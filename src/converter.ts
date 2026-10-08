@@ -4321,9 +4321,11 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
  *  is, as a ZWSP and !, which the next hidden run in the same place goes on */
 const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number }>();
 
-/** What follows an image's alt text, as escapeMarkdownChars reads it: a link's
- *  ], which markdown-it reads the text before alone */
-const IMAGE_ALT_AFTER = new RunsAfter(indexText(''), 0, '', true);
+/** What follows an image's alt text, as escapeMarkdownChars reads it, where
+ *  the runs after the image aren't known: a link's ], which markdown-it
+ *  reads the text before alone, and then text that can close math or a
+ *  highlight, which export reads past the ] from a $ or == in the alt text */
+const IMAGE_ALT_AFTER = new RunsAfter(indexText('\u0001$\u0001=='), 0, ']', true);
 
 /** Alt text as Markdown that export reads back as it: text, as a link's
  *  is, every bracket escaped, as export reads the alt text as Markdown on its
@@ -4332,8 +4334,10 @@ const IMAGE_ALT_AFTER = new RunsAfter(indexText(''), 0, '', true);
  *  would be a soft break's space there, goes as a reference. Each goes in as
  *  a character the text doesn't have, which escapeMarkdownChars reads as text
  *  that is no space, as the reference is, and a \ before one, which it
- *  leaves alone, as no punctuation follows, is escaped after. */
-function imageAltMarkdown(alt: string): string {
+ *  leaves alone, as no punctuation follows, is escaped after. A $ or ==
+ *  that the Markdown `after` it could close is escaped too, as export reads
+ *  math or a highlight from one in the brackets past their ]. */
+export function imageAltMarkdown(alt: string, after = IMAGE_ALT_AFTER): string {
   const stands = new Map<string, string>();
   let next = 0xE000;
   const standIn = (markdown: string) => {
@@ -4345,7 +4349,7 @@ function imageAltMarkdown(alt: string): string {
   const lt = standIn('\\<');
   const lf = standIn('&#10;');
   const cr = standIn('&#13;');
-  const escaped = escapeMarkdownChars(alt.replace(/[<\n\r]/g, c => c === '<' ? lt : c === '\n' ? lf : cr), false, IMAGE_ALT_AFTER);
+  const escaped = escapeMarkdownChars(alt.replace(/[<\n\r]/g, c => c === '<' ? lt : c === '\n' ? lf : cr), false, after);
   return escaped.replace(/(\\*)([\uE000-\uF8FF])/g, (match, backslashes: string, c: string) => {
     const markdown = stands.get(c);
     if (markdown === undefined) return match;
@@ -4356,30 +4360,39 @@ function imageAltMarkdown(alt: string): string {
 /** The Markdown of an image export couldn't embed, without its closing ZWSP */
 /** An image's Markdown: its own, as an embed wrote it, an <img> tag where
  *  it came from one, or else ![alt](src) with its size, as export reads it
- *  there (see syntaxText), in a link of its own where it's a link's */
-function imageMarkdown(item: ContentItem & { type: 'image' }, imageFormatMapping?: Map<string, string>): string {
-  const image = pictureMarkdown(item, imageFormatMapping);
+ *  there (see syntaxText), in a link of its own where it's a link's, its
+ *  alt text escaped for the runs `after` it */
+function imageMarkdown(item: ContentItem & { type: 'image' }, imageFormatMapping: Map<string, string> | undefined, after: RunsAfter): string {
+  const image = pictureMarkdown(item, imageFormatMapping, pictureRunsAfter(item, after));
   return item.href ? markdownLink(image, item.href) : image;
 }
 
-/** An image's Markdown as imageMarkdown writes it, without its link */
-function pictureMarkdown(item: ContentItem & { type: 'image' }, imageFormatMapping?: Map<string, string>): string {
+/** The Markdown after an image's picture, given the runs `after` the image:
+ *  those, past its link's ](url) where it's a link's */
+function pictureRunsAfter(item: ContentItem & { type: 'image' }, after: RunsAfter): RunsAfter {
+  return item.href ? after.linkTo(item.href) : after;
+}
+
+/** An image's Markdown as imageMarkdown writes it, without its link, its
+ *  alt text escaped for the Markdown `after` it, where that's known */
+function pictureMarkdown(item: ContentItem & { type: 'image' }, imageFormatMapping?: Map<string, string>, after?: RunsAfter): string {
   if (item.markdown !== undefined) return syntaxText(unembeddedImageMarkdown(item.markdown));
   if (imageFormatMapping?.get(item.rId) === 'html') {
     return syntaxText('<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"'
       + (item.widthPx > 0 ? ' width="' + item.widthPx + '"' : '')
       + (item.heightPx > 0 ? ' height="' + item.heightPx + '"' : '') + '>');
   }
-  const safeAlt = imageLabelMarkdown(item);
+  const safeAlt = imageLabelMarkdown(item, after);
   const size = [...(item.widthPx > 0 ? ['width=' + item.widthPx] : []), ...(item.heightPx > 0 ? ['height=' + item.heightPx] : [])];
   return syntaxText('![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')' + (size.length ? '{' + size.join(' ') + '}' : ''));
 }
 
 /** An image's alt text as its Markdown has it in its brackets: Word's as
- *  pictureMarkdown writes it, or as an image export couldn't embed has it,
+ *  pictureMarkdown writes it, escaped for the Markdown `after` it as
+ *  pictureMarkdown has that, or as an image export couldn't embed has it,
  *  which is none in an <img>. Its label is balanced, as ![a[b]c](x)'s
  *  a[b]c, and one export can't read is all of its Markdown. */
-function imageLabelMarkdown(item: ContentItem & { type: 'image' }): string {
+function imageLabelMarkdown(item: ContentItem & { type: 'image' }, after?: RunsAfter): string {
   if (item.markdown !== undefined) {
     if (!item.markdown.startsWith('![')) return '';
     const end = imageLabelEnd(item.markdown);
@@ -4388,7 +4401,7 @@ function imageLabelMarkdown(item: ContentItem & { type: 'image' }): string {
   // In an HTML table's cell, which export reads as HTML, the image's
   // Markdown is text (see syntaxText), whose alt text takes no escapes but
   // those of a \ and a ], as it took before
-  return readsMarkdown ? imageAltMarkdown(item.alt) : item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
+  return readsMarkdown ? imageAltMarkdown(item.alt, after?.linkTo(item.src)) : item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
 }
 
 function unembeddedImageMarkdown(markdown: string): string {
@@ -6796,9 +6809,10 @@ function delimiterKinds(markdown: string, closers = false): Set<string> {
  * the other span's text as an entity, as &am and p; would, keeps apart from
  * it (appendRevised). A bare URL or email joins only across whitespace,
  * since linkify finds one only between boundaries. An image keeps its alt
- * text's delimiters, and display math keeps its own span.
+ * text's delimiters, as imageMarkdown writes it for the runs `after` the
+ * image, and display math keeps its own span.
  */
-function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<string> } {
+function spanJoin(item: InlineRevisionItem, after?: RunsAfter): { join: SpanJoin; literal: Set<string> } {
   switch (item.type) {
     case 'text': {
       const bare = !!item.href && (item.text === item.href || item.href === 'mailto:' + item.text) && !hasFormatting(item.formatting);
@@ -6818,7 +6832,7 @@ function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<stri
       // Its alt text's own delimiters, as a backtick, which can pair with
       // one in the other span past its ], as Markdown reads a code span
       // before the brackets around it
-      return { join: 'seam', literal: delimiterKinds(imageLabelMarkdown(item)) };
+      return { join: 'seam', literal: delimiterKinds(imageLabelMarkdown(item, after && pictureRunsAfter(item, after))) };
   }
 }
 
@@ -7216,9 +7230,10 @@ function appendHighlightGroup(
 }
 
 /** How a span of `items` together joins others (see spanJoin): as the most
- *  constrained of them, with the delimiters each has of its own */
-function combinedSpanJoin(items: InlineRevisionItem[]): { join: SpanJoin; literal: Set<string> } {
-  const joins = items.map(item => spanJoin(item));
+ *  constrained of them, with the delimiters each has of its own, the item at
+ *  k written for the runs `afterItem(k)` */
+function combinedSpanJoin(items: InlineRevisionItem[], afterItem?: (k: number) => RunsAfter): { join: SpanJoin; literal: Set<string> } {
+  const joins = items.map((item, k) => spanJoin(item, afterItem?.(k)));
   const join: SpanJoin = joins.some(j => j.join === 'never') ? 'never' : joins.some(j => j.join === 'space') ? 'space' : 'seam';
   return { join, literal: new Set(joins.flatMap(j => [...j.literal])) };
 }
@@ -8013,9 +8028,10 @@ function linkGroup(
   // of one run does. A line break goes in the formatting Word shows on it
   // (see showsOnBreak), as outside a link, and so does the escape of a {
   // after a picture with no size (see escapeBraceAfterImage).
+  const afterItem = (k: number): RunsAfter => runsAfter(segment, start + k + 1, end);
   const itemText = (k: number, after: RunsAfter): string => {
     const item = items[k];
-    if (item.type === 'image') return pictureMarkdown(item, imageFormatMapping);
+    if (item.type === 'image') return pictureMarkdown(item, imageFormatMapping, after.linkTo(href));
     return item.text === '\\\n' && !showsOnBreak(item.formatting) ? lineBreakText()
       : escapeBraceAfterImage(markedFormatting(item.text, item.formatting, false, after.linkTo(href)), segment, start + k);
   };
@@ -8027,11 +8043,11 @@ function linkGroup(
   // together in one span.
   if (items.every((item, k) => revisionsEqual(item.revision, first.revision) && (k === 0 || !codeSpansMeet(items[k - 1], item)))) {
     let markdown = '';
-    for (let k = 0; k < items.length; k++) markdown += itemText(k, runsAfter(segment, start + k + 1, end));
+    for (let k = 0; k < items.length; k++) markdown += itemText(k, afterItem(k));
     const link = markdownLink(markdown, href);
     if (!first.revision || revisionSpanHolds(link, first.revision)) {
       // How a span of the whole link joins others, by each of its runs
-      return { text: link, end: start + items.length, item: first, join: combinedSpanJoin(items) };
+      return { text: link, end: start + items.length, item: first, join: combinedSpanJoin(items, afterItem) };
     }
   }
   // A substitution's sides are text (see side)
@@ -8116,13 +8132,14 @@ function linkGroup(
         triedUntil = retry;
       }
     }
-    [text, span] = appendRevised(text, itemText(k, runsAfter(segment, start + k + 1, end)), item, span);
+    const after = afterItem(k);
+    [text, span] = appendRevised(text, itemText(k, after), item, span, spanJoin(item, after));
   }
   return {
     text: markdownLink(joinRevisedSpans(text), href),
     end: start + items.length,
     item: { ...first, revision: undefined },
-    join: combinedSpanJoin(items),
+    join: combinedSpanJoin(items, afterItem),
   };
 }
 
@@ -8247,7 +8264,8 @@ function renderInlineRange(
         i = link.end;
         continue;
       }
-      [out, lastSpan] = appendRevised(out, imageMarkdown(item, renderOpts?.imageFormatMapping), item, lastSpan);
+      const after = runsAfter(segment, i + 1, segmentEnd);
+      [out, lastSpan] = appendRevised(out, imageMarkdown(item, renderOpts?.imageFormatMapping, after), item, lastSpan, spanJoin(item, after));
       i++;
       continue;
     }
@@ -8302,7 +8320,8 @@ function renderInlineRange(
             j = link.end;
             continue;
           }
-          [anchorText, anchorSpan] = appendRevised(anchorText, imageMarkdown(seg, renderOpts?.imageFormatMapping), seg, anchorSpan);
+          const after = runsAfter(segment, j + 1, segmentEnd);
+          [anchorText, anchorSpan] = appendRevised(anchorText, imageMarkdown(seg, renderOpts?.imageFormatMapping, after), seg, anchorSpan, spanJoin(seg, after));
           j++;
           continue;
         }
@@ -8559,8 +8578,8 @@ function renderInlineRangeWithIds(
         i = link.end;
         continue;
       }
-      const imgText = imageMarkdown(item, imageFormatMapping);
-      [out, lastSpan] = appendRevised(out, imgText, item, lastSpan);
+      const after = runsAfter(segment, i + 1, segmentEnd);
+      [out, lastSpan] = appendRevised(out, imageMarkdown(item, imageFormatMapping, after), item, lastSpan, spanJoin(item, after));
       i++;
       continue;
     }

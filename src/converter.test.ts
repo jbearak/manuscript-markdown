@@ -15469,6 +15469,106 @@ describe('Portrait section round-trip', () => {
   });
 });
 
+describe('round-trip regression: an image\'s alt text', () => {
+  // Minimal 1x1 white PNG (67 bytes)
+  const TINY_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
+    'Nl7BcQAAAABJRU5ErkJggg==', 'base64');
+  const tmpDir = join(require('os').tmpdir(), 'mms-test-alt-' + Date.now());
+
+  beforeAll(() => {
+    const { mkdirSync, writeFileSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+  });
+  afterAll(() => require('fs').rmSync(tmpDir, { recursive: true, force: true }));
+
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const toWord = async (md: string) => (await convertMdToDocx(md, { sourceDir: tmpDir })).docx;
+  const attr = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  /** The alt text of the document's image, as Word's descr has it */
+  const descr = async (docx: Uint8Array) => /descr="([^"]*)"/.exec(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))?.[1];
+
+  test.each([
+    ['a $', 'a $b', 'a \\$b', ' x$ y'],
+    ['an ==', 'a ==b', 'a \\==b', ' c==d'],
+    ['a price, and a $', '$5 and $6', '$5 and \\$6', ' x$ y'],
+  ])('keeps alt text with %s that one after the image closes', async (_name, alt, written, after) => {
+    // Import escaped the alt text as though nothing came after the image,
+    // and the next export read math or a highlight past the image's ] and
+    // no image
+    const zip = await JSZip.loadAsync(await toWord('A ![x](image.png){width=100 height=100} b' + after));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/descr="[^"]*"/, () => 'descr="' + attr(alt) + '"'));
+    const once = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(strip(once)).toBe('A ![' + written + '](image.png){width=100 height=100} b' + after + '\n');
+    const again = await toWord(once);
+    expect(await descr(again)).toBe(attr(alt));
+    expect((await convertDocx(again)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['in a link of its own, with a $ after', 'A [', '](https://e.com/) b x$ y', 'a \\$b'],
+    ['in a link of its own', 'A [', '](https://e.com/) b', 'a $b'],
+    ['in a link with text after it, with a $ after', 'A [t ', ' u](https://e.com/) x$ y', 'a \\$b'],
+    ['in a link with text after it', 'A [t ', ' u](https://e.com/) x', 'a $b'],
+  ])('escapes alt text with a $ for the Markdown after the image, %s', async (_name, before, after, written) => {
+    // Past the link's ](url), from the runs after the image: escaped only
+    // where they could close it
+    const image = (alt: string) => '![' + alt + '](image.png){width=100 height=100}';
+    const zip = await JSZip.loadAsync(await toWord(before + image('x') + after));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/descr="[^"]*"/, () => 'descr="a $b"'));
+    const once = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(strip(once)).toBe(before + image(written) + after + '\n');
+    const again = await toWord(once);
+    expect(await descr(again)).toBe('a $b');
+    expect((await convertDocx(again)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['math before it', '{++$m$ ', '++} z', '{++$m$ ++}{++![$a]IMG++} z'],
+    ['code before it', '{++`c$` ', '++} z', '{++`c$` ++}{++![$a]IMG++} z'],
+    ['math before its link', '{++$m$ [t ', '](https://e.com/)++} z', '{++$m$ ++}{++[t ![$a]IMG](https://e.com/)++} z'],
+    ['math before its link, with math after that escapes the $', '{++$m$ [t ', '](https://e.com/) $n$++} z', '{++$m$ [t ![\\$a]IMG](https://e.com/) $n$++} z'],
+  ])('joins the span of an image to one of %s only where its alt text has no $ of its own', async (_name, before, after, written) => {
+    // Its span joins another of its change where the alt text has no
+    // delimiter of a kind the other's has, as the alt text is written for
+    // the runs after the image
+    const size = '(image.png){width=100 height=100}';
+    const zip = await JSZip.loadAsync(await toWord(before + '![x]' + size + after));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/descr="[^"]*"/, () => 'descr="$a"'));
+    const once = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(strip(once)).toBe(written.replace('IMG', () => size) + '\n');
+    const again = await toWord(once);
+    expect(await descr(again)).toBe('$a');
+    expect((await convertDocx(again)).markdown).toBe(once);
+  });
+
+  const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+  const image = (alt: string, commented: boolean) =>
+    ({ type: 'image', rId: 'rId9', src: 'media/a.png', alt, widthPx: 10, heightPx: 10, commentIds: new Set(commented ? ['0'] : []) });
+  const text = (value: string, commented: boolean) =>
+    ({ type: 'text', text: value, commentIds: new Set(commented ? ['0'] : []), formatting: DEFAULT_FORMATTING });
+  test.each([
+    ['', [image('a $b', false), text(' x$ y', false)], '![a \\$b](media/a.png){width=10 height=10} x$ y'],
+    [' in a comment\'s anchor', [image('a $b', true), text(' x$ y', false)], '{==![a \\$b](media/a.png){width=10 height=10}==}{>>@A | c<<} x$ y'],
+    [' in ID syntax', [image('a==} $b', true), text(' x$ y', false)], '{#1}![a==} \\$b](media/a.png){width=10 height=10}{/1} x$ y\n{#1>>@A | c<<}'],
+  ])('escapes alt text for the text after the image%s', (_name, items, expected) => {
+    expect(buildMarkdown(items as ContentItem[], comments)).toBe(expected);
+  });
+
+  test.each([
+    ['emphasis', 'a\\*b\\*c', ''],
+    ['a backtick before code after the image', 'a\\`b', ' `x`'],
+    ['a $ before one after the image', 'a \\$b', ' x$ y'],
+  ])('keeps the alt text with %s of a reference image export can\'t embed', async (_name, alt, after) => {
+    // Export hid the image's Markdown, inline, with only its brackets and
+    // \ escaped in its alt text, which the next export read otherwise
+    const once = strip((await convertDocx(await toWord('A ![' + alt + '][r] b' + after + '\n\n[r]: missing.png'))).markdown);
+    expect(once).toBe('A ![' + alt + '](missing.png) b' + after + '\n');
+    expect(strip((await convertDocx(await toWord(once))).markdown)).toBe(once);
+  });
+});
+
 describe('round-trip regression: image path preservation', () => {
   // Minimal 1x1 white PNG (67 bytes)
   const TINY_PNG = Buffer.from(
