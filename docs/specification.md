@@ -671,7 +671,7 @@ Each entry contains standard BibTeX fields:
 - `author`, `title`, `journal`/`booktitle`, `year`, `volume`, `number`, `pages`
 - `doi`, `url`, `publisher`, `edition`, `abstract`
 
-A field's value in braces goes to the brace that pairs with its first, as BibTeX reads it, however deep the groups in it nest and however long it is, and every brace counts, an escaped one, as `\{`, too. A value in quotes goes to the next `"` no backslash escapes. A field's whitespace reads as BibTeX reads it: each run of spaces, tabs and line ends is one space, with none at either end, so a value wrapped across lines reads as one line. A `note` keeps its line ends, as Zotero keeps its Extra field there, which citeproc reads a line at a time (`original-date: 1850`). `doi`, `url`, `isbn`, `issn` and `file` stay as written.
+A field's value in braces goes to the brace that pairs with its first, as BibTeX reads it, however deep the groups in it nest and however long it is, and every brace counts, an escaped one, as `\{`, too. A value in quotes goes to the next `"` outside its groups that no backslash escapes, as BibTeX reads it, so `"a {"} b"` is `a {"} b`. A field's whitespace reads as BibTeX reads it: each run of spaces, tabs and line ends is one space, with none at either end, so a value wrapped across lines reads as one line. A `note` keeps its line ends, as Zotero keeps its Extra field there, which citeproc reads a line at a time (`original-date: 1850`). `doi`, `url`, `isbn`, `issn` and `file` stay as written.
 
 When exported from Zotero via DOCX import, entries also include identity fields for roundtrip reconstruction:
 

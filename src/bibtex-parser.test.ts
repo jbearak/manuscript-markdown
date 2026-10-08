@@ -1502,6 +1502,40 @@ describe('BibTeX field reader', () => {
     expect(fields('  title = ' + value + ',\n  year = {2020}')).toEqual({ title: expected, year: '2020' });
   });
 
+  // Which ended at the " in the group, as the regex read it, so the value
+  // lost the rest, where BibTeX, and the parser where it found the entry's
+  // end, read on to the " after the group
+  it.each([
+    ['a " in a group', '"a {"} b"', 'a {"} b'],
+    ['a quoted word in a group', '"a {"b"} c"', 'a {"b"} c'],
+    ['a " in a group in a group', '"a {{"} b} c"', 'a {{"} b} c'],
+    // Guards: an escaped ", an escaped backslash at the end, and a } alone
+    ['an escaped "', String.raw`"a \" b"`, String.raw`a \" b`],
+    ['an escaped backslash at the end', String.raw`"a \\"`, 'a \\'],
+    ['a } with no { before it', '"a } b"', 'a } b'],
+  ])('reads a quoted value with %s whole, and the field after it', (_name, value, expected) => {
+    expect(fields('  title = ' + value + ',\n  year = {2020}')).toEqual({ title: expected, year: '2020' });
+  });
+
+  // Where a quoted value ended none, the search for a field went on from
+  // its name, to the next quoted value, which read the rest of the body
+  // again, as each before it had
+  it('reads a body of quoted values in groups that end none in time linear in its length', () => {
+    const bib = (n: number) => '@article{k,\n{' + 'x="{'.repeat(n) + '}'.repeat(n + 1) + ', year={2020}\n}';
+    expect(parseBibtex(bib(4000)).get('k')?.fields.get('year')).toBe('2020');
+    const time = (n: number) => {
+      const text = bib(n);
+      let fastest = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const start = performance.now();
+        parseBibtex(text);
+        fastest = Math.min(fastest, performance.now() - start);
+      }
+      return fastest;
+    };
+    expect(time(16000) / time(4000)).toBeLessThan(8);
+  }, 30000);
+
   it.each([
     ['braced', (text: string) => '{' + text + '}'],
     ['quoted', (text: string) => '"' + text + '"'],
