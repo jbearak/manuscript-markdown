@@ -563,9 +563,27 @@ function lineStartsAfterBreaks(text: string, inline = false): number[] {
       i++;
     }
   }
-  // Not in an HTML block, which a paragraph can start, or a line in it
+  // Not in an HTML block, which a paragraph can start, or a line in it, but
+  // for the line of one that starts with spaces or tabs before a comment
+  // that ends on it: as references, which keepParagraphWhitespace writes
+  // there as it does before text, they make the line the paragraph's,
+  // which reads the comment as one, so the break before it is one
   const html = !inline && text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions : [];
-  return html.length > 0 ? starts.filter(start => !isInsideCodeRegion(start, html)) : starts;
+  if (html.length === 0) return starts;
+  const blockStarts = new Set(html.map(region => region.start));
+  return starts.filter(start => !isInsideCodeRegion(start, html) || blockStarts.has(start) && commentAfterIndent(text, start));
+}
+
+/** Whether the line at `start` in `text` is spaces or tabs, then an HTML
+ *  comment that ends on that line, as inline Markdown reads one */
+function commentAfterIndent(text: string, start: number): boolean {
+  const indent = /[ \t]+/y;
+  indent.lastIndex = start;
+  if (!indent.test(text) || !text.startsWith('<!--', indent.lastIndex)) return false;
+  HTML_TAG_AT.lastIndex = indent.lastIndex;
+  if (!HTML_TAG_AT.test(text)) return false;
+  const lineEnd = text.indexOf('\n', start);
+  return lineEnd === -1 || HTML_TAG_AT.lastIndex <= lineEnd;
 }
 
 /**
