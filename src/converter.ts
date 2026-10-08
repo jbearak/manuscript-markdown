@@ -7740,12 +7740,13 @@ function linkGroup(
   // The item at k as Markdown in the link's text, which reads the runs
   // `after` it as the rest of the text before the link's ](url), as a link
   // of one run does. A line break goes in the formatting Word shows on it
-  // (see showsOnBreak), as outside a link.
+  // (see showsOnBreak), as outside a link, and so does the escape of a {
+  // after a picture with no size (see escapeBraceAfterImage).
   const itemText = (k: number, after: RunsAfter): string => {
     const item = items[k];
     if (item.type === 'image') return pictureMarkdown(item, imageFormatMapping);
     return item.text === '\\\n' && !showsOnBreak(item.formatting) ? lineBreakText()
-      : markedFormatting(item.text, item.formatting, false, after.linkTo(href));
+      : escapeBraceAfterImage(markedFormatting(item.text, item.formatting, false, after.linkTo(href)), segment, start + k);
   };
   // A revision of the whole link goes around it, but where its span would
   // end at its closer in the link's code, and a substitution with nothing
