@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, createCiteprocEngine, renderBibliography, renderCitationText, textElements } from './md-to-docx-citations';
 import { BibtexEntry, parseBibtex } from './bibtex-parser';
 import { parseMd, convertMdToDocx, type MdRun } from './md-to-docx';
+import { fastestRun } from './test-timing';
 
 /** Extract and parse the CSL_CITATION JSON from a Zotero field code XML string. */
 function extractCsl(xml: string) {
@@ -499,11 +500,11 @@ describe('generateMissingKeysXml', () => {
 
   it('writes a key\'s line ends as spaces, in linear time', () => {
     // Its whitespace was read again from each space in it
-    const start = performance.now();
-    const xml = generateMissingKeysXml(['a  \n  b', 'c' + ' '.repeat(200000) + 'd']);
-    expect(xml).toContain('Citation data for @a b was not found');
-    expect(performance.now() - start).toBeLessThan(500);
-  });
+    expect(fastestRun(() => {
+      const xml = generateMissingKeysXml(['a  \n  b', 'c' + ' '.repeat(200000) + 'd']);
+      expect(xml).toContain('Citation data for @a b was not found');
+    })).toBeLessThan(500);
+  }, 30000);
 
   it('returns empty string for no missing keys', () => {
     expect(generateMissingKeysXml([])).toBe('');

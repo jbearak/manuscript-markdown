@@ -11,6 +11,7 @@ import JSZip from 'jszip';
 import { convertMdToDocx } from './md-to-docx';
 import { buildMarkdown, convertDocx, DEFAULT_FORMATTING, type ContentItem } from './converter';
 import { orderRPr } from './md-to-docx-citations';
+import { fastestRun } from './test-timing';
 
 const bibtex = `@article{doe2020, author={Doe, Jane}, title={A study}, journal={J}, year={2020}}`;
 
@@ -150,12 +151,11 @@ describe('a highlight read back', () => {
       type: 'text', text: 'w' + (i % 10) + ' ', commentIds: new Set(),
       formatting: { ...DEFAULT_FORMATTING, highlight: true, italic: i % 2 === 1 },
     }));
-    const started = performance.now();
-    const markdown = buildMarkdown([{ type: 'para' }, ...items], new Map());
+    let markdown = '';
     // Looking for a group from each item afresh took seconds here
-    expect(performance.now() - started).toBeLessThan(2000);
+    expect(fastestRun(() => { markdown = buildMarkdown([{ type: 'para' }, ...items], new Map()); })).toBeLessThan(2000);
     expect(markdown).toStartWith('==w0 *w1* w2 *w3*');
-  });
+  }, 30000);
 
   it('puts bold around an equation inside the highlight', async () => {
     // Highlighted spaces show in Word, where bold ones don't

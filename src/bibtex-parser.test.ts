@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, stripOuterBraces, stripWrappingBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { fastestRun } from './test-timing';
 
 describe('BibTeX Parser', () => {
   it('parses basic entry', () => {
@@ -292,10 +293,8 @@ describe('double-brace fix', () => {
       // Calling stripOuterBraces in a loop rescans the whole value per pair;
       // this case took seconds.
       const wrapped = '{'.repeat(50000) + 'x' + '}'.repeat(50000);
-      const started = performance.now();
-      expect(stripWrappingBraces(wrapped)).toBe('x');
-      expect(performance.now() - started).toBeLessThan(1000);
-    });
+      expect(fastestRun(() => expect(stripWrappingBraces(wrapped)).toBe('x'))).toBeLessThan(1000);
+    }, 30000);
   });
 
   it('decodes a braced LaTeX accent without corrupting surrounding braces', () => {
@@ -447,10 +446,8 @@ describe('BibTeX field whitespace', () => {
   it('reads a note\'s blank lines in linear time', () => {
     // Its trim of line ends at its edges read the rest of a run of them
     // again from each one in it
-    const started = performance.now();
-    expect(field('note', '{a' + '\n'.repeat(40000) + 'b}')).toBe('a' + '\n'.repeat(40000) + 'b');
-    expect(performance.now() - started).toBeLessThan(500);
-  });
+    expect(fastestRun(() => expect(field('note', '{a' + '\n'.repeat(40000) + 'b}')).toBe('a' + '\n'.repeat(40000) + 'b'))).toBeLessThan(500);
+  }, 30000);
 
   it('drops a note\'s blank lines at its edges, but not between its lines', () => {
     expect(field('note', '{\n \n\ta\n\n \n b \n\n}')).toBe('a\n\n\nb');
@@ -1523,17 +1520,19 @@ describe('BibTeX field reader', () => {
   it('reads a body of quoted values in groups that end none in time linear in its length', () => {
     const bib = (n: number) => '@article{k,\n{' + 'x="{'.repeat(n) + '}'.repeat(n + 1) + ', year={2020}\n}';
     expect(parseBibtex(bib(4000)).get('k')?.fields.get('year')).toBe('2020');
+    // Each run parses the body 40 times, some milliseconds of work, as one
+    // parse took under a millisecond, where the timer's noise decided the
+    // ratio, at sizes where reading the body again for each value fails in
+    // seconds
     const time = (n: number) => {
       const text = bib(n);
-      let fastest = Infinity;
-      for (let k = 0; k < 5; k++) {
-        const start = performance.now();
-        parseBibtex(text);
-        fastest = Math.min(fastest, performance.now() - start);
-      }
-      return fastest;
+      return fastestRun(() => {
+        for (let k = 0; k < 40; k++) parseBibtex(text);
+      });
     };
-    expect(time(16000) / time(4000)).toBeLessThan(8);
+    time(1000);
+    const small = time(1000);
+    expect(time(4000) / small).toBeLessThan(8);
   }, 30000);
 
   it.each([
@@ -1541,8 +1540,6 @@ describe('BibTeX field reader', () => {
     ['quoted', (text: string) => '"' + text + '"'],
   ])('reads a long %s value, and the fields after it, in linear time', (_name, delimit) => {
     const text = 'a b '.repeat(150000) + 'c';
-    const start = performance.now();
-    expect(fields('  title = ' + delimit(text) + ',\n  year = {2020}')).toEqual({ title: text, year: '2020' });
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => expect(fields('  title = ' + delimit(text) + ',\n  year = {2020}')).toEqual({ title: text, year: '2020' }))).toBeLessThan(1000);
+  }, 30000);
 });

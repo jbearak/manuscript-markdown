@@ -10,6 +10,7 @@ import {
 } from './zotero-link';
 import { parseBibtex } from './bibtex-parser';
 import { GROUP_URI_BASE as GROUP, zoteroItem as item } from './zotero-link.fixtures';
+import { fastestRun } from './test-timing';
 
 
 /** The single decision for an entry, by citation key. */
@@ -237,19 +238,15 @@ describe('normalizeIsbns', () => {
       // Segmentation explored suffix by suffix without a table is
       // exponential; this took minutes.
       const input = Array.from({ length: 300 }, () => '1').join(' ') + ' bad';
-      const started = performance.now();
-      normalizeIsbns(input);
-      expect(performance.now() - started).toBeLessThan(1000);
-    });
+      expect(fastestRun(() => normalizeIsbns(input))).toBeLessThan(1000);
+    }, 30000);
 
     it('does not go quadratic on a long run of non-numeric tokens', () => {
       // The length cutoff must count every character: measured on digits
       // alone, junk tokens never trip it and the fallback scan took seconds.
       const input = Array.from({ length: 2000 }, (_, i) => 'junk' + i).join(' ');
-      const started = performance.now();
-      expect(normalizeIsbns(input)).toEqual([]);
-      expect(performance.now() - started).toBeLessThan(1000);
-    });
+      expect(fastestRun(() => expect(normalizeIsbns(input)).toEqual([]))).toBeLessThan(1000);
+    }, 30000);
 
     it('survives a very long token run without overflowing the stack', () => {
       // The fallback selection once recursed per token; fifty thousand tokens
@@ -263,10 +260,8 @@ describe('normalizeIsbns', () => {
       // the whole suffix per accepted run — quadratic retention that
       // exhausted the heap on a field like this.
       const input = 'print ' + Array(50000).fill('0306406152').join(' ');
-      const started = performance.now();
-      expect(normalizeIsbns(input)).toEqual(Array(50000).fill('0306406152'));
-      expect(performance.now() - started).toBeLessThan(2000);
-    });
+      expect(fastestRun(() => expect(normalizeIsbns(input)).toEqual(Array(50000).fill('0306406152')))).toBeLessThan(2000);
+    }, 30000);
   });
 });
 

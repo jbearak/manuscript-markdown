@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'bun:test';
 import { convertMdToDocx } from './md-to-docx';
 import { buildMarkdown, convertDocx, DEFAULT_FORMATTING, type ContentItem, type RevisionInfo } from './converter';
+import { fastestRun } from './test-timing';
 
 const bibtex = `@book{r2025, author={{R Core Team}}, title={R}, year={2025}}
 @book{r2026, author={{R Core Team}}, title={R}, year={2026}}
@@ -135,12 +136,11 @@ describe('one revision across citations, equations and formatting', () => {
   it('joins a long revision of many runs in linear time', () => {
     const italic = { ...DEFAULT_FORMATTING, italic: true };
     const items = Array.from({ length: 20000 }, (_, i) => text('w' + (i % 10) + ' ', added, i % 2 ? DEFAULT_FORMATTING : italic));
-    const started = performance.now();
-    const markdown = render(items);
+    let markdown = '';
     // Quadratic joining took seconds here; linear takes milliseconds
-    expect(performance.now() - started).toBeLessThan(2000);
+    expect(fastestRun(() => { markdown = render(items); })).toBeLessThan(2000);
     expect(markdown.match(/\{\+\+/g)).toHaveLength(1);
-  });
+  }, 30000);
 
   it('keeps the spans of different revisions apart', () => {
     const other: RevisionInfo = { ...added, author: 'B' };

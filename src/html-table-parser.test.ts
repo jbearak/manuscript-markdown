@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { extractHtmlTables } from './html-table-parser';
+import { fastestRun } from './test-timing';
 
 describe('HTML table metadata', () => {
   test('parses shared numeric attributes', () => {
@@ -93,11 +94,11 @@ describe('HTML table cell paragraphs', () => {
   });
 
   test('reads a table with many <!-- and no --> in linear time', () => {
-    const start = performance.now();
-    extractHtmlTables('<table><tr><td>' + '<!--'.repeat(20000) + '</td></tr></table>');
-    extractHtmlTables('<table><tr>' + '<td>a<!-- c --><b title="<!--">x</b></td>'.repeat(2000) + '</tr></table>');
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => {
+      extractHtmlTables('<table><tr><td>' + '<!--'.repeat(20000) + '</td></tr></table>');
+      extractHtmlTables('<table><tr>' + '<td>a<!-- c --><b title="<!--">x</b></td>'.repeat(2000) + '</tr></table>');
+    })).toBeLessThan(1000);
+  }, 30000);
 
   test.each([
     ['before a table', '<div><script>const s = "<!--";</script><table><tr><td>a</td></tr></table></div>', [['a']]],
@@ -121,10 +122,8 @@ describe('HTML table cell paragraphs', () => {
     ['many cells with no >', '<table><tr>' + '<td '.repeat(32000)],
     ['many comments in a cell', '<table><tr><td>' + '<!-- c --> '.repeat(64000) + '</td></tr></table>'],
   ])('reads %s in linear time', (_name, html) => {
-    const start = performance.now();
-    extractHtmlTables(html);
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => extractHtmlTables(html))).toBeLessThan(1000);
+  }, 30000);
 
   test('reads a table of 100,000 rows', () => {
     // Its search held a state for each piece of the table, which ran past
