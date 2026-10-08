@@ -4740,6 +4740,41 @@ function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, op
     ? [trailing.before + '<br>' + payloads[0], last] : [out + block, -1];
 }
 
+/** `text`, which holds `payloads`, the Markdown of its hidden comments'
+ *  runs, in order, with those before the first thing its first line shows
+ *  without the whitespace outside their comments, as after a <br> (see
+ *  lineAfterBreak), and the payloads as they then are. The runs side by
+ *  side there are read together (see withoutSpaceInTexts), as one comment
+ *  can take in the next run. Those after the first thing shown are as
+ *  withoutHiddenCommentSpace left them after text */
+function withoutSpaceAtLineStart(text: string, payloads: string[]): { text: string; payloads: string[] } {
+  // Each payload before the first thing shown, and where it is in `text`
+  const leading: { k: number; found: number }[] = [];
+  let at = 0;
+  for (let k = 0; k < payloads.length; k++) {
+    const found = text.indexOf(payloads[k], at);
+    if (found === -1) continue;
+    if (/[^ \t]/.test(text.slice(at, found))) break;
+    leading.push({ k, found });
+    at = found + payloads[k].length;
+  }
+  const kept = [...payloads];
+  for (let r = 0; r < leading.length;) {
+    let e = r + 1;
+    while (e < leading.length && leading[e].found === leading[e - 1].found + payloads[leading[e - 1].k].length) e++;
+    const bare = withoutSpaceInTexts(leading.slice(r, e).map(({ k }) => payloads[k]));
+    leading.slice(r, e).forEach(({ k }, j) => { kept[k] = bare[j]; });
+    r = e;
+  }
+  let out = '';
+  let from = 0;
+  for (const { k, found } of leading) {
+    out += text.slice(from, found) + kept[k];
+    from = found + payloads[k].length;
+  }
+  return { text: out + text.slice(from), payloads: kept };
+}
+
 /** The rest of the line after a line break that the hidden comment at
  *  segment[i], before `end`, starts, as export would read it after a <br>:
  *  the Markdown in a paragraph of its hidden comments (`payloads`, see
@@ -12092,7 +12127,7 @@ function withoutHiddenCommentSpace(content: ContentItem[]): ContentItem[] {
     // its end in the next run, as one that ends in ---> goes on to a -->
     const joined = run.map(entry => entry.type === 'html_comment' ? entry.text : '').join('');
     const lineEnds = outsideComments(joined).includes('\n');
-    const texts = shown && !code && !lineEnds ? withoutSpaceInRuns(run, joined) : run.map(() => undefined);
+    const texts = shown && !code && !lineEnds ? withoutSpaceInRuns(run) : run.map(() => undefined);
     const first = run.findIndex((entry, k) => texts[k] !== undefined && texts[k] !== (entry as { text: string }).text);
     if (first !== -1) {
       let before = i - 1;
@@ -12114,21 +12149,29 @@ function withoutHiddenCommentSpace(content: ContentItem[]): ContentItem[] {
   return out ?? content;
 }
 
-/** The text of each hidden comment in `run`, whose texts make `joined`,
- *  without the whitespace outside the comments of all of them read
- *  together (see withoutSpaceOutsideComments), or undefined for each item
- *  that isn't one. That whitespace runs from the end of a comment or the
- *  start to the next comment's <!-- or the end, so the text without it
- *  goes on with the next character it keeps, which isn't whitespace */
-function withoutSpaceInRuns(run: ContentItem[], joined: string): Array<string | undefined> {
-  const kept = withoutSpaceOutsideComments(joined);
+/** The text of each hidden comment in `run` without the whitespace outside
+ *  the comments of all of them read together (see withoutSpaceInTexts), or
+ *  undefined for each item that isn't one */
+function withoutSpaceInRuns(run: ContentItem[]): Array<string | undefined> {
+  const texts = withoutSpaceInTexts(run.map(entry => entry.type === 'html_comment' ? entry.text : ''));
+  return run.map((entry, k) => entry.type === 'html_comment' ? texts[k] : undefined);
+}
+
+/** Each of `texts`, the texts of hidden runs side by side, without the
+ *  whitespace outside the comments of all of them read together (see
+ *  withoutSpaceOutsideComments), as inline Markdown reads one comment on
+ *  into the next run, as <!-- a ---> does. That whitespace runs from the
+ *  end of a comment or the start to the next comment's <!-- or the end, so
+ *  the text without it goes on with the next character it keeps, which
+ *  isn't whitespace */
+function withoutSpaceInTexts(texts: string[]): string[] {
+  const kept = withoutSpaceOutsideComments(texts.join(''));
   let at = 0;
-  return run.map(entry => {
-    if (entry.type !== 'html_comment') return undefined;
+  return texts.map(whole => {
     let text = '';
-    for (let k = 0; k < entry.text.length; k++) {
-      if (kept[at] !== entry.text[k]) continue;
-      text += entry.text[k];
+    for (let k = 0; k < whole.length; k++) {
+      if (kept[at] !== whole[k]) continue;
+      text += whole[k];
       at++;
     }
     return text;
@@ -14162,6 +14205,18 @@ export function buildMarkdown(
     // read as text, as one with a blank line in it, which only the block
     // holds, or as more than it, as one that ends in ---> with the next.
     const items = mergedContent.slice(i, rendered.nextIndex);
+    const payloads = items.flatMap((item, k) => item.type === 'html_comment' ? [markdownComment(item.text, items[k + 1]?.type === 'html_comment')] : []);
+    // A block of comments and line breaks gives back runs that are each one
+    // comment, as export splits it at each one's first -->, so a paragraph
+    // mustn't merge those; others, as Word split, it may
+    const blockKeepsRuns = (text: string) => isLineBreakBlock(text) && payloads.every(payload => payload.startsWith('<!--') && payload.indexOf('-->', 4) === payload.length - 3);
+    // Text the runs hold outside their comments, read together as Word may
+    // split one, which a paragraph would show, the block keeps hidden in
+    // its run, with the rest of the paragraph, where that's spaces and tabs
+    // and the block is the comments' (see annotateHtmlCommentIndices), as
+    // where `alone`, the text is the runs alone
+    const hidesText = (text: string, alone: boolean) => alone && /\S/.test(outsideComments(payloads.join('')))
+      && /^<!--[\s\S]*?-->\s*$/.test(text.trim());
     const withEdges = (text: string) => {
       const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(text)?.[0] ?? '' : '';
       let indentColumns = 0;
@@ -14171,21 +14226,10 @@ export function buildMarkdown(
       }
       const htmlIndent = indentColumns <= 3 ? indent : '';
       const referenced = keepParagraphWhitespace(text, atStart, atEnd);
-      const payloads = items.flatMap((item, k) => item.type === 'html_comment' ? [markdownComment(item.text, items[k + 1]?.type === 'html_comment')] : []);
-      // A block of comments and line breaks gives back runs that are each one
-      // comment, as export splits it at each one's first -->, so a paragraph
-      // mustn't merge those; others, as Word split, it may
-      const blockKeepsRuns = isLineBreakBlock(text) && payloads.every(payload => payload.startsWith('<!--') && payload.indexOf('-->', 4) === payload.length - 3);
-      // Text the runs hold outside their comments, read together as Word may
-      // split one, which a paragraph would show, the block keeps hidden in
-      // its run, with the rest of the paragraph, where that's spaces and tabs
-      // and the block is the comments' (see annotateHtmlCommentIndices)
       const commentsAlone = items.every(item => item.type === 'html_comment' || item.type === 'text' && /^[ \t]*$/.test(item.text));
-      const hidesText = /\S/.test(outsideComments(payloads.join(''))) && commentsAlone
-        && /^<!--[\s\S]*?-->\s*$/.test(text.trim());
       const runHoldsIndent = commentsAlone && items[0]?.type === 'html_comment' && /^[ \t]/.test(items[0].text);
-      const inline = () => !hidesText && (isLineBreakBlock(text) || /^[ \t]*<!--/.test(text) && !runHoldsIndent)
-        && readsCommentsInline(referenced, payloads, !blockKeepsRuns);
+      const inline = () => !hidesText(text, commentsAlone) && (isLineBreakBlock(text) || /^[ \t]*<!--/.test(text) && !runHoldsIndent)
+        && readsCommentsInline(referenced, payloads, !blockKeepsRuns(text));
       // Whitespace alone before an equation in the paragraph keeps the space
       // export wrote for its line end as it is, which the math branch takes
       // off, as it does after other text, or it would gain one each round trip
@@ -14308,6 +14352,28 @@ export function buildMarkdown(
         textOut = marker + textOut;
       }
       pendingHeadingCriticMarker = undefined;
+    }
+    // On the line after an alert's marker, text that starts a block, as a
+    // comment does, would end the marker's paragraph, and export would read
+    // the comment's block as text, so four spaces go before it, after which
+    // nothing starts a block in a paragraph, and which Markdown drops from
+    // the paragraph's line. The alert's text goes on in it, as in Word. Not
+    // after a line of the quote's > alone, after which the text starts a
+    // paragraph, and four spaces would make it code, nor where the paragraph
+    // wouldn't hold its comments as they are, as one with a blank line or a
+    // line that starts a block in it, or that ends in --->, or that holds
+    // text outside its comments, where the alert's text is its runs alone,
+    // which only the block keeps hidden. The paragraph's items hold the
+    // label's too, so the runs are the text's where it's theirs alone. The
+    // whitespace the runs before the line's first text hold outside their
+    // comments, which Word hides, and a paragraph would show, as the space
+    // of <!-- a --> <!-- b -->, goes, as after a <br> (see lineAfterBreak).
+    // Runs after text are as withoutHiddenCommentSpace left them
+    const firstLine = alertMarkerLineEnd !== undefined && /^\n[^\n]*$/.test(output[alertMarkerLineEnd] ?? '') ? textOut.split('\n', 1)[0] : '';
+    const runsAlone = textOut.replace(/\s/g, '') === payloads.join('').replace(/\s/g, '');
+    if (/\S/.test(firstLine) && !readsAsParagraph('a\n' + firstLine) && payloads.length > 0 && !hidesText(textOut, runsAlone)) {
+      const inline = withoutSpaceAtLineStart(textOut, payloads);
+      if (readsCommentsInline('a\n    ' + inline.text, inline.payloads, !blockKeepsRuns(textOut))) textOut = '    ' + inline.text;
     }
     // The paragraph's lines after its first, as of the escaped text of a
     // block it opens too

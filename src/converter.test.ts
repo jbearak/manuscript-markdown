@@ -20447,6 +20447,108 @@ describe('HTML comments between Word runs', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(md);
   });
 
+  /** Each of the body's paragraphs as its runs' text, a hidden one's in
+   *  [], with a line break as a new line */
+  const paragraphs = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => [...p[0].matchAll(/<w:r>([\s\S]*?)<\/w:r>/g)].map(([, inner]) => {
+      const text = inner.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, '').replace(/<w:br\/>/g, '\n').replace(/<[^>]+>/g, '');
+      return inner.includes('<w:vanish/>') ? '[' + text + ']' : text;
+    }).join(''));
+  };
+  const hiddenBreak = '<w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">\u200B&lt;!-- c</w:t><w:br/><w:t xml:space="preserve">d --&gt;</w:t></w:r>';
+  test.each([
+    ['before text', '> [!NOTE]\n> XX', comment('<!-- c -->') + run(' rest'), '> [!NOTE]\n>     <!-- c --> rest'],
+    ['alone', '> [!NOTE]\n> XX', comment('<!-- c -->'), '> [!NOTE]\n>     <!-- c -->'],
+    ['before another and text', '> [!NOTE]\n> XX', comment('<!-- c -->') + comment('<!-- d -->') + run(' rest'), '> [!NOTE]\n>     <!-- c --><!-- d --> rest'],
+    ['of two lines', '> [!NOTE]\n> XX', hiddenBreak + run(' rest'), '> [!NOTE]\n>     <!-- c\n> d --> rest'],
+    ['before a line break', '> [!NOTE]\n> XX', comment('<!-- c -->') + run('</w:t><w:br/><w:t>rest'), '> [!NOTE]\n>     <!-- c -->\\\n> rest'],
+    ['with the label hidden', '---\ncallout-labels: false\n---\n\n> [!NOTE]\n> XX', comment('<!-- c -->') + run(' rest'), '> [!NOTE]\n>     <!-- c --> rest'],
+    ['in a nested quote', '> > [!WARNING]\n> > XX', comment('<!-- c -->') + run(' rest'), '> > [!WARNING]\n> >     <!-- c --> rest'],
+    // Which the marker's paragraph holds as it is
+    ['on the marker\'s line', '> [!NOTE] XX', comment('<!-- c -->') + run(' rest'), '> [!NOTE] <!-- c --> rest'],
+    ['after text', '> [!NOTE]\n> XX', run('a ') + comment('<!-- c -->') + run(' rest'), '> [!NOTE]\n> a <!-- c --> rest'],
+  ])('keeps a comment that starts an alert\'s text on the line after its marker, %s', async (_name, template, runs, md) => {
+    // On a line of its own after the marker, the comment started an HTML
+    // block, which ended the marker's paragraph and which export wrote as
+    // text, so the next export showed it, after a paragraph break. Four
+    // spaces keep the line in the paragraph
+    const docx = await withRuns(runs, template);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(strip(markdown).replace(/^\n/, '')).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await paragraphs(again)).toEqual(await paragraphs(docx));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  test.each([
+    ['with a line that starts a block', '<!-- c\n# h -->'],
+    ['with a blank line', '<!-- c\n\nd -->'],
+    ['that ends in --->', '<!-- a --->'],
+    ['with text between two', '<!-- a -->secret<!-- b -->'],
+  ])('keeps a comment alone at the start of an alert\'s text that a paragraph can\'t hold hidden, %s', async (_name, text) => {
+    // Four spaces before its first line put it in the marker's paragraph,
+    // which the rest of it ended, or which read it as text, or the text
+    // between two comments, so the next export showed it. Its block keeps
+    // it hidden
+    const docx = await withRuns(comment(text).replace(/\n/g, '</w:t><w:br/><w:t xml:space="preserve">'), '> [!NOTE]\n> XX');
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).not.toContain('    <!--');
+    const again = (await convertMdToDocx(markdown)).docx;
+    // The text Word shows, which its paragraphs and line breaks may split
+    // otherwise
+    const shown = async (docx: Uint8Array) => (await paragraphs(docx)).join('').replace(/\[[^\]]*\]|\s/g, '');
+    expect(await shown(again)).toBe(await shown(docx));
+  });
+
+  test.each([
+    ['alone', '> [!NOTE]\n> XX', comment('<!-- a --> <!-- b -->'), '> [!NOTE]\n>     <!-- a --><!-- b -->'],
+    ['alone, with the label hidden', '---\ncallout-labels: false\n---\n\n> [!NOTE]\n> XX', comment('<!-- a --> <!-- b -->'), '> [!NOTE]\n>     <!-- a --><!-- b -->'],
+    ['before text', '> [!NOTE]\n> XX', comment('<!-- a -->\t<!-- b -->') + run(' rest'), '> [!NOTE]\n>     <!-- a --><!-- b --> rest'],
+  ])('drops the whitespace between comments of a hidden run that starts an alert\'s text on the line after its marker, %s', async (_name, template, runs, md) => {
+    // The indent put the run in the marker's paragraph, which read its
+    // comments inline, and showed the whitespace between them, which Word
+    // hid, as their block did
+    const docx = await withRuns(runs, template);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(strip(markdown).replace(/^\n/, '')).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    const shown = async (docx: Uint8Array) => (await paragraphs(docx)).map(p => p.replace(/\[[^\]]*\]/g, ''));
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  test('keeps the whitespace in a comment that takes in the next hidden run, at the start of an alert\'s text on the line after its marker', async () => {
+    // Inline Markdown reads <!-- a ---> on to the next run's -->, so the
+    // space between them is in that comment, which Word hid with it, but
+    // the indent dropped it from the second run, read alone, so the next
+    // export hid a comment with less in it
+    const docx = await withRuns(comment('<!-- a --->') + comment(' <!-- b -->'), '> [!NOTE]\n> XX');
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(strip(markdown).replace(/^\n/, '')).toBe('> [!NOTE]\n>     <!-- a ---> <!-- b -->\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    // Word's paragraphs, with the hidden text of runs side by side together,
+    // as export writes the comment in one run
+    const hidden = async (docx: Uint8Array) => (await paragraphs(docx)).map(p => p.replace(/\u200b/g, '').replace(/\]\[/g, ''));
+    expect(await hidden(again)).toEqual(await hidden(docx));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  test.each([
+    ['', comment('<!-- a -->')],
+    [', with a space after its comment', comment('<!-- a --> ')],
+  ])('keeps the space that keeps words apart around a hidden run after text, in an alert\'s text that a hidden comment starts on the line after its marker%s', async (_name, first) => {
+    // The whitespace of the runs before the line's text goes, as the indent
+    // puts them in the marker's paragraph, which would show it. That of a
+    // run after text, as in any paragraph, is down to the one space that
+    // keeps the words on either side apart (see withoutHiddenCommentSpace),
+    // which went too
+    const docx = await withRuns(first + run('x') + comment(' <!-- b --> ') + run('y'), '> [!NOTE]\n> XX');
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(strip(markdown).replace(/^\n/, '')).toBe('> [!NOTE]\n>     <!-- a -->x <!-- b -->y\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
   const cellComments: [string, string][] = [
     ['a comment', comment('<!-- c -->')],
     ['a comment with a space before it', comment(' <!-- c -->')],
