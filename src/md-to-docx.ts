@@ -1536,7 +1536,17 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
   // for the next block unless preprocessing between them changed line counts
   let offset = 0;
   let parsedEnd = 0;
+  // The last search and the state it started from. Each paragraph split
+  // from a span over many, as {++a\n\nb++}, searches again for the span's
+  // one line, which compared in full each time made export quadratic in the
+  // span's length. A search of the same lines from the same state finds
+  // the same and leaves the state as it is.
+  let last: { start: number; end: number; offset: number; cursor: number; parsedEnd: number; found: number } | undefined;
   const find = (start: number, end: number): number => {
+    if (last && last.start === start && last.end === end && last.offset === offset && last.cursor === cursor && last.parsedEnd === parsedEnd) {
+      return last.found;
+    }
+    const from = { start, end, offset, cursor, parsedEnd };
     const lines = parsedLines.slice(start, end);
     const at = start + offset;
     // A block on the last one's lines, as the quote in - > q is, sits at its offset
@@ -1548,6 +1558,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
       cursor = Math.max(cursor, found + lines.length);
       offset = found - start;
     }
+    last = { ...from, found };
     return found;
   };
   for (let t = 0; t < tokens.length; t++) {

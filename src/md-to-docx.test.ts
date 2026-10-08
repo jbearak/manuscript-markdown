@@ -2842,6 +2842,29 @@ describe('preprocessCriticMarkup', () => {
 });
 
 describe('parseMd multi-paragraph CriticMarkup', () => {
+  it.each([
+    ['an insertion', '{++', '++}'],
+    ['a deletion', '{--', '--}'],
+    ['a substitution', '{~~', '~>y~~}'],
+  ])('reads %s over many paragraphs in linear time', (_name, open, close) => {
+    // Each paragraph split from the span looked for the span's one line in
+    // the source, which annotateBlockquoteSpacing compared in full each
+    // time: some 8 times as long as the paragraphs alone at 20,000 before,
+    // about 1.3 after
+    const time = (md: string) => {
+      let best = Infinity;
+      for (let run = 0; run < 3; run++) {
+        const start = performance.now();
+        parseMd(md);
+        best = Math.min(best, performance.now() - start);
+      }
+      return best;
+    };
+    expect(parseMd(open + 'a\n\nb' + close).filter(token => token.type === 'paragraph')).toHaveLength(2);
+    const paragraphs = 'x\n\n'.repeat(20000);
+    expect(time(open + paragraphs + close + '\n') / time(paragraphs)).toBeLessThan(3);
+  }, 30000);
+
   it('parses multi-paragraph comment as single token', () => {
     const tokens = parseMd('{>>para 1\n\npara 2<<}');
     // Should produce a single paragraph (not split across multiple)
