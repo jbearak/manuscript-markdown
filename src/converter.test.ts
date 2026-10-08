@@ -12402,17 +12402,19 @@ describe('Line feeds in Word\'s text', () => {
     // its paragraph
     ['runs alike, a carriage return and line feed between them', '<w:r><w:t xml:space="preserve">&lt;span title="a&#13;</w:t></w:r><w:r><w:t xml:space="preserve">&#10;b"&gt;</w:t></w:r>', 'A <span title="a\nb">x</span> B\n'],
     // Which import writes in parts, with the line feed in text between,
-    // where Markdown reads a space
-    ['runs formatted apart, which import writes in parts', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">\nb"&gt;</w:t></w:r>', 'A <span title="a <i>b"></i>x</span> B\n', false],
+    // where Markdown reads a space, and as text, as the italic's tags come
+    // between them, which export read in the attribute, and Word lost the
+    // italic and had them as text
+    ['runs formatted apart, which import writes in parts', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">\nb"&gt;</w:t></w:r>', 'A \\<span title="a <i>b"></i>x</span> B\n'],
     // Around a line feed alone in bold or italic, which import writes as it
     // is, with no delimiters, as it does the whitespace at their edges
     ['runs alike around a line feed in bold', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">\n</w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A <span title="a\nb">x</span> B\n'],
     ['runs alike around a line feed in italic', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">\n</w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A <span title="a\nb">x</span> B\n'],
     ['runs alike around spaces and a line feed in bold italic', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:b/><w:i/></w:rPr><w:t xml:space="preserve"> \n </w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A <span title="a \n b">x</span> B\n'],
-    // But not one struck, which import writes in <s>, which the attribute
-    // holds as text
-    ['runs alike around a line feed struck, which import writes in parts', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:strike/></w:rPr><w:t xml:space="preserve">\n</w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A <span title="a<s> </s>b">x</span> B\n', false],
-  ])('reads a line feed in a tag Word splits over %s as import writes the tag', async (_name, runs, expected, stable = true) => {
+    // But not one struck, which import writes in <s>, and so as text, as
+    // the attribute would hold the <s> as text
+    ['runs alike around a line feed struck, which import writes in parts', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:strike/></w:rPr><w:t xml:space="preserve">\n</w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A \\<span title="a<s> </s>b">x</span> B\n'],
+  ])('reads a line feed in a tag Word splits over %s as import writes the tag', async (_name, runs, expected) => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('A <span title="a\nb">x</span> B\n')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const tag = /<w:r><w:t>&lt;span title="a\nb"&gt;<\/w:t><\/w:r>/;
@@ -12420,9 +12422,7 @@ describe('Line feeds in Word\'s text', () => {
     zip.file('word/document.xml', xml.replace(tag, runs));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe(expected);
-    // Not the italic's tag in the attribute, which the next round trip
-    // writes as text, as it does on main
-    if (stable) expect(await roundTrip(markdown)).toBe(markdown);
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test.each([
@@ -16757,6 +16757,75 @@ describe('round-trip regression: linked images', () => {
     const once = await toMarkdown(await edited('See ' + IMG + ' here.', edit));
     expect(withoutFrontmatter(once)).toBe('See [' + IMG + '](https://w.example/) here.\n');
     expect(await toMarkdown(await toWord(once))).toBe(once);
+  });
+});
+
+describe('round-trip regression: text before an image that its alt text closes', () => {
+  // Minimal 1x1 white PNG (67 bytes)
+  const TINY_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
+    'Nl7BcQAAAABJRU5ErkJggg==', 'base64');
+  const tmpDir = join(require('os').tmpdir(), 'mms-test-alt-closes-' + Date.now());
+
+  beforeAll(() => {
+    const { mkdirSync, writeFileSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+  });
+  afterAll(() => require('fs').rmSync(tmpDir, { recursive: true, force: true }));
+
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const toWord = async (md: string) => (await convertMdToDocx(md, { sourceDir: tmpDir })).docx;
+  const attr = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const SIZE = '{width=100 height=100}';
+
+  test.each([
+    ['a $', 'a \\$b ', 'c$', '](image.png)' + SIZE + ' d'],
+    ['an ==', 'a \\==b ', 'c\\==', '](image.png)' + SIZE + ' d'],
+    ['a tag with a quoted value', 'a \\<span title=" ', 'c">', '](image.png)' + SIZE + ' d'],
+    ['a tag with a value without quotes', 'a \\<span title=', 'c>', '](image.png)' + SIZE + ' d'],
+    // Whose <b>, which goes as references, takes no backslash, which
+    // would read as text before them, \&lt;b&gt;
+    ['a tag whose value holds one written as references', 'a \\<span title="&lt;b&gt;', 'c">', '](image.png)' + SIZE + ' d'],
+    ['a tag whose value holds one of no formatting', 'a \\<span title="\\<foo>', 'c">', '](image.png)' + SIZE + ' d'],
+    ['a $, the image a link\'s', 'a \\$b [', 'c$', '](image.png)' + SIZE + '](https://e.com/) d'],
+  ])('keeps an image whose alt text closes %s in the text before it', async (_name, before, alt, after) => {
+    // Import wrote the text before as it is, and the next export read
+    // math, a highlight or a tag from it into the alt text, and no image
+    const zip = await JSZip.loadAsync(await toWord(before + '![x' + after));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+      .replace(/descr="[^"]*"/, () => 'descr="' + attr(alt.replace(/\\/g, '')) + '"'));
+    const once = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(strip(once)).toBe(before + '![' + alt + after + '\n');
+    expect(parseMd(strip(once))[0].runs.find(run => run.type === 'image')?.imageAlt).toBe(alt.replace(/\\/g, ''));
+    const again = await toWord(once);
+    expect(await (await JSZip.loadAsync(again)).file('word/document.xml')!.async('string')).toContain('descr="' + attr(alt.replace(/\\/g, '')) + '"');
+    expect((await convertDocx(again)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['an image export can\'t embed', 'a \\$b ![c$](missing.png) d'],
+    ['an image export can\'t embed, its $ in its path', 'a \\$b ![c](missing$.png) d'],
+    ['an <img>', 'a \\$b <img src="image.png" alt="c$" width="100" height="100"> d'],
+    ['alt text that closes nothing', 'a $b ![c](image.png)' + SIZE + ' d'],
+    ['alt text that closes no tag', 'a <span title=" ![c](image.png)' + SIZE + ' d'],
+  ])('writes the text before %s as it needs', async (_name, md) => {
+    // Import wrote the $ before the image's as it is, which the next
+    // export read as math up to it. Alt text that closes nothing leaves the
+    // text before as it was.
+    const once = strip((await convertDocx(await toWord(md))).markdown);
+    expect(once).toBe(md + '\n');
+  });
+
+  test('escapes a tag that text in another run closes', () => {
+    // As a tag the runs before an image leave open: export read
+    // <span title=" **c"> as one tag, with the ** in it, and no bold
+    const markdown = buildMarkdown([
+      { type: 'text', text: 'a <span title=" ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'text', text: 'c">', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: true } },
+    ] as ContentItem[], new Map());
+    expect(markdown).toBe('a \\<span title=" **c">**');
+    expect(parseMd(markdown)[0].runs.find(run => run.bold)?.text).toBe('c">');
   });
 });
 
