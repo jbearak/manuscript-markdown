@@ -1,6 +1,6 @@
 import { describe, it } from 'bun:test';
 import * as fc from 'fast-check';
-import { parseBibtex, serializeBibtex, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, serializeBibtex, readBibtexFields, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser Property Tests', () => {
   // A field's whitespace as BibTeX reads it: a run of it one space, and
@@ -158,4 +158,40 @@ describe('BibTeX Parser Property Tests', () => {
       }
     );
   }, { timeout: 10000 });
+});
+describe('BibTeX field reader parity', () => {
+  // The regex the field reader replaced, which read braces only so deep
+  const fieldRegex = /(\w+(?:-\w+)*)\s*=\s*(?:\{((?:[^{}]|\{(?:[^{}]|\{[^}]*\})*\})*)\}|"((?:\\.|[^"\\])*)"|(\w+))/g;
+  const byRegex = (body: string) => [...body.matchAll(fieldRegex)].map(([, name, braced, quoted, bare]) =>
+    ({ name, value: braced ?? quoted ?? bare, braced: braced !== undefined }));
+  // Its deepest braces, every one counted, as the regex counts them
+  const depth = (body: string) => {
+    let at = 0;
+    let most = 0;
+    for (const c of body) {
+      if (c === '{') most = Math.max(most, ++at);
+      else if (c === '}') at = Math.max(0, at - 1);
+    }
+    return most;
+  };
+
+  /**
+   * A body of fields, and anything else, reads as the regex read it, where
+   * its braces nest no deeper than the regex read them: three levels, with
+   * a field's own.
+   */
+  it('reads an entry body as the regex did, where its braces nest as deep as the regex read them', () => {
+    const atom = fc.constantFrom('title', 'year', 'a-b', 'x1', '-', ' = ', '=', ' ', '\n', ',', '{', '}', '{a}', '{a {b}}', '"', '\\"', '\\', '\\\\',
+      '\\\n', '\\{', '\\}', 'a b', '2020', '@', '%', '\u00A0', '\u2028');
+    fc.assert(
+      fc.property(fc.array(atom, { maxLength: 30 }).map(atoms => atoms.join('')), body => {
+        fc.pre(depth(body) <= 3);
+        const read = readBibtexFields(body);
+        const expected = byRegex(body);
+        if (JSON.stringify(read) !== JSON.stringify(expected)) throw new Error(JSON.stringify(body) + ' read as ' + JSON.stringify(read) + ', not ' + JSON.stringify(expected));
+        return true;
+      }),
+      { numRuns: 5000 }
+    );
+  });
 });

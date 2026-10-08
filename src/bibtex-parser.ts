@@ -687,6 +687,91 @@ function isAtLineStart(input: string, pos: number): boolean {
 /** Parse BibTeX input, returning both the structured entries and raw entry
  *  texts in a single pass over the entry boundaries.  parseBibtex delegates
  *  here; mergeBibtex uses both the parsed and raw maps directly. */
+// A field's name and the = after it, and a bare value, as a number
+const FIELD_NAME_AT = /\w+(?:-\w+)*/y;
+const FIELD_EQUALS_AT = /\s*=\s*/y;
+const BARE_VALUE_AT = /\w+/y;
+
+/**
+ * An entry body's fields, as `name = {value}`, `name = "value"` or
+ * `name = value`, from the left, each where the last ends, past what's
+ * between them, as commas, and anything else that isn't one. A braced value
+ * goes to the } that pairs with its {, however deep its groups nest, every
+ * brace counted, an escaped one too, as BibTeX counts them, and as
+ * findEntryEnd does, so the two read a body the same way. A quoted one goes
+ * to the next " no backslash escapes, a backslash escaping any character but
+ * a line end. Where a value doesn't end, there's no field at its name, and
+ * the search goes on after the name, into the value, as the regex this
+ * replaced searched. In one pass, with each { paired once: the regex read
+ * braces only three deep, with the field's, and a value long enough it gave
+ * up on, so the entry lost the rest of the field, or all its fields.
+ */
+export function readBibtexFields(body: string): Array<{ name: string; value: string; braced: boolean }> {
+  const fields: Array<{ name: string; value: string; braced: boolean }> = [];
+  // The } that pairs with each {, or -1
+  const closes = new Int32Array(body.length).fill(-1);
+  const opens: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === '{') opens.push(i);
+    else if (body[i] === '}' && opens.length > 0) closes[opens.pop()!] = i;
+  }
+  let i = 0;
+  while (i < body.length) {
+    FIELD_NAME_AT.lastIndex = i;
+    const name = FIELD_NAME_AT.exec(body)?.[0];
+    if (!name) {
+      i++;
+      continue;
+    }
+    // A name read from further in it would end where it does, and have the
+    // same = and value after it, or none
+    const nameEnd = i + name.length;
+    FIELD_EQUALS_AT.lastIndex = nameEnd;
+    const equals = FIELD_EQUALS_AT.exec(body);
+    const start = nameEnd + (equals?.[0].length ?? 0);
+    let end = -1;
+    let value: string | undefined;
+    let braced = false;
+    if (!equals) {
+      // No field
+    } else if (body[start] === '{') {
+      end = closes[start];
+      if (end >= 0) {
+        value = body.slice(start + 1, end);
+        braced = true;
+      }
+    } else if (body[start] === '"') {
+      let k = start + 1;
+      while (k < body.length && body[k] !== '"') {
+        if (body[k] === '\\') {
+          // Any character but a line end, as a regex's . reads
+          if (k + 1 >= body.length || /[\n\r\u2028\u2029]/.test(body[k + 1])) break;
+          k++;
+        }
+        k++;
+      }
+      if (body[k] === '"') {
+        end = k;
+        value = body.slice(start + 1, k);
+      }
+    } else {
+      BARE_VALUE_AT.lastIndex = start;
+      const bare = BARE_VALUE_AT.exec(body);
+      if (bare) {
+        end = start + bare[0].length - 1;
+        value = bare[0];
+      }
+    }
+    if (value === undefined) {
+      i = nameEnd;
+      continue;
+    }
+    fields.push({ name, value, braced });
+    i = end + 1;
+  }
+  return fields;
+}
+
 export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   return scanBibtex(input);
 }
@@ -719,11 +804,6 @@ function scanBibtex(input: string): ScannedBibtex {
   // them — but marked untrusted, because a recovered `@book{...}` may really
   // be sitting inside another entry's field value.
   let synced = true;
-
-  // NOTE: This regex handles nested braces only up to a small fixed depth
-  // and backslash escapes within quoted strings (e.g. \").
-  // If we need arbitrary nesting, replace with a balanced-brace field parser.
-  const fieldRegex = /(\w+(?:-\w+)*)\s*=\s*(?:\{((?:[^{}]|\{(?:[^{}]|\{[^}]*\})*\})*)\}|"((?:\\.|[^"\\])*)"|(\w+))/g;
 
   while (pos < input.length) {
     headerRe.lastIndex = pos;
@@ -821,14 +901,9 @@ function scanBibtex(input: string): ScannedBibtex {
       const fieldsStr = input.slice(startPos, endPos);
       const fields = new Map<string, string>();
 
-      fieldRegex.lastIndex = 0;
-      let fieldMatch;
-      while ((fieldMatch = fieldRegex.exec(fieldsStr)) !== null) {
-        const [, fieldName, braceValue, quoteValue, bareValue] = fieldMatch;
-        const lowerField = fieldName.toLowerCase();
-        const rawValue = braceValue ?? quoteValue ?? bareValue ?? '';
-        const value = decodeBibtexFieldValue(lowerField, rawValue, braceValue !== undefined);
-        fields.set(lowerField, value);
+      for (const field of readBibtexFields(fieldsStr)) {
+        const lowerField = field.name.toLowerCase();
+        fields.set(lowerField, decodeBibtexFieldValue(lowerField, field.value, field.braced));
       }
 
       parsed.set(key, {

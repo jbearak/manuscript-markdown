@@ -1484,3 +1484,31 @@ describe('scanBibtexEntryBody', () => {
     expect(scan('not an entry').entryType).toBeUndefined();
   });
 });
+
+describe('BibTeX field reader', () => {
+  // A regex read a braced value's groups only three deep, with the field's
+  // braces, and the rest of the value was lost; and a value long enough,
+  // which it gave up on, so the entry had none of its fields
+  const fields = (body: string) => {
+    const entry = parseBibtex('@article{k,\n' + body + '\n}').get('k');
+    return entry && Object.fromEntries(entry.fields);
+  };
+
+  it.each([
+    ['four levels of groups', '{a {b {c {d} e} f} g}', 'a {b {c {d} e} f} g'],
+    ['a group four deep that holds a group', '{a {b {c {d {e} f} g} h} i}', 'a {b {c {d {e} f} g} h} i'],
+    ['groups 10,000 deep', '{a ' + '{'.repeat(10000) + 'x' + '}'.repeat(10000) + ' b}', 'a ' + '{'.repeat(10000) + 'x' + '}'.repeat(10000) + ' b'],
+  ])('reads a braced value of %s whole', (_name, value, expected) => {
+    expect(fields('  title = ' + value + ',\n  year = {2020}')).toEqual({ title: expected, year: '2020' });
+  });
+
+  it.each([
+    ['braced', (text: string) => '{' + text + '}'],
+    ['quoted', (text: string) => '"' + text + '"'],
+  ])('reads a long %s value, and the fields after it, in linear time', (_name, delimit) => {
+    const text = 'a b '.repeat(150000) + 'c';
+    const start = performance.now();
+    expect(fields('  title = ' + delimit(text) + ',\n  year = {2020}')).toEqual({ title: text, year: '2020' });
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
