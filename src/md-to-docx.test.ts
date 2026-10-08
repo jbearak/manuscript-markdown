@@ -6007,6 +6007,34 @@ describe('Comments a paragraph reads inline', () => {
     }
   }, 60000);
 
+  it.each([
+    ['alone, a line each', '<br>\n'.repeat(800000), 800000],
+    ['after a comment', '<!-- c -->' + ' <br>'.repeat(800000) + '\n', 1600001],
+  ])('reads a block of more line breaks than Bun 1.3.9 matched in one regex, %s', (_name, md, runs) => {
+    // Bun 1.3.9, which CI tests and builds the CLI with, found no match of
+    // /^(?:<br\s*\/?>\s*)+$/i, nor of the one for breaks after comments, past
+    // some 700,000 breaks, so export read them as text. It reads each break
+    // in turn.
+    const tokens = parseMd(md);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].runs).toHaveLength(runs);
+    expect(tokens[0].runs.filter(run => run.type === 'hardbreak')).toHaveLength(800000);
+  });
+
+  it('reads the line breaks of a block one at a time as the regexes for all of them read them', async () => {
+    const { commentsEnd, isLineBreakBlock } = await import('./html-blocks');
+    const byRegex = (content: string) => {
+      const text = content.trim();
+      const end = commentsEnd(text);
+      return /^(?:<br\s*\/?>\s*)+$/i.test(text) || end > 0 && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(end));
+    };
+    const part = fc.constantFrom('<br>', '<BR/>', '<br />', '<bR\t/>', '<br\n>', '<br', '/>', '>', ' ', '\t', '\n', ' ', ' ', '﻿',
+      '<!-- c -->', '<!--', '-->', 'x');
+    fc.assert(fc.property(fc.array(part, { maxLength: 10 }).map(parts => parts.join('')), text => {
+      expect(isLineBreakBlock(text)).toBe(byRegex(text));
+    }), { numRuns: 5000 });
+  });
+
   // A hidden run of `n` comments with 100 spaces between them
   const payload = (n: number) => Array.from({ length: n }, (_, i) => '<!-- c' + i + ' -->').join(' '.repeat(100));
 
