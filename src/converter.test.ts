@@ -2102,6 +2102,77 @@ describe('Where Word list numbering comes from', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  // The numbered list with w:numFmt none at levels `ilvls`, which Word
+  // shows no number for
+  const unnumbered = (...ilvls: number[]) => (xml: string) => xml.replace(/<w:abstractNum w:abstractNumId="1"[^]*?<\/w:abstractNum>/, (list: string) =>
+    list.replace(/(<w:lvl w:ilvl="(\d)"[^>]*><w:start w:val="1"\/>)<w:numFmt w:val="decimal"\/>/g,
+      (match: string, lvl: string, ilvl: string) => ilvls.includes(Number(ilvl)) ? lvl + '<w:numFmt w:val="none"/>' : match));
+
+  test.each([
+    ['a paragraph of the item above it', [[2, 0, 'a'], [2, 1, 'text'], [2, 0, 'b']], '1. a\n\n   text\n2. b'],
+    ['a paragraph of a bullet list\'s item', [[1, 0, 'a'], [2, 1, 'text'], [1, 0, 'b']], '- a\n\n  text\n- b'],
+    // Word counts it, which starts the level under it over
+    ['one that starts the levels under it over', [[2, 0, 'a'], [2, 1, 'text'], [2, 2, 'x'], [2, 1, 'more'], [2, 2, 'y'], [2, 0, 'b']],
+      '1. a\n\n   text\n   1. x\n\n   more\n   1. y\n2. b'],
+    ['a paragraph, where no item is above it', [[2, 1, 'text'], [2, 2, 'x'], [2, 2, 'y']], 'text\n\n1. x\n2. y'],
+  ])('reads a paragraph at a list level Word shows no number for as %s', async (_name, paragraphs, md) => {
+    expect(await imported((paragraphs as [number, number, string][]).map(([numId, ilvl, text]) => [numPr(numId, ilvl), text]), { numbering: unnumbered(1) })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('reads a quote after a paragraph at a level Word shows no number for in the item that paragraph is in', async () => {
+    // Which ends the items under that one: indented as in one of them, it
+    // went in it, at fewer levels
+    const quote: [string, string] = [pStyle('Quote') + '<w:ind w:left="2880"/>', 'q'];
+    const md = '1. a\n   1. x\n\n   text\n   > > > q';
+    expect(await imported([[numPr(2, 0), 'a'], [numPr(2, 2), 'x'], [numPr(2, 1), 'text'], quote], { numbering: unnumbered(1) })).toBe(md);
+    expect(await roundTrip('---\nblockquote-style: Quote\n---\n\n' + md)).toBe(md);
+  });
+
+  test.each([
+    ['an item at a deeper level', [numPr(2, 3), 'y'], '1. a\n   1. x\n\n   <!-- -->\n\n   1. y'],
+    ['a quote', [pStyle('Quote') + '<w:ind w:left="2880"/>', 'q'], '1. a\n   1. x\n\n   > > > q'],
+  ])('reads %s after an empty paragraph at a level Word shows no number for in the item that paragraph is in', async (_name, after, md) => {
+    // Which ends the items under that one, as one with text does: with no
+    // text, it ended none, and what came after went in the item before it
+    expect(await imported([[numPr(2, 0), 'a'], [numPr(2, 2), 'x'], [numPr(2, 1), ''], after as [string, string]], { numbering: unnumbered(1) })).toBe(md);
+    expect(await roundTrip('---\nblockquote-style: Quote\n---\n\n' + md)).toBe(md);
+  });
+
+  test.each([
+    ['one in no list, then one at such a level', [[numPr(2, 0), 'a'], [numPr(2, 2), 'x'], ['', ''], [numPr(2, 1), ''], [numPr(2, 3), 'y']], [1], '1. a\n   1. x\n\n   <!-- -->\n\n   1. y'],
+    ['one at such a level, then one at a shallower one', [[numPr(2, 0), 'a'], [numPr(2, 2), 'x'], [numPr(2, 4), 'z'], [numPr(2, 3), ''], [numPr(2, 1), ''], [numPr(2, 5), 'y']], [1, 3], '1. a\n   1. x\n      1. z\n\n   <!-- -->\n\n   1. y'],
+  ])('reads an item after empty paragraphs in a row, %s, as after the shallowest one at a level Word shows no number for', async (_name, paragraphs, levels, md) => {
+    // Empty paragraphs in a row are one item, which had the level of the
+    // first alone, and the item after them went in a deeper item
+    expect(await imported(paragraphs as [string, string][], { numbering: unnumbered(...levels as number[]) })).toBe(md as string);
+    expect(await roundTrip(md as string)).toBe(md as string);
+  });
+
+  test('reads an item after an empty paragraph at the top level, which Word shows no number for, in no item', async () => {
+    // With no item above it, it ended none, and the item after it went in
+    // the item before it
+    const md = '1. a\n\n<!-- -->\n\n1. b';
+    expect(await imported([[numPr(2, 1), 'a'], [numPr(2, 0), ''], [numPr(2, 2), 'b']], { numbering: unnumbered(0) })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('numbers an item after an empty paragraph at a level Word shows no number for as Word does', async () => {
+    // Which cleared the list types of the items still open, so the last
+    // item read as a new list, numbered 2 as the item before it, where
+    // Markdown goes on to 3
+    const markdown = await imported([[numPr(2, 0), 'a'], [numPr(2, 2), 'x'], [numPr(2, 2), 'y'], [numPr(2, 3), ''], [numPr(2, 3), 'z'], [numPr(2, 1), 'b']], { numbering: unnumbered(3) });
+    expect(markdown).toBe('1. a\n   1. x\n   2. y\n\n      z\n\n   <!-- -->\n\n   2. b');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('reads a list whose levels Word shows no number for as paragraphs', async () => {
+    const md = 'a\n\nb';
+    expect(await imported([[numPr(2, 0), 'a'], [numPr(2, 0), 'b']], { numbering: unnumbered(0, 1, 2, 3, 4, 5, 6, 7, 8) })).toBe(md);
+    expect(await imported([[numPr(5, 0), 'a'], [numPr(5, 0), 'b']], { numbering: overriding(1, lvl('none')) })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('keeps a heading its style numbers a heading, which Word counts in its list', async () => {
     const styles = (xml: string) => xml.replace(/(<w:style [^>]*w:styleId="Heading1">[^]*?<w:pPr>)/, (match: string) => match + numPr(2));
     const md = '# H\n\n2. a';
