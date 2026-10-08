@@ -6,6 +6,7 @@ import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, seria
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
+import { findStyleElement } from './style-element';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -15266,43 +15267,13 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   const documentIds = new Map<string, string>();
   for (const [id, builtInId] of opts?.builtInIds ?? []) if (!documentIds.has(builtInId)) documentIds.set(builtInId, id);
 
-  /** Where the next w:style element starts from `from`, or -1, with any
-   *  whitespace before its first attribute */
-  function nextStyleStart(from: number): number {
-    const start = /<w:style\s/g;
-    start.lastIndex = from;
-    return start.exec(stylesXml)?.index ?? -1;
-  }
-
-  /** The w:style element of the paragraph style `id`, or of the document's
-   *  ID for it, or else of one whose ID differs only in case, as Word
-   *  matches a style's ID whatever its case, as `heading1`, but not of
-   *  another type, which a paragraph doesn't take, as a character style
-   *  `Normal`. With `anyType`, as for a custom style, which can be a
-   *  character style, the style of the ID itself is of any type. As Word
-   *  shows it, without a tracked change's record (see withoutFormatChanges) */
+  /** The w:style element of the paragraph style `id`, by the document's ID
+   *  for a built-in style, of any type with `anyType` (see
+   *  findStyleElement), as Word shows it, without a tracked change's record
+   *  (see withoutFormatChanges) */
   function styleBlock(id: string, anyType = false): string | null {
-    const styleId = documentIds.get(id) ?? id;
-    let caseless: string | null = null;
-    let searchFrom = 0;
-    while (true) {
-      const idx = nextStyleStart(searchFrom);
-      if (idx === -1) return caseless;
-      // A style written as <w:style .../> is its tag alone, and the next
-      // </w:style> closes another
-      const tagEnd = stylesXml.indexOf('>', idx) + 1;
-      if (tagEnd === 0) return caseless;
-      const empty = stylesXml[tagEnd - 2] === '/';
-      const closeTag = empty ? tagEnd : stylesXml.indexOf('</w:style>', tagEnd);
-      if (closeTag === -1) return caseless;
-      const block = stylesXml.substring(idx, empty ? tagEnd : closeTag + '</w:style>'.length);
-      const tag = block.slice(0, tagEnd - idx);
-      // A style without a type is a paragraph style
-      const paragraph = (/\sw:type\s*=\s*"([^"]*)"/.exec(tag)?.[1] ?? 'paragraph') === 'paragraph';
-      if (block.includes('w:styleId="' + styleId + '"') && (paragraph || anyType)) return withoutFormatChanges(block);
-      caseless ??= paragraph && /\sw:styleId\s*=\s*"([^"]*)"/.exec(tag)?.[1].toLowerCase() === styleId.toLowerCase() ? withoutFormatChanges(block) : null;
-      searchFrom = idx + block.length;
-    }
+    const found = findStyleElement(stylesXml, id, documentIds, anyType);
+    return found ? withoutFormatChanges(found.element) : null;
   }
 
   // Helper: a style block's style-level rPr, or '' for none
@@ -15390,6 +15361,46 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   const defaultRPr = /<w:rPrDefault>\s*<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(docDefaults)?.[1] ?? '';
   const defaultPPr = /<w:pPrDefault>\s*<w:pPr>([\s\S]*?)<\/w:pPr>/.exec(docDefaults)?.[1] ?? '';
 
+  /** A style's block and those of the styles it's based on (w:basedOn), nearest first */
+  function styleChain(styleId: string): string[] {
+    const chain: string[] = [];
+    const seen = new Set<string>();
+    for (let id: string | undefined = styleId; id !== undefined && !seen.has(id);) {
+      seen.add(id);
+      const block = styleBlock(id);
+      if (block === null) break;
+      chain.push(block);
+      id = /<w:basedOn\s+w:val\s*=\s*"([^"]*)"/.exec(block)?.[1];
+    }
+    return chain;
+  }
+
+  /**
+   * The size, in half-points, and the font a style shows: each from the
+   * nearest style in its chain (see styleChain) that sets it, else from the
+   * document defaults, as for its font style (see inheritedStyle). Without a
+   * size anywhere, Word shows 10pt. A font is the w:ascii of the nearest
+   * w:rFonts that sets w:ascii or w:asciiTheme; a theme font, which Word
+   * shows over a w:ascii beside it (ECMA-376 Part 1 §17.3.2.26), has no name
+   * here, so it's undefined, as is a style styles.xml doesn't have.
+   */
+  function inheritedSizeHp(styleId: string): number | undefined {
+    const chain = styleChain(styleId);
+    if (chain.length === 0) return undefined;
+    for (const rpr of [...chain.map(blockRPr), defaultRPr]) {
+      const size = extractSizeHp(rpr);
+      if (size !== undefined) return size;
+    }
+    return 20;
+  }
+  function inheritedFont(styleId: string): string | undefined {
+    for (const rpr of [...styleChain(styleId).map(blockRPr), defaultRPr]) {
+      const rFonts = /<w:rFonts\b[^>]*>/.exec(rpr)?.[0];
+      if (rFonts && /\bw:ascii(?:Theme)?="/.test(rFonts)) return /\bw:asciiTheme="/.test(rFonts) ? undefined : extractFont(rFonts);
+    }
+    return undefined;
+  }
+
   /**
    * The font style a style shows (see extractStyle). A style that doesn't set
    * bold, italic, underline, caps or alignment has what the style it's based
@@ -15412,15 +15423,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
    * only one.
    */
   function inheritedStyle(styleId: string, own: { rPr: string; pPr: string } = { rPr: '', pPr: '' }): string {
-    const chain: string[] = [];
-    const seen = new Set<string>();
-    for (let id: string | undefined = styleId; id !== undefined && !seen.has(id);) {
-      seen.add(id);
-      const block = styleBlock(id);
-      if (block === null) break;
-      chain.push(block);
-      id = /<w:basedOn\s+w:val\s*=\s*"([^"]*)"/.exec(block)?.[1];
-    }
+    const chain = styleChain(styleId);
     // The nearest element, a paragraph's own first, self-closing, as
     // <w:b></w:b> means what <w:b/> does
     const nearest = (ownProperties: string, properties: (block: string) => string, defaults: string, tag: string) => {
@@ -15478,8 +15481,8 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   for (const id of ids) {
     const rpr = getStyleRPr(id);
     if (rpr !== null) {
-      fonts.push(extractFont(rpr));
-      sizes.push(extractSizeHp(rpr));
+      fonts.push(inheritedFont(id));
+      sizes.push(inheritedSizeHp(id));
       styles.push(inheritedStyle(id));
     } else {
       fonts.push(undefined);
@@ -15488,6 +15491,12 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     }
   }
 
+  // The size export gives a heading or title without a size of its own in
+  // the frontmatter: its default, scaled to the body's font-size where the
+  // frontmatter has one (see resolveFontOverrides in md-to-docx.ts)
+  const exportedSizeHp = (defaultSizeHp: number) =>
+    result.fontSize !== undefined && bodySizeHp !== undefined ? Math.round(defaultSizeHp / 22 * bodySizeHp) : defaultSizeHp;
+
   // Trim trailing duplicates helper
   function trimTrailing<T>(arr: T[]): T[] {
     let end = arr.length;
@@ -15495,17 +15504,19 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return arr.slice(0, end);
   }
 
-  // headerFont: emit if any heading font differs from body font
-  const hFonts = fonts.map(f => f || bodyFont);
-  if (hFonts.some(f => f && f !== bodyFont)) {
-    const trimmed = trimTrailing(hFonts.filter((f): f is string => !!f));
-    if (trimmed.length > 0) result.headerFont = trimmed;
-  }
+  // headerFont: emit if any heading font differs from the one export gives a
+  // heading without one: the body's, or else Calibri, its theme's. A heading
+  // whose font has no name here, as a theme font has none, takes that one
+  // too, which keeps the others in their places
+  const unsetFont = result.font ?? 'Calibri';
+  const hFonts = fonts.map(f => f ?? unsetFont);
+  if (hFonts.some(f => f !== unsetFont)) result.headerFont = trimTrailing(hFonts);
 
-  // headerFontSize: emit if any heading size differs from default
-  // Fill undefined entries with defaults to preserve positional alignment
-  if (sizes.some((s, i) => s !== undefined && s !== defaultHp[ids[i]])) {
-    const ptSizes = sizes.map((s, i) => (s !== undefined ? s : defaultHp[ids[i]]) / 2);
+  // headerFontSize: emit if any heading shows a size other than the one export
+  // would give it. Fill undefined entries with that size to preserve
+  // positional alignment
+  if (sizes.some((s, i) => s !== undefined && s !== exportedSizeHp(defaultHp[ids[i]]))) {
+    const ptSizes = sizes.map((s, i) => (s !== undefined ? s : exportedSizeHp(defaultHp[ids[i]])) / 2);
     result.headerFontSize = trimTrailing(ptSizes);
   }
 
@@ -15519,10 +15530,10 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   // Title extraction
   const titleRpr = getStyleRPr('Title');
   if (titleRpr !== null) {
-    const tFont = extractFont(titleRpr);
+    const tFont = inheritedFont('Title');
     if (tFont && tFont !== bodyFont) result.titleFont = [tFont];
-    const tSizeHp = extractSizeHp(titleRpr);
-    if (tSizeHp !== undefined && tSizeHp !== 56) result.titleFontSize = [tSizeHp / 2];
+    const tSizeHp = inheritedSizeHp('Title');
+    if (tSizeHp !== undefined && tSizeHp !== exportedSizeHp(56)) result.titleFontSize = [tSizeHp / 2];
     // Each title's, or else the style's
     const tStyles = opts?.titleParagraphs?.length ? opts.titleParagraphs.map(paragraph => inheritedStyle('Title', titleOwnProperties(paragraph))) : [inheritedStyle('Title')];
     if (tStyles.some(style => style !== 'normal')) result.titleFontStyle = trimTrailing(tStyles);
