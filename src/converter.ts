@@ -5166,15 +5166,17 @@ function parseNoteBody(
               break;
             }
           }
-          // Push para separator for multi-paragraph notes (skip first). Each
-          // line of a code block has one, as in the document, an empty one
-          // too, and so does the paragraph after one.
-          const last = target[target.length - 1];
-          const needsPara = inTableCell || isCodeBlock
-            || (last !== undefined && (last.type !== 'para' || !!last.isCodeBlock));
           // The tracked mark of the paragraph before, which this one's text
           // joins to it
           const trackedBreak = !inTableCell && precedingMark?.target === target && precedingMark.end === target.length;
+          // Push para separator for multi-paragraph notes (skip first). Each
+          // line of a code block has one, as in the document, an empty one
+          // too, and so does the paragraph after one, and after an empty one
+          // whose mark is tracked, which this one takes, as after one with
+          // text.
+          const last = target[target.length - 1];
+          const needsPara = inTableCell || isCodeBlock || trackedBreak
+            || (last !== undefined && (last.type !== 'para' || !!last.isCodeBlock));
           if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
             if (trackedBreak) paraItem.breakRevision = precedingMark.revision;
@@ -5229,7 +5231,11 @@ function parseNoteBody(
               if (walked.type === 'math' && walked.display) walked.inParagraph = true;
             }
           }
-          if (paraMarkRevision && !inTableCell && target.length > lenBeforeContent) {
+          // An empty paragraph's tracked mark is the break after its item,
+          // which one after another empty one gets of its own
+          const emptyMark = !!paraMarkRevision && !inTableCell && !isCodeBlock && target.length === lenBeforeContent && last !== undefined;
+          if (emptyMark && !needsPara) target.push({ type: 'para' });
+          if (paraMarkRevision && !inTableCell && (target.length > lenBeforeContent || emptyMark)) {
             trackedParaMark = { revision: paraMarkRevision, target, end: target.length };
           }
         } else if (key === 'w:r') {
@@ -6502,14 +6508,6 @@ export async function extractDocumentContent(
             prevItem.taskLevel !== undefined ||
             prevItem.unnumberedListLevel !== undefined
           );
-          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle || horizontalRule || taskLevel !== undefined || unnumberedListLevel !== undefined)
-            ? true
-            : target.length > 0 && (prevItem!.type !== 'para' || prevIsCodeBlockPara || prevIsStructuralPara);
-
-          const targetLenBeforePara = target.length;
-          // Whether the tracked mark of the paragraph before is a break this
-          // one's text joins to it
-          let trackedBreak = false;
           // Paragraphs whose tracked mark can become a break inside a CriticMarkup
           // span (see joinTrackedParagraphBreaks); headings keep paraMarkRevision
           // too, for one whose text is all in the revision, {++# a++}. A
@@ -6517,6 +6515,17 @@ export async function extractDocumentContent(
           // text before, which the break then ends
           const takesTrackedBreak = !inTableCell && !isTitle;
           const canJoinTrackedBreak = takesTrackedBreak && !isCodeBlock;
+          // After an empty paragraph whose mark is tracked, this one takes the
+          // break in a para item of its own, as after one with text
+          const takesMarkBefore = takesTrackedBreak && precedingMark?.target === target && precedingMark.end === target.length;
+          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle || horizontalRule || taskLevel !== undefined || unnumberedListLevel !== undefined)
+            ? true
+            : target.length > 0 && (prevItem!.type !== 'para' || prevIsCodeBlockPara || prevIsStructuralPara || takesMarkBefore);
+
+          const targetLenBeforePara = target.length;
+          // Whether the tracked mark of the paragraph before is a break this
+          // one's text joins to it
+          let trackedBreak = false;
           if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
             if (headingLevel) paraItem.headingLevel = headingLevel;
@@ -6538,8 +6547,8 @@ export async function extractDocumentContent(
               paraItem.unnumberedListLevel = unnumberedListLevel;
             }
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
-            if (takesTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
-              paraItem.breakRevision = precedingMark.revision;
+            if (takesMarkBefore) {
+              paraItem.breakRevision = precedingMark!.revision;
               // A list item, a heading or code never joins it (see
               // breakContainer). Whether another's container is the one
               // before's, a later pass finds, with which paragraphs continue
@@ -6567,11 +6576,18 @@ export async function extractDocumentContent(
           // as an empty paragraph would lose them
           const blank = !inTableCell && !isCodeBlock && !paraMarkRevision && !trackedBreak
             && dropBlankParagraphText(target, targetLenBeforePara + (needsPara ? 1 : 0));
+          // An empty paragraph with no item of its own, whose mark is tracked
+          const emptyMarked = !needsPara && !!paraMarkRevision && canJoinTrackedBreak && !inBibliographyField && target.length === targetLenBeforePara;
           // If walking this paragraph's children entered a bibliography field
           // (i.e. the field-begin + separate markers were in this paragraph),
           // remove the para we just pushed — it would become a trailing blank line.
           if (inBibliographyField && needsPara && target.length > targetLenBeforePara) {
             target.splice(targetLenBeforePara, 1);
+          } else if (emptyMarked && target.length === 0) {
+            // An empty first paragraph whose mark is tracked gets an item
+            // for the break after it; one after an empty one shares that
+            // one's
+            target.push({ type: 'para', emptyParagraphCount: 1 });
           } else if (needsPara) {
             const paraItem = target[targetLenBeforePara];
             // Which export numbered (see blankParagraphs)
@@ -6595,7 +6611,11 @@ export async function extractDocumentContent(
             ) {
               paraItem.emptyParagraphCount = 1;
               const prevItem = targetLenBeforePara > 0 ? target[targetLenBeforePara - 1] : undefined;
+              // One that takes the tracked mark of an empty one before
+              // keeps its item, which holds the break (see
+              // joinTrackedParagraphBreaks)
               if (
+                !paraItem.breakRevision &&
                 prevItem?.type === 'para' &&
                 prevItem.emptyParagraphCount !== undefined &&
                 !prevItem.headingLevel &&
@@ -6645,7 +6665,7 @@ export async function extractDocumentContent(
               leadingBlankParagraphs++;
             }
           }
-          if (paraMarkRevision && canJoinTrackedBreak && !inBibliographyField && target.length > targetLenBeforePara) {
+          if (paraMarkRevision && canJoinTrackedBreak && !inBibliographyField && (target.length > targetLenBeforePara || emptyMarked)) {
             trackedParaMark = { revision: paraMarkRevision, target, end: target.length };
           }
           if (sectionFence) {
@@ -11625,6 +11645,26 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     }
   };
   let sides: ReturnType<typeof contentAroundTrackedBreaks> | undefined;
+  // A citation the text of the paragraph after the break at k starts,
+  // past a comment's range's start, starts a line
+  const startLine = (k: number) => {
+    let first = k + 1;
+    for (let item = content[first]; item?.type === 'text' && item.text === '' && !item.revision; item = content[++first]);
+    if (content[first]?.type === 'citation') lineStarts.add(first);
+  };
+  // The last break written alone and the barrier after it, if any, and its
+  // text: to its last line end, with the blank lines of the breaks that go
+  // on in its span, and the prefix of the line after, which join once it's
+  // done, as joining each in turn copied the span, in time in the square of
+  // their number
+  let lastAlone: { item: Extract<ContentItem, { type: 'text' }>; barrier?: ContentItem; lines: string[]; prefix: string } | undefined;
+  // The first item after the last break that isn't a paragraph's, which
+  // holds for each break up to it, as a run of empty paragraphs whose
+  // marks' revisions differ would read the rest of the run again for each
+  let nextIndex = 0;
+  const finishAlone = () => {
+    if (lastAlone && lastAlone.lines.length > 1) lastAlone.item.text = lastAlone.lines.join('') + lastAlone.prefix;
+  };
   for (let k = 0; k < content.length; k++) {
     const para = content[k];
     if (para.type !== 'para' || !para.breakRevision) continue;
@@ -11635,7 +11675,11 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     let last = k - 1;
     while (last >= 0 && isCommentPoint(content[last])) last--;
     const prev = content[last];
-    if (!prev || !isInlineRevisionItem(prev)) continue;
+    const inlinePrev = prev && isInlineRevisionItem(prev) ? prev : undefined;
+    // After an empty paragraph, whose mark it is, the break goes in that
+    // paragraph, alone, as in a\n\n{++\n\n++}b, before the text after
+    const afterEmpty = prev?.type === 'para' && !prev.headingLevel && !prev.isTitle && !prev.isCodeBlock && !prev.horizontalRule;
+    if (!inlinePrev && !afterEmpty) continue;
     let openingIndex = k - 1;
     while (openingIndex >= 0 && content[openingIndex].type !== 'para') openingIndex--;
     const opening = content[openingIndex] as ParaItem | undefined;
@@ -11651,43 +11695,67 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
       && !para.indentOverride && !para.horizontalRule && !!after?.content;
     // Else the break ends its paragraph, though not code's or a title's
     if (!joins && (opening?.isCodeBlock || opening?.isTitle)) continue;
-    const alone = !(joins && opensNewSide(content, k)) && !revisionsEqual(prev.revision, revision);
+    const alone = !(joins && opensNewSide(content, k)) && !revisionsEqual(inlinePrev?.revision, revision);
     joined ??= [];
     copy(last + 1);
     // A list item's own indent, which buildMarkdown knows once it writes
     // the item, goes in for its mark after a break that ends its text
     const prefix = joins ? linePrefix(para, opening) : opening?.listMeta ? marks().indent : opening ? linePrefix(opening, opening) : '';
+    const blankLine = prefix === marks().indent ? '' : prefix.trimEnd();
+    // A break after an empty paragraph whose own break, in the same
+    // revision, was the last written alone goes on in that one's span, a
+    // blank line more, as in a\n\n{++\n\n\n\n++}b, but not past a
+    // comment's reference in the empty paragraph, which would go to the
+    // paragraph after it
+    const tail = joined[joined.length - 1];
+    if (afterEmpty && last === k - 1 && lastAlone && (tail === lastAlone.item || tail === lastAlone.barrier) && revisionsEqual(lastAlone.item.revision, revision)) {
+      lastAlone.lines.push(blankLine + '\n' + blankLine + '\n');
+      lastAlone.prefix = prefix;
+      pushAll(joined, content.slice(last + 1, k));
+      copied = joins ? k + 1 : k;
+      if (joins) startLine(k);
+      continue;
+    }
     // A break alone has no end mark, so it ends with the next line's start,
     // which what comes after reads, as a citation does to put no space there
-    const text = (alone ? marks().alone : marks().start) + '\n' + (prefix === marks().indent ? '' : prefix.trimEnd()) + '\n' + prefix + (alone ? '' : marks().end);
+    const text = (alone ? marks().alone : marks().start) + '\n' + blankLine + '\n' + prefix + (alone ? '' : marks().end);
     // A break in a span of its own is in a comment's range where the text
     // on both sides is, past empty paragraphs, or a range that starts at
     // the paragraph's mark, whose empty item (see startRangesAtMark) comes
     // before it
-    let nextIndex = k + 1;
-    while (content[nextIndex]?.type === 'para') nextIndex++;
+    if (nextIndex <= k) for (nextIndex = k + 1; content[nextIndex]?.type === 'para';) nextIndex++;
     const next = content[nextIndex];
     const commentIds = alone
       ? new Set(content.slice(last, k).flatMap(item => 'commentIds' in item ? [...item.commentIds ?? []] : [])
         .filter(id => next && 'commentIds' in next && next.commentIds?.has(id)))
-      : new Set(prev.commentIds);
-    const item: ContentItem = { type: 'text', text, commentIds, formatting: DEFAULT_FORMATTING, revision };
+      : new Set(inlinePrev?.commentIds);
+    const item: Extract<ContentItem, { type: 'text' }> = { type: 'text', text, commentIds, formatting: DEFAULT_FORMATTING, revision };
     // and ends it: empty text in no revision keeps the text after from
     // running into it, from joining its span, and from pairing with it as
     // a substitution's new side
     const barrier: ContentItem[] = alone && joins ? [{ type: 'text', text: '', commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING }] : [];
     // A comment's reference before it stays there, outside its span
     const points = content.slice(last + 1, k);
-    pushAll(joined, alone ? [...points, item, ...barrier] : [item, ...points]);
+    // Alone after the break that ends a paragraph of text in its revision,
+    // it stays apart from that one's span, as {++a\n\n++}{++\n\n++}b, as
+    // export reads an empty paragraph's mark only from a span of breaks
+    // alone (see splitCriticParagraphs)
+    let back = joined.length - 1;
+    while (back >= 0 && (joined[back].type === 'para' || isCommentPoint(joined[back]))) back--;
+    const ending = joined[back];
+    const apart: ContentItem[] = alone && ending?.type === 'text' && ending.text.startsWith(marks().start) && revisionsEqual(ending.revision, revision)
+      ? [{ type: 'text', text: '', commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING }] : [];
+    pushAll(joined, alone ? [...points, ...apart, item, ...barrier] : [item, ...points]);
+    if (alone) {
+      finishAlone();
+      lastAlone = { item, barrier: barrier[0], lines: [marks().alone + '\n' + blankLine + '\n'], prefix };
+    }
     // The paragraph after a break that ends its own stays
     copied = joins ? k + 1 : k;
-    if (!joins) continue;
-    // Past a comment's range's start
-    let first = k + 1;
-    for (let item = content[first]; item?.type === 'text' && item.text === '' && !item.revision; item = content[++first]);
-    if (content[first]?.type === 'citation') lineStarts.add(first);
+    if (joins) startLine(k);
   }
   if (!joined) return content;
+  finishAlone();
   copy(content.length);
   return joined;
 }
@@ -11702,12 +11770,15 @@ function afterTrackedBreakSpan(text: string, at: number, marks: TrackedBreakMark
   let k = at - 3;
   if (text[k - 1] === marks.end) return true;
   const prefix = (ch: string | undefined) => ch === '>' || ch === ' ' || ch === '\t' || ch === marks.indent;
-  for (let line = 0; line < 2; line++) {
+  // Its blank line, and those of the breaks that went on in its span
+  let lines = 0;
+  for (;;) {
     while (k > 0 && prefix(text[k - 1])) k--;
-    if (text[k - 1] !== '\n') return false;
+    if (text[k - 1] !== '\n') break;
     k--;
+    lines++;
   }
-  return text[k - 1] === marks.alone;
+  return lines >= 2 && text[k - 1] === marks.alone;
 }
 
 /** A paragraph's text before an equation it goes on in, on the next line,
@@ -11738,10 +11809,12 @@ function beforeParagraphMath(text: string): string {
  *  where they end the line, as a paragraph of them after a tracked mark
  *  does in a{--\n\n--}&#32;. */
 function joinSpansAtTrackedBreaks(text: string, marks: TrackedBreakMarks): string {
-  const markdown = text.replace(new RegExp('(' + marks.end + '|' + marks.alone + '\\n[> \\t]*\\n[> \\t]*)((?:--|\\+\\+)\\})([ \\t]+)(?=\\n|$)', 'g'),
+  // A break alone's blank line, and those of the breaks that went on in
+  // its span
+  const markdown = text.replace(new RegExp('(' + marks.end + '|' + marks.alone + '(?:\\n[> \\t]*){2,})((?:--|\\+\\+)\\})([ \\t]+)(?=\\n|$)', 'g'),
     (_m, mark: string, closer: string, whitespace: string) => mark + closer + whitespace.replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;'));
   const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
-  const marked = new RegExp('(' + boundary + ')(' + SPAN_AT_BREAK + '?)' + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary + '([ \\t]*)', 'g');
+  const marked = new RegExp('(' + boundary + ')(' + SPAN_AT_BREAK + '?)' + marks.start + '([^' + marks.end + ']*)' + marks.end + '(' + boundary + ')([ \\t]*)', 'g');
   let out = '';
   let from = 0;
   for (const match of markdown.matchAll(marked)) {
@@ -11784,7 +11857,13 @@ function joinSpansAtTrackedBreaks(text: string, marks: TrackedBreakMarks): strin
     const closer = opener.slice(1) + '}';
     const after = match.index + match[0].length;
     const split = opener && !markdown.startsWith(closer, after) ? closer + opener : '';
-    out += before + match[3] + split + match[4].replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
+    // A break alone after it, of an empty paragraph, stays a span of its
+    // own after a span with text, as export reads an empty paragraph's mark
+    // only from a span of breaks alone (see splitCriticParagraphs), as in
+    // {++a\n\n++}{++\n\n++}b
+    const withText = !!match[1] || !/^\{(?:\+\+|--)$/.test(markdown.slice(match.index - 3, match.index));
+    const apart = match[4] && markdown[after] === marks.alone && withText ? match[4] : '';
+    out += before + match[3] + split + apart + match[5].replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
     from = after;
   }
   return (out + markdown.slice(from)).split(marks.alone).join('').split(marks.indent).join('').split(SPAN_AT_BREAK).join('');
@@ -13766,11 +13845,15 @@ export function buildMarkdown(
   // as it writes it there, not one in the block of a line before it, as the
   // HTML around a table is, which a comment that the marker ends can go on
   // in past a blank line.
+  // The line ends before it are found from it, as a regex for them would
+  // read each run of them again from each of its line ends.
   const body = output.join('');
-  const endingMarker = /(?:^|\n+)<!--\s*references\s*-->\s*$/.exec(body);
-  if (endingMarker) {
-    const line = body.slice(0, endingMarker.index + endingMarker[0].indexOf('<!--')).split('\n').length - 1;
-    if (!htmlBlocksIn(body).some(block => block.start < line && line < block.end)) output.splice(0, output.length, body.slice(0, endingMarker.index));
+  const endingMarker = /<!--\s*references\s*-->\s*$/.exec(body);
+  let markerStart = endingMarker?.index ?? -1;
+  while (markerStart > 0 && body[markerStart - 1] === '\n') markerStart--;
+  if (endingMarker && (endingMarker.index === 0 || markerStart < endingMarker.index)) {
+    const line = body.slice(0, endingMarker.index).split('\n').length - 1;
+    if (!htmlBlocksIn(body).some(block => block.start < line && line < block.end)) output.splice(0, output.length, body.slice(0, markerStart));
   }
 
   // Append footnote definitions
@@ -15224,8 +15307,11 @@ export async function convertDocx(
     if (images.size === 0) images = undefined;
   }
 
-  // Ensure the output ends with exactly one newline (POSIX convention)
-  markdown = markdown.replace(/\n*$/, '\n');
+  // Ensure the output ends with exactly one newline (POSIX convention),
+  // from the end, as a regex would read each run of line ends from each
+  let end = markdown.length;
+  while (end > 0 && markdown[end - 1] === '\n') end--;
+  markdown = markdown.slice(0, end) + '\n';
 
   return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images };
 }

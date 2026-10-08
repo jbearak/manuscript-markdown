@@ -2096,6 +2096,20 @@ function splitCriticParagraphs(tokens: MdToken[]): MdToken[] {
     const split = splitRunsAtCriticParagraphs(token.runs);
     if (!split) return [token];
     const segments: MdToken[] = [];
+    // Whether a revision holds paragraph breaks alone (see below), found
+    // once for each, as it can hold many empty paragraphs
+    const breaksAlone = new Map<MdRun, boolean>();
+    const holdsBreaksAlone = (mark: MdRun) => {
+      let alone = breaksAlone.get(mark);
+      if (alone === undefined) {
+        // Spaces, tabs and line ends in its Markdown, as Markdown's
+        // whitespace, but not a no-break space, as of &nbsp;, nor a space
+        // of code or of a reference, as ` ` or &#32;, which are text
+        alone = /^[ \t\r\n]*$/.test(mark.text);
+        breaksAlone.set(mark, alone);
+      }
+      return alone;
+    };
     split.parts.forEach((runs, k) => {
       if (runs.length === 0) {
         // An empty paragraph between a deleted and an inserted mark, as in
@@ -2106,6 +2120,16 @@ function splitCriticParagraphs(tokens: MdToken[]): MdToken[] {
         if (previous?.criticParaMark && mark && k < split.parts.length - 1
           && previous.criticParaMark !== (mark.type === 'critic_add' ? 'addition' : 'deletion')) {
           segments[segments.length - 1] = { ...previous, criticParaMark: undefined, criticParaMarkRun: undefined };
+          return;
+        }
+        // Else an empty paragraph whose break a revision of breaks alone
+        // tracks, as in a\n\n{++\n\n++}b, which import writes for one
+        // whose mark is tracked, keeps it, but not a heading. One at the
+        // edge of a revision with text, {++\n\nfirst++}, is none, nor one
+        // with a line break, of <br> or of a \ at a line's end, as text.
+        const segment = criticBlockSegment(token, runs, segments.length);
+        if (mark && k < split.parts.length - 1 && segment.type !== 'heading' && holdsBreaksAlone(mark)) {
+          segments.push({ ...segment, criticParaMark: mark.type === 'critic_add' ? 'addition' : 'deletion', criticParaMarkRun: mark });
         }
         return;
       }
