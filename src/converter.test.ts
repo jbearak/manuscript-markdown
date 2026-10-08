@@ -3890,6 +3890,25 @@ describe('Comments across paragraphs', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
+  const tableAfter = (table: string, frontmatter = '') => frontmatter + 'Before {==z==}{>>c<<}\n\n' + table + '\nAfter.\n';
+  test.each([
+    ['it set a font a directive can\'t hold on, which had one it can', tableAfter('<!-- table-font: Georgia -->\n| a | b |\n| --- | --- |\n| X | W |\n'), 'A --&gt; B',
+      ['{#1}Before {#2}z{/1}{/2}\n{#1>>@B', '<table data-font="A --&gt; B">']],
+    ['it set a font a directive can hold on, which had one it can\'t', tableAfter('<table data-font="A --> B">\n<tr><th>a</th><th>b</th></tr>\n<tr><td>X</td><td>W</td></tr>\n</table>\n'), 'Georgia',
+      ['<!-- table-font: Georgia -->\n| a | b |\n| --- | --- |\n| X{/1} | W |\n']],
+    ['whose text takes the document\'s font for tables, which a directive can\'t hold', tableAfter('| a | b |\n| --- | --- |\n| X | W |\n', '---\ntable-font: "A --> B"\n---\n\n'), undefined,
+      ['\n| a | b |\n| --- | --- |\n| X{/1} | W |\n']],
+  ])('keeps a comment Word puts from a paragraph into a table %s', async (_name, base, font, parts) => {
+    // Whether its cells could hold the range was told by the font export
+    // stored, or as the table's own, not by the one the table was written
+    // with, so the range was open into HTML cells, which hold no markers,
+    // or in parts in cells that could hold it, each a comment in Word
+    const setFont = (xml: string) => font === undefined ? xml
+      : xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, found => found.replace(/<w:rFonts [^>]*\/>/g, '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '"/>'));
+    const markdown = await wordComment(base, 'Before ', 'X', undefined, undefined, setFont);
+    await expectCommentKept(markdown, parts);
+  });
+
   /** That the Markdown holds `parts`, and the next export the comment, and
    *  that the next round trip leaves it as it is */
   async function expectCommentKept(markdown: string, parts: string[], exportOptions?: Parameters<typeof convertMdToDocx>[1]): Promise<void> {
@@ -3903,10 +3922,11 @@ describe('Comments across paragraphs', () => {
 
   /** The Markdown of `base` where Word put a comment from the run of text
    *  `from` to that of `to`, in the document or another `part`, exported
-   *  with `exportOptions` */
-  async function wordComment(base: string, from: string, to: string, part = 'word/document.xml', exportOptions?: Parameters<typeof convertMdToDocx>[1]): Promise<string> {
+   *  with `exportOptions`, and changed the part's XML as `edit` does */
+  async function wordComment(base: string, from: string, to: string, part = 'word/document.xml', exportOptions?: Parameters<typeof convertMdToDocx>[1],
+    edit = (xml: string) => xml): Promise<string> {
     const zip = await JSZip.loadAsync((await convertMdToDocx(base, exportOptions)).docx);
-    let xml = await zip.file(part)!.async('string');
+    let xml = edit(await zip.file(part)!.async('string'));
     const run = (text: string, from = 0) => {
       const found = new RegExp('<w:r>(?:(?!<w:r>|</w:r>).)*?<w:t(?: [^>]*)?>' + text.replace('.', '\\.') + '</w:t></w:r>').exec(xml.slice(from))!;
       return { start: from + found.index, end: from + found.index + found[0].length };

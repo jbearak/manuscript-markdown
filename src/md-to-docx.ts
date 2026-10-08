@@ -5188,6 +5188,55 @@ export interface FontOverrides {
   tableBorders?: 'horizontal' | 'solid' | 'none';
 }
 
+/** The theme's minor font, which export's default font for the document,
+ *  in docDefaults, is (see stylesXml and defaultThemeXml), and so the
+ *  font of text with none of its own or of its styles: Word's, Calibri */
+export const THEME_MINOR_FONT = 'Calibri';
+
+/** The font export gives the table paragraph style, which a table's text
+ *  without one of its own takes: the frontmatter's for tables, else its
+ *  body font, or none, where the style takes the theme's */
+export function tableStyleFont(overrides: FontOverrides): string | undefined {
+  return overrides.tableFont ?? overrides.bodyFont;
+}
+
+/** The font export shows a table's text in where it has none of its own:
+ *  the table paragraph style's, else the theme's minor font, which import
+ *  writes no table's font for where Word shows its text in it from that
+ *  style (see tableFontName in converter.ts) */
+export function tableTextDefaultFont(overrides: FontOverrides): string {
+  return tableStyleFont(overrides) ?? THEME_MINOR_FONT;
+}
+
+/** The fonts of a w:rFonts export sets a table's font as, the
+ *  frontmatter's or a table's own: its font for ASCII and its font for the
+ *  rest, not its East Asian or complex script one, so a table's East Asian
+ *  text keeps the document's East Asian font. Import writes a table's font
+ *  only where Word would show each character of its text in one of these
+ *  (see runTextFont in converter.ts). */
+export const TABLE_FONT_SLOTS = ['ascii', 'hAnsi'] as const;
+
+/** A w:rFonts setting `font` as a table's (see TABLE_FONT_SLOTS) */
+export function tableRFonts(font: string): string {
+  return '<w:rFonts' + TABLE_FONT_SLOTS.map(slot => ' w:' + slot + '="' + escapeXml(font) + '"').join('') + '/>';
+}
+
+/** Whether export writes a table's font, `font`, its directive's or else
+ *  the frontmatter's for tables, on each of the table's runs, as it does
+ *  where that's not the frontmatter's, which it leaves to the table
+ *  paragraph style (see generateTable). A run in a character style with a
+ *  font of its own, as inline code is, CodeChar, shows that font over the
+ *  table paragraph style's, but not over one on the run. */
+export function tableFontOnRuns(overrides: FontOverrides | undefined, font: string | undefined): boolean {
+  return !!font && font !== overrides?.tableFont;
+}
+
+/** The font export shows inline code and code blocks in: the
+ *  frontmatter's, or else Consolas */
+export function codeFontName(overrides: FontOverrides | undefined): string {
+  return overrides?.codeFont || 'Consolas';
+}
+
 /** Resolve value at index with Array_Inheritance: use arr[i] if i < length, else arr[last]. */
 export function resolveAtIndex<T>(arr: T[] | undefined, index: number): T | undefined {
   if (!arr || arr.length === 0) return undefined;
@@ -5524,12 +5573,9 @@ export function applyFontOverridesToTemplate(
   if (overrides.tableSizeHp || overrides.tableFont) {
     if (!xml.includes('w:styleId="TableParagraph"')) {
       // Insert before </w:styles>
+      const tableFont = tableStyleFont(overrides);
       const tableRpr = '<w:rPr>' +
-        (overrides.tableFont
-          ? '<w:rFonts w:ascii="' + escapeXml(overrides.tableFont) + '" w:hAnsi="' + escapeXml(overrides.tableFont) + '"/>'
-          : (overrides.bodyFont
-            ? '<w:rFonts w:ascii="' + escapeXml(overrides.bodyFont) + '" w:hAnsi="' + escapeXml(overrides.bodyFont) + '"/>'
-            : '')) +
+        (tableFont ? tableRFonts(tableFont) : '') +
         (overrides.tableSizeHp
           ? '<w:sz w:val="' + overrides.tableSizeHp + '"/><w:szCs w:val="' + overrides.tableSizeHp + '"/>'
           : '') +
@@ -5633,7 +5679,7 @@ export function applyFontOverridesToTemplate(
     if (isCodeStyle) {
       font = overrides.codeFont;
     } else if (isTableStyle) {
-      font = overrides.tableFont ?? overrides.bodyFont;
+      font = tableStyleFont(overrides);
     } else if (isHeading && overrides.headingFonts?.has(styleId)) {
       font = overrides.headingFonts.get(styleId);
     } else if (isTitle && overrides.titleFonts?.[0]) {
@@ -5670,9 +5716,9 @@ export function applyFontOverridesToTemplate(
       (element, change?: string) => change ? element : '');
 
     // Build the replacement fragments
-    const rFontsEl = font !== undefined
-      ? '<w:rFonts w:ascii="' + escapeXml(font) + '" w:hAnsi="' + escapeXml(font) + '"/>'
-      : undefined;
+    const rFontsEl = font === undefined ? undefined
+      : isTableStyle ? tableRFonts(font)
+      : '<w:rFonts w:ascii="' + escapeXml(font) + '" w:hAnsi="' + escapeXml(font) + '"/>';
     const szEl = sizeHp !== undefined
       ? '<w:sz w:val="' + sizeHp + '"/>'
       : undefined;
@@ -6087,9 +6133,9 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
 
   // Resolve body font rFonts string (empty if no override)
   const bodyFontStr = overrides?.bodyFont ? rFonts(overrides.bodyFont) : '';
-  const codeFontStr = overrides?.codeFont
-    ? rFonts(overrides.codeFont)
-    : rFonts('Consolas');
+  // The table paragraph style's font (see tableStyleFont)
+  const tableFont = overrides && tableStyleFont(overrides);
+  const codeFontStr = rFonts(codeFontName(overrides));
 
   // Normal style: body font + body size (default 22hp)
   const normalSz = overrides?.bodySizeHp
@@ -6366,9 +6412,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
         '<w:name w:val="Table Paragraph"/>\n' +
         '<w:basedOn w:val="Normal"/>\n' +
         '<w:rPr>' +
-        (overrides.tableFont
-          ? '<w:rFonts w:ascii="' + escapeXml(overrides.tableFont) + '" w:hAnsi="' + escapeXml(overrides.tableFont) + '"/>'
-          : bodyFontStr) +
+        (tableFont ? tableRFonts(tableFont) : '') +
         (overrides.tableSizeHp ? szPair(overrides.tableSizeHp) : '') +
         '</w:rPr>\n' +
         '</w:style>\n'
@@ -6824,7 +6868,7 @@ function defaultThemeXml(): string {
     '</a:clrScheme>\n' +
     '<a:fontScheme name="Office">\n' +
     '<a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>\n' +
-    '<a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>\n' +
+    '<a:minorFont><a:latin typeface="' + THEME_MINOR_FONT + '"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>\n' +
     '</a:fontScheme>\n' +
     '<a:fmtScheme name="Office">\n' +
     '<a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>\n' +
@@ -8881,14 +8925,13 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
   if (effectiveTableSizeHp || effectiveTableFont) {
     const hasDocLevelStyle = !!(fo?.tableSizeHp || fo?.tableFont);
     // Per-table overrides that differ from doc-level require inline rPr on both pPr and runs
-    const needsInlineFont = effectiveTableFont && effectiveTableFont !== fo?.tableFont;
     const needsInlineSize = effectiveTableSizeHp && effectiveTableSizeHp !== fo?.tableSizeHp;
     let pPrInner = '';
     if (hasDocLevelStyle) pPrInner += '<w:pStyle w:val="TableParagraph"/>';
     pPrInner += spacingZero;
     let rPrInner = '';
-    if (needsInlineFont || (!hasDocLevelStyle && effectiveTableFont)) {
-      rPrInner += '<w:rFonts w:ascii="' + escapeXml(effectiveTableFont!) + '" w:hAnsi="' + escapeXml(effectiveTableFont!) + '"/>';
+    if (tableFontOnRuns(fo, effectiveTableFont)) {
+      rPrInner += tableRFonts(effectiveTableFont!);
     }
     if (needsInlineSize || (!hasDocLevelStyle && effectiveTableSizeHp)) {
       rPrInner += '<w:sz w:val="' + effectiveTableSizeHp + '"/><w:szCs w:val="' + effectiveTableSizeHp + '"/>';
@@ -10287,7 +10330,7 @@ export async function convertMdToDocx(
     codeBlockLanguages: new Map(),
     noteCodeBlockStarts: new Map(),
     citedKeys: new Set(),
-    codeFont: fontOverrides?.codeFont || 'Consolas',
+    codeFont: codeFontName(fontOverrides),
     codeShadingMode: !isInsetMode,
     blockquoteGaps: blockquoteGaps,
     blockquotePreContentBlankLines,

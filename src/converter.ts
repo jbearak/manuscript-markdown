@@ -16,7 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, withoutSpaceOutsideComments } from './md-to-docx';
+import { blocksAsRead, citationEndInText, codeFontName, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableFontOnRuns, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments, type FontOverrides } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -1550,8 +1550,9 @@ interface StructuralListContext {
   markerWidth?: number;
 }
 
-/** A table, and the size Word shows its text in (see tableTextSize) */
-type TableItem = { type: 'table'; rows: TableRow[]; textSize?: TableTextSize };
+/** A table, and the size and font Word shows its text in (see
+ *  tableTextSize and tableTextFont) */
+type TableItem = { type: 'table'; rows: TableRow[]; textSize?: TableTextSize; textFont?: TableTextFont };
 
 export type ContentItem =
   | {
@@ -3199,6 +3200,12 @@ function xmlOn(value: string | undefined): boolean {
   return value === 'true' || value === '1' || value === 'on';
 }
 
+/** Whether a run's character style, by its ID, is export's for inline
+ *  code, CodeChar, whatever its case, which import reads as code */
+function isCodeStyle(id: string): boolean {
+  return id.toLowerCase() === 'codechar';
+}
+
 /** Parse run properties and return RunFormatting */
 export function parseRunProperties(
   rPrChildren: XmlNode[],
@@ -3272,10 +3279,7 @@ export function parseRunProperties(
 
   // inline code: w:rStyle with val matching "CodeChar" (case-insensitive)
   const rStyleElement = rPrChildren.find(child => child['w:rStyle'] !== undefined);
-  if (rStyleElement) {
-    const val = getAttr(rStyleElement, 'val');
-    formatting.code = !!(val && val.toLowerCase() === 'codechar');
-  }
+  if (rStyleElement) formatting.code = isCodeStyle(getAttr(rStyleElement, 'val'));
 
   return formatting;
 }
@@ -5703,7 +5707,7 @@ function parseNoteBody(
           if (rows.length > 0) {
             // As in extractDocumentContent: a tracked mark before the table
             if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
-            target.push({ type: 'table', rows, textSize: tableTextSize(tblChildren, context.styleLayouts) });
+            target.push({ type: 'table', rows, textSize: tableTextSize(tblChildren, context.styleLayouts), textFont: tableTextFont(tblChildren, context.styleLayouts) });
           } else {
             trackedParaMark = markBefore;
           }
@@ -6430,14 +6434,15 @@ function rowRevision(trChildren: XmlNode[]): RevisionInfo | undefined {
 }
 
 /** A run of a table's text Word shows: its properties and its text, as a
- *  symbol's, by its character, whether it also shows characters import
- *  can't tell (`unread`, see RUN_CONTENT), and its paragraph's style, by
- *  the document's ID, where it sets one */
-type ShownRun = { rPrChildren: XmlNode[]; text: string; unread?: boolean; paragraphStyle?: string };
+ *  symbol's, by its character, with its font (`symbolFont`), whether it
+ *  also shows characters import can't tell (`unread`, see RUN_CONTENT),
+ *  and its paragraph's style, by the document's ID, where it sets one */
+type ShownRun = { rPrChildren: XmlNode[]; text: string; unread?: boolean; symbolFont?: string; paragraphStyle?: string };
 
-/** A setting Word shows a run's text with, as its size (`value`), and
- *  whether the run takes it from the table paragraph style, as the
- *  document's for tables, rather than having it of its own (`inherited`) */
+/** A setting Word shows a run's text with, as its size or its font's
+ *  name (`value`), and whether the run takes it from the table paragraph
+ *  style, as the document's for tables, rather than having it of its own
+ *  (`inherited`) */
 interface ShownSetting<T> { value: T; inherited: boolean }
 
 /** The setting all of `settings` are, which is inherited where all of
@@ -6548,7 +6553,7 @@ function tableRunsSetting<T>(tblChildren: XmlNode[], read: (run: ShownRun) => Sh
         if (unknown) settings.push(undefined);
         else if (text !== '' || unread) settings.push(read({ rPrChildren, text, unread, paragraphStyle }));
         for (const symbol of children.filter(c => c['w:sym'] !== undefined)) {
-          settings.push(read({ rPrChildren, text: String.fromCodePoint(parseInt(getAttr(symbol, 'char'), 16) || 0xF020), paragraphStyle }));
+          settings.push(read({ rPrChildren, text: String.fromCodePoint(parseInt(getAttr(symbol, 'char'), 16) || 0xF020), symbolFont: getAttr(symbol, 'font'), paragraphStyle }));
         }
       }
     }
@@ -6581,13 +6586,13 @@ function toggleIn(rPr: XmlNode[], tag: string): boolean | undefined {
   return rPr.some(c => c[tag] !== undefined) ? isToggleOn(rPr, tag) : undefined;
 }
 
-/** Whether Word shows a run's text in its complex script size: where the
- *  run is marked right-to-left or complex script, by its own w:rtl or w:cs
- *  or a style's (see styledProperty), whatever its characters, as Arabic or
- *  Hebrew, which it shows in its size for the rest where nothing marks it
- *  so (MS-OI29500, Part 1 17.3.2.39, szCs). Undefined where a mark is
- *  unknown. */
-function runInComplexScript(run: ShownRun, layouts: StyleLayouts | undefined, tableStyle: string): boolean | undefined {
+/** Whether a run is marked right-to-left or complex script, by its own
+ *  w:rtl or w:cs or a style's (see styledProperty), which Word shows all of
+ *  in its complex script size and font, whatever its characters, as Arabic
+ *  or Hebrew, which it shows in its size and a font for the rest where
+ *  nothing marks it so (MS-OI29500, Part 1 17.3.2.39, szCs, and
+ *  17.3.2.26, rFonts). Undefined where a mark is unknown. */
+function markedComplexScript(run: ShownRun, layouts: StyleLayouts | undefined, tableStyle: string): boolean | undefined {
   const marks = ['w:cs', 'w:rtl'].map(tag => runProperty(layouts, run, tableStyle, rPr => toggleIn(rPr, tag)));
   return marks.some(mark => !mark) ? undefined : marks.some(mark => !!mark!.value);
 }
@@ -6622,9 +6627,9 @@ function isTableParagraphStyle(id: string | undefined): boolean {
 /**
  * The size Word shows a table's text in, where all of it is in one and
  * import can tell it (see tableRunsSetting): a run's w:szCs where it's
- * marked complex script, and else its w:sz (see runInComplexScript). A run's
- * own size, or else the one it takes from the table paragraph style, as
- * the paragraph's style, or its base or the document's default (see
+ * marked complex script, and else its w:sz (see markedComplexScript). A
+ * run's own size, or else the one it takes from the table paragraph style,
+ * as the paragraph's style, or its base or the document's default (see
  * fromTableParagraphStyle), which is `inherited` where all the text takes it. Unknown
  * where any run's is: one a style may hide (see mayBeHidden), one whose
  * size or mark is unknown, as a size that's no number of half-points
@@ -6636,7 +6641,7 @@ function isTableParagraphStyle(id: string | undefined): boolean {
 function tableTextSize(tblChildren: XmlNode[], layouts: StyleLayouts | undefined): TableTextSize | undefined {
   const tableStyle = tableStyleId(tblChildren, layouts);
   const sizeOf = (run: ShownRun): ShownSetting<number> | undefined => {
-    const complex = runInComplexScript(run, layouts, tableStyle);
+    const complex = markedComplexScript(run, layouts, tableStyle);
     if (mayBeHidden(run, layouts, tableStyle) || complex === undefined) return undefined;
     const tag = complex ? 'w:szCs' : 'w:sz';
     // A size, or null for one import can't read
@@ -6650,6 +6655,171 @@ function tableTextSize(tblChildren: XmlNode[], layouts: StyleLayouts | undefined
   };
   const size = tableRunsSetting(tblChildren, sizeOf);
   return size ? { hp: size.value, inherited: size.inherited } : undefined;
+}
+
+/** A font of a w:rFonts Word may show a character in, but its complex
+ *  script one, which it shows all of a run marked so in */
+export type RunFontSlot = 'ascii' | 'hAnsi' | 'eastAsia';
+
+/**
+ * The font of a w:rFonts Word shows each character in, where nothing marks
+ * its run right-to-left or complex script, from the table of MS-OI29500,
+ * Part 1 17.3.2.26, rFonts, note b, as rows of the first and last
+ * UTF-16 code unit of a range, as Word reads its text, so a character
+ * outside the Basic Multilingual Plane by its first surrogate, the font,
+ * and where its East Asian font takes over: where the run's w:hint is
+ * eastAsia (`hint`), or only where the run is in Chinese, or for some
+ * ranges where its East Asian font's character set is Chinese, too
+ * (`language`), which import doesn't read. Word shows a character in no
+ * range, as the rest of Latin-1 Supplement's, in the hAnsi font, so a row
+ * here joins the table's rows only where no code point is between them
+ * (see the test that checks each code point against the table's rows).
+ */
+const RUN_FONT_RANGES: readonly (readonly [number, number, RunFontSlot, ('hint' | 'language')?])[] = [
+  [0x0000, 0x007F, 'ascii'], // Basic Latin
+  // Of Latin-1 Supplement, 00A0-00FF, those the hint takes, as the rest are in no range
+  [0x00A1, 0x00A1, 'hAnsi', 'hint'], [0x00A4, 0x00A4, 'hAnsi', 'hint'], [0x00A7, 0x00A8, 'hAnsi', 'hint'],
+  [0x00AA, 0x00AA, 'hAnsi', 'hint'], [0x00AD, 0x00AD, 'hAnsi', 'hint'], [0x00AF, 0x00B4, 'hAnsi', 'hint'],
+  [0x00B6, 0x00BA, 'hAnsi', 'hint'], [0x00BC, 0x00BF, 'hAnsi', 'hint'], [0x00D7, 0x00D7, 'hAnsi', 'hint'],
+  [0x00E0, 0x00E1, 'hAnsi', 'language'], [0x00E8, 0x00EA, 'hAnsi', 'language'], [0x00EC, 0x00ED, 'hAnsi', 'language'],
+  [0x00F2, 0x00F3, 'hAnsi', 'language'], [0x00F7, 0x00F7, 'hAnsi', 'hint'], [0x00F9, 0x00FA, 'hAnsi', 'language'],
+  [0x00FC, 0x00FC, 'hAnsi', 'language'],
+  [0x0100, 0x02AF, 'hAnsi', 'language'], // Latin Extended-A and -B, IPA Extensions
+  [0x02B0, 0x03CF, 'hAnsi', 'hint'], // Spacing Modifier Letters, Combining Diacritical Marks, Greek
+  [0x0400, 0x04FF, 'hAnsi', 'hint'], // Cyrillic
+  [0x0590, 0x07BF, 'ascii'], // Hebrew, Arabic, Syriac, Arabic Supplement, Thaana
+  [0x1100, 0x11FF, 'eastAsia'], // Hangul Jamo
+  [0x1E00, 0x1EFF, 'hAnsi', 'language'], // Latin Extended Additional
+  // General Punctuation to Dingbats
+  [0x2000, 0x27BF, 'hAnsi', 'hint'],
+  [0x2E80, 0x2EFF, 'hAnsi', 'hint'], // CJK Radicals Supplement
+  [0x2F00, 0x2FDF, 'eastAsia'], // Kangxi Radicals
+  // Ideographic Description Characters to Kanbun, but not 31A0-31FF, as
+  // Bopomofo Extended, which no row has
+  [0x2FF0, 0x319F, 'eastAsia'],
+  // Enclosed CJK Letters and Months to CJK Unified Ideographs Extension A
+  [0x3200, 0x4DBF, 'eastAsia'],
+  [0x4E00, 0x9FAF, 'eastAsia'], // CJK Unified Ideographs
+  [0xA000, 0xA4CF, 'eastAsia'], // Yi Syllables, Yi Radicals
+  [0xAC00, 0xD7AF, 'eastAsia'], // Hangul Syllables
+  [0xD800, 0xDFFF, 'eastAsia'], // Surrogates
+  [0xE000, 0xF8FF, 'hAnsi', 'hint'], // Private Use Area
+  [0xF900, 0xFAFF, 'eastAsia'], // CJK Compatibility Ideographs
+  [0xFB00, 0xFB1C, 'hAnsi', 'hint'], // Alphabetic Presentation Forms, Latin and Armenian
+  [0xFB1D, 0xFDFF, 'ascii'], // Alphabetic Presentation Forms, Hebrew, Arabic Presentation Forms-A
+  [0xFE30, 0xFE6F, 'eastAsia'], // CJK Compatibility Forms, Small Form Variants
+  [0xFE70, 0xFEFE, 'ascii'], // Arabic Presentation Forms-B
+  [0xFF00, 0xFFEF, 'eastAsia'], // Halfwidth and Fullwidth Forms
+];
+
+/** The fonts of a w:rFonts Word may show a character in, where nothing
+ *  marks its run right-to-left or complex script (see RUN_FONT_RANGES):
+ *  the one its range and the run's hint, eastAsia or not (`eastAsiaHint`),
+ *  tell, or both its range takes, where the hint is unknown, or where the
+ *  run's language or font would tell */
+export function characterFontSlots(character: string, eastAsiaHint: boolean | undefined): RunFontSlot[] {
+  const code = character.charCodeAt(0);
+  const range = RUN_FONT_RANGES.find(([first, last]) => first <= code && code <= last);
+  const font = range?.[2] ?? 'hAnsi';
+  if (!range?.[3] || eastAsiaHint === false) return [font];
+  return eastAsiaHint && range[3] === 'hint' ? ['eastAsia'] : [font, 'eastAsia'];
+}
+
+/** The attribute of a w:rFonts for each of its fonts' theme fonts, as
+ *  w:asciiTheme for its w:ascii, but w:cstheme, in lowercase, for its w:cs */
+const THEME_FONT_ATTRIBUTES: Record<string, string> = { ascii: 'asciiTheme', hAnsi: 'hAnsiTheme', eastAsia: 'eastAsiaTheme', cs: 'cstheme' };
+
+/** The font Word shows a table's text in, by its name, whether it takes
+ *  it from the table paragraph style, as the document's font for tables,
+ *  rather than its runs, and whether any of the text is inline code (see
+ *  isCodeStyle) */
+interface TableTextFont { name: string; inherited: boolean; code: boolean }
+
+/**
+ * The font Word shows a run's text in, by its name, where it shows all of
+ * it in one and import can tell it. Word picks one of a w:rFonts' fonts
+ * for each character (MS-OI29500, Part 1 17.3.2.26): its complex script font for all
+ * of a run marked right-to-left or complex script (see
+ * markedComplexScript), else the one the character's range and the run's
+ * hint, its own or a style's, take (see RUN_FONT_RANGES), but its ascii
+ * font for its East Asian one where that's Times New Roman and the ascii
+ * and hAnsi fonts are one. A note reference's mark, whose characters
+ * import doesn't read, may be in any of them, so they must be one. Each
+ * font is the run's own, or else a style's or the document's default (see
+ * styledProperty), which is inherited where it's the table paragraph
+ * style's, or its base's, or the default under it (see
+ * fromTableParagraphStyle), and one of the fonts export
+ * writes the frontmatter's font for tables as (see TABLE_FONT_SLOTS in
+ * md-to-docx), for ASCII and the rest, but not the East Asian or complex
+ * script one, which it has none for. A symbol's is its own. Unknown where
+ * any font is: a theme's, which Word takes before a name and which has
+ * none to write, one of a character style or another paragraph style,
+ * which a table's directive doesn't stand for, or none at all, or where a
+ * style may hide the run. Unknown, too, where the run has a character
+ * export wouldn't show in the table's font (see showsInTableFont), as
+ * East Asian text, so the directive would stand for a font it doesn't
+ * show the text in.
+ */
+function runTextFont(run: ShownRun, layouts: StyleLayouts | undefined, tableStyle: string): ShownSetting<string> | undefined {
+  if (mayBeHidden(run, layouts, tableStyle)) return undefined;
+  if (run.symbolFont !== undefined) return run.symbolFont ? { value: run.symbolFont, inherited: false } : undefined;
+  if (![...run.text].every(showsInTableFont)) return undefined;
+  const rFonts = (rPr: XmlNode[]) => rPr.find(c => c['w:rFonts'] !== undefined);
+  // A font of a w:rFonts, or null for a theme's
+  const font = (kind: string) => runProperty(layouts, run, tableStyle, rPr => {
+    const set = rFonts(rPr);
+    return !set ? undefined : getAttr(set, THEME_FONT_ATTRIBUTES[kind]) ? null : getAttr(set, kind) || undefined;
+  });
+  // The East Asian font, and the slot it's in, as the ascii one for it
+  const eastAsian = (): [ReturnType<typeof font>, RunFontSlot] => {
+    const eastAsia = font('eastAsia');
+    if (typeof eastAsia?.value !== 'string' || eastAsia.value.toLowerCase() !== 'times new roman') return [eastAsia, 'eastAsia'];
+    const [ascii, hAnsi] = [font('ascii'), font('hAnsi')];
+    if (typeof ascii?.value !== 'string' || typeof hAnsi?.value !== 'string') return [undefined, 'eastAsia'];
+    // Names differing only in case may be one font or two
+    return ascii.value === hAnsi.value ? [ascii, 'ascii'] : ascii.value.toLowerCase() === hAnsi.value.toLowerCase() ? [undefined, 'eastAsia'] : [eastAsia, 'eastAsia'];
+  };
+  const marked = markedComplexScript(run, layouts, tableStyle);
+  if (marked === undefined) return undefined;
+  const hint = runProperty(layouts, run, tableStyle, rPr => getAttr(rFonts(rPr), 'hint') || undefined);
+  const eastAsiaHint = hint && hint.value === 'eastAsia';
+  const kinds = new Set<RunFontSlot | 'cs'>(marked ? ['cs'] : run.unread ? ['ascii', 'hAnsi', 'eastAsia'] : []);
+  if (!marked) for (const character of run.text) characterFontSlots(character, eastAsiaHint).forEach(kind => kinds.add(kind));
+  return oneSetting([...kinds].map(kind => {
+    const [shown, slot] = kind === 'eastAsia' ? eastAsian() : [font(kind), kind];
+    if (typeof shown?.value !== 'string') return undefined;
+    if (shown.from === 'own') return { value: shown.value, inherited: false };
+    return fromTableParagraphStyle(layouts, run, shown.from) ? { value: shown.value, inherited: isTableFontSlot(slot) } : undefined;
+  }));
+}
+
+/** Whether export writes a table's font as a w:rFonts' `slot` font (see
+ *  TABLE_FONT_SLOTS in md-to-docx) */
+function isTableFontSlot(slot: string): boolean {
+  return (TABLE_FONT_SLOTS as readonly string[]).includes(slot);
+}
+
+/** Whether export shows a character of a table's text in the table's
+ *  font: where Word shows it in one of the fonts export writes that as
+ *  (see isTableFontSlot), by its range alone, as export marks no run right-
+ *  to-left or complex script and gives none a hint (see
+ *  characterFontSlots). Not East Asian text, which Word shows in the East
+ *  Asian font, as the document's. A note reference's mark, which export
+ *  numbers in digits or roman numerals, Word shows in the ASCII font. */
+function showsInTableFont(character: string): boolean {
+  return characterFontSlots(character, false).every(isTableFontSlot);
+}
+
+/** The font Word shows a table's text in, where all of it is in one and
+ *  import can tell it (see tableRunsSetting and runTextFont) */
+function tableTextFont(tblChildren: XmlNode[], layouts: StyleLayouts | undefined): TableTextFont | undefined {
+  const tableStyle = tableStyleId(tblChildren, layouts);
+  let code = false;
+  const font = tableRunsSetting(tblChildren, run => {
+    code ||= isCodeStyle(getAttr(run.rPrChildren.find(c => c['w:rStyle'] !== undefined), 'val'));
+    return runTextFont(run, layouts, tableStyle);
+  });
+  return font ? { name: font.value, inherited: font.inherited, code } : undefined;
 }
 
 /**
@@ -7143,7 +7313,7 @@ export async function extractDocumentContent(
             // paragraph before it (see joinTrackedParagraphBreaks), which an
             // empty paragraph takes, as one before the table would
             if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
-            target.push({ type: 'table', rows, textSize: tableTextSize(tblChildren, styleLayouts) });
+            target.push({ type: 'table', rows, textSize: tableTextSize(tblChildren, styleLayouts), textFont: tableTextFont(tblChildren, styleLayouts) });
           } else {
             trackedParaMark = markBefore;
           }
@@ -10497,7 +10667,7 @@ function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, stri
   return index;
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; tablesWrittenAt?: (number | undefined)[]; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean; cellRangeComments?: Set<string>; aroundTable?: { open: Set<string>; lastItems?: Map<string, ContentItem> }; tableSizeHp?: number };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; tablesWrittenAt?: (number | undefined)[]; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean; cellRangeComments?: Set<string>; aroundTable?: { open: Set<string>; lastItems?: Map<string, ContentItem> }; tableSizeHp?: number; tableFontName?: string; fontOverrides?: FontOverrides };
 
 /**
  * The ranges of comments over more than one paragraph (see
@@ -10847,7 +11017,7 @@ function gridHoldsTableShape(rows: TableRow[]): boolean {
  * `tableIndex` among those the body and then the notes render.
  */
 function cellsTakeNoRanges(table: TableItem, renderOpts: RenderOpts, tableIndex: number): boolean {
-  return !gridHoldsTableShape(table.rows) || buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: table.textSize }).commentUnsafeFont
+  return !gridHoldsTableShape(table.rows) || buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: table.textSize, textFont: table.textFont }).commentUnsafeFont
     || !!renderOpts.embedDirectiveMapping?.get(String(tableIndex));
 }
 
@@ -11093,11 +11263,33 @@ function tableFontSize(renderOpts: RenderOpts, tableIndex: number, textSize: Tab
   return textSize.inherited && textSize.hp === renderOpts.tableSizeHp ? undefined : String(textSize.hp / 2);
 }
 
+/** A table's own font, for its directive, as for its size (see
+ *  tableFontSize): the one export stored where it's the font Word shows
+ *  the table's text in (`textFont`, see tableTextFont), or where import
+ *  can't tell that font, else the font Word shows, but none where the text
+ *  takes the table paragraph style's and that's the font export gives a
+ *  table's text with none of its own, by the frontmatter (see
+ *  tableTextDefaultFont in md-to-docx). The one export stored, too, where
+ *  export wouldn't show all the text in the font Word shows: where it
+ *  leaves the table's font to the table paragraph style, as for the
+ *  frontmatter's font for tables, but not on the runs (see
+ *  tableFontOnRuns in md-to-docx), and the table has inline code, which
+ *  it shows in the code font over that style's, and the code font is
+ *  another. CodeChar is the only character style export gives a font. */
+function tableFontName(renderOpts: RenderOpts, tableIndex: number, textFont: TableTextFont | undefined): string | undefined {
+  const stored = renderOpts.tableFontMapping?.get(String(tableIndex));
+  if (!textFont || stored !== undefined && stored === textFont.name) return stored;
+  const font = textFont.inherited && textFont.name === renderOpts.tableFontName ? undefined : textFont.name;
+  const fonts = renderOpts.fontOverrides;
+  if (textFont.code && !tableFontOnRuns(fonts, font ?? fonts?.tableFont) && codeFontName(fonts) !== textFont.name) return stored;
+  return font;
+}
+
 /** What Word shows a table's text in, which its directives are for (see
- *  tableTextSize), each where import can tell it, which every caller of
- *  buildTableDirectivePrefix passes, an embed's too, so none falls back to
- *  what export stored where Word shows another */
-interface TableShown { textSize: TableTextSize | undefined }
+ *  tableTextSize and tableTextFont), each where import can tell it, which
+ *  every caller of buildTableDirectivePrefix passes, an embed's too, so
+ *  none falls back to what export stored where Word shows another */
+interface TableShown { textSize: TableTextSize | undefined; textFont: TableTextFont | undefined }
 
 function buildTableDirectivePrefix(
   renderOpts: RenderOpts | undefined,
@@ -11110,7 +11302,7 @@ function buildTableDirectivePrefix(
   const isPortraitTable = tableIndex !== undefined && renderOpts?.portraitTableIndices?.has(tableIndex);
   if (tableIndex !== undefined && renderOpts) {
     const fontSize = tableFontSize(renderOpts, tableIndex, shown.textSize);
-    const font = renderOpts.tableFontMapping?.get(String(tableIndex));
+    const font = tableFontName(renderOpts, tableIndex, shown.textFont);
     if (fontSize) fontPrefix += '<!-- table-font-size: ' + fontSize + ' -->\n';
     if (font) {
       if (font.includes('-->')) {
@@ -11573,7 +11765,7 @@ function detachedTableHtml(html: string): string | undefined | null {
 }
 
 function renderTableOrFallback(
-  item: { rows: TableRow[]; textSize?: TableTextSize },
+  item: { rows: TableRow[]; textSize?: TableTextSize; textFont?: TableTextFont },
   comments: Map<string, Comment>,
   options?: { pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; tableIndent?: string },
   renderOpts?: RenderOpts,
@@ -11581,13 +11773,13 @@ function renderTableOrFallback(
   tableIndex?: number,
   scope = '',
 ): { directivePrefix: string; body: string; before?: string; after?: string; join?: string } {
-  const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: item.textSize });
+  const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: item.textSize, textFont: item.textFont });
   let htmlFontAttrs = '';
   const isLandscapeTable = tableIndex !== undefined && renderOpts?.landscapeTableIndices?.has(tableIndex);
   const isPortraitTable = tableIndex !== undefined && renderOpts?.portraitTableIndices?.has(tableIndex);
   if (tableIndex !== undefined && renderOpts) {
     const fontSize = tableFontSize(renderOpts, tableIndex, item.textSize);
-    const font = renderOpts.tableFontMapping?.get(String(tableIndex));
+    const font = tableFontName(renderOpts, tableIndex, item.textFont);
     if (fontSize) htmlFontAttrs += ' data-font-size="' + escapeHtmlAttr(fontSize) + '"';
     if (font) htmlFontAttrs += ' data-font="' + escapeHtmlAttr(font) + '"';
     const colWidths = renderOpts.tableColWidthsMapping?.get(String(tableIndex));
@@ -13311,7 +13503,7 @@ function popLeast(heap: number[]): number {
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableSizeHp?: number; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableSizeHp?: number; tableFontName?: string; fontOverrides?: FontOverrides; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   trackedBreakStart = undefined;
@@ -13407,6 +13599,8 @@ export function buildMarkdown(
   // What of each table's settings decides whether its cells can hold a
   // comment's range (see cellsTakeNoRanges)
   const rangeSettings: RenderOpts = {
+    tableFontName: options?.tableFontName,
+    fontOverrides: options?.fontOverrides,
     tableFontMapping: settingsRead(options?.tableFontMapping),
     tableColWidthsMapping: settingsRead(options?.tableColWidthsMapping),
     embedDirectiveMapping,
@@ -13771,6 +13965,8 @@ export function buildMarkdown(
     gridSourceColWidthsMapping: settingsRead(options?.gridSourceColWidthsMapping),
     tableFontSizeMapping: settingsRead(options?.tableFontSizeMapping),
     tableSizeHp: options?.tableSizeHp,
+    tableFontName: options?.tableFontName,
+    fontOverrides: options?.fontOverrides,
     tableFontMapping: settingsRead(options?.tableFontMapping),
     tableColWidthsMapping: settingsRead(options?.tableColWidthsMapping),
     tableDigitsMapping: settingsRead(options?.tableDigitsMapping),
@@ -14960,7 +15156,7 @@ export function buildMarkdown(
         const embedDirective = tabPos >= 0 ? rawEmbedValue.substring(tabPos + 1) : rawEmbedValue;
         // As export gives the directive to the embed's first table only,
         // where the embed has more than one, as a Markdown file's
-        const { fontPrefix: embedPrefix } = buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: item.textSize });
+        const { fontPrefix: embedPrefix } = buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: item.textSize, textFont: item.textFont });
         pushWithHoistedPrefix(output, embedPrefix, embedDirective, documentStartCommentGap);
         tableIndex++;
         i++;
@@ -15551,7 +15747,7 @@ export function buildMarkdown(
             const noteTabPos = noteRawEmbedValue.indexOf('\t');
             const noteEmbedDirective = noteTabPos >= 0 ? noteRawEmbedValue.substring(noteTabPos + 1) : noteRawEmbedValue;
             // As export gives the directive to the embed's first table only
-            const { fontPrefix: noteEmbedPrefix } = buildTableDirectivePrefix(noteRenderOpts, tableIndex, { textSize: item.textSize });
+            const { fontPrefix: noteEmbedPrefix } = buildTableDirectivePrefix(noteRenderOpts, tableIndex, { textSize: item.textSize, textFont: item.textFont });
             bodyParts.push(noteEmbedPrefix + noteEmbedDirective);
             tableIndex++;
             bi++;
@@ -16174,7 +16370,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   const bodySizeHp = normalRpr ? extractSizeHp(normalRpr) : undefined;
 
   // Emit body font/fontSize when they differ from Word defaults
-  if (bodyFont && bodyFont !== 'Calibri') result.font = bodyFont;
+  if (bodyFont && bodyFont !== THEME_MINOR_FONT) result.font = bodyFont;
   if (bodySizeHp !== undefined && bodySizeHp !== 22) result.fontSize = bodySizeHp / 2;
 
   // Default heading sizes in half-points
@@ -16808,11 +17004,17 @@ export async function convertDocx(
   // takes from styles.xml
   const stylesXml = await readZipText(zip, 'word/styles.xml');
   const fontFields = stylesXml !== undefined ? extractFontOverridesFromStyles(stylesXml, { explicitTableFontSize, builtInIds: styleLayouts.builtInIds, titleParagraphs }) : {};
+  // And the size and font export gives a table's text with none of its
+  // own, by them, the font the theme's where they have none (see
+  // tableTextDefaultFont), which a table whose text takes them from the
+  // table paragraph style takes no directive for
+  const documentFonts = resolveFontOverrides(fontFields);
   let markdown = buildMarkdown(docContent, comments, {
-    // The size export gives a table's text with none of its own, by the
-    // frontmatter, which a table whose text takes it from the table
-    // paragraph style takes no directive for
-    tableSizeHp: resolveFontOverrides(fontFields).tableSizeHp,
+    tableSizeHp: documentFonts.tableSizeHp,
+    tableFontName: tableTextDefaultFont(documentFonts),
+    // Which table's font export writes on its runs, and its code font (see
+    // tableFontName)
+    fontOverrides: documentFonts,
     tableIndent: options?.tableIndent,
     // Comment dates in the offset the frontmatter will declare, which export reads them in
     timezone: storedSettings?.timezone,
