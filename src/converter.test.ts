@@ -8151,6 +8151,34 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
   });
 
+  test.each([
+    ['starts with spaces', '<!-- x\n  y -->', '| <!-- x   |\n|   y -->b |'],
+    ['starts with a tab', '<!-- x\n\ty -->', '| <!-- x  |\n| \ty -->b |'],
+    ['ends in a backslash', '<!-- x \\\ny -->', '| <!-- x \\ |\n| y -->b   |'],
+    ['ends in a backslash, before one that starts with spaces', '<!-- x\\\n  y -->', '| <!-- x\\  |\n|   y -->b |'],
+    ['ends in two backslashes, before one that starts with spaces', '<!-- x\\\\\n  y -->', '| <!-- x\\\\ |\n|   y -->b |'],
+  ])('keeps a line of a comment in a grid table\'s cell that %s', async (_name, text, lines) => {
+    // Export took the spaces and tabs at a line's start for the cell's
+    // padding, and import took a backslash at a line's end for a line
+    // break's, which it wrote as the line's end, with the spaces before it
+    // as references, which the comment showed
+    const { docx, md } = await gridCell(comment(text));
+    expect(md).toContain('\n' + lines + '\n');
+    const exported = (await convertMdToDocx(md)).docx;
+    expect(await texts(exported)).toEqual(await texts(docx));
+    expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
+  test.each([
+    ['text', '+-------+\n| a\\   |\n|    b  |\n+-------+\n', 'a⏎b'],
+    ['text after a padding of more than a space', '+-------+\n|   a   |\n|    b  |\n+-------+\n', 'a⏎b'],
+    ['a comment', '+----------+\n| a <!-- x |\n|     y    |\n| -->b     |\n+----------+\n', 'a [\u200B&lt;!-- x⏎    y⏎--&gt;]b'],
+  ])('reads the spaces at the start of a line after the first in a grid table\'s cell of %s as a paragraph\'s line\'s', async (_name, md, text) => {
+    // A paragraph's text drops them, and a comment keeps them, but for the
+    // cell's padding, a space
+    expect((await texts((await convertMdToDocx(md)).docx)).join(' | ')).toBe(text);
+  });
+
   test('keeps a comment\'s hidden run that starts with a space after a line break in a grid table\'s cell as Markdown', async () => {
     // Whose space is the text's, as at the cell's start, and shows after the
     // next export, which then moved it into the padding

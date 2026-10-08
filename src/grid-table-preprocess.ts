@@ -388,7 +388,13 @@ function parseGridTable(lines: string[]): GridTableData | null {
         const lineCells = currentContent.map(line => gridLineCells(line, boundaries, layout));
         const cells: string[] = [];
         for (let col = 0; col < numCols; col++) {
-          const cellLines = lineCells.map(cells => cells[col].replace(/^[ \t]+/, '').replace(/[ \t]+$/, ''));
+          // Each line without its padding: the spaces and tabs at its end,
+          // and the space or tab at its start, as Pandoc reads a cell, and
+          // at the cell's start, all of them. The rest, at the start of a
+          // line after the first, a paragraph's text after a line end drops,
+          // as Markdown reads it, but a comment, or other text Markdown keeps
+          // raw, keeps, as in a paragraph
+          const cellLines = lineCells.map((cells, k) => cells[col].replace(k === 0 ? /^[ \t]+/ : /^[ \t]/, '').replace(/[ \t]+$/, ''));
 
           // Blank lines at a cell's end pad it to its row's height, as Pandoc
           // reads them, and aren't line breaks, but a backslash before them

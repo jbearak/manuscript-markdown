@@ -9240,13 +9240,20 @@ function tryRenderGridTable(
         // Split on newlines within a paragraph (e.g. hard breaks).
         // Strip the backslash of the break that ends each line but the last —
         // grid table cells treat bare newlines as hard breaks, so the
-        // backslash is redundant. A line of an equation or a comment, which
-        // ends in no break's backslash, as an odd run of them, stays as it is.
+        // backslash is redundant. A line in an equation or a comment, whose
+        // line end is its own, stays as it is, with a backslash it ends in,
+        // as lineStartsAfterBreaks finds the breaks, as Markdown reads them.
         // A line starts no HTML block in a cell, so the spaces before a
         // comment that starts one after a break are the padding's, as before
         // text, unless they're references
-        const paraLines = keepParagraphWhitespace(r.text, true, true, true).split('\n');
-        pushAll(cellLines, paraLines.map((l, k) => k < paraLines.length - 1 && /(?<!\\)(?:\\\\)*\\$/.test(l) ? gridLineBeforeBreak(l.slice(0, -1)) : l));
+        const kept = keepParagraphWhitespace(r.text, true, true, true);
+        const afterBreaks = new Set(lineStartsAfterBreaks(kept, true));
+        const paraLines = kept.split('\n');
+        let lineEnd = -1;
+        pushAll(cellLines, paraLines.map((l, k) => {
+          lineEnd += l.length + 1;
+          return k < paraLines.length - 1 && afterBreaks.has(lineEnd + 1) ? gridLineBeforeBreak(l.slice(0, -1)) : l;
+        }));
         pushAll(cellDeferred, r.deferredComments);
       }
       // A line break at the cell's end is <br> there, as the blank line after
@@ -9350,8 +9357,10 @@ function tryRenderGridTable(
     return lines.length <= 2 ? null : lines;
   };
 
-  // Whether the table reads back as written, as export reads it
-  const cellText = (text: string) => text.split('\n').map(line => line.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '')).join('\n').replace(/\n+$/, '');
+  // Whether the table reads back as written, as export reads it: but for the
+  // spaces and tabs at its lines' ends and its start, its lines' starts as
+  // they are, as a comment's keep them (see readGridTableCells)
+  const cellText = (text: string) => text.split('\n').map(line => line.replace(/[ \t]+$/, '')).join('\n').replace(/^[ \t]+/, '').replace(/\n+$/, '');
   const readsBack = (lines: string[]) => {
     const read = readGridTableCells(lines);
     return !!read && read.length === rendered.length
