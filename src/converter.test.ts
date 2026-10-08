@@ -14490,6 +14490,81 @@ describe('Blocks a quote can\'t hold', () => {
   });
 });
 
+describe('An alert whose first paragraph holds spaces or tabs alone', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  const hidden = '---\ncallout-labels: false\n---\n\n';
+  const styled = '---\ncallout-labels: false\nstyles:\n  Aside:\n    font: Georgia\n---\n\n';
+
+  test.each([
+    ['spaces', '> [!NOTE] &#32;\n>\n> a\n', '> [!NOTE]\n>\n> a\n'],
+    ['a tab', '> [!TIP] &#9;\n>\n> a\n', '> [!TIP]\n>\n> a\n'],
+    ['bold spaces', '> [!WARNING] **&#32;**\n>\n> a\n', '> [!WARNING]\n>\n> a\n'],
+    ['spaces, in a list item', '- x\n\n  > [!CAUTION] &#32;\n  >\n  > a\n', '- x\n\n  > [!CAUTION]\n  >\n  > a\n'],
+  ])('writes the marker on a line of its own where the paragraph holds %s', async (_name, md, expected) => {
+    // Export marked the marker's line as one with text, after which import
+    // wrote the next paragraph's text on it where the label is hidden, as
+    // > [!NOTE] a. With the label hidden, export leaves out the empty
+    // paragraph before, and records the marker as alone, as it does where
+    // the marker is, so import writes the line of > after it
+    for (const frontmatter of ['', hidden]) {
+      const once = await roundTrip(frontmatter + md);
+      expect(strip(once)).toBe(expected);
+      expect(await roundTrip(once)).toBe(once);
+    }
+  });
+
+  test.each([
+    ['in an ID comment\'s range from before the alert, where the label is hidden', hidden + '{#1}x\n\n> [!NOTE] &#32;\n>\n> a{/1}\n\n{#1>>c<<}\n',
+      '{#1}x\n\n> [!NOTE] &#32;a{/1}\n> {#1>>c<<}\n'],
+    ['before an inserted paragraph mark', '> [!NOTE] &#32;{++\n>\n> ++}a\n', '> [!NOTE] &#32;{++\n>\n> ++}a\n'],
+    ['before an inserted paragraph mark, where the label is hidden', hidden + '> [!NOTE] &#32;{++\n>\n> ++}a\n', '> [!NOTE] &#32;a\n'],
+    ['before a deleted paragraph mark, where the label is hidden', hidden + '> [!NOTE] &#32;{--\n>\n> --}a\n', '> [!NOTE] &#32;a\n'],
+    ['between two ranges of an ID comment, which Word reads as one, where the label is hidden',
+      hidden + '{#1}x{/1}\n\n> [!NOTE] &#32;\n>\n> {#1}a{/1}\n\n{#1>>c<<}\n', '{#1}x\n\n> [!NOTE] &#32;a{/1}\n> {#1>>c<<}\n'],
+    ['after a tracked paragraph mark, where the label is hidden', hidden + '> [!NOTE] a{++\n>\n> ++}\n> [!NOTE] &#32;\n>\n> b\n',
+      '> [!NOTE] a{++\n>\n> ++} b\n'],
+    ['after a tracked paragraph mark and a quote\'s paragraph of an ID comment\'s body, which export moves into the one before, where the label is hidden',
+      hidden + '> [!NOTE] a{--\n>\n> --}{#1>>c<<}\n> [!NOTE] &#32;\n>\n> b\n\n{#1}x{/1}\n', '> [!NOTE] a{--\n>\n> --} b\n\n{==x==}{>>c<<}\n'],
+    ['after a tracked paragraph mark and a paragraph of an ID comment\'s body, which export leaves out, where the label is hidden',
+      hidden + 'x{++\n\n++}{#1>>c<<}\n\n> [!NOTE] &#32;\n>\n> b\n\n{#1}y{/1}\n', 'x{++\n\n++}\n\n> [!NOTE] &#32;b\n\n{==y==}{>>c<<}\n'],
+    // A style's directive gets no paragraph in Word either
+    ['after a tracked paragraph mark and a style\'s closing directive, where the label is hidden',
+      styled + '<!-- style: Aside -->\n\nx{++\n\n++}\n\n<!-- /style -->\n\n> [!NOTE] &#32;\n>\n> b\n',
+      '<!-- style: Aside -->\n\nx{++\n\n++}\n\n<!-- /style -->\n\n> [!NOTE] &#32;b\n'],
+    // Import drops a directive that styles no paragraph, as on main
+    ['after a tracked paragraph mark and a style\'s opening directive, where the label is hidden',
+      styled + 'x{++\n\n++}\n\n<!-- style: Aside -->\n\n> [!NOTE] &#32;\n>\n> b\n', 'x{++\n\n++}\n\n> [!NOTE] &#32;b\n'],
+  ])('keeps the spaces %s, which import keeps', async (_name, md, expected) => {
+    // Export left them out, as it does the spaces import drops
+    const once = await roundTrip(md);
+    expect(strip(once)).toBe(expected);
+    expect(await roundTrip(once)).toBe(once);
+  });
+
+  test('reads many paragraphs of ID comment bodies in linear time', () => {
+    // Each token looked back past every paragraph of bodies before it for
+    // the paragraph Word gets before it: some 16 times as long at 2,000 as
+    // at 500 before, about 3 after
+    const time = (count: number) => {
+      const md = Array.from({ length: count }, (_, i) => '{#c' + i + '>>b<<}').join('\n\n') + '\n';
+      let best = Infinity;
+      for (let run = 0; run < 3; run++) {
+        const start = performance.now();
+        parseMd(md);
+        best = Math.min(best, performance.now() - start);
+      }
+      return best;
+    };
+    time(500);
+    expect(time(2000) / time(500)).toBeLessThan(8);
+  }, 30000);
+
+  test('keeps a no-break space on the marker\'s line, which import keeps', async () => {
+    expect(strip(await roundTrip('> [!NOTE] &nbsp;\n>\n> a\n'))).toBe('> [!NOTE] &nbsp;\n>\n> a\n');
+  });
+});
+
 describe('Blocks a note can\'t hold', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
   const note = (body: string) => 'T.[^1]\n\n[^1]: A.\n\n    ' + body.replace(/\n(?!\n)/g, '\n    ') + '\n';
