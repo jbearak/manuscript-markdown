@@ -803,6 +803,17 @@ export function blocksAsRead(markdown: string): Array<Pick<MdToken, 'type' | 'le
   }));
 }
 
+/** Whether export reads Markdown `markdown` as one block of `text` alone,
+ *  unformatted, as it does an HTML block that is no comment alone,
+ *  directive, image, line break or table, as it is, or after its line's
+ *  prefix, as a list item's marker */
+export function showsAsText(markdown: string, text = markdown): boolean {
+  const blocks = blocksAsRead(markdown);
+  const run = blocks.length === 1 && blocks[0].runs.length === 1 ? blocks[0].runs[0] : undefined;
+  return run?.type === 'text' && run.text === text && !run.bold && !run.italic && !run.underline && !run.strikethrough
+    && !run.superscript && !run.subscript && !run.highlight && !run.code && run.href === undefined;
+}
+
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:
  *  each one's lines, from `start` to before `end`, and its text */
 export function htmlBlocksIn(text: string): Array<{ start: number; end: number; content: string }> {
