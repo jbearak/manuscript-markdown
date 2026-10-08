@@ -46,6 +46,7 @@ const expected: Record<string, string> = {
   'the comments before a tracked paragraph break': String(N),
   'the comments on an equation text follows': String(N),
   'the comments in a note': String(N),
+  'the references in a note': String(N + 1),
   'the comments in a note before its next paragraph': String(N),
   'the comments in a note before its code': String(N),
   'the comments in a note before its equation': String(N),

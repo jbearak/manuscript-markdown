@@ -13861,7 +13861,9 @@ export async function convertDocx(
     if (shown[noteKind].has(noteId)) continue;
     shown[noteKind].add(noteId);
     const note = (noteKind === 'footnote' ? footnotes : endnotes).get(noteId);
-    if (note) reach.push(...noteReferences(note.content));
+    // Onto the end of the list, one at a time, as a note can hold more than
+    // a call takes arguments (see arrays.ts)
+    if (note) noteReferences(note.content, reach);
   }
   footnoteParts.withImages(shown.footnote);
   endnoteParts.withImages(shown.endnote);
