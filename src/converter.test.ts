@@ -11680,6 +11680,30 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test.each([
+    ['a paragraph', 'A.\n\np\\\n&#32;<!-- z -->b\n\nB.\n'],
+    ['a paragraph, before a line break', 'A.\n\np\\\n&#32;<!-- z -->\\\n&#32;b\n\nB.\n'],
+    ['a paragraph, as three spaces', 'A.\n\np\\\n&#32;&#32;&#32;<!-- z -->b\n\nB.\n'],
+    ['a list item', '- p\\\n&#32;<!-- z -->b\n- b\n'],
+    ['a quote', '> p\\\n> &#32;<!-- z -->b\n'],
+    ['a note', 'T.[^1]\n\n[^1]: A.\n\n    p\\\n    &#32;<!-- z -->b\n'],
+    // Whose line break is <br>, after which the space is the heading's
+    ['a heading', '# p<br> <!-- z -->b\n'],
+    ['a table\'s cell', '| a |\n| --- |\n| p<br> <!-- z -->b |\n'],
+    ['a grid table\'s cell', '+------------------+\n| a                |\n+==================+\n| p                |\n| &#32;<!-- z -->b |\n|                  |\n| q                |\n+------------------+\n'],
+  ])('keeps the whitespace at the start of a line after a line break before an HTML comment in %s', async (_name, md) => {
+    // As spaces, it was the indent of the HTML block the comment started,
+    // which ended the paragraph and left the \ before it as text, where a
+    // tab or four spaces, which start none, were references
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('leaves the whitespace after a line break before an HTML comment that goes on past its line as it is', () => {
+    // The comment's HTML block holds it, which a paragraph would end at the
+    // blank line in it
+    expect(keepParagraphWhitespace('p\\\n <!-- a\n\nb -->', true, true)).toBe('p\\\n <!-- a\n\nb -->');
+  });
+
+  test.each([
     ['an HTML comment', 'A <!-- x\\\n  y --> b.\n'],
     ['math', 'A $x\\\n  y$ b.\n'],
     ['an HTML tag', 'A <span title="a\\\n  b">x</span> c.\n'],
