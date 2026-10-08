@@ -35,7 +35,7 @@ import {
   extractCalloutLabels,
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
-import { annotateHtmlCommentIndices, convertMdToDocx, parseMd } from './md-to-docx';
+import { annotateHtmlCommentIndices, convertMdToDocx, parseMd, templateStyleIds } from './md-to-docx';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractAllDecorationRanges } from './highlight-colors';
@@ -5410,6 +5410,141 @@ describe('A heading whose text ends in #', () => {
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
     expect(xml).toContain('<w:pStyle w:val="Heading1"/>');
     expect(xml.replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, '')).toContain(text);
+  });
+});
+
+describe('A template whose built-in styles Word named in another language', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  /** styles.xml of `styles` */
+  const stylesOf = (styles: string) => '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + styles + '</w:styles>';
+  // German Word's IDs for the built-in styles, which keep their English
+  // names, as `heading 1`
+  const GERMAN: Record<string, string> = {
+    Normal: 'Standard', Title: 'Titel', Quote: 'Zitat', FootnoteText: 'Funotentext', FootnoteReference: 'Funotenzeichen', Bibliography: 'Literaturverzeichnis',
+    ...Object.fromEntries([1, 2, 3, 4, 5, 6].map(level => ['Heading' + level, 'berschrift' + level])),
+  };
+  /** Export's own styles.xml with German Word's IDs */
+  const germanStyles = async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# H\n\nText.[^1]\n\n[^1]: Note.\n')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const german = styles.replace(/(w:styleId="|<w:(?:basedOn|next|link) w:val=")([A-Za-z0-9]+)"/g, (match, before: string, id: string) =>
+      GERMAN[id] ? before + GERMAN[id] + '"' : match);
+    zip.file('word/styles.xml', german);
+    return { styles, german, template: await zip.generateAsync({ type: 'uint8array' }) };
+  };
+
+  test('gives Word the template\'s own IDs for its built-in styles, and its font settings in them', async () => {
+    // Export wrote Heading1 and the rest, which the template has no style
+    // of, so Word showed the headings as Standard text, and the settings
+    // changed none of the template's styles
+    const { template } = await germanStyles();
+    const md = '---\ntitle: My Title\nfont: Georgia\nheader-font: Arial\nblockquote-style: Quote\n---\n\n# H\n\n> Quoted.\n\nText.[^1]\n\n[^1]: Note.\n';
+    const docx = (await convertMdToDocx(md, { templateDocx: template })).docx;
+    const zip = await JSZip.loadAsync(docx);
+    const styleIdsIn = async (part: string) => new Set([...(await zip.file(part)!.async('string')).matchAll(/<w:[pr]Style w:val="([^"]+)"/g)].map(m => m[1]));
+    expect([...await styleIdsIn('word/document.xml')].sort()).toEqual(['Funotenzeichen', 'Titel', 'Zitat', 'berschrift1']);
+    expect([...await styleIdsIn('word/footnotes.xml')].sort()).toEqual(['Funotentext', 'Funotenzeichen']);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const style = (id: string) => new RegExp('<w:style [^>]*w:styleId="' + id + '"[\\s\\S]*?</w:style>').exec(styles)?.[0] ?? '';
+    expect(style('berschrift1')).toContain('<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>');
+    expect(style('Standard')).toContain('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>');
+    // No style of an English ID beside the template's, and none based on one
+    expect(styles).not.toMatch(/w:styleId="(?:Normal|Heading1|Title|Bibliography)"/);
+    expect(styles).not.toContain('<w:basedOn w:val="Normal"/>');
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  test('finds the template\'s IDs for the built-in styles by their names, where they aren\'t the English ones', async () => {
+    const { styles, german } = await germanStyles();
+    expect(templateStyleIds(styles).size).toBe(0);
+    expect(templateStyleIds(german).get('Heading1')).toBe('berschrift1');
+    expect(templateStyleIds(german).get('Normal')).toBe('Standard');
+    const style = (id: string, name: string) => '<w:style w:type="paragraph" w:styleId="' + id + '"><w:name w:val="' + name + '"/></w:style>';
+    // An ID that differs only in case, which Word matches
+    expect([...templateStyleIds(stylesOf(style('heading1', 'heading 1')))]).toEqual([['Heading1', 'heading1']]);
+    // Another style with the English ID, which Word reads that ID as
+    expect(templateStyleIds(stylesOf(style('Heading1', 'My heading') + style('berschrift1', 'heading 1'))).has('Heading1')).toBe(false);
+  });
+
+  test('finds the template\'s IDs for the built-in styles only of their types, each style on its own', () => {
+    const style = (type: string, id: string, name?: string) => '<w:style w:type="' + type + '" w:styleId="' + id + '"'
+      + (name === undefined ? '/>' : '><w:name w:val="' + name + '"/></w:style>');
+    // A style written as <w:style .../> ends at its tag, where export read
+    // it to the next style's end, and gave the next style's name to its ID
+    expect([...templateStyleIds(stylesOf(style('character', 'Empty') + style('paragraph', 'berschrift1', 'heading 1')))])
+      .toEqual([['Heading1', 'berschrift1']]);
+    expect(templateStyleIds(stylesOf(style('character', 'Empty') + style('paragraph', 'Heading1', 'heading 1'))).size).toBe(0);
+    // A w:pStyle refers to a paragraph style, and a w:rStyle to a character
+    // style, which a style of another type of the name or ID isn't
+    expect(templateStyleIds(stylesOf(style('character', 'Zitat', 'quote'))).size).toBe(0);
+    expect([...templateStyleIds(stylesOf(style('paragraph', 'Funotenzeichen', 'footnote reference')
+      + style('character', 'Funotenzeichen1', 'footnote reference')))]).toEqual([['FootnoteReference', 'Funotenzeichen1']]);
+    // A style without a type is a paragraph style
+    expect([...templateStyleIds(stylesOf('<w:style w:styleId="Zitat"><w:name w:val="Quote"/></w:style>'))]).toEqual([['Quote', 'Zitat']]);
+  });
+
+  /** A template of export's own, whose styles.xml is `styles` */
+  const withStyles = async (styles: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# H\n\nText.[^1]\n\n[^1]: Note.\n')).docx);
+    zip.file('word/styles.xml', styles);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  const styleIn = (styles: string, id: string) => new RegExp('<w:style [^>]*w:styleId="' + id + '"[^>]*>[\\s\\S]*?</w:style>').exec(styles)?.[0] ?? '';
+
+  test.each([
+    ['English', 'Heading1'],
+    ['German', 'berschrift1'],
+  ])('gives the headings the heading style of a template in %s after a style written as <w:style .../>', async (language, heading) => {
+    // Export read that style to the heading style's end, and gave the
+    // headings its ID, a character style's, which Word and import read
+    // as no style
+    const { styles, german } = await germanStyles();
+    const template = await withStyles((language === 'German' ? german : styles)
+      .replace(new RegExp('<w:style [^>]*w:styleId="' + heading + '"'), match => '<w:style w:type="character" w:styleId="Empty"/>' + match));
+    const md = '---\nfont: Georgia\nheader-font: Arial\n---\n\n# H\n\nText.\n';
+    const docx = (await convertMdToDocx(md, { templateDocx: template })).docx;
+    const zip = await JSZip.loadAsync(docx);
+    expect(await zip.file('word/document.xml')!.async('string')).toContain('<w:pStyle w:val="' + heading + '"/>');
+    const out = await zip.file('word/styles.xml')!.async('string');
+    expect(out).toContain('<w:style w:type="character" w:styleId="Empty"/>');
+    expect(styleIn(out, heading)).toContain('<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>');
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  test('leaves the style after one of a built-in style\'s ID written as <w:style .../> as it is', async () => {
+    // Export read the title's style to the next style's end, and gave that
+    // style the title's font
+    const { styles } = await germanStyles();
+    const template = await withStyles(styles.replace(/<w:style [^>]*w:styleId="Title"[^>]*>[\s\S]*?<\/w:style>/, '<w:style w:type="paragraph" w:styleId="Title"/>'));
+    const out = await (await JSZip.loadAsync((await convertMdToDocx('---\ntitle: My Title\ntitle-font: Verdana\n---\n\nText.\n', { templateDocx: template })).docx))
+      .file('word/styles.xml')!.async('string');
+    expect(out).toContain('<w:style w:type="paragraph" w:styleId="Title"/>');
+    expect(out).not.toContain('Verdana');
+    expect(styleIn(out, 'FootnoteText')).toBe(styleIn(styles, 'FootnoteText'));
+  });
+
+  test('keeps the template\'s references to a style of another type with a built-in style\'s ID', async () => {
+    // A character style `Normal` beside the paragraph style `Standard` named
+    // Normal: export gave the base of a character style based on it, and the
+    // link of a paragraph style linked to it, as Standard, a paragraph
+    // style, which neither can be
+    const { german } = await germanStyles();
+    const others = '<w:style w:type="character" w:styleId="Normal"><w:name w:val="Normal Char"/><w:rPr><w:b/></w:rPr></w:style>'
+      + '<w:style w:type="character" w:styleId="Fett"><w:name w:val="Fett"/><w:basedOn w:val="Normal"/></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="Brief"><w:name w:val="Brief"/><w:basedOn w:val="Standard"/><w:link w:val="Normal"/></w:style>';
+    const template = await withStyles(german.replace('</w:styles>', others + '</w:styles>'));
+    const md = '---\nfont: Georgia\n---\n\n# H\n\nText.\n\n| a |\n| --- |\n| 1 |\n';
+    const docx = (await convertMdToDocx(md, { templateDocx: template })).docx;
+    const zip = await JSZip.loadAsync(docx);
+    const out = await zip.file('word/styles.xml')!.async('string');
+    expect(styleIn(out, 'Fett')).toContain('<w:basedOn w:val="Normal"/>');
+    expect(styleIn(out, 'Brief')).toContain('<w:link w:val="Normal"/>');
+    // The styles export adds go on being based on the template's Standard
+    expect(styleIn(out, 'TableParagraph')).toContain('<w:basedOn w:val="Standard"/>');
+    expect(styleIn(out, 'Standard')).toContain('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>');
+    expect(styleIn(out, 'Normal')).not.toContain('Georgia');
+    expect(await zip.file('word/document.xml')!.async('string')).toContain('<w:pStyle w:val="berschrift1"/>');
+    expect((await convertDocx(docx)).markdown).toBe(md);
   });
 });
 

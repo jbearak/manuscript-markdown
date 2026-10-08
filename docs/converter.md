@@ -277,7 +277,7 @@ If a style is not bundled, you will be prompted to download it from the [CSL sty
 
 When using **Export to Word with Template**, the converter extracts styling parts from the template:
 
-- `word/styles.xml` — heading fonts, body text formatting, spacing
+- `word/styles.xml` — heading fonts, body text formatting, spacing. A template from Word in another language gives its built-in styles IDs from the names it shows, as `berschrift1` for German's Überschrift 1 and `Standard` for Normal, and keeps their English names, as `heading 1`. Export finds those styles by name and refers to them by the template's IDs, for the headings, title, quotes, notes, comments and bibliography, and applies the font and spacing settings to them. Where the template has a style with the English ID, or one that differs from it only in case, export uses that style. Either way it looks only at the template's styles of the built-in style's type: character styles for the note and comment reference marks, and paragraph styles for the rest. The template's own references to another style of an English ID, as a character style's base `Normal` where that's a character style, stay as they are.
 - `word/theme/theme1.xml` — theme colors and fonts
 - `word/numbering.xml` — list definitions, with the images of its picture bullets. Bullets take the template's numId 1 and numbers its numId 2 where those are a bullet and a number. Where they aren't, export adds its own definitions and leaves the template's in place for its headers, footers and styles.
 - the page setup of its last section, such as its page size, margins and page number format
