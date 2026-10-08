@@ -4249,6 +4249,9 @@ export interface DocxGenState {
   nextParaId: number;
   codeBlockIndex: number;
   codeBlockLanguages: Map<number, string>;
+  /** The index of each note's first code block, by the note's key on import
+   *  (see noteCodeBlockProps) */
+  noteCodeBlockStarts: Map<string, number>;
   citedKeys: Set<string>;
   codeFont: string;
   codeShadingMode: boolean;
@@ -6049,6 +6052,15 @@ function codeBlockLanguageProps(codeBlockLanguages: Map<number, string>): Custom
     mapping[String(index)] = language;
   }
   return chunkCustomProps('MANUSCRIPT_CODE_BLOCK_LANGS_', JSON.stringify(mapping));
+}
+
+/** The index of the first code block of each note that has one, by the
+ *  note's key on import, as `footnote:2`, so that import finds each note's
+ *  languages by the note, whatever turn it writes the note in: Word may show
+ *  a note in another, or not at all, as where its references are hidden */
+function noteCodeBlockProps(starts: Map<string, number>): CustomPropEntry[] {
+  if (starts.size === 0) return [];
+  return chunkCustomProps('MANUSCRIPT_NOTE_CODE_BLOCKS_', JSON.stringify(Object.fromEntries([...starts].map(([key, start]) => [key, String(start)]))));
 }
 
 function codeBlockStylingProps(fm: Frontmatter): CustomPropEntry[] {
@@ -9065,6 +9077,7 @@ export async function convertMdToDocx(
     nextParaId: 0x10000000,
     codeBlockIndex: 0,
     codeBlockLanguages: new Map(),
+    noteCodeBlockStarts: new Map(),
     citedKeys: new Set(),
     codeFont: fontOverrides?.codeFont || 'Consolas',
     codeShadingMode: !isInsetMode,
@@ -9242,10 +9255,10 @@ export async function convertMdToDocx(
   // The notes the text reaches go in the order import writes them back in,
   // which their tables' and code blocks' indices follow (see
   // compareNoteLabels): the body's, whose first references break ties, and
-  // then those only another note refers to, which import doesn't write, as
-  // the notes before reach them, and so after the note that gives each its
-  // ID. All are parsed before any is made, so that a comment's range in one
-  // registers before its body in another, whatever their order.
+  // then those only another note refers to, which import writes after
+  // those, as the notes before reach them, and so after the note that gives
+  // each its ID. All are parsed before any is made, so that a comment's
+  // range in one registers before its body in another, whatever their order.
   state.inNoteBody = true;
   const noteQueue = [...footnoteDefs.keys()].filter(label => firstReferences.has(label))
     .sort((a, b) => compareNoteLabels(a, b) || firstReferences.get(a)! - firstReferences.get(b)!);
@@ -9296,6 +9309,7 @@ export async function convertMdToDocx(
     const refStyle = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
     // The note's key on import, which counts the tables alike in it
     const tableScope = (state.notesMode === 'endnotes' ? 'endnote' : 'footnote') + ':' + noteId;
+    const firstCodeBlock = state.codeBlockIndex;
     let bodyXml = '';
     const paragraphPPr = '<w:pPr><w:pStyle w:val="' + pStyle + '"/></w:pPr>';
     // If this footnote is cross-referenced, wrap the self-ref run in a bookmark
@@ -9374,6 +9388,7 @@ export async function convertMdToDocx(
       }
     }
     state.activeCustomStyle = savedCustomStyle;
+    if (state.codeBlockIndex > firstCodeBlock) state.noteCodeBlockStarts.set(tableScope, firstCodeBlock);
     if (noteTokens.length === 0 || isFirstContent) {
       // No content tokens (empty body or all sentinels) — emit self-ref paragraph
       if (!bodyXml) bodyXml = '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
@@ -9570,6 +9585,7 @@ export async function convertMdToDocx(
   customProps.push(...footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
   customProps.push(...footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));
   customProps.push(...codeBlockLanguageProps(state.codeBlockLanguages));
+  customProps.push(...noteCodeBlockProps(state.noteCodeBlockStarts));
   customProps.push(...codeBlockStylingProps(frontmatter));
   customProps.push(...pipeTableMaxLineWidthProps(frontmatter));
   customProps.push(...gridTableMaxLineWidthProps(frontmatter));

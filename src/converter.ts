@@ -1506,9 +1506,6 @@ interface NoteBodyContext {
   /** The notes' own image relationships, and where and to which files
    *  their images go, which the document's share */
   images?: { relationships: Map<string, string>; folder: string; files: ImageFiles };
-  /** The IDs of the notes the document references, which only have images:
-   *  another's would take a file, and a name, for an image nothing shows */
-  referenced?: ReadonlySet<string>;
   /** The Zotero citations of the notes' part, in order */
   zoteroCitations: ZoteroCitation[];
   /** The key of each item the document cites, in its body or its notes */
@@ -1520,6 +1517,8 @@ interface NoteBodyContext {
   /** See extractDocumentContent's */
   commentBodies?: ReadonlySet<string>;
   styleLayouts?: StyleLayouts;
+  /** Bookmark name → "noteKind:noteId", for a NOTEREF field in a note */
+  footnoteCrossRefMap?: Map<string, string>;
 }
 
 export interface TableRow {
@@ -4043,19 +4042,28 @@ export async function extractHtmlCommentGapMapping(data: Uint8Array | JSZip): Pr
   }
 }
 
+/** A part's notes, each read without its images, and `withImages`, which
+ *  reads again, with them, those of `ids` that hold one, in the part's
+ *  order, which their images take names in: only the notes the document
+ *  shows, which the notes read tell (see convertDocx), have images, as
+ *  another's would take a file, and a name, for an image nothing shows */
 async function extractNotes(
   zip: JSZip,
   xmlPath: string,
   tagName: string,
   context?: NoteBodyContext,
-): Promise<Map<string, FootnoteBody>> {
+): Promise<{ notes: Map<string, FootnoteBody>; withImages: (ids: ReadonlySet<string>) => void }> {
   const notes = new Map<string, FootnoteBody>();
   const parsed = await readZipXml(zip, xmlPath);
-  if (!parsed) return notes;
+  if (!parsed) return { notes, withImages: () => {} };
 
   // The context's citations are this file's, in order (see convertDocx),
   // which one counter runs through across all its notes
   const citationCounter = { idx: 0 };
+  // Each note's children and the index of its first citation, which it's
+  // read again from
+  const noteNodes = new Map<string, { children: XmlNode[]; citations: number }>();
+  const withoutImages = context && { ...context, images: undefined };
 
   for (const node of findAllDeep(parsed, tagName)) {
     const id = getAttr(node, 'id');
@@ -4068,11 +4076,19 @@ async function extractNotes(
     const noteChildren = node[tagName];
     if (!Array.isArray(noteChildren)) continue;
 
-    const noteContext = context?.referenced && !context.referenced.has(id) ? { ...context, images: undefined } : context;
-    const content = parseNoteBody(noteChildren, tagName, noteContext, citationCounter);
+    noteNodes.set(id, { children: noteChildren, citations: citationCounter.idx });
+    const content = parseNoteBody(noteChildren, tagName, withoutImages, citationCounter);
     notes.set(id, { id, content });
   }
-  return notes;
+  const withImages = (ids: ReadonlySet<string>) => {
+    if (!context?.images) return;
+    for (const [id, { children, citations }] of noteNodes) {
+      if (ids.has(id) && findAllDeep(children, 'w:drawing').length > 0) {
+        notes.set(id, { id, content: parseNoteBody(children, tagName, context, { idx: citations }) });
+      }
+    }
+  };
+  return { notes, withImages };
 }
 
 /**
@@ -4095,8 +4111,14 @@ async function extractNotes(
  */
 function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefined, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, link?: { href: string; link: number }): XmlNode[] {
   if (!rPrChildren || !isToggleOn(rPrChildren, 'w:vanish')) return runChildren;
-  const fieldChildren = runChildren.filter((c) => c['w:fldChar'] !== undefined || c['w:instrText'] !== undefined);
-  if (fieldChildren.length > 0) return fieldChildren;
+  const isField = (c: XmlNode) => c['w:fldChar'] !== undefined || c['w:instrText'] !== undefined;
+  // A field's characters, and in their places a mark for each text, which
+  // may be in the field's result, as a cross-reference's number hidden in
+  // the run of its separator (see HIDDEN_TEXT)
+  if (runChildren.some(isField)) {
+    return runChildren.flatMap(c => isField(c) ? [c]
+      : (c['w:t'] ?? c['w:delText']) !== undefined && nodeText(asXmlNodes(c['w:t'] ?? c['w:delText'])) !== '' ? [{ [HIDDEN_TEXT]: [] }] : []);
+  }
   // Text from w:t/w:delText, with breaks, so multiline payloads survive
   let runText = '';
   for (const child of runChildren) {
@@ -4332,6 +4354,11 @@ function unembeddedImageMarkdown(markdown: string): string {
 
 const FIELD_RUN_KEYS = new Set([':@', 'w:rPr', 'w:fldChar', 'w:instrText', 'w:delInstrText', 'w:lastRenderedPageBreak']);
 
+/** The mark readHiddenRun leaves for hidden text in a run with a field's
+ *  characters, which the walk reads as unshown text where it is: in a
+ *  cross-reference's result, its number hidden */
+const HIDDEN_TEXT = 'mm:hiddenText';
+
 /**
  * Tracks whether a field shows, since readHiddenRun gives the walk the
  * field characters and code of a hidden run: a field hidden from its begin
@@ -4381,8 +4408,17 @@ function parseNoteBody(
   let citationTextParts: string[] = [];
   let fieldFormatting: RunFormatting | undefined;
   // As in extractDocumentContent: the comments whose ranges end in a
-  // citation's result, which end with the field
+  // citation's or cross-reference's result, which end with the field
   const resultEnds: string[] = [];
+  // As in extractDocumentContent: a NOTEREF field's note, which its number
+  // shows, and the instruction of a deleted field, read only for that
+  let noterefInfo: { noteId: string; noteKind: 'footnote' | 'endnote' } | undefined;
+  // Its number, which the reference stands for: whether any of it shows,
+  // whether any of it is hidden, and the revisions its runs are in, where
+  // they're in one (undefined where they're in none), which the reference
+  // takes where they agree, as the field's end can be outside it
+  let noterefNumber: { shown: boolean; hidden: boolean; revisions: (RevisionInfo | undefined)[] } = { shown: false, hidden: false, revisions: [] };
+  let deletedInstrParts: string[] = [];
   const fieldShows = fieldVisibility();
   const cCounter = citationCounter ?? { idx: 0 };
   let currentHref: string | undefined;
@@ -4431,7 +4467,7 @@ function parseNoteBody(
         } else if (key === 'w:commentRangeEnd') {
           const id = getAttr(node, 'id');
           if (hasRange(id)) {
-            if (inCitationField && currentCitation) resultEnds.push(id);
+            if ((inCitationField && currentCitation) || noterefInfo) resultEnds.push(id);
             else endComment(id, target);
           }
         } else if (key in REVISION_ELEMENTS) {
@@ -4439,15 +4475,21 @@ function parseNoteBody(
           const date = getAttr(node, 'date');
           const rev = { type: REVISION_ELEMENTS[key], author, date };
           if (Array.isArray(node[key])) walkNoteBody(node[key], currentFormatting, target, inTableCell, rev);
+        } else if (key === HIDDEN_TEXT) {
+          if (noterefInfo) noterefNumber.hidden = true;
         } else if (key === 'w:fldChar' && context) {
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
+            // A field with no end, whose result's comments end
             for (const id of resultEnds.splice(0)) endComment(id, target);
             inField = true;
             fieldShows.begin();
             fieldInstrParts = [];
+            deletedInstrParts = [];
             fieldFormatting = undefined;
             inCitationField = false;
+            noterefInfo = undefined;
+            noterefNumber = { shown: false, hidden: false, revisions: [] };
           } else if (fldType === 'separate') {
             if (inField) {
               const instrText = fieldInstrParts.join('');
@@ -4455,9 +4497,26 @@ function parseNoteBody(
                 inCitationField = true;
                 currentCitation = context.zoteroCitations[cCounter.idx++];
                 citationTextParts = [];
+              } else {
+                // A reference to another note, which a note can't hold but
+                // as a cross-reference, whose number is that note's
+                noterefInfo = noterefTarget(instrText || deletedInstrParts.join(''), context.footnoteCrossRefMap);
               }
             }
           } else if (fldType === 'end') {
+            // Not where Word shows nothing of its number, all hidden
+            if (noterefInfo && fieldShows.shows() && (noterefNumber.shown || !noterefNumber.hidden)) {
+              const [first, ...rest] = noterefNumber.revisions;
+              const revision = currentRevision ?? (first && rest.every(other => other && revisionsEqual(other, first)) ? first : undefined);
+              target.push({
+                type: 'footnote_ref',
+                ...noterefInfo,
+                commentIds: new Set(activeComments),
+                ...(revision ? { revision } : {}),
+                ...highlightOnly(fieldFormatting),
+              });
+            }
+            noterefInfo = undefined;
             if (inCitationField && currentCitation && fieldShows.shows()) {
               const pandocKeys = citationPandocKeys(currentCitation, context.keyMap);
               target.push({
@@ -4476,6 +4535,15 @@ function parseNoteBody(
           }
         } else if (key === 'w:instrText' && inField && context) {
           fieldInstrParts.push(nodeText(asXmlNodes(node['w:instrText'])));
+        } else if (key === 'w:delInstrText' && inField && context) {
+          deletedInstrParts.push(nodeText(asXmlNodes(node['w:delInstrText'])));
+        } else if (key === 'w:footnoteReference' || key === 'w:endnoteReference') {
+          // A reference to another note, as export writes one only notes
+          // refer to (see convertDocx)
+          const noteId = getAttr(node, 'id');
+          if (noteId && noteId !== '0' && noteId !== '-1') {
+            target.push({ type: 'footnote_ref', noteId, noteKind: key === 'w:footnoteReference' ? 'footnote' : 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
+          }
 
         // --- Hyperlinks ---
         } else if (key === 'w:hyperlink' && context) {
@@ -4573,7 +4641,12 @@ function parseNoteBody(
         } else if (key === 'w:t' || key === 'w:delText') {
           const text = nodeText(asXmlNodes(node[key]));
           if (text) {
-            if (inCitationField && context) {
+            if (noterefInfo) {
+              // The note's number, which its reference is
+              fieldFormatting ??= currentFormatting;
+              noterefNumber.shown = true;
+              noterefNumber.revisions.push(currentRevision);
+            } else if (inCitationField && context) {
               fieldFormatting ??= currentFormatting;
               citationTextParts.push(text);
             } else {
@@ -4706,6 +4779,12 @@ function parseNoteBody(
           // A hidden mark is still the note's, which Word's space or tab
           // after it follows
           if (walked !== runChildren && !skippedSelfRef && runChildren.some(child => child[selfRefTag] !== undefined)) passMark(target);
+          // A hidden run of a cross-reference's number, which goes unread;
+          // one with a field's characters marks its text (see HIDDEN_TEXT)
+          if (walked.length === 0 && noterefInfo && runChildren.some(child => (child['w:t'] ?? child['w:delText']) !== undefined
+              && nodeText(asXmlNodes(child['w:t'] ?? child['w:delText'])) !== '')) {
+            noterefNumber.hidden = true;
+          }
           fieldShows.run(runChildren, walked);
           walkNoteBody(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (Array.isArray(node[key])) {
@@ -4722,6 +4801,27 @@ function parseNoteBody(
     content.push({ type: 'para', breakRevision: trackedParaMark.revision });
   }
   return content;
+}
+
+/** The note a NOTEREF field's instruction points to, by its bookmark's
+ *  entry in `crossRefMap`, "noteKind:noteId" (see footnoteCrossRefMap) */
+function noterefTarget(instruction: string, crossRefMap: Map<string, string> | undefined): { noteId: string; noteKind: 'footnote' | 'endnote' } | undefined {
+  const bookmark = /NOTEREF\s+(\S+)/.exec(instruction)?.[1];
+  const resolved = bookmark ? crossRefMap?.get(bookmark) : undefined;
+  if (!resolved) return undefined;
+  const colon = resolved.indexOf(':');
+  const noteKind = resolved.slice(0, colon);
+  const noteId = resolved.slice(colon + 1);
+  return colon !== -1 && noteId && (noteKind === 'footnote' || noteKind === 'endnote') ? { noteId, noteKind } : undefined;
+}
+
+/** A note import writes, by its label. `reached`: only notes refer to it,
+ *  which it goes after the others for (see convertDocx). */
+interface NoteEntry {
+  label: string;
+  body: ContentItem[];
+  noteKind: 'footnote' | 'endnote';
+  reached?: true;
 }
 
 /** The note references in `items`, in table cells too, in order, after `refs` */
@@ -4758,11 +4858,11 @@ function noteImageFormats(mapping: Map<string, string>, part: 'footnotes' | 'end
   return formats;
 }
 
-async function extractFootnotes(zip: JSZip, context?: NoteBodyContext): Promise<Map<string, FootnoteBody>> {
+async function extractFootnotes(zip: JSZip, context?: NoteBodyContext): ReturnType<typeof extractNotes> {
   return extractNotes(zip, 'word/footnotes.xml', 'w:footnote', context);
 }
 
-async function extractEndnotes(zip: JSZip, context?: NoteBodyContext): Promise<Map<string, FootnoteBody>> {
+async function extractEndnotes(zip: JSZip, context?: NoteBodyContext): ReturnType<typeof extractNotes> {
   return extractNotes(zip, 'word/endnotes.xml', 'w:endnote', context);
 }
 
@@ -5351,6 +5451,9 @@ export async function extractDocumentContent(
   let inBibliographyField = false;
   let inNoterefField = false;
   let noterefInfo: { noteId: string; noteKind: 'footnote' | 'endnote' } | undefined;
+  // As in parseNoteBody: the NOTEREF field's number, which the reference
+  // stands for, and which it shows or is hidden and the revisions it's in
+  let noterefNumber: { shown: boolean; hidden: boolean; revisions: (RevisionInfo | undefined)[] } = { shown: false, hidden: false, revisions: [] };
   let fieldInstrParts: string[] = [];
   // The highlight on a citation's or cross-reference's result, which the
   // renderer keeps (see renderHighlightGroup)
@@ -5495,7 +5598,9 @@ export async function extractDocumentContent(
       for (const key of Object.keys(node)) {
         if (key === ':@') { continue; }
 
-        if (key === 'w:fldChar') {
+        if (key === HIDDEN_TEXT) {
+          if (inNoterefField) noterefNumber.hidden = true;
+        } else if (key === 'w:fldChar') {
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
             // A field with no end, whose result's comments end
@@ -5509,6 +5614,7 @@ export async function extractDocumentContent(
             inBibliographyField = false;
             inNoterefField = false;
             noterefInfo = undefined;
+            noterefNumber = { shown: false, hidden: false, revisions: [] };
           } else if (fldType === 'separate') {
             if (inField) {
               const instrText = fieldInstrParts.join('');
@@ -5537,30 +5643,22 @@ export async function extractDocumentContent(
                 // Always suppress display text for NOTEREF fields (even when
                 // the mapping is unavailable) to prevent stray "1" literals.
                 inNoterefField = true;
-                const noterefMatch = (instrText || deletedInstrText).match(/NOTEREF\s+(\S+)/);
-                if (noterefMatch && crossRefMap) {
-                  const bkmkName = noterefMatch[1];
-                  const resolved = crossRefMap.get(bkmkName);
-                  if (resolved) {
-                    const colonIdx = resolved.indexOf(':');
-                    const noteKind = resolved.slice(0, colonIdx);
-                    const noteId = resolved.slice(colonIdx + 1);
-                    if (colonIdx !== -1 && noteId && (noteKind === 'footnote' || noteKind === 'endnote')) {
-                      noterefInfo = { noteId, noteKind };
-                    }
-                  }
-                }
+                noterefInfo = noterefTarget(instrText || deletedInstrText, crossRefMap);
               }
             }
           } else if (fldType === 'end') {
             const shows = fieldShows.shows();
-            if (inNoterefField && noterefInfo && shows) {
+            // Not where Word shows nothing of its number, all hidden, and in
+            // the revision its number is in, where the field's end isn't
+            if (inNoterefField && noterefInfo && shows && (noterefNumber.shown || !noterefNumber.hidden)) {
+              const [first, ...rest] = noterefNumber.revisions;
+              const revision = currentRevision ?? (first && rest.every(other => other && revisionsEqual(other, first)) ? first : undefined);
               target.push({
                 type: 'footnote_ref',
                 noteId: noterefInfo.noteId,
                 noteKind: noterefInfo.noteKind,
                 commentIds: new Set(activeComments),
-                ...(currentRevision ? { revision: currentRevision } : {}),
+                ...(revision ? { revision } : {}),
                 ...highlightOnly(fieldFormatting),
               });
             }
@@ -5691,6 +5789,12 @@ export async function extractDocumentContent(
           }
 
           const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision, currentHref ? { href: currentHref, link: currentLink } : undefined);
+          // A hidden run of a cross-reference's number, which goes unread;
+          // one with a field's characters marks its text (see HIDDEN_TEXT)
+          if (walked.length === 0 && inNoterefField && runChildren.some(child => (child['w:t'] ?? child['w:delText']) !== undefined
+              && nodeText(asXmlNodes(child['w:t'] ?? child['w:delText'])) !== '')) {
+            noterefNumber.hidden = true;
+          }
           fieldShows.run(runChildren, walked);
           walk(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (key === 'w:br') {
@@ -5713,8 +5817,12 @@ export async function extractDocumentContent(
           const text = nodeText(asXmlNodes(node[key]));
           if (text) {
             if (inCitationField || inNoterefField) fieldFormatting ??= currentFormatting;
-            if (inBibliographyField || inNoterefField) {
-              // Skip display text inside ZOTERO_BIBL / NOTEREF fields
+            if (inNoterefField) {
+              // The note's number, which its reference is
+              noterefNumber.shown = true;
+              noterefNumber.revisions.push(currentRevision);
+            } else if (inBibliographyField) {
+              // Skip display text inside ZOTERO_BIBL fields
             } else if (inCitationField) {
               citationTextParts.push(text);
             } else {
@@ -10752,7 +10860,7 @@ function joinSpansAtTrackedBreaks(text: string, marks: TrackedBreakMarks): strin
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   trackedBreakStart = undefined;
@@ -10877,7 +10985,9 @@ export function buildMarkdown(
     }
   }
   // Notes in the order they're written, after the body
-  const noteEntries = [...(options?.notes?.map.values() ?? [])].sort((a, b) => compareNoteLabels(a.label, b.label));
+  // Those only notes refer to after the others, as they reach them
+  const allNotes = [...(options?.notes?.map.values() ?? [])];
+  const noteEntries = [...allNotes.filter(entry => !entry.reached).sort((a, b) => compareNoteLabels(a.label, b.label)), ...allNotes.filter(entry => entry.reached)];
   // Each note's content as it renders, which collectCommentSpans finds the
   // last item of a comment's range in
   // Whether each of a note's code blocks goes as its paragraphs, before
@@ -11136,9 +11246,20 @@ export function buildMarkdown(
   // where Word added or deleted a table before it: the settings of the one
   // export wrote that it is (see matchTables), or, where export wrote no
   // identities, of the one at its index
-  const writtenAt = options?.tableIdentities
-    ? matchTables(options.tableIdentities, tablesRead.map(table => tableIdentityOf(table.rows.map(row => row.cells.map(tableCellText)), table.scope)))
-    : undefined;
+  // The notes' tables go to matchTables in the order export wrote their
+  // notes in, which the identities' scopes give, as Word may show a note in
+  // another turn (see convertDocx), and those of a note export didn't write
+  // after
+  let writtenAt: (number | undefined)[] | undefined;
+  if (options?.tableIdentities) {
+    const firstWritten = new Map<string, number>();
+    options.tableIdentities.forEach(([scope], index) => { if (!firstWritten.has(scope)) firstWritten.set(scope, index); });
+    const turn = (index: number) => tablesRead[index].scope === '' ? -1 : firstWritten.get(tablesRead[index].scope) ?? options.tableIdentities!.length;
+    const order = tablesRead.map((_, index) => index).sort((a, b) => turn(a) - turn(b) || a - b);
+    const matched = matchTables(options.tableIdentities, order.map(index => tableIdentityOf(tablesRead[index].rows.map(row => row.cells.map(tableCellText)), tablesRead[index].scope)));
+    writtenAt = [];
+    order.forEach((index, k) => { writtenAt![index] = matched[k]; });
+  }
   const settingsRead = <T>(settings: Map<string, T> | null | undefined): Map<string, T> | undefined => {
     if (!settings || !writtenAt) return settings ?? undefined;
     const read = new Map<string, T>();
@@ -11398,6 +11519,7 @@ export function buildMarkdown(
   // The last comment bodies written into a quote
   let quotedBodies: { text: string; group?: number; level: number } | undefined;
   const codeBlockLangs = options?.codeBlockLangs;
+  const noteCodeBlockStarts = options?.noteCodeBlockStarts;
   const blockquoteGaps = options?.blockquoteGaps;
   const blockquotePreContentBlankLines = options?.blockquotePreContentBlankLines;
   const blockquotePostContentBlankLines = options?.blockquotePostContentBlankLines;
@@ -12691,9 +12813,15 @@ export function buildMarkdown(
         }
       };
       // The note's code blocks, in order, each in the numbering export gave
-      // it, one that goes as paragraphs too (see demoteNoteCodeBlocks)
+      // it, one that goes as paragraphs too (see demoteNoteCodeBlocks): on
+      // from its first's, where export wrote that by note, whatever turn the
+      // note is written in, and with no language in one export wrote no
+      // code block in, or else on from the notes' before it
       const demoted = noteCodeDemoted.get(entry)!;
       let codeBlock = 0;
+      const noteStart = noteCodeBlockStarts ? noteCodeBlockStarts.get(noteScopes.get(entry) ?? '') : String(codeBlockGroupIndex);
+      if (noteStart !== undefined) codeBlockGroupIndex = Number(noteStart);
+      const languageAt = (index: number) => noteStart === undefined ? '' : codeBlockLangs?.get(String(index)) || '';
       const skipDemoted = () => {
         while (demoted[codeBlock]) { codeBlockGroupIndex++; codeBlock++; }
       };
@@ -12709,7 +12837,7 @@ export function buildMarkdown(
           // goes.
           skipDemoted();
           codeBlock++;
-          const code = codeBlockFence(bodyMerged, bi, codeBlockLangs?.get(String(codeBlockGroupIndex++)) || '');
+          const code = codeBlockFence(bodyMerged, bi, languageAt(codeBlockGroupIndex++));
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text));
@@ -13388,6 +13516,7 @@ export async function convertDocx(
     footnoteIdMapping,
     footnoteCrossRefMapping,
     codeBlockLangMapping,
+    noteCodeBlockStarts,
     threads,
     codeBlockStyling,
     blockquoteGapMapping,
@@ -13453,6 +13582,7 @@ export async function convertDocx(
     footnoteIdMapping: extractFootnoteIdMapping(zip),
     footnoteCrossRefMapping: extractFootnoteCrossRefMapping(zip),
     codeBlockLangMapping: extractCodeBlockLanguageMapping(zip),
+    noteCodeBlockStarts: extractIdMappingFromCustomXml(zip, 'MANUSCRIPT_NOTE_CODE_BLOCKS'),
     threads: extractCommentThreads(zip),
     codeBlockStyling: extractCodeBlockStyling(zip),
     blockquoteGapMapping: extractBlockquoteGapMapping(zip),
@@ -13563,16 +13693,31 @@ export async function convertDocx(
   // relationships are each part's own
   const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
   const imageFolder = options?.imageFolder ?? '';
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined };
 
   const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, numberingStyles, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, hiddenBeforeSections: hiddenBeforeSections ?? undefined, hiddenAfterSections: hiddenAfterSections ?? undefined, templatePageSections: templatePageSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
-  // The notes the document references, in its order, which are the ones it
-  // shows; their images take names after its own, footnotes' first
+  // The notes the document references, in its order
   const refOrder = noteReferences(docContent);
-  const referenced = (kind: 'footnote' | 'endnote') => new Set(refOrder.filter(ref => ref.noteKind === kind).map(ref => ref.noteId));
-  const footnotes = await extractFootnotes(zip, { ...fnContext, referenced: referenced('footnote') });
-  const endnotes = await extractEndnotes(zip, { ...enContext, referenced: referenced('endnote') });
+  const footnoteParts = await extractFootnotes(zip, fnContext);
+  const endnoteParts = await extractEndnotes(zip, enContext);
+  const footnotes = footnoteParts.notes;
+  const endnotes = endnoteParts.notes;
+  // The notes the document shows, which have images: those it references,
+  // and those they reference in turn, in either part, as import read the
+  // references, a hidden one not, and writes the notes (see noteQueue).
+  // Their images take names after its own, footnotes' first.
+  const shown = { footnote: new Set<string>(), endnote: new Set<string>() };
+  const reach = [...refOrder];
+  for (let k = 0; k < reach.length; k++) {
+    const { noteId, noteKind } = reach[k];
+    if (shown[noteKind].has(noteId)) continue;
+    shown[noteKind].add(noteId);
+    const note = (noteKind === 'footnote' ? footnotes : endnotes).get(noteId);
+    if (note) reach.push(...noteReferences(note.content));
+  }
+  footnoteParts.withImages(shown.footnote);
+  endnoteParts.withImages(shown.endnote);
 
   // A task item is a list item, which the code block's spacer goes before
   markTaskListItems(docContent);
@@ -13732,17 +13877,17 @@ export async function convertDocx(
   }
 
   // Build unified notes map with renumbered labels
-  const notesMap = new Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>();
+  const notesMap = new Map<string, NoteEntry>();
   let noteCounter = 1;
 
   const assignedLabels = new Map<string, string>(); // "kind:noteId" -> label
   const usedLabels = new Set<string>();
-  for (const ref of refOrder) {
+  const addNote = (ref: { noteId: string; noteKind: 'footnote' | 'endnote' }, reached: boolean) => {
     const key = ref.noteKind + ':' + ref.noteId;
-    if (assignedLabels.has(key)) continue;
+    if (assignedLabels.has(key)) return;
     const source = ref.noteKind === 'footnote' ? footnotes : endnotes;
     const body = source.get(ref.noteId);
-    if (!body) continue;
+    if (!body) return;
     const mappedLabel = footnoteIdMapping?.get(ref.noteId);
     let label: string;
     if (mappedLabel) {
@@ -13758,7 +13903,22 @@ export async function convertDocx(
     }
     usedLabels.add(label);
     assignedLabels.set(key, label);
-    notesMap.set(key, { label, body: body.content, noteKind: ref.noteKind });
+    notesMap.set(key, { label, body: body.content, noteKind: ref.noteKind, ...(reached ? { reached: true as const } : {}) });
+  };
+  for (const ref of refOrder) addNote(ref, false);
+  // Then the notes only notes refer to, as export writes a note's reference
+  // to one (see noteReferenceXml), which Word itself can't, after the
+  // body's, in the order the notes before reach them, which is the order
+  // export makes them in (see noteQueue)
+  const noteQueue = [...notesMap.values()].sort((a, b) => compareNoteLabels(a.label, b.label));
+  for (let k = 0; k < noteQueue.length; k++) {
+    for (const ref of noteReferences(noteQueue[k].body)) {
+      const key = ref.noteKind + ':' + ref.noteId;
+      if (notesMap.has(key)) continue;
+      addNote(ref, true);
+      const added = notesMap.get(key);
+      if (added) noteQueue.push(added);
+    }
   }
 
   // Detect which note kind is used for the frontmatter notes field.
@@ -13793,6 +13953,7 @@ export async function convertDocx(
     commentIdMapping,
     notes: notesMap.size > 0 ? { map: notesMap, assignedLabels } : undefined,
     codeBlockLangs: codeBlockLangMapping,
+    noteCodeBlockStarts,
     blockquoteGaps: blockquoteGapMapping ?? derivedBlockquoteGaps,
     blockquotePreContentBlankLines: blockquotePreContentBlankLineMapping ?? derivedBlockquotePreContentBlankLines,
     blockquotePostContentBlankLines: blockquotePostContentBlankLineMapping ?? derivedBlockquotePostContentBlankLines,

@@ -6372,6 +6372,36 @@ async function buildSyntheticDocx(documentXml: string, extraParts?: Record<strin
   return zip.generateAsync({ type: 'uint8array' });
 }
 
+/** Export's XML with its first cross-reference's number hidden in one run
+ *  with the field's characters around it, as Word may merge them: the
+ *  separator and the number, the separator, number and end, or the number
+ *  and end */
+function hideNumberInFieldRun(xml: string, parts: 'separate' | 'both' | 'end'): string {
+  const run = (inner: string) => '<w:r>(<w:rPr>(?:(?!</w:rPr>).)*</w:rPr>)' + inner + '</w:r>';
+  const match = new RegExp(run('(<w:fldChar w:fldCharType="separate"/>)') + run('(<w:t>\\d+</w:t>)') + run('(<w:fldChar w:fldCharType="end"/>)')).exec(xml)!;
+  const [whole, rPr, separate, , number, , end] = match;
+  const hidden = '<w:r>' + rPr.replace('<w:rPr>', '<w:rPr><w:vanish/>');
+  const shown = (fldChar: string) => '<w:r>' + rPr + fldChar + '</w:r>';
+  return xml.replace(whole, parts === 'separate' ? hidden + separate + number + '</w:r>' + shown(end)
+    : parts === 'both' ? hidden + separate + number + end + '</w:r>'
+      : shown(separate) + hidden + number + end + '</w:r>');
+}
+
+/** The Markdown of md's export, whose note `id`, the second by default,
+ *  which another refers to, the text refers to by references Word hides:
+ *  its note reference and the number of a cross-reference to it */
+async function withHiddenReferences(md: string, id = '2'): Promise<string> {
+  const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const hide = (run: string) => run.replace('<w:rPr>', '<w:rPr><w:vanish/>');
+  let edited = xml.replace(new RegExp('<w:r><w:rPr>(?:(?!</w:rPr>).)*</w:rPr><w:footnoteReference w:id="' + id + '"/></w:r>'), hide);
+  expect(edited).not.toBe(xml);
+  edited = edited.replace(/(fldCharType="separate"\/><\/w:r>)(<w:r>(?:(?!<\/w:r>).)*<\/w:r>)(?=<w:r>(?:(?!<\/w:r>).)*fldCharType="end")/,
+    (_match, separate: string, number: string) => separate + hide(number));
+  zip.file('word/document.xml', edited);
+  return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+}
+
 function wrapNotesXml(noteType: 'footnotes' | 'endnotes', content: string): string {
   const root = 'w:' + noteType;
   const el = noteType === 'footnotes' ? 'w:footnote' : 'w:endnote';
@@ -7075,6 +7105,118 @@ describe('A comment comments.xml has no body for', () => {
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe(expected);
     expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown)).toBe(markdown);
+  });
+});
+
+describe('Notes that notes refer to', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+
+  test.each([
+    ['in its text', 'T.[^1]\n\n[^1]: A [^2] B.\n\n[^2]: C.\n'],
+    ['at its start', 'T.[^1]\n\n[^1]: [^2] A.\n\n[^2]: B.\n'],
+    ['alone', 'T.[^1]\n\n[^1]: [^2]\n\n[^2]: B.\n'],
+    ['in its second paragraph', 'T.[^1]\n\n[^1]: A.\n\n    [^2] B.\n\n[^2]: C.\n'],
+    ['in an endnote', '---\nnotes: endnotes\n---\n\nT.[^1]\n\n[^1]: [^2] A.\n\n[^2]: B.\n'],
+    ['in a tracked insertion', 'T.[^1]\n\n[^1]: A {++B[^2]++}.\n\n[^2]: C.\n'],
+    ['through another', 'T[^c].\n\n[^c]: C[^b].\n\n[^b]: B[^a].\n\n[^a]: A.\n'],
+    ['twice', 'T.[^1]\n\n[^1]: A[^2] and[^3].\n\n[^2]: B[^3].\n\n[^3]: C.\n'],
+    ['whose label comes first, after the notes the text refers to', 'T[^2].\n\n[^2]: Outer[^1].\n\n[^1]: Inner.\n'],
+    ['that the text refers to too', 'T.[^1][^2]\n\n[^1]: A [^2] B.\n\n[^2]: C.\n'],
+    ['that the text refers to too, with another\'s reference', 'T.[^1] U.[^2]\n\n[^1]: A [^2] B.\n\n[^2]: C[^1].\n'],
+  ])('keeps a note\'s reference to another note %s, and that note', async (_name, md) => {
+    // Import read only the notes the text refers to, and of a note's
+    // reference to another, which export writes as a note's reference in
+    // the note, or a cross-reference to one the text refers to, nothing or
+    // its number
+    expect(await roundTrip(md)).toBe(strip(md));
+  });
+
+  test.each([
+    ['on its number alone', true, true],
+    ['from before it to its number', false, true],
+    ['from its number on', true, false],
+  ])('keeps a comment Word put %s on a note\'s cross-reference to another note', async (_name, startInResult, endInResult) => {
+    // A range that ended in the number, whose text the reference stands
+    // for, ended before the reference, which lost the comment
+    const md = 'T[^1] U[^2]\n\n[^1]: A{==[^2]==}{>>@Ann (2024-02-01 09:00) | note<<} b.\n\n[^2]: B.\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const separate = /<w:r>(?:(?!<\/w:r>).)*<w:fldChar w:fldCharType="separate"\/><\/w:r>/.exec(xml)![0];
+    const end = /<w:r>(?:(?!<\/w:r>).)*<w:fldChar w:fldCharType="end"\/><\/w:r>/.exec(xml)![0];
+    let edited = xml;
+    if (startInResult) edited = edited.replace('<w:commentRangeStart w:id="0"/>', '').replace(separate, separate + '<w:commentRangeStart w:id="0"/>');
+    if (endInResult) edited = edited.replace('<w:commentRangeEnd w:id="0"/>', '').replace(end, '<w:commentRangeEnd w:id="0"/>' + end);
+    expect(edited).toMatch(startInResult ? /separate"\/><\/w:r><w:commentRangeStart/ : /<w:commentRangeStart w:id="0"\/><w:r>(?:(?!<\/w:r>).)*begin/);
+    expect(edited).toMatch(endInResult ? /<w:commentRangeEnd w:id="0"\/><w:r>(?:(?!<\/w:r>).)*end"/ : /end"\/><\/w:r><w:commentRangeEnd/);
+    zip.file('word/footnotes.xml', edited);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(strip(md));
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  /** md's export, with edit applied to its footnotes and, where given, to
+   *  its body, read back */
+  const withEdits = async (md: string, notes: (xml: string, result: string) => string, body?: (xml: string) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    // The cross-reference's number, between its separate and its end
+    const result = /fldCharType="separate"\/><\/w:r>(<w:r>(?:(?!<\/w:r>).)*<\/w:r>)<w:r>(?:(?!<\/w:r>).)*fldCharType="end"/.exec(xml)![1];
+    const edited = notes(xml, result);
+    expect(edited).not.toBe(xml);
+    zip.file('word/footnotes.xml', edited);
+    if (body) {
+      const doc = await zip.file('word/document.xml')!.async('string');
+      expect(body(doc)).not.toBe(doc);
+      zip.file('word/document.xml', body(doc));
+    }
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  test('leaves out a note\'s cross-reference whose number is hidden, and the note only it shows', async () => {
+    // The field showed, as its begin wasn't hidden, though Word shows
+    // nothing of it, and so did the note
+    const md = 'T[^1] U[^2]\n\n[^1]: A[^2] b.\n\n[^2]: B.\n';
+    const hide = (run: string) => run.replace(/<w:rPr>/, '<w:rPr><w:vanish/>');
+    const markdown = await withEdits(md, (xml, result) => xml.replace(result, hide(result)),
+      (doc) => doc.replace(/<w:r>(<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)<w:footnoteReference w:id="2"\/><\/w:r>/, (run) => hide(run)));
+    expect(markdown).toBe('T[^1] U\n\n[^1]: A b.\n');
+  });
+
+  test.each([
+    ['the separator', 'separate'],
+    ['the separator and the end', 'both'],
+    ['the end', 'end'],
+  ] as const)('leaves out a note\'s cross-reference whose number is hidden in one run with %s, and the note only it shows', async (_name, parts) => {
+    // Where the separator was in the number's run, the walk read the
+    // number before it knew the field was a cross-reference
+    const md = 'T[^1] U[^2]\n\n[^1]: A[^2] b.\n\n[^2]: B.\n';
+    const hide = (run: string) => run.replace(/<w:rPr>/, '<w:rPr><w:vanish/>');
+    const markdown = await withEdits(md, xml => hideNumberInFieldRun(xml, parts),
+      (doc) => doc.replace(/<w:r>(<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)<w:footnoteReference w:id="2"\/><\/w:r>/, (run) => hide(run)));
+    expect(markdown).toBe('T[^1] U\n\n[^1]: A b.\n');
+  });
+
+  test.each([
+    ['an insertion', 'ins', 'A{++[^2]++} b.'],
+    ['a deletion', 'del', 'A{--[^2]--} b.'],
+  ])('keeps %s Word tracked on a note\'s cross-reference\'s number alone', async (_name, type, expected) => {
+    // The field's end, outside the change, took no revision, so the
+    // reference lost it
+    const md = 'T[^1] U[^2]\n\n[^1]: A[^2] b.\n\n[^2]: B.\n';
+    const markdown = await withEdits(md, (xml, result) => xml.replace(result, '<w:' + type + ' w:id="90" w:author="Ann" w:date="2024-02-01T09:00:00Z">'
+      + (type === 'del' ? result.replace(/<w:t>/g, '<w:delText>').replace(/<\/w:t>/g, '</w:delText>') : result) + '</w:' + type + '>'));
+    expect(markdown).toBe('T[^1] U[^2]\n\n[^1]: ' + expected + '\n\n[^2]: B.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a note\'s cross-reference whose number Word updated with tracking on as it was', async () => {
+    // The old number deleted and the new one inserted are the same reference
+    const md = 'T[^1] U[^2]\n\n[^1]: A[^2] b.\n\n[^2]: B.\n';
+    const markdown = await withEdits(md, (xml, result) => xml.replace(result,
+      '<w:del w:id="90" w:author="Ann" w:date="2024-02-01T09:00:00Z">' + result.replace('<w:t>2</w:t>', '<w:delText>3</w:delText>') + '</w:del>'
+      + '<w:ins w:id="91" w:author="Ann" w:date="2024-02-01T09:00:00Z">' + result + '</w:ins>'));
+    expect(markdown).toBe(strip(md));
   });
 });
 
@@ -10550,12 +10692,25 @@ describe('Table alignment', () => {
     expect((await roundTrip(front + md)).replace(/^\n/, '')).toBe(md);
   });
 
-  test('keeps the table settings of a note after one only another note refers to', async () => {
-    // Export made that one in its label's turn, which import, which writes
-    // only the notes the text refers to, doesn't read, so the next note
-    // read its table's settings
+  test('keeps the table settings of a note only another note refers to, and of the notes after it', async () => {
+    // Export made that one in its label's turn, which import, which wrote
+    // only the notes the text refers to, didn't read, so the next note read
+    // its table's settings. Import writes it after the others, which is
+    // where export makes it.
     const md = 'T[^a] and[^c].\n\n[^a]: A[^b].\n\n' + tableNote('b', 7, 'y', 'B.') + '\n' + tableNote('c', 12, 'z', 'C.');
-    expect(await roundTrip(md)).toBe('T[^a] and[^c].\n\n[^a]: A.\n\n' + tableNote('c', 12, 'z', 'C.'));
+    expect(await roundTrip(md)).toBe('T[^a] and[^c].\n\n[^a]: A[^b].\n\n' + tableNote('c', 12, 'z', 'C.') + '\n' + tableNote('b', 7, 'y', 'B.'));
+  });
+
+  test.each([
+    ['its reference', 'T[^a] U[^b] and[^c].', 'T[^a] U and[^c].'],
+    ['its reference and a cross-reference to it', 'T[^a] U[^b] V[^b] and[^c].', 'T[^a] U V and[^c].'],
+  ])('keeps the table settings of a note the text refers to by %s, which Word hides, and of the notes after it', async (_name, text, shown) => {
+    // Import writes that one after the others, where export made it in its
+    // label's turn, so its table, out of the order export wrote the tables
+    // in, matched none and lost its settings
+    const markdown = await withHiddenReferences(text + '\n\n[^a]: A[^b].\n\n' + tableNote('b', 7, 'y', 'B.') + '\n' + tableNote('c', 12, 'z', 'C.'));
+    expect(markdown).toBe(shown + '\n\n[^a]: A[^b].\n\n' + tableNote('c', 12, 'z', 'C.') + '\n' + tableNote('b', 7, 'y', 'B.'));
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test('keeps a padded pipe table without a closing pipe padded', async () => {
@@ -11418,6 +11573,60 @@ describe('DOCX footnote cross-reference import', () => {
     // The display text "1" should NOT appear — it's from the unresolved NOTEREF field
     expect(result.markdown.trim()).toBe('Before after');
   });
+
+  describe('A cross-reference whose number Word changed', () => {
+    const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+    const md = 'T[^1] U[^1] V.\n\n[^1]: N.\n';
+    /** md's export, with `edit` applied to its cross-reference's number, read back */
+    const withNumber = async (edit: (run: string) => string) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      // The number, between the field's separate and its end
+      const number = /fldCharType="separate"\/><\/w:r>(<w:r>(?:(?!<\/w:r>).)*<\/w:r>)<w:r>(?:(?!<\/w:r>).)*fldCharType="end"/.exec(xml)![1];
+      expect(edit(number)).not.toBe(number);
+      zip.file('word/document.xml', xml.replace(number, edit(number)));
+      return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    };
+
+    test('leaves out a cross-reference whose number is hidden', async () => {
+      // The field showed, as its begin wasn't hidden, though Word shows
+      // nothing of it
+      expect(await withNumber(run => run.replace('<w:rPr>', '<w:rPr><w:vanish/>'))).toBe('T[^1] U V.\n\n[^1]: N.\n');
+    });
+
+    test.each([
+      ['the separator', 'separate'],
+      ['the separator and the end', 'both'],
+      ['the end', 'end'],
+    ] as const)('leaves out a cross-reference whose number is hidden in one run with %s', async (_name, parts) => {
+      // Where the separator was in the number's run, the walk read the
+      // number before it knew the field was a cross-reference
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', hideNumberInFieldRun(xml, parts));
+      expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('T[^1] U V.\n\n[^1]: N.\n');
+    });
+
+    test.each([
+      ['an insertion', 'ins', 'T[^1] U{++[^1]++} V.\n\n[^1]: N.\n'],
+      ['a deletion', 'del', 'T[^1] U{--[^1]--} V.\n\n[^1]: N.\n'],
+    ])('keeps %s Word tracked on a cross-reference\'s number alone', async (_name, type, expected) => {
+      // The field's end, outside the change, took no revision, so the
+      // reference lost it
+      const markdown = await withNumber(run => '<w:' + type + ' w:id="90" w:author="Ann" w:date="2024-02-01T09:00:00Z">'
+        + (type === 'del' ? run.replace(/<w:t>/g, '<w:delText>').replace(/<\/w:t>/g, '</w:delText>') : run) + '</w:' + type + '>');
+      expect(markdown).toBe(expected);
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
+
+    test('keeps a cross-reference whose number Word updated with tracking on as it was', async () => {
+      // The old number deleted and the new one inserted are the same reference
+      expect(await withNumber(run => '<w:del w:id="90" w:author="Ann" w:date="2024-02-01T09:00:00Z">'
+        + run.replace('<w:t>1</w:t>', '<w:delText>2</w:delText>') + '</w:del>'
+        + '<w:ins w:id="91" w:author="Ann" w:date="2024-02-01T09:00:00Z">' + run + '</w:ins>')).toBe(md);
+    });
+  });
 });
 
 describe('parseBlockquoteLevel', () => {
@@ -12199,13 +12408,89 @@ describe('Code block round-trip', () => {
       .toBe(text + note('a', 'js') + '\n' + note('b', 'py'));
   });
 
-  test('numbers code blocks in notes after one only another note refers to', async () => {
+  test('numbers code blocks in a note only another note refers to, and in the notes after it', async () => {
     // Export numbered that one's in its label's turn, but import, which
-    // writes only the notes the text refers to, doesn't read it
+    // wrote only the notes the text refers to, didn't read it. Import writes
+    // it after the others, which is where export makes it.
     const note = (label: string, lang: string, text = 'Note.') => '[^' + label + ']: ' + text + '\n\n    ```' + lang + '\n    x\n    ```\n';
     const md = 'T[^a] and[^c].\n\n' + note('a', 'python', 'A[^b].') + '\n' + note('b', 'js') + '\n' + note('c', 'r');
     expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown))
-      .toBe('T[^a] and[^c].\n\n' + note('a', 'python', 'A.') + '\n' + note('c', 'r'));
+      .toBe('T[^a] and[^c].\n\n' + note('a', 'python', 'A[^b].') + '\n' + note('c', 'r') + '\n' + note('b', 'js'));
+  });
+
+  test.each([
+    ['its reference', 'T[^a] U[^b] and[^c].', 'T[^a] U and[^c].'],
+    ['its reference and a cross-reference to it', 'T[^a] U[^b] V[^b] and[^c].', 'T[^a] U V and[^c].'],
+  ])('keeps the languages of code blocks in a note the text refers to by %s, which Word hides, and in the notes after it', async (_name, text, shown) => {
+    // Export numbered that one's in its label's turn, but import, which
+    // reads it as one only another note refers to, writes it after the
+    // others, which took each other's languages
+    const note = (label: string, lang: string, body = 'Note.') => '[^' + label + ']: ' + body + '\n\n    ```' + lang + '\n    x\n    ```\n';
+    const notes = (...labels: string[]) => labels.map(label => label === 'a' ? note('a', 'python', 'A[^b].') : note(label, label === 'b' ? 'js' : 'r')).join('\n');
+    const markdown = await withHiddenReferences(text + '\n\n' + notes('a', 'b', 'c'));
+    expect(markdown).toBe(shown + '\n\n' + notes('a', 'c', 'b'));
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown)).toBe(markdown);
+  });
+
+  test('keeps the languages of code blocks in a note the text refers to first by a reference Word hides, and in a note whose label has the same number', async () => {
+    // Export made 1a before 1b, as the text refers to it first, and import,
+    // which found 1a through note 2, writes it after
+    const note = (label: string, lang: string) => '[^' + label + ']: Note.\n\n    ```' + lang + '\n    x\n    ```\n';
+    const markdown = await withHiddenReferences('T[^1a] U[^1b] V[^2].\n\n' + note('1a', 'js') + '\n' + note('1b', 'python') + '\n[^2]: See[^1a].\n', '1');
+    expect(markdown).toBe('T U[^1b] V[^2].\n\n' + note('1b', 'python') + '\n[^2]: See[^1a].\n\n' + note('1a', 'js'));
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown)).toBe(markdown);
+  });
+
+  test('keeps the languages of code blocks in the notes after one Word hides every reference to', async () => {
+    // Import writes no note there, whose code block export numbered, so the
+    // notes after it took the languages of the ones before them
+    const note = (label: string, lang: string) => '[^' + label + ']: Note.\n\n    ```' + lang + '\n    x\n    ```\n';
+    const markdown = await withHiddenReferences('T[^a] U[^b] and[^c].\n\n' + note('a', 'python') + '\n' + note('b', 'js') + '\n' + note('c', 'r'));
+    expect(markdown).toBe('T[^a] U and[^c].\n\n' + note('a', 'python') + '\n' + note('c', 'r'));
+  });
+
+  test('gives no language to a code block Word added to a note, and keeps the next note\'s', async () => {
+    // The added one took the language of the next note's, which took none
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T[^a] and[^b].\n\n[^a]: A.\n\n[^b]: B.\n\n    ```js\n    x\n    ```\n')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const edited = xml.replace(/(<w:footnote w:id="1">[\s\S]*?)<\/w:footnote>/, (_match, note: string) => note
+      + '<w:p><w:pPr><w:pStyle w:val="CodeBlock"/></w:pPr><w:r><w:t>y</w:t></w:r></w:p></w:footnote>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/footnotes.xml', edited);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown))
+      .toBe('T[^a] and[^b].\n\n[^a]: A.\n\n    ```\n    y\n    ```\n\n[^b]: B.\n\n    ```js\n    x\n    ```\n');
+  });
+
+  test('numbers code blocks in notes on from the body\'s where export wrote no note\'s first, as it did before', async () => {
+    const md = '```r\nx\n```\n\nText[^a] and[^b].\n\n[^a]: Note.\n\n    ```js\n    x\n    ```\n\n[^b]: Note.\n\n    ```py\n    x\n    ```\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const custom = await zip.file('docProps/custom.xml')!.async('string');
+    const older = custom.replace(/<property [^>]*name="MANUSCRIPT_NOTE_CODE_BLOCKS_\d+">[\s\S]*?<\/property>/g, '');
+    expect(older).not.toBe(custom);
+    zip.file('docProps/custom.xml', older);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
+  test('keeps the languages of code blocks in a note only another note refers to, where Word added a hidden cross-reference to it', async () => {
+    // A hidden reference, which Word shows nothing of, is none, so the
+    // note goes after the others as before, with its own language
+    const note = (label: string, lang: string, body = 'Note.') => '[^' + label + ']: ' + body + '\n\n    ```' + lang + '\n    x\n    ```\n';
+    const md = 'T[^a] V[^a] and[^c].\n\n' + note('a', 'python', 'A[^b].') + '\n' + note('b', 'js') + '\n' + note('c', 'r');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    // Note b is the third, which the text doesn't refer to
+    const custom = await zip.file('docProps/custom.xml')!.async('string');
+    const mapped = custom.replace('"_Ref100000001":"footnote:1"', '"_Ref100000001":"footnote:1","_Ref100000003":"footnote:3"');
+    expect(mapped).not.toBe(custom);
+    zip.file('docProps/custom.xml', mapped);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const hidden = (inner: string) => '<w:r><w:rPr><w:vanish/></w:rPr>' + inner + '</w:r>';
+    const field = hidden('<w:fldChar w:fldCharType="begin"/>') + hidden('<w:instrText xml:space="preserve"> NOTEREF _Ref100000003 \\f \\h </w:instrText>')
+      + hidden('<w:fldChar w:fldCharType="separate"/>') + hidden('<w:t>3</w:t>') + hidden('<w:fldChar w:fldCharType="end"/>');
+    const edited = xml.replace('<w:t xml:space="preserve"> and</w:t></w:r>', '<w:t xml:space="preserve"> and</w:t></w:r>' + field);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown))
+      .toBe('T[^a] V[^a] and[^c].\n\n' + note('a', 'python', 'A[^b].') + '\n' + note('c', 'r') + '\n' + note('b', 'js'));
   });
 
   test.each([
@@ -14833,6 +15118,7 @@ describe('round-trip regression: image path preservation', () => {
     ['a note\'s table', 'Text.[^1]\n\n[^1]: Note.\n\n    | a |\n    | --- |\n    | ![x](image.png){width=100 height=100} |'],
     ['a note, as HTML, after an image in Markdown', '![y](image.png){width=100 height=100}\n\nText.[^1]\n\n[^1]: <img src="image.png" alt="x" width="100" height="100">'],
     ['a note, in Markdown, after an image as HTML', '<img src="image.png" alt="y" width="100" height="100">\n\nText.[^1]\n\n[^1]: ![x](image.png){width=100 height=100}'],
+    ['a note only another note refers to', 'Text.[^1]\n\n[^1]: A[^2].\n\n[^2]: ![x](image.png){width=100 height=100}'],
   ])('keeps an image in %s', async (_name, md) => {
     // Import read no images in notes, and gave a note's image the format
     // of the document's image with its relationship ID
@@ -14845,6 +15131,87 @@ describe('round-trip regression: image path preservation', () => {
       const result = await convertDocx(docx);
       expect(result.markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(md.replace(/^---\n[\s\S]*?\n---\n\n/, '') + '\n');
       expect([...(result.images?.keys() ?? [])]).toEqual(['image.png']);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  /** The run of the reference to note `id` in the document hidden */
+  const hideReference = (xml: string, kind: 'Footnote' | 'Endnote', id: string) => {
+    const tag = '<w:' + kind.toLowerCase() + 'Reference w:id="' + id + '"/>';
+    const hidden = xml.replace('<w:rStyle w:val="' + kind + 'Reference"/></w:rPr>' + tag, '<w:rStyle w:val="' + kind + 'Reference"/><w:vanish/></w:rPr>' + tag);
+    expect(hidden).not.toBe(xml);
+    return hidden;
+  };
+  /** A footnotes part of note 1 of `endnotes`, which goes from them */
+  const endnoteAsFootnote = (endnotes: string) => {
+    const note = /<w:endnote w:id="1">.*?<\/w:endnote>/.exec(endnotes)![0];
+    const footnote = note.replace('<w:endnote ', '<w:footnote ').replace('</w:endnote>', '</w:footnote>').replace('<w:endnoteRef/>', '<w:footnoteRef/>').replace('EndnoteText', 'FootnoteText');
+    return {
+      endnotes: endnotes.replace(note, ''),
+      footnotes: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:footnotes ' + /<w:endnotes ([^>]*)>/.exec(endnotes)![1] + '>'
+        + '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+        + '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' + footnote + '</w:footnotes>',
+    };
+  };
+
+  test.each([
+    ['a cross-reference whose instruction Word split', 'T.[^1][^2]\n\n[^1]: A [^2] B.\n\n[^2]: ![x](image.png){width=100 height=100}\n', async (zip: JSZip) => {
+      const xml = await zip.file('word/footnotes.xml')!.async('string');
+      const split = xml.replace(/(<w:r>(<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)<w:instrText xml:space="preserve">) NOTEREF (_Ref\d+ [^<]*)<\/w:instrText><\/w:r>/,
+        '$1 NOTE</w:instrText></w:r><w:r>$2<w:instrText xml:space="preserve">REF $3</w:instrText></w:r>');
+      expect(split).not.toBe(xml);
+      zip.file('word/footnotes.xml', split);
+    }, 'T.[^1]\n\n[^1]: A [^2] B.\n\n[^2]: ![x](image.png){width=100 height=100}\n'],
+    ['a deleted cross-reference', 'T.[^1][^2]\n\n[^1]: A {--[^2]--} B.\n\n[^2]: ![x](image.png){width=100 height=100}\n', async () => {},
+      'T.[^1]\n\n[^1]: A {--[^2]--} B.\n\n[^2]: ![x](image.png){width=100 height=100}\n'],
+    ['a footnote\'s cross-reference to an endnote', '---\nnotes: endnotes\n---\n\nT.[^1] U.[^2]\n\n[^1]: A [^2] B.\n\n[^2]: ![x](image.png){width=100 height=100}\n', async (zip: JSZip) => {
+      const parts = endnoteAsFootnote(await zip.file('word/endnotes.xml')!.async('string'));
+      zip.file('word/endnotes.xml', parts.endnotes);
+      zip.file('word/footnotes.xml', parts.footnotes);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace('<w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteReference w:id="1"/>', '<w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/>'));
+    }, 'T.[^1] U.\n\n[^1]: A [^2] B.\n\n[^2]: ![x](image.png){width=100 height=100}\n'],
+  ] as [string, string, (zip: JSZip) => Promise<void>, string][])('keeps the image of a note only %s shows', async (_name, md, edit, expected) => {
+    // Import read which notes have images from the notes' XML apart from
+    // the notes it read: an instruction in one run, of a field not deleted,
+    // to a note of the same part, whose image it left out
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-note-ref-img-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+    try {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { sourceDir: tmpDir })).docx);
+      const kind = md.includes('notes: endnotes') ? 'Endnote' : 'Footnote';
+      zip.file('word/document.xml', hideReference(await zip.file('word/document.xml')!.async('string'), kind, '2'));
+      await edit(zip);
+      const result = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+      expect(result.markdown).toBe(expected);
+      expect([...(result.images?.keys() ?? [])]).toEqual(['image.png']);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('leaves out the image of a note only a hidden cross-reference refers to', async () => {
+    // Import gave it an image, which took the name of the image another
+    // note shows, as photo.png, and that one photo-2.png
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-hidden-ref-img-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(join(tmpDir, 'a'), { recursive: true });
+    mkdirSync(join(tmpDir, 'b'), { recursive: true });
+    writeFileSync(join(tmpDir, 'a', 'x.png'), TINY_PNG);
+    writeFileSync(join(tmpDir, 'b', 'x.png'), Buffer.concat([TINY_PNG, Buffer.from('X')]));
+    try {
+      const md = 'T.[^1][^2] U.[^3]\n\n[^1]: A [^2] B.\n\n[^2]: ![a](a/x.png){width=100 height=100}\n\n[^3]: ![b](b/x.png){width=100 height=100}\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { sourceDir: tmpDir })).docx);
+      zip.file('word/document.xml', hideReference(await zip.file('word/document.xml')!.async('string'), 'Footnote', '2'));
+      const xml = (await zip.file('word/footnotes.xml')!.async('string')).replace(/ name="[ab]\/x\.png"/g, ' name="photo.png"');
+      const field = /<w:r><w:rPr><w:rStyle w:val="FootnoteReference"\/><\/w:rPr><w:fldChar w:fldCharType="begin"\/>.*?<w:fldChar w:fldCharType="end"\/><\/w:r>/.exec(xml)![0];
+      zip.file('word/footnotes.xml', xml.replace(field, field.replaceAll('<w:rStyle w:val="FootnoteReference"/></w:rPr>', '<w:rStyle w:val="FootnoteReference"/><w:vanish/></w:rPr>')));
+      const result = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+      expect(result.markdown).toBe('T.[^1] U.[^2]\n\n[^1]: A  B.\n\n[^2]: ![b](photo.png){width=100 height=100}\n');
+      expect([...(result.images?.entries() ?? [])].map(([name, bytes]) => [name, bytes.length])).toEqual([['photo.png', TINY_PNG.length + 1]]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
