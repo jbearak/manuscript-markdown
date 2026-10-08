@@ -4709,7 +4709,6 @@ export function imageAltMarkdown(alt: string, after = IMAGE_ALT_AFTER): string {
   });
 }
 
-/** The Markdown of an image export couldn't embed, without its closing ZWSP */
 /** An image's Markdown: its own, as an embed wrote it, an <img> tag where
  *  it came from one, or else ![alt](src) with its size, as export reads it
  *  there (see syntaxText), in a link of its own where it's a link's, its
@@ -4756,6 +4755,7 @@ function imageLabelMarkdown(item: ContentItem & { type: 'image' }, after?: RunsA
   return readsMarkdown ? imageAltMarkdown(item.alt, after?.linkTo(item.src)) : item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
 }
 
+/** The Markdown of an image export couldn't embed, without its closing ZWSP */
 function unembeddedImageMarkdown(markdown: string): string {
   return markdown.endsWith('\u200B') ? markdown.slice(0, -1) : markdown;
 }
