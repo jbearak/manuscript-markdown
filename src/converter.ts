@@ -16,7 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
+import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, exportReads, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -5040,16 +5040,83 @@ function trailingBreakOf(before: string, piece: string, after: string): Trailing
  *  its line's start go without the whitespace outside them too, which the
  *  cell would show after the break, as a pipe table's <br> or a grid
  *  table's line holds it. The break is kept apart from `out`, as reading
- *  the end of `out` would take time in its length for each comment */
-function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, opts: InlineRangeOpts | undefined, comment: string, rest: () => { line: string; raw: string; payloads: string[]; last: number }, block = comment): [string, number] {
+ *  the end of `out` would take time in its length for each comment.
+ *
+ *  Where a paragraph takes the forms buildMarkdown reads back (`opts`'s
+ *  `forms`), comments its line can't hold that are all the paragraph holds
+ *  after the break, but for spaces and tabs (`blocks`, see commentBlocks),
+ *  go in HTML blocks of their own after it, which keep them hidden. The
+ *  blocks end the paragraph, whose break is then at its end, as <br>, as
+ *  at any paragraph's end, where a \ would be text, and each starts after
+ *  a blank line. The index of the last item they hold is returned, and
+ *  true */
+function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, opts: InlineRangeOpts | undefined, comment: string, rest: () => { line: string; raw: string; payloads: string[]; last: number }, block = comment,
+  blocks?: () => { text: string; through: number } | undefined): [string, number, boolean?] {
   if (!trailing || trailing.after !== out) return [out + comment, -1];
   const { line, raw, payloads, last } = rest();
   if (opts?.cell) return [out + payloads[0], last];
   // The spaces and tabs the line starts with, which go as references,
   // after which no block starts (see lineStartsAfterBreaks)
   if (/^[ \t]/.test(raw) && lineStartsAfterBreaks('x\\\n' + raw).includes(3)) return [out + comment, -1];
-  return readsCommentsInline((opts?.heading ? '# ' : '') + 'x<br>' + line, payloads, false, opts?.heading) && !/\S/.test(outsideComments(payloads.join('')))
-    ? [trailing.before + '<br>' + payloads[0], last] : [out + block, -1];
+  if (readsCommentsInline((opts?.heading ? '# ' : '') + 'x<br>' + line, payloads, false, opts?.heading) && !/\S/.test(outsideComments(payloads.join('')))) {
+    return [trailing.before + '<br>' + payloads[0], last];
+  }
+  const forms = opts?.forms;
+  const held = forms && blocks?.();
+  if (!forms || !held) return [out + block, -1];
+  forms.used = true;
+  return [trailing.before + '<br>\n\n' + held.text, held.through, true];
+}
+
+/** The hidden comments of segment[from] to `end`, the end of its
+ *  paragraph, as HTML blocks of their own write them (see
+ *  breakBeforeComment): each as markdownComment ends it, after a blank
+ *  line, as a block ends at its first line with a -->, without the
+ *  whitespace around them, which Word hides, and which, four spaces or a
+ *  tab, would keep the first on the paragraph's line, with the index of
+ *  the last item they hold. None where anything but comments in no Word
+ *  comment's range and spaces and tabs goes from `from` on, nor where
+ *  their runs hold anything but whitespace outside them, or a comment with
+ *  no end there, or an empty one, <!--> or <!--->, whose --> a block may
+ *  end at */
+function commentBlocks(segment: ContentItem[], from: number, end: number): { text: string; through: number } | undefined {
+  if (!isMarkdownBlockEdge(segment[end])) return undefined;
+  const blocks: string[] = [];
+  for (let k = from; k < end; k++) {
+    const item = segment[k];
+    if (isBlankText(item)) continue;
+    if (item.type !== 'html_comment' || item.commentIds.size > 0) return undefined;
+    const text = markdownComment(item.text, segment[k + 1]?.type === 'html_comment');
+    let at = 0;
+    for (let open = text.indexOf('<!--'); open !== -1; open = text.indexOf('<!--', at)) {
+      const close = text.indexOf('-->', open + 4);
+      if (/\S/.test(text.slice(at, open)) || /^-?>/.test(text.slice(open + 4, open + 6)) || close === -1) return undefined;
+      at = close + 3;
+      blocks.push(text.slice(open, at));
+    }
+    if (/\S/.test(text.slice(at))) return undefined;
+  }
+  return blocks.length > 0 ? { text: blocks.join('\n\n'), through: end - 1 } : undefined;
+}
+
+/** Whether export reads `markdown`, a paragraph's alone, as buildMarkdown
+ *  writes it, as Word has `items`, its text and hidden comments (see
+ *  plainParagraphs): as paragraphs, with each comment hidden, as
+ *  markdownComment ends it, and none taken as a directive, and the text
+ *  all shown, in order, and nothing more, as no \ of a line break. Not
+ *  where a comment ends in --->, which inline Markdown reads on to the next
+ *  -->, as reading many of those would take time in the square of their
+ *  number */
+function readsAsWord(markdown: string, items: ContentItem[]): boolean {
+  if (markdown.includes('--->')) return false;
+  let hidden = '';
+  let shown = '';
+  items.forEach((item, k) => {
+    if (item.type === 'html_comment') hidden += markdownComment(item.text, items[k + 1]?.type === 'html_comment');
+    else if (item.type === 'text') shown += item.text.replace(/\\\n/g, '');
+  });
+  const read = exportReads(markdown);
+  return !!read && read.hidden === hidden.replace(/\s+/g, '') && read.shown === shown.replace(/\s+/g, '') + 'z';
 }
 
 /** `text`, which holds `payloads`, the Markdown of its hidden comments'
@@ -9373,6 +9440,9 @@ type InlineRangeOpts = {
   // The indent of a list item's text, which a line of a hidden comment in
   // it takes (see keepCommentInParagraph)
   listLinePrefix?: string;
+  // Where the paragraph may take the forms buildMarkdown reads back (see
+  // breakBeforeComment), whether it took one
+  forms?: { used: boolean };
 };
 
 /** A segment's runs from the start of a paragraph to `end` as text, by
@@ -9927,9 +9997,12 @@ function renderInlineRange(
         // As it is in a table's cell, where no line of it starts a block
         const inParagraph = opts?.cell ? comment : keepCommentInParagraph(comment, lineBeforeComment(segment, i), opts?.listLinePrefix);
         let last: number;
-        [out, last] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
-          () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment);
-        inlineThrough = Math.max(inlineThrough, last);
+        let held: boolean | undefined;
+        [out, last, held] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
+          () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment, () => commentBlocks(segment, i, segmentEnd));
+        // The blocks hold the rest of the paragraph
+        if (held) i = last;
+        else inlineThrough = Math.max(inlineThrough, last);
       }
       if (item.commentIds.size > 0) {
         for (const cid of [...item.commentIds].sort()) {
@@ -10298,9 +10371,12 @@ function renderInlineRangeWithIds(
         const before = lineBeforeComment(segment, i);
         const inParagraph = opts?.cell ? comment : keepCommentInParagraph(comment, before === undefined ? undefined : before + markers, opts?.listLinePrefix);
         let last: number;
-        [out, last] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
-          () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment);
-        inlineThrough = Math.max(inlineThrough, last);
+        let held: boolean | undefined;
+        [out, last, held] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
+          () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment, () => commentBlocks(segment, i, segmentEnd));
+        // The blocks hold the rest of the paragraph
+        if (held) i = last;
+        else inlineThrough = Math.max(inlineThrough, last);
       }
       i++;
       continue;
@@ -12170,9 +12246,15 @@ function paragraphHasContent(content: ContentItem[], paraIndex: number): boolean
  * equation or image, or whose paragraph marks, or the one before it, are
  * tracked, which a tracked break joins to the paragraph before it. The
  * paragraphs read as text for comments' ranges and tracked breaks then.
+ * Read once for each note's body, which it changes, as buildMarkdown may
+ * write the notes twice (see buildMarkdown).
  */
+const demotedNoteCodeBlocks = new WeakMap<ContentItem[], boolean[]>();
 function demoteNoteCodeBlocks(body: ContentItem[]): boolean[] {
+  const read = demotedNoteCodeBlocks.get(body);
+  if (read) return read;
   const demoted: boolean[] = [];
+  demotedNoteCodeBlocks.set(body, demoted);
   for (let i = 0; i < body.length; i++) {
     const item = body[i];
     if (item.type !== 'para' || !item.isCodeBlock) continue;
@@ -13572,10 +13654,69 @@ function popLeast(heap: number[]): number {
   return least;
 }
 
-export function buildMarkdown(
+/** The number of block edges before each item of `content`, and its end,
+ *  which keys its paragraph (see plainParagraphs) */
+function edgesBefore(content: ContentItem[]): Int32Array {
+  const edges = new Int32Array(content.length + 1);
+  for (let k = 0; k < content.length; k++) edges[k + 1] = edges[k] + (isMarkdownBlockEdge(content[k]) ? 1 : 0);
+  return edges;
+}
+
+/** The paragraphs of `content` that may take forms main doesn't write,
+ *  which buildMarkdown reads back, by the block edges before their items
+ *  (see edgesBefore): a plain paragraph's, in the body, and not a
+ *  heading's, a title's, a list's, a quote's, an alert's or code's, nor
+ *  one in a custom style's block, before display math in its paragraph, or
+ *  with a tracked paragraph mark or indent of its own, whose items are
+ *  text in no formatting but bold and italic, and hidden comments, none in
+ *  a Word comment's range, a tracked change or a link, so that export
+ *  reads it alone as it does in the document */
+function plainParagraphs(content: ContentItem[]): Set<number> {
+  const plain = new Set<number>();
+  let edges = 0;
+  let styled = 0;
+  // A plain first paragraph has no para item before it
+  let ok = true;
+  for (let k = 0; k <= content.length; k++) {
+    const item = content[k];
+    if (!isMarkdownBlockEdge(item)) {
+      ok &&= item.type === 'html_comment' ? item.commentIds.size === 0 : isPlainText(item);
+      continue;
+    }
+    if (ok && item?.type !== 'math') plain.add(edges);
+    edges++;
+    if (item?.type === 'custom_style_open') styled++;
+    if (item?.type === 'custom_style_close') styled--;
+    ok = item?.type === 'para' && styled === 0 && !item.headingLevel && !item.isTitle && !item.listMeta && !item.listContinuation
+      && !item.itemContinuation && !item.blockquoteLevel && !item.alertType && !item.isCodeBlock && item.taskLevel === undefined
+      && item.unnumberedListLevel === undefined && !item.generatedListContinuation && !item.horizontalRule && !item.customStyleName
+      && !item.indentOverride && !item.paraMarkRevision && !item.breakRevision;
+  }
+  return plain;
+}
+
+/** The Markdown of a document's content, its body and notes, as import
+ *  writes it. Each paragraph that takes a form main doesn't write (see
+ *  plainParagraphs) is read back alone as export reads it, and where it
+ *  doesn't read as Word has it, the content is written again with that
+ *  paragraph as main writes it, so each paragraph is written twice at most
+ *  and read once */
+export function buildMarkdown(content: ContentItem[], comments: Map<string, Comment>, options?: Parameters<typeof buildMarkdownOnce>[2]): string {
+  const fallback = new Set<number>();
+  const markdown = buildMarkdownOnce(content, comments, options, fallback, true);
+  return fallback.size === 0 ? markdown : buildMarkdownOnce(content, comments, options, fallback, false);
+}
+
+/** buildMarkdown's Markdown, with the paragraphs keyed in `fallback` (see
+ *  plainParagraphs) as main writes them, and, where `check`, the keys of
+ *  those that took another form export doesn't read back as Word has them
+ *  added to it */
+function buildMarkdownOnce(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableSizeHp?: number; tableFontName?: string; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
+  options: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableSizeHp?: number; tableFontName?: string; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> } | undefined,
+  fallback: Set<number>,
+  check: boolean,
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   trackedBreakStart = undefined;
@@ -13679,6 +13820,10 @@ export function buildMarkdown(
   const takesNoRanges = (table: TableItem, index: number) => cellsTakeNoRanges(table, rangeSettings, index);
   const mergedContent = mergeConsecutiveRuns(withoutHiddenCommentSpace(options?.calloutLabels === false ? joinedContent
     : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup, takesNoRanges)));
+  // The block edges before each item, which key its paragraph, and the
+  // paragraphs that may take the forms buildMarkdown reads back
+  const formsKeys = edgesBefore(mergedContent);
+  const plain = plainParagraphs(mergedContent);
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
   const commentIdRemap = new Map<string, string>();
@@ -15334,8 +15479,10 @@ export function buildMarkdown(
       continue;
     }
 
+    const formsKey = formsKeys[i];
+    const forms = plain.has(formsKey) && !fallback.has(formsKey) ? { used: false } : undefined;
     const rendered = renderInlineRange(mergedContent, i, comments, {
-      stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading, ...(quoteLinePrefix ? {} : { listLinePrefix }),
+      stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading, ...(quoteLinePrefix ? {} : { listLinePrefix }), forms,
     }, renderOpts);
     if (rendered.nextIndex <= i) {
       throw new Error('Invariant violated: renderInlineRange did not advance index');
@@ -15675,6 +15822,10 @@ export function buildMarkdown(
         quoted: !!currentPara?.blockquoteLevel,
       };
     }
+    // Where it took a form main doesn't write, the paragraph alone, at a
+    // line's start, as export reads it, or else main's (see buildMarkdown)
+    if (check && forms?.used && (paragraphStart > 0 && !output[paragraphStart - 1].endsWith('\n')
+        || !readsAsWord(output.slice(paragraphStart).join(''), items))) fallback.add(formsKey);
     alertMarkerLineEnd = undefined;
     i = rendered.nextIndex;
   }

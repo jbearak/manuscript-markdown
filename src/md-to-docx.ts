@@ -898,6 +898,27 @@ export function readsCommentsInline(text: string, payloads: string[], merge = fa
     || merge && read.join('') === payloads.join('');
 }
 
+/** What export reads of Markdown `markdown`, a paragraph's as import may
+ *  write it: the text of its HTML comments, which Word hides, and the text
+ *  Word shows, both without whitespace, or null where it reads anything
+ *  but paragraphs of text, line breaks and comments, as a heading, a list,
+ *  code, raw HTML, an equation or a tracked change. Read before a
+ *  paragraph of its own, a z, to which a directive before it applies,
+ *  which export then takes out, so its comment is in neither */
+export function exportReads(markdown: string): { hidden: string; shown: string } | null {
+  let hidden = '';
+  let shown = '';
+  for (const token of parseMd(markdown + '\n\nz\n', [])) {
+    if (token.type !== 'paragraph') return null;
+    for (const run of token.runs) {
+      if (run.type === 'html_comment') hidden += run.text;
+      else if (run.type === 'text' && !run.rawHtml) shown += run.text;
+      else if (run.type !== 'softbreak' && run.type !== 'hardbreak') return null;
+    }
+  }
+  return { hidden: hidden.replace(/\s+/g, ''), shown: shown.replace(/\s+/g, '') };
+}
+
 /** The blocks export reads in Markdown `markdown`, each with its kind and
  *  its runs, those of text next to each other formatted alike joined, as
  *  Word shows them: what the Markdown gives Word, to compare Markdown by */
