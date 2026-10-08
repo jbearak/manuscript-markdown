@@ -814,6 +814,23 @@ export function outsideComments(text: string): string {
     .filter(child => child.type === 'html_inline' && child.content.startsWith('<!--')).map(child => child.content));
 }
 
+/** `text`, a comment's hidden run, without the whitespace inline Markdown
+ *  reads outside its HTML comments, which Word hides with them, but which a
+ *  paragraph would show, as the space of <!-- a --> <!-- b --> */
+export function withoutSpaceOutsideComments(text: string): string {
+  const md = citationTextMd ??= createMarkdownIt();
+  let kept = '';
+  let at = 0;
+  for (const child of md.parseInline(text, {})[0]?.children ?? []) {
+    if (child.type !== 'html_inline' || !child.content.startsWith('<!--')) continue;
+    const found = text.indexOf(child.content, at);
+    if (found === -1) continue;
+    kept += text.slice(at, found).replace(/^\s+$/, '') + child.content;
+    at = found + child.content.length;
+  }
+  return kept + text.slice(at).replace(/^\s+$/, '');
+}
+
 /** Whether export reads Markdown `text` as one paragraph whose HTML
  *  comments are those inline Markdown reads in each of `payloads`, the
  *  comments' hidden runs, read alone, as in &#32;<!-- a --><!-- b -->c with

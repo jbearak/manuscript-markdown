@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, showsAsText, startsHtmlBlock } from './md-to-docx';
+import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, showsAsText, startsHtmlBlock, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -9242,11 +9242,11 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       lines.push(i2 + '<' + tag + attrs + '>');
       for (const para of cell.paragraphs) {
         // Export makes a header cell bold, as for a pipe table
-        const items = mergeConsecutiveRuns(row.isHeader
+        const items = mergeConsecutiveRuns(withoutHiddenCommentSpace(row.isHeader
           ? para.map(item => item.type === 'text' && item.formatting?.bold
             ? { ...item, formatting: { ...item.formatting, bold: false } }
             : item)
-          : para, false);
+          : para), false);
         const html = renderHtmlCellParagraph(items);
         if (html !== undefined) {
           lines.push(i3 + '<p>' + html + '</p>');
@@ -9398,7 +9398,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
           : cell.paragraphs[0];
         // Its line breaks at its end too, which renderInlineSegment drops
         // for a grid table's, as a cell of one line holds them as Word's
-        const r = renderInlineRange(joinSplitComments(mergeConsecutiveRuns(items), !!renderOpts?.htmlCells), 0, comments, { cell: true }, renderOpts);
+        const r = renderInlineRange(joinSplitComments(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), !!renderOpts?.htmlCells), 0, comments, { cell: true }, renderOpts);
         // A line break, which a cell's one line can't hold, as <br>, which a
         // cell reads as one, but not a line end in code, an equation or a
         // comment, which isn't one
@@ -9632,7 +9632,7 @@ function tryRenderGridTable(
                 ? { ...item, formatting: { ...item.formatting, bold: false } }
                 : item)
           : para;
-        const r = renderInlineSegment(mergeConsecutiveRuns(items), comments, renderOpts, { cell: true });
+        const r = renderInlineSegment(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), comments, renderOpts, { cell: true });
         // Split on newlines within a paragraph (e.g. hard breaks).
         // Strip the backslash of the break that ends each line but the last —
         // grid table cells treat bare newlines as hard breaks, so the
@@ -11492,6 +11492,101 @@ function trackedBreakMarks(values: unknown): TrackedBreakMarks {
   return { start: unused[0], end: unused[1], alone: unused[2], indent: unused[3] };
 }
 
+/** `content` without the spaces and tabs outside each hidden comment's
+ *  comments, in its run, on a line of a paragraph's text after something
+ *  it shows there, which Word hid with them, but the paragraph would show,
+ *  as the spaces of mid<!-- a -->rest in a run of " <!-- a --> " (see
+ *  withoutSpaceOutsideComments). But for one, where the comments go between
+ *  text they'd join, as a space Word put next to them took their hidden
+ *  formatting, so the words stay apart: the one before them, where their
+ *  run starts with one, or else after them. The text next to them is the
+ *  nearest that isn't empty, as an item a comment's range of no width
+ *  leaves. Not at a line's start, at the paragraph's, after a line break or
+ *  an alert's label, where their whitespace may be the indent of an HTML
+ *  block, whose comment the paragraph would show without it, nor in a code
+ *  block's lines, whose text is as Word has it, nor where a line end is
+ *  outside a comment. So too for a table cell's paragraph, whose start is
+ *  as a paragraph's */
+function withoutHiddenCommentSpace(content: ContentItem[]): ContentItem[] {
+  const empty = (item: ContentItem | undefined) => item?.type === 'text' && item.text === '';
+  // Whether an item ends or starts with what isn't whitespace, as the text
+  // the comments would join
+  const ends = (item: ContentItem | undefined) => !!item && !isMarkdownBlockEdge(item) && item.type !== 'html_comment'
+    && (item.type !== 'text' || /\S$/.test(item.text));
+  const starts = (item: ContentItem | undefined) => !!item && !isMarkdownBlockEdge(item) && item.type !== 'html_comment'
+    && (item.type !== 'text' || /^\S/.test(item.text) && !item.text.startsWith('\\\n'));
+  let out: ContentItem[] | undefined;
+  // Whether something shown goes before on the line, and in a code block
+  let shown = false;
+  let code = false;
+  for (let i = 0; i < content.length;) {
+    const item = content[i];
+    if (isMarkdownBlockEdge(item)) {
+      shown = false;
+      code = item.type === 'para' && !!item.isCodeBlock;
+    }
+    if (item.type !== 'html_comment') {
+      out?.push(item);
+      if (item.type === 'text') {
+        const line = item.text.lastIndexOf('\n');
+        shown = /[^ \t\n]/.test(item.text.slice(line + 1)) || shown && line === -1;
+      } else if (item.type === 'image' ? item.markdown === undefined : item.type === 'citation' || item.type === 'math' || item.type === 'footnote_ref') {
+        shown = true;
+      }
+      i++;
+      continue;
+    }
+    // The run of hidden comments from here, with the empty items between
+    let end = i;
+    for (let j = i + 1; content[j]?.type === 'html_comment' || empty(content[j]); j++) if (content[j].type === 'html_comment') end = j;
+    const run = content.slice(i, end + 1);
+    // Read together, as inline Markdown reads a comment Word split on to
+    // its end in the next run, as one that ends in ---> goes on to a -->
+    const joined = run.map(entry => entry.type === 'html_comment' ? entry.text : '').join('');
+    const lineEnds = outsideComments(joined).includes('\n');
+    const texts = shown && !code && !lineEnds ? withoutSpaceInRuns(run, joined) : run.map(() => undefined);
+    const first = run.findIndex((entry, k) => texts[k] !== undefined && texts[k] !== (entry as { text: string }).text);
+    if (first !== -1) {
+      let before = i - 1;
+      while (empty(content[before])) before--;
+      let after = end + 1;
+      while (empty(content[after])) after++;
+      if (ends(content[before]) && starts(content[after])) {
+        texts[first] = /^[ \t]/.test((run[first] as { text: string }).text) ? ' ' + texts[first] : texts[first] + ' ';
+      }
+      out ??= content.slice(0, i);
+      run.forEach((entry, k) => out!.push(texts[k] === undefined || entry.type !== 'html_comment' || texts[k] === entry.text ? entry : { ...entry, text: texts[k]! }));
+    } else if (out) {
+      pushAll(out, run);
+    }
+    // A line end outside the comments starts a line, whose start they are
+    if (lineEnds) shown = false;
+    i = end + 1;
+  }
+  return out ?? content;
+}
+
+/** The text of each hidden comment in `run`, whose texts make `joined`,
+ *  without the whitespace outside the comments of all of them read
+ *  together (see withoutSpaceOutsideComments), or undefined for each item
+ *  that isn't one. That whitespace runs from the end of a comment or the
+ *  start to the next comment's <!-- or the end, so the text without it
+ *  goes on with the next character it keeps, which isn't whitespace */
+function withoutSpaceInRuns(run: ContentItem[], joined: string): Array<string | undefined> {
+  const kept = withoutSpaceOutsideComments(joined);
+  let at = 0;
+  return run.map(entry => {
+    if (entry.type !== 'html_comment') return undefined;
+    let text = '';
+    for (let k = 0; k < entry.text.length; k++) {
+      if (kept[at] !== entry.text[k]) continue;
+      text += entry.text[k];
+      at++;
+    }
+    return text;
+  });
+}
+
 /** A paragraph break tracked in Word goes inside the CriticMarkup span as a
  *  blank line, as in {--end.\n\nStart--}, even where nothing of the change
  *  is left on one side of it once accepted or rejected, as for a paragraph
@@ -11763,8 +11858,8 @@ export function buildMarkdown(
   const joinedContent = joinTrackedParagraphBreaks(content, marks, (para, opening) => (
     opening && prefixesQuoteLines(opening) ? '' : paragraphLinePrefix(para)
   ));
-  const mergedContent = mergeConsecutiveRuns(options?.calloutLabels === false ? joinedContent
-    : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup));
+  const mergedContent = mergeConsecutiveRuns(withoutHiddenCommentSpace(options?.calloutLabels === false ? joinedContent
+    : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup)));
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
   const commentIdRemap = new Map<string, string>();
@@ -11856,7 +11951,7 @@ export function buildMarkdown(
   // Whether each of a note's code blocks goes as its paragraphs, before
   // what reads code paragraphs apart from text
   const noteCodeDemoted = new Map(noteEntries.map(entry => [entry, demoteNoteCodeBlocks(entry.body)]));
-  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks))]));
+  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(withoutHiddenCommentSpace(joinTrackedParagraphBreaks(entry.body, marks)))]));
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
   // A comment in a table cell whose body has more than one line takes ID

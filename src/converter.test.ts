@@ -19432,6 +19432,92 @@ describe('HTML comments between Word runs', () => {
   };
 
   test.each([
+    // But for one, which keeps the words apart, as a space Word put next to
+    // the comment took its hidden formatting
+    ['on each side, between words', run('mid') + comment(' <!-- b --> ') + run('rest'), 'mid <!-- b -->rest', 'mid rest'],
+    ['on each side, after a space', run('mid ') + comment(' <!-- b --> ') + run('rest'), 'mid <!-- b -->rest', 'mid rest'],
+    ['on each side, before a space', run('mid') + comment(' <!-- b --> ') + run(' rest'), 'mid<!-- b --> rest', 'mid rest'],
+    ['on each side, between spaces', run('mid ') + comment(' <!-- b --> ') + run(' rest'), 'mid <!-- b --> rest', 'mid  rest'],
+    ['after it, after a space', run('mid ') + comment('<!-- b --> ') + run('rest'), 'mid <!-- b -->rest', 'mid rest'],
+    ['on each side, at the paragraph\'s end', run('mid') + comment(' <!-- b --> '), 'mid<!-- b -->', 'mid'],
+    ['around two, between words', run('mid') + comment(' <!-- b --> ') + comment(' <!-- c --> ') + run('rest'), 'mid <!-- b --><!-- c -->rest', 'mid rest'],
+    ['between two in a run, between spaces', run('mid ') + comment('<!-- b --> <!-- c -->') + run(' rest'), 'mid <!-- b --><!-- c --> rest', 'mid  rest'],
+    // Which inline Markdown reads as one, on to the next -->, whose space,
+    // in the comment, stays
+    ['across a comment Word split after its --->', run('mid ') + comment('<!-- a --->') + comment(' <!-- c -->').replace('\u200B', '') + run(' rest'), 'mid <!-- a ---> <!-- c --> rest', 'mid  rest'],
+    ['on each side, in a list item', run('mid ') + comment(' <!-- b --> ') + run(' rest'), '- mid <!-- b --> rest', 'mid  rest', '- XX'],
+    ['on each side, in a quote', run('mid ') + comment(' <!-- b --> ') + run(' rest'), '> mid <!-- b --> rest', 'mid  rest', '> XX'],
+  ])('drops the hidden spaces outside a comment in its run %s', async (_name, runs, md, text, template = 'XX') => {
+    // Which Word hid, and the paragraph showed
+    const docx = await withRuns(runs, template);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await shown(again)).join('')).toBe(text);
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test('drops the hidden spaces outside a comment in its run in a footnote', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Text[^1]\n\n[^1]: XX')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    zip.file('word/footnotes.xml', xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, run('mid ') + comment(' <!-- b --> ') + run(' rest')));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('Text[^1]\n\n[^1]: mid <!-- b --> rest\n');
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['at its paragraph\'s start', comment(' <!-- b --> ') + run('rest'), '&#32;<!-- b --> rest'],
+    // Whose label export writes, after which the comment would start the
+    // body's line, and an HTML block, which showed it
+    ['at the start of an alert\'s text', comment(' <!-- b --> ') + run('rest'), '> [!NOTE]\n> &#32;<!-- b --> rest', '> [!NOTE]\n> XX'],
+    ['after a line break', run('a') + '<w:r><w:br/></w:r>' + comment('    <!-- b --> ') + run('rest'), 'a\\\n&#32;&#32;&#32;&#32;<!-- b --> rest'],
+  ])('keeps the spaces of a comment\'s run %s, at a line\'s start', async (_name, runs, md, template = 'XX') => {
+    // Which may be the indent of the HTML block export wrote it as, and
+    // without which the comment would start one
+    const docx = await withRuns(runs, template);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await shown(again)).join('')).not.toContain('&lt;!--');
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a pipe table\'s', '| a |\n|---|\n| XX |', '| a |\n| --- |\n| mid <!-- b -->rest |'],
+    ['a grid table\'s', '+-----+\n| a   |\n+=====+\n| XX  |\n|     |\n| p   |\n+-----+',
+      '+--------------------+\n| a                  |\n+====================+\n| mid <!-- b -->rest |\n|                    |\n| p                  |\n+--------------------+'],
+    ['an HTML table\'s', '<table><tr><td colspan="2">a</td></tr><tr><td>y</td><td>XX</td></tr></table>',
+      '<table>\n  <tr>\n    <td colspan="2">\n      <p>a</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>y</p>\n    </td>\n    <td>\n      <p>mid <!-- b -->rest</p>\n    </td>\n  </tr>\n</table>'],
+  ])('drops the hidden spaces outside a comment in its run in %s cell', async (_name, template, md) => {
+    const docx = await withRuns(run('mid') + comment(' <!-- b --> ') + run('rest'), template);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await shown(again)).join('')).toContain('mid rest');
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test.each(['before', 'after'])('keeps a space between words around a comment\'s run with a Word comment of no width %s it', async (where) => {
+    // The empty item the comment's range left was taken for the text next
+    // to the run, which the run's spaces didn't join, so they all went
+    const zip = await JSZip.loadAsync((await convertMdToDocx('XX\n\nB {==z==}{>>@A (2024-01-15 10:30) | note<<}.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const start = '<w:commentRangeStart w:id="0"/>';
+    const end = '<w:commentRangeEnd w:id="0"/>';
+    const reference = /<w:r>(?:(?!<w:r>)[\s\S])*?<w:commentReference w:id="0"\/><\/w:r>/.exec(xml)![0];
+    const point = start + end + reference;
+    const runs = where === 'before' ? run('mid') + point + comment(' <!-- b --> ') + run('rest') : run('mid') + comment(' <!-- b --> ') + point + run('rest');
+    zip.file('word/document.xml', xml.replace(start, '').replace(end, '').replace(reference, '').replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const note = '{>>@A (2024-01-15 10:30) | note<<}';
+    expect(markdown).toBe((where === 'before' ? 'mid' + note + ' <!-- b -->rest' : 'mid <!-- b -->' + note + 'rest') + '\n\nB z.\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await shown(again)).join('').replace(/<[^>]+>/g, '')).toStartWith('mid rest');
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test.each([
     ['a $ before one with a $', run('A cost $') + comment('<!-- x$ -->') + run(' B'), 'A cost \\$<!-- x$ --> B'],
     ['a $ before one with a $, at the paragraph\'s end', run('A cost $') + comment('<!-- x$ -->'), 'A cost \\$<!-- x$ -->'],
     ['a $ before two, the second with a $', run('A $') + comment('<!-- x -->') + comment('<!-- y$ -->') + run(' B'), 'A \\$<!-- x --><!-- y$ --> B'],
