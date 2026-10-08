@@ -2466,8 +2466,9 @@ describe('Blocks in list items', () => {
 
   test.each([
     ['shown', '', labelOnlyAlert, labelOnlyAlert],
-    // Its blank line goes as it does in a list item
-    ['hidden', '---\ncallout-labels: false\n---\n\n', labelOnlyAlert, '1. a\n\n> > > > [!NOTE]\n> > > > body\n'],
+    // With its line of > alone, which the record of the alerts whose
+    // marker is a paragraph of its own keeps
+    ['hidden', '---\ncallout-labels: false\n---\n\n', labelOnlyAlert, labelOnlyAlert],
   ])('keeps an alert whose first paragraph is its label alone where it is after a list, with labels %s', async (_name, frontmatter, body, expected) => {
     // With its label hidden, export leaves the first paragraph out, and the
     // record had that paragraph's empty start, which Word hasn't

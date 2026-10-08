@@ -175,6 +175,7 @@ export interface MdRun {
   linkStart?: true; // first run of a link, where a hyperlink starts though the run before goes to the same place
   cellParagraphBreak?: true; // hardbreak between two of an HTML table cell's paragraphs, which generateTable splits on
   newline?: true; // hardbreak a newline made, in breaks mode or a grid table's cell, which a line of comment bodies drops as a softbreak
+  htmlBreak?: true; // hardbreak an HTML <br> made, which ends no line of the source, so no alert's marker starts a line after it
   type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'hardbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref' | 'html_comment' | 'image';
   text: string;
   bold?: boolean;
@@ -847,7 +848,8 @@ export function blocksAsRead(markdown: string): Array<Pick<MdToken, 'type' | 'le
     runs: runs.reduce<MdRun[]>((joined, run) => {
       const last = joined[joined.length - 1];
       if (last?.type === 'text' && run.type === 'text' && format(last) === format(run)) joined[joined.length - 1] = { ...last, text: last.text + run.text };
-      else joined.push(run);
+      // A break as Word has it, from a <br> or a \ alike
+      else joined.push(run.htmlBreak ? { ...run, htmlBreak: undefined } : run);
       return joined;
     }, []),
   }));
@@ -1477,6 +1479,11 @@ interface BlockquoteSpacing {
   after?: number;
   /** Whether an alert's marker line holds text, as in > [!NOTE] text */
   alertInline?: boolean;
+  /** Whether an alert's marker is a paragraph of its own, with the alert's
+   *  text in the paragraphs after it, as in > [!NOTE] then > and > text,
+   *  which Word shows with the label's paragraph, and with the label hidden
+   *  has no paragraph for (see omitEmptyAlertLead) */
+  alertAlone?: boolean;
 }
 
 const BLOCKQUOTE_ALERT_MARKER_RE = /^(?:>\s*)+\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](.*)$/i;
@@ -1642,6 +1649,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
     const alertMarker = originalLines[group.text].replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
     // A comment body on the marker line shows nothing, and import writes it below
     if (alertMarker) spacing.alertInline = withoutCommentBodies(alertMarker[2]).trim().length > 0;
+    if (alertMarker && group.first.alertLead && group.first.alertHasBodyParagraph && group.first.runs.length === 0) spacing.alertAlone = true;
     group.first.blockquoteSpacing = spacing;
   });
 }
@@ -1654,6 +1662,7 @@ function blockquoteSpacingMaps(tokens: MdToken[]) {
     before: new Map<number, number>(),
     after: new Map<number, number>(),
     alertInline: new Map<number, boolean>(),
+    alertAlone: new Map<number, boolean>(),
   };
   for (const token of tokens) {
     const spacing = token.blockquoteSpacing;
@@ -1663,6 +1672,7 @@ function blockquoteSpacingMaps(tokens: MdToken[]) {
     if (spacing.before !== undefined) maps.before.set(group, spacing.before);
     if (spacing.after !== undefined) maps.after.set(group, spacing.after);
     if (spacing.alertInline !== undefined) maps.alertInline.set(group, spacing.alertInline);
+    if (spacing.alertAlone) maps.alertAlone.set(group, true);
   }
   return maps;
 }
@@ -1786,6 +1796,16 @@ export function blockquoteAlertMarkerStyleProps(inlineByGroup: Map<number, boole
     mapping[String(index)] = isInline ? 1 : 0;
   }
   return chunkCustomProps('MANUSCRIPT_BLOCKQUOTE_ALERT_STYLE_', JSON.stringify(mapping));
+}
+/** The alerts whose marker is a paragraph of its own, which export writes
+ *  no paragraph for with the label hidden, by group index (see alertAlone) */
+export function blockquoteAlertMarkerAloneProps(aloneByGroup: Map<number, boolean>): CustomPropEntry[] {
+  if (aloneByGroup.size === 0) return [];
+  const mapping: Record<string, number> = {};
+  for (const [index, alone] of aloneByGroup) {
+    if (alone) mapping[String(index)] = 1;
+  }
+  return chunkCustomProps('MANUSCRIPT_BLOCKQUOTE_ALERT_MARKER_ALONE_', JSON.stringify(mapping));
 }
 export function blockquotePreContentBlankLineProps(gaps: Map<number, number>): CustomPropEntry[] {
   if (gaps.size === 0) return [];
@@ -2754,6 +2774,12 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
   }
 }
 
+/** Whether `run` ends a line of the source, as a line end and a \ before
+ *  one do, but not a <br> */
+function endsLine(run: MdRun): boolean {
+  return run.type === 'softbreak' || run.type === 'hardbreak' && !run.htmlBreak;
+}
+
 /**
  * Whether runs[r] can hold a task's box or an alert's marker, as GFM reads
  * one: text without code, formatting or a link, not after an escaped [, that
@@ -2764,7 +2790,7 @@ function holdsMarker(runs: MdRun[], r: number, afterBreak = false): boolean {
   if (run?.type !== 'text' || run.escapedBracket || run.code || run.href || run.bold || run.italic || run.underline
       || run.strikethrough || run.highlight || run.superscript || run.subscript) return false;
   for (let k = r - 1; k >= 0; k--) {
-    if (afterBreak && (runs[k].type === 'softbreak' || runs[k].type === 'hardbreak')) return true;
+    if (afterBreak && endsLine(runs[k])) return true;
     if (runs[k].type !== 'text' || runs[k].text !== '') return false;
   }
   return true;
@@ -2813,16 +2839,17 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
         markerIndices.push(r);
       }
     }
-    // Skip splitting only when the first text run IS the sole marker
-    const firstTextRunIdx = token.runs.findIndex(r => r.type === 'text' && r.text.length > 0);
+    // Skip splitting only where the sole marker starts the paragraph, as
+    // stripLeadingAlertMarker reads one, not on a line after runs that
+    // aren't text, as a highlight's or a comment's, which go before it
     if (markerIndices.length === 0 ||
-        (markerIndices.length === 1 && markerIndices[0] === firstTextRunIdx)) {
+        (markerIndices.length === 1 && holdsMarker(token.runs, markerIndices[0]))) {
       expanded.push(token);
       continue;
     }
     // Each segment's own lines, from the line breaks before its runs
     const range = token.sourceRange;
-    const lineOf = (runIndex: number) => range![0] + token.runs.slice(0, runIndex).filter(run => run.type === 'softbreak' || run.type === 'hardbreak').length;
+    const lineOf = (runIndex: number) => range![0] + token.runs.slice(0, runIndex).filter(endsLine).length;
     const segmentRange = (start: number, end: number) => range
       ? { sourceRange: [lineOf(start), end < token.runs.length ? lineOf(end) : range[1]] as [number, number] }
       : {};
@@ -3619,7 +3646,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         } else if (/^<br\s*\/?>$/i.test(html)) {
           // A line break, as import writes one Markdown's \ can't hold: at
           // the end of a paragraph, or in a heading
-          runs.push({ type: 'hardbreak', text: '\n', ...formatStack, href: currentHref });
+          runs.push({ type: 'hardbreak', text: '\n', htmlBreak: true, ...formatStack, href: currentHref });
         } else if (/^<img\s/i.test(html)) {
           const srcMatch = html.match(/src\s*=\s*["']([^"']+)["']/);
           const altMatch = html.match(/alt\s*=\s*["']([^"']*?)["']/);
@@ -9882,6 +9909,9 @@ export async function convertMdToDocx(
   customProps.push(...blockquotePostContentBlankLineProps(state.blockquotePostContentBlankLines));
   customProps.push(...blockquoteAlertMarkerStyleProps(state.blockquoteAlertMarkerInlineByGroup));
   customProps.push(...blockquoteListLevelProps(state.blockquotePlaces, state.blockquoteIdentities));
+  // Word shows the label's paragraph of an alert whose marker is one of its
+  // own, and with the label hidden, has none
+  if (!effectiveCalloutLabels) customProps.push(...blockquoteAlertMarkerAloneProps(blockquoteSpacing.alertAlone));
   if (explicitCalloutLabels !== undefined) {
     customProps.push({ name: 'MANUSCRIPT_CALLOUT_LABELS', value: String(explicitCalloutLabels) });
   }

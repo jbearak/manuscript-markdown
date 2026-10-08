@@ -4153,6 +4153,90 @@ describe('callout-labels DOCX export', () => {
     const customXml = await zip.file('docProps/custom.xml')!.async('string');
     expect(customXml).not.toContain('MANUSCRIPT_CALLOUT_LABELS');
   });
+
+  const hidden = '---\ncallout-labels: false\n---\n\n';
+  const display = '$' + '$';
+  it.each([
+    ['before a paragraph', '> [!NOTE]\n>\n> body\n'],
+    ['before two paragraphs', '> [!NOTE]\n>\n> body\n>\n> more\n'],
+    ['in a quote', '> > [!NOTE]\n> >\n> > body\n'],
+    ['in a list item', '- a\n\n  > [!NOTE]\n  >\n  > body\n'],
+    ['before a comment', '> [!NOTE]\n>\n> <!-- c -->\n>\n> body\n'],
+    ['before an equation', '> [!NOTE]\n>\n> ' + display + '\n> x\n> ' + display + '\n'],
+    ['before an alert whose marker isn\'t', '> [!NOTE]\n>\n> body\n\n> [!TIP]\n> tip\n'],
+    ['after an alert whose marker isn\'t', '> [!TIP]\n> tip\n\n> [!NOTE]\n>\n> body\n'],
+    ['whose text is on the next line', '> [!NOTE]\n> body\n'],
+  ])('keeps the line of > alone after a marker that\'s a paragraph of its own, with the label hidden, %s', async (_name, body) => {
+    // Word shows the label's paragraph, and with the label hidden has none,
+    // so the marker went on the alert's text's line
+    const { convertDocx } = await import('./converter');
+    const md = hidden + body;
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const docXml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    // And still no paragraph for the marker
+    const paragraphs = docXml.match(/<w:p [^>]*>(?:(?!<\/w:p>)[^])*<\/w:p>/g) ?? [];
+    expect(paragraphs.filter(p => /GitHub(?:Note|Tip)/.test(p) && !/<w:t[ >]|<m:oMath/.test(p))).toEqual([]);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(md);
+  });
+
+  it('writes a comment Word put at the start of an alert\'s text after a marker that\'s a paragraph of its own after the line of >', async () => {
+    // Where it starts a paragraph, as in a quote's paragraph after its
+    // first, and the four spaces that keep one on the line after a marker
+    // in the marker's paragraph would make code
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(hidden + '> [!NOTE]\n>\n> body\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const comment = '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t xml:space="preserve">\u200B&lt;!-- c --&gt;</w:t></w:r>';
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>)[^])*?>body<\/w:t><\/w:r>/, run => comment + run);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe(hidden + '> [!NOTE]\n>\n> <!-- c -->body\n');
+  });
+
+  it.each([
+    ['shown', ''],
+    ['hidden', hidden],
+  ])('keeps an alert apart from the one before it whose last line is a comment\'s range, with labels %s', async (_name, front) => {
+    // Export left a marker on a line after runs that aren't text in that
+    // line's paragraph, as its text, so the second alert went into the
+    // first, as with the label hidden after a marker that's a paragraph of
+    // its own, where the range starts a paragraph
+    const { convertDocx } = await import('./converter');
+    const body = '> [!NOTE]\n>\n> {==body==}{>>c<<}\n> [!TIP]\n>\n> tip\n';
+    const withoutFrontmatter = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    const markdown = (await convertDocx((await convertMdToDocx(front + body)).docx)).markdown;
+    expect(withoutFrontmatter(markdown)).toBe(body);
+    expect(withoutFrontmatter((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown)).toBe(body);
+  });
+
+  it.each([
+    ['a <br>', '> $x$<br>[!NOTE] body', false],
+    ['a <br/>', '> $x$<br/>[!NOTE] body', false],
+    ['a <br> after a comment\'s range', '> {==a==}{>>c<<}<br>[!NOTE] body', false],
+    ['a <br> after text', '> a<br>[!NOTE] body', false],
+    ['a \\ and a line end', '> $x$\\\n> [!NOTE] body', true],
+  ])('reads a marker after %s as an alert\'s only where it starts a line of the source', async (_name, md, alert) => {
+    // A <br> ends no line, but export took the marker after it for one at
+    // a line's start, and threw where it counted that line past the
+    // quote's, or made an alert of it
+    const JSZip = (await import('jszip')).default;
+    for (const end of ['', '\n']) {
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md + end)).docx)).file('word/document.xml')!.async('string');
+      expect(xml.includes('<w:pStyle w:val="GitHubNote"/>')).toBe(alert);
+      expect(xml.includes('[!NOTE]')).toBe(!alert);
+    }
+  });
+
+  it('records a marker that\'s a paragraph of its own only with the label hidden', async () => {
+    const JSZip = (await import('jszip')).default;
+    const custom = async (md: string) => (await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('docProps/custom.xml')!.async('string'));
+    expect(await custom(hidden + '> [!NOTE]\n>\n> body\n')).toContain('MANUSCRIPT_BLOCKQUOTE_ALERT_MARKER_ALONE_');
+    expect(await custom('> [!NOTE]\n>\n> body\n')).not.toContain('MANUSCRIPT_BLOCKQUOTE_ALERT_MARKER_ALONE_');
+  });
 });
 
 describe('blockquote-style frontmatter', () => {
