@@ -1,4 +1,8 @@
 import { describe, it, expect, afterEach } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { build } from 'esbuild';
 import * as fc from 'fast-check';
 import { XMLValidator } from 'fast-xml-parser';
 import { LATENT_STYLES } from './latent-styles';
@@ -5929,6 +5933,37 @@ describe('Comments a paragraph reads inline', () => {
     }
     return largeTime / smallTime;
   };
+  it.each(['<br>', ' <br> <br>'])('reads a long comment before %s in linear time', (breaks) => {
+    // As import writes one a line break ends, whose block the regex that
+    // found the comments at its start read many times slower past some
+    // tens of thousands of a comment's characters: about 35 before, 2.5 after
+    const read = (n: number) => () => parseMd('<!-- ' + 'a'.repeat(n) + ' -->' + breaks + '\n');
+    expect(parseMd('<!-- a -->' + breaks + '\n')[0].runs?.map(run => run.type)).toContain('hardbreak');
+    expect(growth(read(40000), read(160000))).toBeLessThan(8);
+  });
+
+  // Under Node, the extension's runtime, from a bundle for it, as
+  // esbuild.mjs builds the extension
+  const node = Bun.which('node');
+  it.skipIf(!node)('reads a comment before more line breaks than a call takes arguments', async () => {
+    // A spread of the line breaks and the spaces before them into push
+    // overflowed the stack, in Node past about 120,000 arguments. Bun takes
+    // some 500,000, but Bun 1.3.9 reads a block of more than some 700,000
+    // line breaks as text, as its regex for one fails there.
+    const dir = mkdtempSync(join(tmpdir(), 'md-to-docx-'));
+    try {
+      const bundle = join(dir, 'md-to-docx.cjs');
+      await build({ entryPoints: [join(import.meta.dir, 'md-to-docx.ts')], bundle: true, platform: 'node', target: 'node20', format: 'cjs', outfile: bundle, logLevel: 'error' });
+      const script = 'const runs = require(' + JSON.stringify(bundle) + ").parseMd('<!-- c -->' + ' <br>'.repeat(200000) + '\\n')[0].runs;"
+        + "console.log(runs.length, runs.filter(run => run.type === 'hardbreak').length);";
+      const result = Bun.spawnSync([node!, '-e', script]);
+      expect(result.stderr.toString()).toBe('');
+      expect(result.stdout.toString()).toBe('400001 200000\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60000);
+
   // A hidden run of `n` comments with 100 spaces between them
   const payload = (n: number) => Array.from({ length: n }, (_, i) => '<!-- c' + i + ' -->').join(' '.repeat(100));
 
