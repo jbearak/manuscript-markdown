@@ -31,11 +31,12 @@ import {
 	HIGHLIGHT_DECORATION_COLORS,
 	CRITIC_COMMENT_DECORATION,
 	extractAllDecorationRanges,
+	dropRangesInCode,
 	setDefaultHighlightColor,
 	getDefaultHighlightColor,
 } from './highlight-colors';
 import { setDefaultColorScheme } from './alert-colors';
-import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
+import { computeCodeRegions } from './code-regions';
 import {
 	resolveBibliographyWritePathForOutput,
 	resolveDocumentBibliography,
@@ -903,29 +904,7 @@ export function activate(context: vscode.ExtensionContext) {
 		// spans or fenced code blocks). This is done at the call site so that
 		// extractAllDecorationRanges remains code-region-agnostic and preserves parity
 		// with the standalone extraction functions (extractHighlightRanges, etc.).
-		const codeRegions = computeCodeRegions(text);
-		if (codeRegions.length > 0) {
-			const keep = (r: { start: number; end: number }) =>
-				!overlapsCodeRegion(r.start, r.end, codeRegions);
-			for (const [key, ranges] of all.highlights) {
-				const filtered = ranges.filter(keep);
-				if (filtered.length === 0) {
-					all.highlights.delete(key);
-				} else if (filtered.length !== ranges.length) {
-					all.highlights.set(key, filtered);
-				}
-			}
-			all.comments.splice(0, all.comments.length, ...all.comments.filter(keep));
-			all.additions.splice(0, all.additions.length, ...all.additions.filter(keep));
-			all.deletions.splice(0, all.deletions.length, ...all.deletions.filter(keep));
-			all.additionDelimiters.splice(0, all.additionDelimiters.length, ...all.additionDelimiters.filter(keep));
-			all.deletionDelimiters.splice(0, all.deletionDelimiters.length, ...all.deletionDelimiters.filter(keep));
-			all.substitutionDelimiters.splice(0, all.substitutionDelimiters.length, ...all.substitutionDelimiters.filter(keep));
-			all.substitutionOld.splice(0, all.substitutionOld.length, ...all.substitutionOld.filter(keep));
-			all.substitutionNew.splice(0, all.substitutionNew.length, ...all.substitutionNew.filter(keep));
-			all.highlightDelimiters.splice(0, all.highlightDelimiters.length, ...all.highlightDelimiters.filter(keep));
-			all.commentDelimiters.splice(0, all.commentDelimiters.length, ...all.commentDelimiters.filter(keep));
-		}
+		dropRangesInCode(all, computeCodeRegions(text));
 
 		// Clear all decoration types, then set those with ranges
 		for (const [key, decType] of decorationTypes) {

@@ -26,6 +26,7 @@ import { matchCriticHeadingPrefix } from './critic-markup';
 import { commentsEnd, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
+import { pushAll } from './arrays';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
@@ -609,7 +610,7 @@ function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
     (inner as LinkState).linkLevel = (state as LinkState).linkLevel;
     state.md.inline.tokenize(inner);
     for (const rule of state.md.inline.ruler2.getRules('')) rule(inner);
-    state.tokens.push(...children);
+    pushAll(state.tokens, children);
     pushManuscriptToken(state, 'highlight_close', 'mark', -1);
   }
   state.pos = next;
@@ -1883,9 +1884,9 @@ function splitRunsAtCriticParagraphs(runs: MdRun[]): CriticParagraphSplit | unde
       continue;
     }
     found = true;
-    parts[parts.length - 1].push(...split.parts[0]);
-    parts.push(...split.parts.slice(1));
-    marks.push(...split.marks);
+    pushAll(parts[parts.length - 1], split.parts[0]);
+    pushAll(parts, split.parts.slice(1));
+    pushAll(marks, split.marks);
   }
   return found ? { parts, marks } : undefined;
 }
@@ -2926,7 +2927,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         const startAttr = token.attrGet('start');
         const listStart = startAttr !== null ? parseInt(startAttr, 10) : undefined;
         const listItems = extractListItems(tokens.slice(i + 1, listClose), token.type === 'ordered_list_open', currentLevel, warnings, listStart, sourceLines);
-        result.push(...listItems);
+        pushAll(result, listItems);
         i = listClose + 1;
         break;
       }
@@ -2983,7 +2984,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           const last = annotated[annotated.length - 1];
           last.droppedRange = span(last.droppedRange, [end - 1, end]);
         }
-        result.push(...annotated);
+        pushAll(result, annotated);
         i = blockquoteClose + 1;
         break;
       }
@@ -3320,7 +3321,7 @@ function convertInlineTokens(tokens: ManuscriptToken[]): MdRun[] {
   for (const token of tokens) {
     if (token.type === 'inline' && token.children) {
       // Process the children of inline tokens
-      runs.push(...processInlineChildren(token.children));
+      pushAll(runs, processInlineChildren(token.children));
     } else {
       // Single token processing
       const tokenRuns = processInlineChildren([token]);
@@ -3392,7 +3393,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
     const token = tokens[ti];
     if (token.type === 'inline' && token.children) {
       // Process the children directly - they should already have custom tokens
-      runs.push(...processInlineChildren(token.children));
+      pushAll(runs, processInlineChildren(token.children));
       continue;
     }
     
@@ -3885,7 +3886,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
       items.push(listItem);
       childSegments.sort((a, b) => (a.startIndex - b.startIndex) || (a.order - b.order));
       for (const segment of childSegments) {
-        items.push(...segment.items);
+        pushAll(items, segment.items);
       }
 
       itemOrdinal++;
@@ -6548,8 +6549,7 @@ function deletionWithComments(runs: MdRun[] | undefined, outer: MdRun, deletion:
     } else if (hasCommentRuns(run.innerRuns) || hasCommentRuns(run.oldRuns) || hasCommentRuns(run.newRuns)) {
       // A revision in a deletion is deleted with it, both sides of a substitution
       flush();
-      pieces.push(...deletionWithComments(run.innerRuns, run, deletion),
-        ...deletionWithComments(run.oldRuns, run, deletion), ...deletionWithComments(run.newRuns, run, deletion));
+      for (const side of [run.innerRuns, run.oldRuns, run.newRuns]) pushAll(pieces, deletionWithComments(side, run, deletion));
     } else {
       // A break takes the formatting around it, as it would in `outer`, where
       // the deletion it goes in has only `deletion`'s
@@ -7332,7 +7332,7 @@ function withoutCommentBodyLines(source: MdRun[]): MdRun[] {
   }
   const kept: MdRun[] = [];
   trimmed.forEach((line, k) => {
-    kept.push(...line);
+    pushAll(kept, line);
     if (k < breaks.length && !dropped.has(k)) kept.push(breaks[k]);
   });
   // Each revision and highlight back around its text, or its text in its
@@ -7363,7 +7363,7 @@ function withoutCommentBodyLines(source: MdRun[]): MdRun[] {
       const frame = frames.pop()!;
       const sides = { ...done.get(frame.open!.run), [frame.open!.key]: frame.children };
       done.set(frame.open!.run, sides);
-      if (frame.open!.last) frames[frames.length - 1].children.push(...rebuilt(frame.open!.run, sides));
+      if (frame.open!.last) pushAll(frames[frames.length - 1].children, rebuilt(frame.open!.run, sides));
     } else {
       frames[frames.length - 1].children.push(run);
     }
@@ -8873,7 +8873,7 @@ export async function convertMdToDocx(
   const numbersFormatted = numberResult.output !== bodyForParsing;
   const unformattedBody = bodyForParsing;
   bodyForParsing = numberResult.output;
-  parseWarnings.push(...numberResult.warnings);
+  pushAll(parseWarnings, numberResult.warnings);
 	// A note's body from before number formatting, where it formatted any
 	const unformattedNotes = new Map<string, string>();
 	for (const [label, noteBody] of footnoteDefs) {
@@ -8884,7 +8884,7 @@ export async function convertMdToDocx(
 		});
 		if (noteNumberResult.output !== noteBody) unformattedNotes.set(label, noteBody);
 		footnoteDefs.set(label, noteNumberResult.output);
-		parseWarnings.push(...noteNumberResult.warnings);
+		pushAll(parseWarnings, noteNumberResult.warnings);
 	}
   // The line the body starts on, after the frontmatter and the blank lines
   // after it, which frontmatterBlankLines holds. The masked frontmatter's
@@ -9288,7 +9288,7 @@ export async function convertMdToDocx(
     if (noteId === undefined) continue;
     madeNotes.add(label);
     const { tokens: bodyTokens, warnings: parseWarnings } = parsedNotes.get(label)!;
-    state.warnings.push(...parseWarnings);
+    pushAll(state.warnings, parseWarnings);
     const noteWarnings = new Set(bodyTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_NOTE_CODE_WARNING
       : isOrientationDirective(t) || isOrphanedOrientationClose(t) ? NOTE_ORIENTATION_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
     for (const warning of noteWarnings) {

@@ -3,6 +3,7 @@ import { DEFAULT_FORMATTING, markdownTable, type ContentItem, type TableCell } f
 import MarkdownIt from 'markdown-it';
 import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { separatorAlign, type TableAlign } from './grid-table-preprocess';
+import { maxOf } from './arrays';
 import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, preprocessCriticMarkup } from './critic-markup';
 
 export interface TextTransformation {
@@ -527,7 +528,7 @@ export function parseTable(text: string, separatorIndex?: number): ParsedTable |
   });
   
   // Calculate column widths (maximum content length for each column)
-  const columnCount = Math.max(...rows.map(row => row.cells.length));
+  const columnCount = maxOf(rows.map(row => row.cells.length));
   const columnWidths: number[] = new Array(columnCount).fill(0);
   
   for (const row of rows) {
