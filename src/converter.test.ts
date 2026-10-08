@@ -9684,6 +9684,14 @@ describe('HTML table cells', () => {
     ['a link whose target has an apostrophe', '      <p><a href="https://e.com/O\'Brien">o</a></p>'],
     ['whitespace HTML would collapse', '      <p>a&#9;b &#32;c</p>'],
     ['a space at the start of a line before formatting', '      <p>&#32;<b>x</b> &#32;<i>y</i><br>&#32;&#32;<b>&#32;z</b>&nbsp;</p>'],
+    // Which import wrote as a space, which HTML drops at a paragraph's end,
+    // as export did, so Word lost it
+    ['a space at the end of a paragraph', '      <p>a&#32;</p>\n      <p>b</p>'],
+    ['a space at the end of a paragraph, in formatting', '      <p><b>a&#32;</b></p>\n      <p>b</p>'],
+    ['a space alone in formatting at the end of a paragraph', '      <p>a<b>&#32;</b></p>'],
+    ['a space at the end of a link that ends a paragraph', '      <p><a href="https://e.com/">a&#32;</a></p>'],
+    ['a space before a comment that ends a paragraph', '      <p>a&#32;<!-- c --></p>'],
+    ['a space at the end of a paragraph after a line break', '      <p>a <br>b&#32;</p>'],
     // Which Word showed as text
     ['a comment', '      <p>a<!-- c --> b</p>'],
     ['comments alone and in formatting', '      <p><!-- c --></p>\n      <p><b>x<!-- d -->y</b></p>'],
