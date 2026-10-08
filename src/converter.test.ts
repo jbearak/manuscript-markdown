@@ -4412,6 +4412,56 @@ describe('Emphasis between runs', () => {
 });
 
 describe('buildMarkdown', () => {
+  type Formatting = { bold: boolean; italic: boolean; strikethrough: boolean; underline: boolean; highlight: boolean; superscript: boolean; subscript: boolean; code: boolean };
+
+  /** Markdown without the spaces and tabs at its end, which import leaves
+   *  out of a paragraph, as Markdown drops them, with a backslash before
+   *  them, which was text, escaped (see buildMarkdown's withoutEndSpaces) */
+  const withoutEndSpaces = (markdown: string) => {
+    let end = markdown.length;
+    while (end > 0 && (markdown[end - 1] === ' ' || markdown[end - 1] === '\t')) end--;
+    if (end === markdown.length) return markdown;
+    let slashes = 0;
+    while (slashes < end && markdown[end - 1 - slashes] === '\\') slashes++;
+    return markdown.slice(0, end) + (slashes % 2 === 1 ? '\\' : '');
+  };
+
+  /** That `texts`, as runs of one formatting and link, write as the text
+   *  of one run would */
+  function mergesRuns(texts: string[], formatting: Formatting, href: string | undefined) {
+    const content = texts.map(text => ({
+      type: 'text' as const,
+      text,
+      commentIds: new Set<string>(),
+      formatting,
+      href,
+    }));
+
+    const result = buildMarkdown(content, new Map());
+    const expectedText = texts.join('');
+    // The paragraph's text starts its line, and nothing follows it,
+    // and whitespace at its edges takes character references, but for
+    // the spaces and tabs at its end, which it leaves out; a link's is
+    // as the link of one run of the text writes it, with the escapes
+    // its brackets need, as of a citation's @
+    const expectedRendering = href
+      ? buildMarkdown([{ type: 'text', text: expectedText, commentIds: new Set<string>(), formatting, href }], new Map()).trim()
+      : withoutEndSpaces(keepParagraphEdgeWhitespace(wrapWithFormatting(expectedText, formatting, true, RunsAfter.of('')), true, true));
+
+    // The result should contain the merged rendering for the combined text.
+    expect(result).toContain(expectedRendering);
+
+    // For simple cases, verify no duplicate formatting
+    if (Object.values(formatting).filter(Boolean).length === 1) {
+      const activeFormat = Object.entries(formatting).find(([_, active]) => active)?.[0];
+      if (activeFormat === 'bold') {
+        expect(result.match(/\*\*[^*]*\*\*/g)?.length).toBe(1);
+      } else if (activeFormat === 'highlight') {
+        expect(result.match(/==[^=]*==/g)?.length).toBe(1);
+      }
+    }
+  }
+
   test('Property 2: Consecutive runs with identical formatting merge into a single span', () => {
     fc.assert(
       fc.property(
@@ -4427,41 +4477,21 @@ describe('buildMarkdown', () => {
           code: fc.boolean(),
         }),
         fc.option(fc.webUrl(), { nil: undefined }),
-        (texts, formatting, href) => {
-          const content = texts.map(text => ({
-            type: 'text' as const,
-            text,
-            commentIds: new Set<string>(),
-            formatting,
-            href,
-          }));
-          
-          const result = buildMarkdown(content, new Map());
-          const expectedText = texts.join('');
-          // The paragraph's text starts its line, and nothing follows it,
-          // and whitespace at its edges takes character references; a
-          // link's is as the link of one run of the text writes it, with
-          // the escapes its brackets need, as of a citation's @
-          const expectedRendering = href
-            ? buildMarkdown([{ type: 'text', text: expectedText, commentIds: new Set<string>(), formatting, href }], new Map()).trim()
-            : keepParagraphEdgeWhitespace(wrapWithFormatting(expectedText, formatting, true, RunsAfter.of('')), true, true);
-          
-          // The result should contain the merged rendering for the combined text.
-          expect(result).toContain(expectedRendering);
-          
-          // For simple cases, verify no duplicate formatting
-          if (Object.values(formatting).filter(Boolean).length === 1) {
-            const activeFormat = Object.entries(formatting).find(([_, active]) => active)?.[0];
-            if (activeFormat === 'bold') {
-              expect(result.match(/\*\*[^*]*\*\*/g)?.length).toBe(1);
-            } else if (activeFormat === 'highlight') {
-              expect(result.match(/==[^=]*==/g)?.length).toBe(1);
-            }
-          }
-        }
+        mergesRuns,
       ),
       { numRuns: 100 }
     );
+  });
+
+  const PLAIN: Formatting = { bold: false, italic: false, strikethrough: false, underline: false, highlight: false, superscript: false, subscript: false, code: false };
+  test.each([
+    // Which Property 2 drew: it expected the space, which import leaves out
+    ['with no formatting', ["JI&kg'?M(m", ')w', 'ODYKY '], PLAIN],
+    ['in bold', ['a', 'b '], { ...PLAIN, bold: true }],
+    ['in italics, a tab', ['a', 'b\t'], { ...PLAIN, italic: true }],
+    ['after a backslash', ['a', 'b\\ '], PLAIN],
+  ])('merges runs that end the paragraph in whitespace %s', (_name, texts, formatting) => {
+    mergesRuns(texts, formatting, undefined);
   });
 
   test('Property 4: Hyperlink text items produce Markdown link syntax', () => {
