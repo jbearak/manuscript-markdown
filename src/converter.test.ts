@@ -10303,6 +10303,52 @@ describe('Whitespace at the edges of a paragraph', () => {
     expect(text).not.toContain('b\\\\');
   });
 
+  const equation = (prefix: string) => '\n' + prefix + '$$\n' + prefix + 'E\n' + prefix + '$$\n';
+  test.each([
+    ['one', 'A x&#32;' + equation(''), 'A x&#32;' + equation('')],
+    ['two', 'A x&#32;&#32;' + equation(''), 'A x&#32;&#32;' + equation('')],
+    ['after a tab, which stays', 'A x&#9;&#32;' + equation(''), 'A x\t&#32;' + equation('')],
+    ['after a backslash, which stays text', 'A x\\\\&#32;&#32;' + equation(''), 'A x\\\\&#32;&#32;' + equation('')],
+    ['in a quote', '> A x&#32;&#32;' + equation('> '), '> A x&#32;&#32;' + equation('> ')],
+    ['in a list item', '- A x&#32;&#32;' + equation('  '), '- A x&#32;&#32;' + equation('  ')],
+    ['in a note', 'T.[^1]\n\n[^1]: A x&#32;&#32;' + equation('    '), 'T.[^1]\n\n[^1]:\n\n    A x&#32;&#32;' + equation('    ')],
+    ['before comments\' bodies', 'A {#1}{#2}x{/1}y{/2}&#32;&#32;\n{#1>>n<<}\n{#2>>m<<}' + equation(''), 'A {#1}{#2}x{/1}y{/2}&#32;&#32;\n{#1>>n<<}\n{#2>>m<<}' + equation('')],
+    ['with text after the equation', 'A x&#32;&#32;' + equation('') + 'B\n', 'A x&#32;&#32;' + equation('').trimEnd() + '&#32;B\n'],
+  ])('keeps the spaces before an equation in the paragraph: %s', async (_name, md, expected) => {
+    // Raw before the line end, where Markdown drops one and reads two as a
+    // line break, which export wrote in Word, after the space it writes for
+    // the line end, which import takes off
+    const markdown = (await roundTrip(md)).replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    expect(markdown).toBe(expected);
+    const part = md.startsWith('T.') ? 'word/footnotes.xml' : 'word/document.xml';
+    expect(await paragraphs((await convertMdToDocx(markdown)).docx, part)).toEqual(await paragraphs((await convertMdToDocx(md)).docx, part));
+    expect((await roundTrip(markdown)).replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(markdown);
+  });
+
+  test.each([
+    ['a space', 'See [https://example.com/a](https://example.com/a)&#32;' + equation('')],
+    ['two spaces', 'See [https://example.com/a](https://example.com/a)&#32;&#32;' + equation('')],
+    ['a full stop and a space', 'See [https://example.com/a](https://example.com/a).&#32;' + equation('')],
+  ])('keeps a link before %s before an equation in the paragraph as a link', async (_name, md) => {
+    // Bare, its address took the first reference in, as linkify reads
+    // https://example.com/a&#32 or https://example.com/a.&#32 as one
+    const markdown = (await roundTrip(md)).replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    expect(markdown).toContain('](https://example.com/a)');
+    expect(await paragraphs((await convertMdToDocx(markdown)).docx, 'word/document.xml')).toEqual(await paragraphs((await convertMdToDocx(md)).docx, 'word/document.xml'));
+    expect((await roundTrip(markdown)).replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(markdown);
+  });
+
+  test.each([
+    ['spaces', '&lt;pre&gt;x&lt;/pre&gt;&#32;&#32;' + equation('')],
+    ['a backslash and a space', '&lt;pre&gt;x&lt;/pre&gt;\\\\&#32;' + equation('')],
+  ])('leaves %s before an equation in an HTML block\'s paragraph as text', async (_name, md) => {
+    // The block shows references and an escape as text
+    const markdown = (await roundTrip(md)).replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    const text = (await paragraphs((await convertMdToDocx(markdown)).docx, 'word/document.xml')).join('\n');
+    expect(text).not.toContain('#32;');
+    expect(text).not.toContain('\\\\');
+  });
+
   test.each([
     ['spaces', 'a' + ' '.repeat(100000) + 'b\u3000', 'A.\n\na' + ' '.repeat(100000) + 'b&#12288;\n\nB.\n'],
     ['backslashes', '\\'.repeat(100000) + 'b\u3000', 'A.\n\n' + '\\\\'.repeat(99999) + '\\b&#12288;\n\nB.\n'],
