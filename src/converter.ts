@@ -10580,6 +10580,29 @@ function joinSpansAtTrackedBreaks(text: string, marks: TrackedBreakMarks): strin
   return (out + markdown.slice(from)).split(marks.alone).join('').split(marks.indent).join('').split(SPAN_AT_BREAK).join('');
 }
 
+/** Adds `value` to `heap`, a binary heap of numbers with the least on top */
+function pushInOrder(heap: number[], value: number): void {
+  let at = heap.push(value) - 1;
+  for (let parent = (at - 1) >> 1; at > 0 && heap[parent] > value; at = parent, parent = (at - 1) >> 1) heap[at] = heap[parent];
+  heap[at] = value;
+}
+
+/** Takes the least number off `heap`, a binary heap of them (see
+ *  pushInOrder), which isn't empty */
+function popLeast(heap: number[]): number {
+  const least = heap[0];
+  const last = heap.pop()!;
+  if (heap.length === 0) return least;
+  let at = 0;
+  for (let child = 1; child < heap.length; at = child, child = 2 * at + 1) {
+    if (child + 1 < heap.length && heap[child + 1] < heap[child]) child++;
+    if (heap[child] >= last) break;
+    heap[at] = heap[child];
+  }
+  heap[at] = last;
+  return least;
+}
+
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
@@ -10945,14 +10968,50 @@ export function buildMarkdown(
     }
     return readsCommentsInline(text, payloads);
   };
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const paragraph of commentParagraphs) {
+  // A paragraph that doesn't read back takes the ranges over its comments
+  // out of ID syntax, which changes how the other paragraphs they're in
+  // read, so the paragraphs are checked in rounds, each in their order,
+  // until one changes nothing. A paragraph reads as it did while no ID in it
+  // has changed since its last check, so a round checks only those an ID
+  // changed in, where a check of all of them would: after the paragraph
+  // that changed it in the same round, and before it in the next. A check
+  // of all of them each round took time in the square of their number where
+  // each one's change reached only the one before, as a comment's ranges,
+  // one over each paragraph's last comment and one over the next one's
+  // first, can link each paragraph to the next.
+  const holders = new Map<string, number[]>();
+  commentParagraphs.forEach((paragraph, k) => {
+    for (const item of paragraph) {
+      for (const id of 'commentIds' in item ? item.commentIds ?? [] : []) {
+        const held = holders.get(id);
+        if (!held) holders.set(id, [k]);
+        else if (held[held.length - 1] !== k) held.push(k);
+      }
+    }
+  });
+  // This round's paragraphs to check, as a heap of their indices, and the
+  // next round's
+  let round = commentParagraphs.map((_, k) => k);
+  while (round.length > 0) {
+    const queued = new Set(round);
+    const next = new Set<number>();
+    while (round.length > 0) {
+      const k = popLeast(round);
+      const paragraph = commentParagraphs[k];
       const ids = paragraph.flatMap(item => item.type === 'html_comment' ? [...item.commentIds ?? []].filter(id => idOverComments.has(id)) : []);
       if (ids.length === 0 || readsBack(paragraph)) continue;
-      for (const id of ids) idOverComments.delete(id);
-      changed = true;
+      for (const id of ids) {
+        if (!idOverComments.delete(id)) continue;
+        for (const j of holders.get(id) ?? []) {
+          if (j < k) next.add(j);
+          else if (j > k && !queued.has(j)) {
+            queued.add(j);
+            pushInOrder(round, j);
+          }
+        }
+      }
     }
+    round = [...next].sort((a, b) => a - b);
   }
   for (const id of idOverComments) forceIdCommentIds.add(id);
 
