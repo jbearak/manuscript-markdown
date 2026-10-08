@@ -5285,6 +5285,28 @@ describe('Emphasis between runs', () => {
     expect(time(32000) / time(8000)).toBeLessThan(8);
   });
 
+  test('reads the line breaks in many HTML comments\' runs before one a <br> can\'t take in time linear in their number', () => {
+    // Each break's line, to see whether the comments on it went after a
+    // <br>, read on through the runs after it that kept their line ends,
+    // to the last, which none could take, for each
+    const time = (n: number) => {
+      const items: ContentItem[] = [
+        run('a'),
+        ...Array.from({ length: n }, (): ContentItem => ({ type: 'html_comment', text: '<!-- x -->\n', commentIds: new Set() })),
+        { type: 'html_comment', text: '<!-- y\n\nz -->', commentIds: new Set() },
+        run('b'),
+      ];
+      let fastest = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const start = performance.now();
+        buildMarkdown(items, new Map());
+        fastest = Math.min(fastest, performance.now() - start);
+      }
+      return fastest;
+    };
+    expect(time(3200) / time(800)).toBeLessThan(8);
+  });
+
   test('property: adjacent runs read back with their formatting', () => {
     const format = fc.record({
       bold: fc.boolean(), italic: fc.boolean(), strikethrough: fc.boolean(), underline: fc.boolean(),
@@ -19731,6 +19753,126 @@ describe('HTML comments between Word runs', () => {
       expect(await breaks(again)).toBe(1);
       expect(strip((await convertDocx(again, undefined, { alwaysUseCommentIds })).markdown)).toBe(markdown);
     }
+  });
+
+  test.each([
+    ['after it, before another', run('a') + commentLines('<!-- x -->\n') + comment('<!-- z -->') + run('b'), 'a<!-- x --><br><!-- z -->b'],
+    ['after it, before text', run('a') + commentLines('<!-- x -->\n') + run('b'), 'a<!-- x -->\\\nb'],
+    ['after it, before another at the paragraph\'s end', run('a') + commentLines('<!-- x -->\n') + comment('<!-- z -->'), 'a<!-- x --><br><!-- z -->'],
+    ['between it and another in its run', run('a') + commentLines('<!-- x -->\n<!-- z -->') + run('b'), 'a<!-- x --><br><!-- z -->b'],
+    // Which started the next line, as Markdown drops it there
+    ['after it, with a space after the break', run('a') + commentLines('<!-- x -->\n ') + comment('<!-- z -->') + run('b'), 'a<!-- x --><br><!-- z -->b'],
+    // Which Word hid, and the paragraph would show
+    ['after it, with a space before the break', run('a') + commentLines('<!-- x --> \n') + run('b'), 'a<!-- x -->\\\nb'],
+    ['before it', run('a') + commentLines('\n<!-- x -->') + run('b'), 'a<br><!-- x -->b'],
+    ['two after it', run('a') + commentLines('<!-- x -->\n\n') + comment('<!-- z -->') + run('b'), 'a<!-- x -->\\\n<br><!-- z -->b', 2],
+    ['in a list item', run('a') + commentLines('<!-- x -->\n') + comment('<!-- z -->') + run('b'), '- a<!-- x --><br><!-- z -->b', 1, '- XX'],
+    ['in a quote', run('a') + commentLines('<!-- x -->\n') + run('b'), '> a<!-- x -->\\\n> b', 1, '> XX'],
+    ['in a heading', run('a') + commentLines('<!-- x -->\n') + run('b'), '# a<!-- x --><br>b', 1, '# XX'],
+  ])('keeps a line break in a comment\'s hidden run outside the comment, %s, as one', async (_name, runs, md, count = 1, template = 'XX') => {
+    // Which went in the comment's text, as a line end, which Markdown read
+    // as a space, or, before a comment, as an HTML block's start, which
+    // ended the paragraph. The break shows, as other whitespace after the
+    // comment's end does
+    const docx = await withRuns(runs, template);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(await breaks(again)).toBe(count);
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a space', ' ', '&#32;'],
+    ['a tab', '\t', '&#9;'],
+  ])('keeps a line break in a comment\'s hidden run outside the comment before another whose run starts with %s as one', async (_name, indent, reference) => {
+    // Whose indent goes as a reference, as after any line break, before
+    // which the comment starts no HTML block. In the comment's text, the
+    // line end started one
+    const docx = await withRuns(run('a') + commentLines('<!-- x -->\n') + comment(indent + '<!-- z -->') + run(' b'));
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe('a<!-- x -->\\\n' + reference + '<!-- z --> b\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await shown(again)).join('')).not.toContain('&lt;!--');
+    expect(await breaks(again)).toBe(1);
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test('keeps a line break in a comment\'s hidden run outside the comment, in a footnote, as one', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Text[^1]\n\n[^1]: XX')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    zip.file('word/footnotes.xml', xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, run('a') + commentLines('<!-- x -->\n') + comment('<!-- z -->') + run('b')));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('Text[^1]\n\n[^1]: a<!-- x --><br><!-- z -->b\n');
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown)).toBe(markdown);
+  });
+
+  test('keeps one Word comment on a comment\'s hidden run with line breaks after it in a footnote', async () => {
+    // The breaks, in the Word comment's range, which only the note's
+    // content as it renders held, went with a second copy of its body
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Text[^1]\n\n[^1]: XX\n\nB {==z==}{>>@A (2024-01-15 10:30) | note<<}.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const start = '<w:commentRangeStart w:id="0"/>';
+    const end = '<w:commentRangeEnd w:id="0"/>';
+    const reference = /<w:r>(?:(?!<w:r>)[\s\S])*?<w:commentReference w:id="0"\/><\/w:r>/.exec(xml)![0];
+    zip.file('word/document.xml', xml.replace(start, '').replace(end, '').replace(reference, ''));
+    const notes = await zip.file('word/footnotes.xml')!.async('string');
+    zip.file('word/footnotes.xml', notes.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, run('a') + start + commentLines('<!-- x -->\n\n') + end + reference + run('b')));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('Text[^1]\n\nB z.\n\n[^1]:\n\n    a{#1}<!-- x -->\\\n    \\\n    {/1}b\n    {#1>>@A (2024-01-15 10:30) | note<<}\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    const commentsXml = await (await JSZip.loadAsync(again)).file('word/comments.xml')!.async('string');
+    expect(commentsXml.match(/<w:comment /g)?.length).toBe(1);
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test.each([
+    // Where the comment starts an HTML block, which a break doesn't keep
+    // from ending the paragraph
+    ['at the paragraph\'s start', commentLines('<!-- x -->\n') + comment('<!-- z -->') + run('b'), '<!-- x -->\n<!-- z -->b'],
+    // Where a break would show, which the hidden one didn't
+    ['at the paragraph\'s end', run('a') + commentLines('<!-- x -->\n'), 'a<!-- x -->'],
+    // Which only an HTML block holds hidden, which would leave a \ before
+    // it as text
+    ['before one with a blank line in it', run('a') + commentLines('<!-- x -->\n') + commentLines('<!-- z\n\ny -->') + run('b'), 'a<!-- x -->\n<!-- z\n\ny -->b'],
+    ['before one with a line that starts a block', run('a') + commentLines('<!-- x -->\n') + commentLines('<!-- z\n# y -->') + run('b'), 'a<!-- x -->\n<!-- z\n# y -->b'],
+    ['before one with a blank line in it, in its run', run('a') + commentLines('<!-- x -->\n<!-- z\n\ny -->') + run('b'), 'a<!-- x -->\n<!-- z\n\ny -->b'],
+    ['before two, the second with a blank line in it', run('a') + commentLines('<!-- x -->\n') + comment('<!-- z -->') + commentLines('<!-- w\n\nq -->') + run('b'), 'a<!-- x -->\n<!-- z --><!-- w\n\nq -->b'],
+    // On a line of an HTML block, which would take a \ there as text: one
+    // after a line end another comment's text keeps
+    ['after another\'s kept before one with a blank line in it', run('a') + commentLines('<!-- z -->\n') + commentLines('<!-- y\n\nend -->') + commentLines('<!-- x -->\n') + run('b'), 'a<!-- z -->\n<!-- y\n\nend --><!-- x -->\nb'],
+    // One a comment at the paragraph's start begins
+    ['on the line of one that starts its paragraph', commentLines('<!-- z -->') + run(' b') + commentLines('<!-- x -->\n') + run('c'), '<!-- z --> b<!-- x -->\nc'],
+    // One after a line break of Word's before one with a blank line in it
+    ['after a line break before one with a blank line in it', run('a') + lineBreak + commentLines('<!-- y\n\nend -->') + commentLines('<!-- x -->\n') + run('b'), 'a\\\n<!-- y\n\nend --><!-- x -->\nb'],
+    // One after an alert's label, which goes
+    ['at the start of an alert\'s text', commentLines('<!-- x -->\n') + comment('<!-- z -->') + run('b'), '> [!NOTE]\n> <!-- x -->\n> <!-- z -->b', '> [!NOTE]\n> XX'],
+    // After a comment over lines, one of which starts a heading, which would
+    // take a \ as text
+    ['after one over lines, one a heading\'s', run('a') + commentLines('<!-- x\n# y -->\n') + run('b'), 'a<!-- x\n# y -->\nb'],
+    ['after one over lines, one a heading\'s, in a run before', run('a') + commentLines('<!-- x\n# y -->') + commentLines('<!-- z -->\n') + run('b'), 'a<!-- x\n# y --><!-- z -->\nb'],
+    // A line feed in Word's text, not a break of Word's, which Word shows as
+    // a space
+    ['as a line feed in Word\'s text', run('a') + comment('<!-- x -->\n') + run('b'), 'a<!-- x -->\nb'],
+    ['as a line feed in Word\'s text, before another', run('a') + comment('<!-- x -->\n') + comment('<!-- z -->') + run('b'), 'a<!-- x -->\n<!-- z -->b'],
+    // A page or column break, which import leaves out of a paragraph's
+    // text, as it's no line break
+    ['as a page break', run('a') + comment('<!-- x -->').replace(/<\/w:t><\/w:r>$/, '</w:t><w:br w:type="page"/></w:r>') + run('b'), 'a<!-- x -->\nb'],
+    ['as a column break, before another', run('a') + comment('<!-- x -->').replace(/<\/w:t><\/w:r>$/, '</w:t><w:br w:type="column"/></w:r>') + comment('<!-- z -->') + run('b'), 'a<!-- x -->\n<!-- z -->b'],
+  ])('leaves a line break in a comment\'s hidden run after the comment, %s, in its text', async (_name, runs, md, template = 'XX') => {
+    expect(strip((await convertDocx(await withRuns(runs, template))).markdown)).toBe(md + '\n');
+  });
+
+  test('leaves a line break in a comment\'s hidden run after the comment at the start of an alert\'s text, after a label Word split, in its text', async () => {
+    // Whose first run alone wasn't the label, so the comment came after
+    // text the paragraph shows, which the label isn't, as it goes
+    const zip = await JSZip.loadAsync(await withRuns(commentLines('<!-- x -->\n') + comment('<!-- z -->') + run('b'), '> [!NOTE]\n> XX'));
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const label = /<w:r>(<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)<w:t>※ Note<\/w:t><\/w:r>/s.exec(xml)!;
+    zip.file('word/document.xml', xml.replace(label[0], '<w:r>' + label[1] + '<w:t xml:space="preserve">※ </w:t></w:r><w:r>' + label[1] + '<w:t>Note</w:t></w:r>'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('> [!NOTE]\n> <!-- x -->\n> <!-- z -->b\n');
   });
 });
 
