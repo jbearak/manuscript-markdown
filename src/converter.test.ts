@@ -17716,6 +17716,109 @@ describe('Links of more than one run', () => {
   });
 });
 
+describe('Links Word writes as fields or with a location', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const rels = (target: string) => '<?xml version="1.0"?>'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + target + '" TargetMode="External"/>'
+    + '</Relationships>';
+  const text = (t: string) => '<w:r><w:t xml:space="preserve">' + t + '</w:t></w:r>';
+  const deletedText = (t: string) => '<w:r><w:delText xml:space="preserve">' + t + '</w:delText></w:r>';
+  const fldChar = (type: string) => '<w:r><w:fldChar w:fldCharType="' + type + '"/></w:r>';
+  const instr = (t: string) => '<w:r><w:instrText xml:space="preserve">' + t + '</w:instrText></w:r>';
+  /** A field whose instruction is in `instrRuns` and result `result` */
+  const field = (instrRuns: string, result: string) => fldChar('begin') + instrRuns + fldChar('separate') + result + fldChar('end');
+  const inserted = (runs: string) => '<w:ins w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z">' + runs + '</w:ins>';
+  const deleted = (runs: string) => '<w:del w:id="8" w:author="A" w:date="2024-01-01T00:00:00Z">' + runs + '</w:del>';
+  /** The Markdown of a paragraph `See `, `runs` and ` now.`, and of the
+   *  same paragraph in a note, with a hyperlink relationship rId1 to `target` */
+  const importBody = async (runs: string, target = 'https://e.com/page') => strip((await convertDocx(await buildSyntheticDocx(
+    wrapDocumentXml('<w:p>' + text('See ') + runs + text(' now.') + '</w:p>'),
+    { 'word/_rels/document.xml.rels': rels(target) }))).markdown);
+  const importNote = async (runs: string, target = 'https://e.com/page') => strip((await convertDocx(await buildSyntheticDocx(
+    wrapDocumentXml('<w:p>' + text('Text') + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'),
+    {
+      'word/footnotes.xml': wrapNotesXml('footnotes', '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
+        + text(' See ') + runs + text(' now.') + '</w:p></w:footnote>'),
+      'word/_rels/footnotes.xml.rels': rels(target),
+    }))).markdown);
+  /** The Markdown export and import give back, which should be `md` */
+  const again = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+
+  test.each([
+    ['a HYPERLINK field', field(instr(' HYPERLINK "https://e.com/x" '), text('the site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field with a location', field(instr(' HYPERLINK "https://e.com/x" \\l "part-2" '), text('the site')), '[the site](https://e.com/x#part-2)'],
+    ['a HYPERLINK field with its address unquoted', field(instr(' HYPERLINK https://e.com/x '), text('the site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field with a switch before its address', field(instr(' HYPERLINK \\o "Tip" "https://e.com/x" '), text('the site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field with a format switch before its address', field(instr(' HYPERLINK \\* MERGEFORMAT "https://e.com/x" '), text('the site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field with general switches after its address', field(instr(' HYPERLINK "https://e.com/x" \\* MERGEFORMAT \\# "0.00" \\@ "d MMM" '), text('the site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field with switches that take no argument before its location', field(instr(' HYPERLINK "https://e.com/x" \\n \\m \\h \\! \\l "part-2" '), text('the site')), '[the site](https://e.com/x#part-2)'],
+    ['a HYPERLINK field with a frame and a tip', field(instr(' HYPERLINK "https://e.com/x" \\t "_blank" \\o "Tip" '), text('the site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field with a location right after its switch', field(instr(' HYPERLINK \\l"part-2" "https://e.com/x" '), text('the site')), '[the site](https://e.com/x#part-2)'],
+    ['a HYPERLINK field written in lowercase', field(instr(' hyperlink "https://e.com/x" '), text('the site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field whose instruction is in two runs', field(instr(' HYPERLINK "https://e.') + instr('com/x" '), text('the ') + text('site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field with a field in its result', field(instr(' HYPERLINK "https://e.com/x" '), text('the ') + field(instr(' QUOTE "site" '), text('site')) + text(' here')), '[the site here](https://e.com/x)'],
+    ['an inserted HYPERLINK field', inserted(field(instr(' HYPERLINK "https://e.com/x" '), text('the site'))), '{++[the site](https://e.com/x)++}'],
+    ['a deleted HYPERLINK field', deleted(fldChar('begin') + '<w:r><w:delInstrText xml:space="preserve"> HYPERLINK "https://e.com/x" </w:delInstrText></w:r>'
+      + fldChar('separate') + deletedText('the site') + fldChar('end')), '{--[the site](https://e.com/x)--}'],
+    ['a HYPERLINK field with text after it', field(instr(' HYPERLINK "https://e.com/x" '), text('the site')) + text(' and more'), '[the site](https://e.com/x) and more'],
+    ['a HYPERLINK field Word wrote whole', '<w:fldSimple w:instr=" HYPERLINK &quot;https://e.com/x&quot; ">' + text('the ') + text('site') + '</w:fldSimple>', '[the site](https://e.com/x)'],
+    ['a HYPERLINK field Word wrote whole, with a location', '<w:fldSimple w:instr=" HYPERLINK &quot;https://e.com/x&quot; \\l &quot;part-2&quot;">' + text('the site') + '</w:fldSimple>', '[the site](https://e.com/x#part-2)'],
+    ['a hyperlink with a location', '<w:hyperlink r:id="rId1" w:anchor="part-2" w:history="1">' + text('the site') + '</w:hyperlink>', '[the site](https://e.com/page#part-2)'],
+  ])('imports %s as a link', async (_name, runs, link) => {
+    const md = 'See ' + link + ' now.\n';
+    expect(await importBody(runs)).toBe(md);
+    expect(await again(md)).toBe(md);
+  });
+
+  test.each([
+    ['a drive path', 'C:\\\\Docs\\\\a.docx'],
+    ['a UNC path', '\\\\\\\\server\\\\share\\\\a.docx'],
+    ['a URL with a backslash', 'https://e.com/a\\\\b'],
+    ['a path with a quote', 'C:\\\\Docs\\\\\\"a\\".docx'],
+  ])('reads a HYPERLINK field\'s address to %s, quoted or not, with each \\\\ a backslash', async (_name, address) => {
+    // Word doubles a backslash in a field's argument, and \" is a quote. An
+    // unquoted address kept both backslashes, and one that started with them
+    // was read as switches, which lost them.
+    const target = address.replace(/\\(.)/g, '$1');
+    for (const written of ['"' + address + '"', address]) {
+      const md = await importBody(field(instr(' HYPERLINK ' + written + ' '), text('the file')));
+      expect(md).toMatch(/^See \[the file\]\(.*\) now\.\n$/);
+      // The address the Markdown links to, as markdown-it reads it, which
+      // export gives Word percent-encoded
+      const { docx } = await convertMdToDocx(md);
+      const rels = await (await JSZip.loadAsync(docx)).file('word/_rels/document.xml.rels')!.async('string');
+      const exported = /Type="[^"]*\/hyperlink" Target="([^"]*)"/.exec(rels)?.[1];
+      expect(exported === undefined ? undefined : decodeURIComponent(exported.replace(/&quot;/g, '"').replace(/&amp;/g, '&'))).toBe(target);
+    }
+  });
+
+  test.each([
+    ['a HYPERLINK field', field(instr(' HYPERLINK "https://e.com/x" '), text('the site')), '[the site](https://e.com/x)'],
+    ['a HYPERLINK field Word wrote whole', '<w:fldSimple w:instr=" HYPERLINK &quot;https://e.com/x&quot; ">' + text('the site') + '</w:fldSimple>', '[the site](https://e.com/x)'],
+    ['a hyperlink with a location', '<w:hyperlink r:id="rId1" w:anchor="part-2">' + text('the site') + '</w:hyperlink>', '[the site](https://e.com/page#part-2)'],
+    ['a deleted HYPERLINK field', deleted(fldChar('begin') + '<w:r><w:delInstrText xml:space="preserve"> HYPERLINK "https://e.com/x" </w:delInstrText></w:r>'
+      + fldChar('separate') + deletedText('the site') + fldChar('end')), '{--[the site](https://e.com/x)--}'],
+  ])('imports %s in a note as a link', async (_name, runs, link) => {
+    expect(await importNote(runs)).toBe('Text[^1]\n\n[^1]: See ' + link + ' now.\n');
+  });
+
+  test.each([
+    ['a hyperlink to a bookmark', '<w:hyperlink w:anchor="part-2">' + text('the site') + '</w:hyperlink>'],
+    ['a HYPERLINK field to a bookmark', field(instr(' HYPERLINK \\l "part-2" '), text('the site'))],
+    ['a HYPERLINK field to a bookmark, with a format switch', field(instr(' HYPERLINK \\l "part-2" \\* MERGEFORMAT '), text('the site'))],
+    ['another field', field(instr(' QUOTE "the site" '), text('the site'))],
+    ['another field Word wrote whole', '<w:fldSimple w:instr=" QUOTE &quot;the site&quot; ">' + text('the site') + '</w:fldSimple>'],
+  ])('keeps the text of %s, which goes to no address, as text', async (_name, runs) => {
+    expect(await importBody(runs)).toBe('See the site now.\n');
+  });
+
+  test('keeps a hyperlink whose target has a fragment as it is, with its location', async () => {
+    expect(await importBody('<w:hyperlink r:id="rId1" w:anchor="part-2">' + text('the site') + '</w:hyperlink>', 'https://e.com/page#top'))
+      .toBe('See [the site](https://e.com/page#top) now.\n');
+  });
+});
+
 describe('Formatting Word shows on whitespace', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n/, '');
   const HL = '<w:highlight w:val="yellow"/>', U = '<w:u w:val="single"/>', S = '<w:strike/>';
