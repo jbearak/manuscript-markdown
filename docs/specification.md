@@ -743,7 +743,7 @@ An image can be a link's text, or part of it, as in `[![alt text](image.png)](ht
 ![alt text](folder/image.png){width=640 height=480}
 ```
 
-The curly-brace block after the image reference specifies dimensions. Bare numbers and `px` are pixels; absolute units `in`, `cm`, `mm`, `pt`, and `pc` are converted at 96 px per inch. Both `width` and `height` are optional — when only one is provided, the other is computed from the image's intrinsic aspect ratio.
+The curly-brace block after the image reference specifies dimensions. Bare numbers and `px` are pixels; absolute units `in`, `cm`, `mm`, `pt`, and `pc` are converted at 96 px per inch. Both `width` and `height` are optional — when only one is provided, the other is computed from the image's intrinsic aspect ratio. A brace escaped as `\{`, or written as `&#123;`, right after the image is text, not its block: `![alt text](image.png)\{x}`. DOCX import escapes one so after an image with no size.
 
 ### HTML Image Syntax
 

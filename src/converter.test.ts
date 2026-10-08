@@ -15073,6 +15073,45 @@ describe('round-trip regression: linked images', () => {
   });
 });
 
+describe('round-trip regression: a brace after an image', () => {
+  // Minimal 1x1 white PNG (67 bytes)
+  const TINY_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
+    'Nl7BcQAAAABJRU5ErkJggg==', 'base64');
+  const tmpDir = join(require('os').tmpdir(), 'mms-test-brace-img-' + Date.now());
+
+  beforeAll(() => {
+    const { mkdirSync, writeFileSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+  });
+  afterAll(() => require('fs').rmSync(tmpDir, { recursive: true, force: true }));
+
+  const toMarkdown = async (md: string) => (await convertDocx((await convertMdToDocx(md, { sourceDir: tmpDir })).docx)).markdown;
+
+  test.each([
+    ['escaped', 'A ![a](image.png)\\{x\\} b', 'A ![a](image.png){width=1 height=1}{x} b'],
+    ['written as a reference', 'A ![a](image.png)&#123;x} b', 'A ![a](image.png){width=1 height=1}{x} b'],
+    ['escaped, that reads as a size', 'A ![a](image.png)\\{width=50\\} b', 'A ![a](image.png){width=1 height=1}{width=50} b'],
+    ['escaped, in a tracked change', 'A {++![a](image.png)\\{x\\}++} b', 'A {++![a](image.png){width=1 height=1}++}{++{x}++} b'],
+    ['escaped, in a table\'s cell', '| h |\n| --- |\n| ![a](image.png)\\{x\\} |', '| h |\n| --- |\n| ![a](image.png){width=1 height=1}{x} |'],
+    // Which import wrote as it is, which the next export read as its size
+    ['escaped, after one export can\'t embed', 'A ![a](missing.png)\\{x\\} b', 'A ![a](missing.png)\\{x} b'],
+  ])('keeps a brace after an image as text, %s', async (_name, md, expected) => {
+    // Export read the image's size from the text after it, past its escape,
+    // and the image's {x} was lost: A ![a](image.png){width=1 height=1} b
+    const once = await toMarkdown(md);
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+    expect(await toMarkdown(once)).toBe(once);
+  });
+
+  test('reads no size for an image from an escaped brace after it', () => {
+    const runs = parseMd('A ![a](image.png)\\{width=50\\} b')[0].runs;
+    expect(runs.find(run => run.type === 'image')).toMatchObject({ imageWidth: undefined, imageSource: '![a](image.png)' });
+    expect(runs.filter(run => run.type === 'text').map(run => run.text).join('')).toBe('A {width=50} b');
+  });
+});
+
 describe('round-trip regression: images export cannot embed', () => {
   async function roundTrip(md: string, sourceDir?: string) {
     const { docx, warnings } = await convertMdToDocx(md, sourceDir ? { sourceDir } : undefined);
