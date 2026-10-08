@@ -3480,6 +3480,26 @@ export async function extractBlockquoteAlertStyleMapping(data: Uint8Array | JSZi
   }
 }
 
+/** The quote groups of alerts whose marker export wrote as a paragraph of
+ *  its own, which it writes no paragraph for with the label hidden (see
+ *  blockquoteAlertMarkerAloneProps in md-to-docx.ts) */
+export async function extractBlockquoteAlertMarkerAloneGroups(data: Uint8Array | JSZip): Promise<Set<number> | null> {
+  const mappingJson = await extractChunkedCustomProp(data, 'MANUSCRIPT_BLOCKQUOTE_ALERT_MARKER_ALONE_');
+  if (!mappingJson) return null;
+  try {
+    const parsedJson = JSON.parse(mappingJson);
+    if (!parsedJson || typeof parsedJson !== 'object') return null;
+    const groups = new Set<number>();
+    for (const [key, alone] of Object.entries(parsedJson)) {
+      const groupIdx = parseInt(key, 10);
+      if (!isNaN(groupIdx) && alone === 1) groups.add(groupIdx);
+    }
+    return groups.size > 0 ? groups : null;
+  } catch {
+    return null;
+  }
+}
+
 async function extractIdMappingFromCustomXml(
   data: Uint8Array | JSZip,
   propPrefix: string,
@@ -11315,7 +11335,7 @@ function popLeast(heap: number[]): number {
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   trackedBreakStart = undefined;
@@ -12566,7 +12586,12 @@ export function buildMarkdown(
               pendingAlertInlinePrefixForHardBreak = item.listContinuation ? itemPrefix : undefined;
             } else {
               if (!nextIsDisplayMath) alertMarkerLineEnd = output.length;
-              output.push('\n' + (nextIsDisplayMath ? '' : itemPrefix));
+              // With the label hidden, Word has no paragraph for a marker
+              // that was one of its own, so the line of the quote's > alone
+              // after it is the record's
+              const alone = options?.calloutLabels === false
+                && options.blockquoteAlertMarkerAloneGroups?.has(item.blockquoteGroupIndex ?? -1);
+              output.push((alone ? '\n' + itemPrefix.trimEnd() : '') + '\n' + (nextIsDisplayMath ? '' : itemPrefix));
               pendingAlertInlinePrefixForHardBreak = undefined;
             }
             pendingAlertPrefixStrip = (next && next.type !== 'para') ? item.alertType : undefined;
@@ -14027,6 +14052,7 @@ export async function convertDocx(
     blockquotePostContentBlankLineMapping,
     blockquoteListLevelMapping,
     blockquoteAlertStyleMapping,
+    blockquoteAlertMarkerAloneGroups,
     imageFormatMapping,
     noteImageFormatMapping,
     tableFormatMapping,
@@ -14094,6 +14120,7 @@ export async function convertDocx(
     blockquotePostContentBlankLineMapping: extractBlockquotePostContentBlankLineMapping(zip),
     blockquoteListLevelMapping: extractBlockquoteListLevelMapping(zip),
     blockquoteAlertStyleMapping: extractBlockquoteAlertStyleMapping(zip),
+    blockquoteAlertMarkerAloneGroups: extractBlockquoteAlertMarkerAloneGroups(zip),
     imageFormatMapping: extractImageFormatMapping(zip),
     noteImageFormatMapping: extractNoteImageFormatMapping(zip),
     tableFormatMapping: extractTableFormatMapping(zip),
@@ -14465,6 +14492,7 @@ export async function convertDocx(
     blockquotePreContentBlankLines: blockquotePreContentBlankLineMapping ?? derivedBlockquotePreContentBlankLines,
     blockquotePostContentBlankLines: blockquotePostContentBlankLineMapping ?? derivedBlockquotePostContentBlankLines,
     blockquoteAlertInlineByGroup: blockquoteAlertStyleMapping,
+    blockquoteAlertMarkerAloneGroups,
     calloutLabels: storedCalloutLabels,
     imageFormatMapping,
     noteImageFormatMapping,
