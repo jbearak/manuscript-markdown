@@ -6089,8 +6089,9 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     } else {
       styleStr = '<w:b/>';
     }
-    // Heading 4, normal, in the body font and size, changes nothing
-    const rPrInner = styleStr + font + sz;
+    // Heading 4, normal, in the body font and size, changes nothing. In
+    // schema order (see orderRPr)
+    const rPrInner = orderRPr(styleStr + font + sz);
     return rPrInner ? '<w:rPr>' + rPrInner + '</w:rPr>\n' : '';
   }
 
@@ -6146,7 +6147,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     if (titleStyle0.includes('smallcaps')) titleStyleStr += '<w:smallCaps/>';
     else if (titleStyle0.includes('allcaps')) titleStyleStr += '<w:caps/>';
   }
-  const titleRpr = '<w:rPr>' + titleStyleStr + titleFont + titleSz + '</w:rPr>\n';
+  const titleRpr = '<w:rPr>' + orderRPr(titleStyleStr + titleFont + titleSz) + '</w:rPr>\n';
 
   // FootnoteText: body font + size from heading map or default 20hp
   const footnoteSz = overrides?.headingSizesHp?.has('FootnoteText')

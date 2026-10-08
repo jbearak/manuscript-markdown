@@ -1242,6 +1242,27 @@ describe('heading and title styles based on another style', () => {
     expect(parseFrontmatter((await convertDocx(docx)).markdown).metadata.headerFontStyle?.[1]).toBe('bold-underline');
   });
 
+  // Word writes run properties in schema order and reorders others on open,
+  // marking the document changed
+  it.each([
+    ['a heading', 'header-font: Georgia\nheader-font-size: 13\nheader-font-style: bold-underline-smallcaps', 'Heading1',
+      '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:b/><w:smallCaps/><w:sz w:val="26"/><w:szCs w:val="26"/><w:u w:val="single"/>'],
+    ['the title', 'title-font: Georgia\ntitle-font-style: italic-underline-allcaps', 'Title',
+      '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:i/><w:caps/><w:sz w:val="56"/><w:szCs w:val="56"/><w:u w:val="single"/>'],
+    ['a custom style', 'styles:\n  epigraph:\n    font: Georgia\n    font-size: 13\n    font-style: bold-underline-smallcaps', 'MsCustomEpigraph',
+      '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:b/><w:smallCaps/><w:sz w:val="26"/><w:szCs w:val="26"/><w:u w:val="single"/>'],
+  ])('the rPr export writes into its own style for %s goes in schema order', async (_name, fields, id, expected) => {
+    const { convertDocx } = await import('./converter');
+    const md = '---\n' + fields + '\ntitle: T\n---\n\n# One\n\n<!-- style: epigraph -->\n\nStyled\n\n<!-- /style -->\n';
+    const docx = (await convertMdToDocx(md)).docx;
+    const styles = await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+    expect(/<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(extractStyleBlock(styles, id)!)?.[1]).toBe(expected);
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata).toMatchObject(parseFrontmatter(md).metadata);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), id)).toBe(extractStyleBlock(styles, id));
+  });
+
   it('a heading based on a bold heading stays bold without the template', async () => {
     const { convertDocx } = await import('./converter');
     const { markdown } = await convertDocx(await withStyles(heading(2, '<w:basedOn w:val="Heading1"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')));
