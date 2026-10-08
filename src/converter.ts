@@ -803,6 +803,8 @@ interface TextIndex {
   /** Where each note reference and citation is, whose [ before its ]
    *  ends a citation before it, as [^1] and [@b] do */
   bracketed: number[];
+  /** Where each > is, which can end a tag a run before leaves open */
+  tagEnds: number[];
 }
 
 /** `text`'s index, where a run of dollar signs ends at each of `bounds`,
@@ -817,8 +819,10 @@ function indexText(text: string, bounds: ReadonlySet<number> = new Set(), bracke
   const ats: number[] = [];
   const semicolons: number[] = [];
   const openers: number[] = [];
+  const tagEnds: number[] = [];
   for (let i = 0; i < text.length; i++) {
     if (text[i] === ']') closers.push(i);
+    else if (text[i] === '>') tagEnds.push(i);
     else if (text[i] === '@') ats.push(i);
     else if (text[i] === ';') semicolons.push(i);
     else if (text[i] === '[') openers.push(i);
@@ -837,7 +841,7 @@ function indexText(text: string, bounds: ReadonlySet<number> = new Set(), bracke
     nextDouble[k] = dollarRuns[k].length > 1 ? k : nextDouble[k + 1];
   }
   const linkClosers = comments.length === 0 ? closers : closers.filter(at => lowerBound(comments, at + 1) % 2 === 0);
-  return { text, closers, linkClosers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, laterEquals, ats, semicolons, openers, bracketed };
+  return { text, closers, linkClosers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, laterEquals, ats, semicolons, openers, bracketed, tagEnds };
 }
 
 /** The first of `sorted` at or after `value` */
@@ -933,6 +937,19 @@ export class RunsAfter {
   get hasEquals(): boolean {
     return this.prefix.includes('==') || this.from <= this.index.laterEquals
       || lowerBound(this.index.equals, this.from) < this.index.equals.length;
+  }
+
+  /** Whether a > in these could end a tag that the run before leaves
+   *  open, as a link's URL's or an image's alt text's can */
+  get endsTag(): boolean {
+    return this.prefix.includes('>') || lowerBound(this.index.tagEnds, this.from) < this.index.tagEnds.length;
+  }
+
+  /** Whether the tag at `start` that `text`, the run before's, leaves open
+   *  goes on to its > in these with no delimiters between, where they're
+   *  known (see tagWrittenWhole) */
+  tagGoesOn(text: string, start: number): boolean {
+    return !this.prefix && !!this.runs && tagWrittenWhole(this.runs, text, start);
   }
 
   /** The character after the nth ] a link's text can close at, from 0: ''
@@ -1216,6 +1233,28 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     } else if (c === '&') {
       // An entity or character reference
       if (/^&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-z\d]{1,31});/.test(text.slice(i, i + 40))) escaped.add(i);
+    }
+  }
+  // A tag the text leaves open at its end, as <span title=" , which a > in
+  // the runs after it could close, as an image's alt text's can, reads as
+  // HTML across their Markdown, as of the image: its <, and each in it
+  // that could start a tag of its own once that one is text. One of its
+  // name alone, as <u, goes on only into a space, / or >, which a
+  // delimiter or an image's ! between the runs comes before. But not one
+  // that goes on to its > in runs written with it with no delimiters
+  // between, as one Word's runs split, a tag in Word's text as well.
+  if (after?.endsTag && text.includes('<')) {
+    const open = OPEN_TAG_AT_END_RE.exec(text);
+    if (open && (/\s/.test(open[0]) || /^[\s/>]/.test(after.first)) && !after.tagGoesOn(text, open.index)) {
+      for (let i = open.index; i < text.length; i++) {
+        if (text[i] !== '<' || !/[A-Za-z/]/.test(text[i + 1] ?? '')) continue;
+        // But one of a tag that escapeSensitiveHtmlLikeTags writes as
+        // references, which start none, and which would keep the escape
+        // before them, as \&lt;b&gt;
+        HTML_LIKE_TAG_AT.lastIndex = i;
+        const tag = HTML_LIKE_TAG_AT.exec(text);
+        if (!tag || !MARKDOWN_HTML_SENSITIVE_TAGS.has(tag[1].toLowerCase())) escaped.add(i);
+      }
     }
   }
   // A URL or email address, which linkify would make a link of, as export's
@@ -2616,6 +2655,54 @@ function readCarriageReturns(items: ContentItem[]): void {
 
 // Each start or end of an element in Word's text, as markdown-it reads one
 const ELEMENT_TAG_IN_WORD_TEXT = new RegExp(HTML_OPEN_CLOSE_TAG_RE.source.replace(/^\^/, ''), 'g');
+const ELEMENT_TAG_AT = new RegExp(HTML_OPEN_CLOSE_TAG_RE.source.replace(/^\^/, ''), 'y');
+
+/** The text of the runs of a paragraph's items that import writes with no
+ *  delimiters between them, as Word's runs split it: plain text, and
+ *  whitespace in bold or italic alone (see writesNoDelimiters), of the same
+ *  link, change and comments, in no link or change, whose delimiters could
+ *  come between; with each item's part, and its place in it. Found once for
+ *  each array of items. */
+const plainRunTexts = new WeakMap<ContentItem[], { texts: string[]; part: number[]; offsets: number[] }>();
+
+/**
+ * Whether the tag at `start` in `text`, the text of the item before
+ * `runs.at`, which it leaves open at its end, goes on to its > in the runs
+ * import writes with it with no delimiters between (see plainRunTexts): as
+ * Word's text has it, a tag whole, which import writes raw, with the line
+ * feeds in it (see readTextLineFeeds). Not one import writes as text (see
+ * escapeSensitiveHtmlLikeTags), whose line feeds it doesn't keep.
+ */
+function tagWrittenWhole(runs: IndexedRuns, text: string, start: number): boolean {
+  const { items, at } = runs;
+  const item = items[at - 1];
+  if (item?.type !== 'text' || item.text !== text || hasFormatting(item.formatting)) return false;
+  const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(text.slice(start, start + 40));
+  if (!name || MARKDOWN_HTML_SENSITIVE_TAGS.has(name[1].toLowerCase())) return false;
+  let found = plainRunTexts.get(items);
+  if (!found) {
+    const texts: string[] = [];
+    const part: number[] = [];
+    const offsets: number[] = [];
+    for (let k = 0; k < items.length; k++) {
+      const run = items[k];
+      if (run.type !== 'text' || run.text === '\\\n' || run.href !== undefined || run.revision
+        || hasFormatting(run.formatting) && !writesNoDelimiters(run.text, run.formatting)) {
+        part.push(-1);
+        offsets.push(0);
+        continue;
+      }
+      if (part[k - 1] === undefined || part[k - 1] === -1 || !writtenTogether(items[k - 1], run)) texts.push('');
+      part.push(texts.length - 1);
+      offsets.push(texts[texts.length - 1].length);
+      texts[texts.length - 1] += run.text;
+    }
+    plainRunTexts.set(items, found = { texts, part, offsets });
+  }
+  const from = found.offsets[at - 1];
+  ELEMENT_TAG_AT.lastIndex = from + start;
+  return ELEMENT_TAG_AT.test(found.texts[found.part[at - 1]]) && ELEMENT_TAG_AT.lastIndex > from + text.length;
+}
 
 /** Whether import writes the text of two items next to each other, but
  *  for their formatting's delimiters: text of the same link, change and
@@ -8060,8 +8147,16 @@ function indexedText(item: ContentItem): string {
   // a citation's key across, as in $<!-- x$ -->, though not emphasis, nor
   // a link's text (see TextIndex.linkClosers)
   if (item.type === 'html_comment') return item.text;
-  // A linked image's link, as a link's below, with the image as its text
-  if (item.type === 'image' && item.href) return '[\uFFFC](' + formatHrefForMarkdown(item.href) + ')';
+  // An image's alt text and path, which a $, == or tag the text before it
+  // opens can close in, as export reads math, a highlight or a tag past
+  // its ![, or its Markdown, where export couldn't embed it, with their
+  // brackets, which close nothing, as a link's text's below. A linked
+  // image's link goes around it, as a link's below.
+  if (item.type === 'image') {
+    const image = (item.markdown !== undefined ? unembeddedImageMarkdown(item.markdown)
+      : '\uFFFC' + item.alt + '\uFFFC(' + formatHrefForMarkdown(item.src) + ')').replace(/[[\]]/g, '\uFFFC');
+    return item.href ? '[' + image + '](' + formatHrefForMarkdown(item.href) + ')' : image;
+  }
   if (item.type !== 'text') return '\uFFFC';
   // A link's text in its brackets, whose ] closes a citation before it
   // and whose URL's $ closes math, even where it's written as its URL
