@@ -71,7 +71,9 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 //    Delete dir entries from zip.files before generateAsync().
 // 3. pPr element ordering: pBdr before spacing before ind. Word normalizes
 //    out-of-order elements. Applies to styles AND inline paragraph properties.
-// 4. rPr element ordering: color before shd, color before sz/szCs.
+// 4. rPr element ordering: CT_RPr's schema order, as rFonts before b, caps
+//    before smallCaps, color before sz/szCs before u before shd. Put run
+//    properties composed from several parts through orderRPr.
 // 5. Redundant style properties: do not emit w:sz/w:szCs on a derived style
 //    when the value matches the base style (e.g. Heading4 sz=22 from Normal).
 //    Do not emit w:before="0" (it's the default and Word strips it), nor an
@@ -5724,10 +5726,12 @@ export function applyFontOverridesToTemplate(
       if (fontStyleOverride !== undefined) {
         // Remove existing b, i, u, smallCaps, caps elements (all toggle forms: self-closing, with attributes, open+close),
         // noting one that turns off what the font style leaves out, which
-        // may undo what the style's base turns on, to write again in order
+        // may undo what the style's base turns on, to write again in order.
+        // Each goes with the whitespace before it, as orderRPr moves it, so
+        // a style written on lines of its own comes back the same
         const ownOff = new Map<FontStyleProperty, string>();
         for (const property of FONT_STYLE_RUN_PROPERTIES) {
-          rPrContent = rPrContent.replace(new RegExp('<' + property.tag + '\\b[^>]*(?:/>|></' + property.tag + '>)', 'g'), element => {
+          rPrContent = rPrContent.replace(new RegExp('\\s*<' + property.tag + '\\b[^>]*(?:/>|></' + property.tag + '>)', 'g'), element => {
             if (!property.wanted(fontStyleOverride) && !fontStylePropertyOn(property, element)) ownOff.set(property, element);
             return '';
           });

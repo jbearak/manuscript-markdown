@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'bun:test';
+import fc from 'fast-check';
 import JSZip from 'jszip';
 import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, createCiteprocEngine, renderBibliography, renderCitationText, textElements } from './md-to-docx-citations';
 import { BibtexEntry, parseBibtex } from './bibtex-parser';
@@ -972,8 +973,50 @@ describe('orderRPr', () => {
       .toBe('<w:b/><w:i/><w:smallCaps/><w:sz w:val="18"/><w:highlight w:val="red"/><w:vertAlign w:val="superscript"/>');
   });
 
-  it('leaves anything else as it was', () => {
-    expect(orderRPr('<w:u w:val="single"/><w:foo/><w:b/>')).toBe('<w:u w:val="single"/><w:foo/><w:b/>');
-    expect(orderRPr('<w:u w:val="single"/>text<w:b/>')).toBe('<w:u w:val="single"/>text<w:b/>');
+  // Word writes a style's properties on lines of their own where it's asked
+  // to indent its XML, and a tracked change's record holds others
+  it('puts properties with whitespace between them, and ones that hold others, in schema order', () => {
+    const record = '<w:rPrChange w:id="1" w:author="A"><w:rPr><w:i/><w:b/></w:rPr></w:rPrChange>';
+    expect(orderRPr('\n  <w:b w:val="0"/>\n  ' + record + '\n  <w:rFonts w:ascii="A" w:hAnsi="A"></w:rFonts>\r\n\t<w:sz w:val="32" />\n'))
+      .toBe('\n  <w:rFonts w:ascii="A" w:hAnsi="A"></w:rFonts>\n  <w:b w:val="0"/>\r\n\t<w:sz w:val="32" />\n  ' + record + '\n');
+  });
+
+  it('keeps an element it doesn\'t know in its place', () => {
+    expect(orderRPr('<w:u w:val="single"/><w:foo/><w:b/>')).toBe('<w:b/><w:foo/><w:u w:val="single"/>');
+    expect(orderRPr('<w:lang w:val="en-US"/><w14:ligatures w14:val="standard"/><w:b/>')).toBe('<w:b/><w14:ligatures w14:val="standard"/><w:lang w:val="en-US"/>');
+  });
+
+  it('leaves properties with text, a comment or a tag left open among them as they were', () => {
+    for (const children of ['<w:u w:val="single"/>text<w:b/>', '<w:u w:val="single"/><!-- note --><w:b/>', '<w:u w:val="single"/><w:rPrChange><w:b/>', '<w:u w:val="single"/></w:rPr><w:b/>']) {
+      expect(orderRPr(children)).toBe(children);
+    }
+  });
+
+  // CT_RPr's children, in the order ECMA-376 Part 1 §17.3.2.28 gives them
+  const SCHEMA_ORDER = [
+    'rStyle', 'rFonts', 'b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps', 'strike', 'dstrike', 'outline', 'shadow',
+    'emboss', 'imprint', 'noProof', 'snapToGrid', 'vanish', 'webHidden', 'color', 'spacing', 'w', 'kern',
+    'position', 'sz', 'szCs', 'highlight', 'u', 'effect', 'bdr', 'shd', 'fitText', 'vertAlign', 'rtl', 'cs',
+    'em', 'lang', 'eastAsianLayout', 'specVanish', 'oMath', 'rPrChange',
+  ];
+  it('puts any of the properties, in any order and with any whitespace between them, in schema order, each once', () => {
+    const element = (name: string) => fc.constantFrom(
+      '<w:' + name + ' w:val="1"/>',
+      '<w:' + name + '/>',
+      '<w:' + name + '></w:' + name + '>',
+      '<w:' + name + ' w:id="2"><w:rPr><w:b/><w:sz w:val="20"/></w:rPr></w:' + name + '>',
+    );
+    const whitespace = fc.constantFrom('', ' ', '\n', '\r\n    ', '\t\t');
+    const properties = fc.shuffledSubarray(SCHEMA_ORDER).chain(names => fc.tuple(
+      fc.constant(names), fc.tuple(...names.map(element)), fc.array(whitespace, { minLength: names.length + 1, maxLength: names.length + 1 })));
+    fc.assert(fc.property(properties, ([names, elements, spaces]) => {
+      const children = elements.map((xml, index) => spaces[index] + xml).join('') + spaces[elements.length];
+      const ordered = orderRPr(children);
+      // Each element once, in schema order, and the same whitespace
+      const byRank = elements.map((xml, index) => ({ xml, rank: SCHEMA_ORDER.indexOf(names[index]) })).sort((a, b) => a.rank - b.rank);
+      expect(ordered.replace(/>[ \t\r\n]+</g, '><').trim()).toBe(byRank.map(({ xml }) => xml).join(''));
+      expect(ordered.replace(/[^ \t\r\n]/g, '').length).toBe(children.replace(/[^ \t\r\n]/g, '').length);
+      expect(ordered.length).toBe(children.length);
+    }), { numRuns: 200 });
   });
 });

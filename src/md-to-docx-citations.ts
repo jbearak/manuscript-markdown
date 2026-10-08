@@ -128,25 +128,62 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&amp;/g, '&');
 }
 
-/** CT_RPr's children in schema order. */
+/** CT_RPr's children in schema order, the record of a tracked change to
+ *  them last */
 const RPR_ORDER = [
   'rStyle', 'rFonts', 'b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps', 'strike', 'dstrike', 'outline', 'shadow',
   'emboss', 'imprint', 'noProof', 'snapToGrid', 'vanish', 'webHidden', 'color', 'spacing', 'w', 'kern',
   'position', 'sz', 'szCs', 'highlight', 'u', 'effect', 'bdr', 'shd', 'fitText', 'vertAlign', 'rtl', 'cs',
-  'em', 'lang', 'eastAsianLayout', 'specVanish', 'oMath',
+  'em', 'lang', 'eastAsianLayout', 'specVanish', 'oMath', 'rPrChange',
 ];
 
+// A start, end or empty tag, its attributes in either quotes
+const XML_TAG_RE = /<(\/?)([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*\s*(\/?)>/g;
+
+/** The elements `xml` holds at its top level, whatever they hold, each
+ *  with where it ends, or undefined where there's text, a comment or a tag
+ *  left open among them */
+function topLevelElements(xml: string): Array<{ end: number; element: string }> | undefined {
+  if (/<[!?]/.test(xml)) return undefined;
+  const elements: Array<{ end: number; element: string }> = [];
+  const open: string[] = [];
+  let start = 0;
+  let at = 0;
+  for (const match of xml.matchAll(XML_TAG_RE)) {
+    const between = xml.slice(at, match.index);
+    if (between.includes('<') || (open.length === 0 && !/^[ \t\r\n]*$/.test(between))) return undefined;
+    const [tag, close, name, empty] = match;
+    if (open.length === 0) start = match.index;
+    if (close) {
+      if (empty || open.pop() !== name) return undefined;
+    } else if (!empty) {
+      open.push(name);
+    }
+    at = match.index + tag.length;
+    if (open.length === 0) elements.push({ end: at, element: xml.slice(start, at) });
+  }
+  return open.length === 0 && /^[ \t\r\n]*$/.test(xml.slice(at)) ? elements : undefined;
+}
+
 /**
- * Run properties, empty elements such as `<w:b/>`, in schema order, so ones
- * composed from several sources (a citation's style, a highlight, a table's
- * font) don't make Word reorder them on open and mark the document modified.
- * Anything else comes back as it was.
+ * Run properties in schema order, so ones composed from several sources (a
+ * citation's style, a highlight, a table's font, what a template's style
+ * has) don't make Word reorder them on open and mark the document modified.
+ * An element may hold others, as a tracked change's record does, and goes
+ * with the whitespace before it, so each keeps its line where Word wrote
+ * them on lines of their own. One the order doesn't know, as one of another
+ * namespace, stays in its place, and the others go in order around it. Text
+ * or a comment among them leaves them as they were.
  */
 export function orderRPr(children: string): string {
-  const elements = children.match(/<w:[A-Za-z]+(?:\s[^>]*)?\/>/g) ?? [];
-  const rank = (element: string) => RPR_ORDER.indexOf(element.slice(3).split(/[\s/]/)[0]);
-  if (elements.join('') !== children || elements.some(element => rank(element) < 0)) return children;
-  return elements.sort((a, b) => rank(a) - rank(b)).join('');
+  const elements = topLevelElements(children);
+  if (elements === undefined) return children;
+  const rank = (element: string) => RPR_ORDER.indexOf(/^<w:([A-Za-z]+)[\s/>]/.exec(element)?.[1] ?? '');
+  // Each element with the whitespace before it
+  const units = elements.map(({ end, element }, index) => ({ xml: children.slice(index === 0 ? 0 : elements[index - 1].end, end), rank: rank(element) }));
+  const ordered = units.filter(unit => unit.rank >= 0).sort((a, b) => a.rank - b.rank);
+  let next = 0;
+  return units.map(unit => unit.rank >= 0 ? ordered[next++].xml : unit.xml).join('') + children.slice(elements.length > 0 ? elements[elements.length - 1].end : 0);
 }
 
 /** The formatting citeproc's HTML sets, as htmlToOoxmlRuns writes it */

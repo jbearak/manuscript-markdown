@@ -1405,6 +1405,21 @@ describe('the styles export takes from a template', () => {
     expect(noSize(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), id))).toBe(noSize(extractStyleBlock(styles, id)));
   });
 
+  // Word writes a style's properties on lines of their own where it's
+  // asked to indent its XML, and orders them all the same
+  it('the off export writes into a template\'s heading whose rPr is indented goes in schema order', async () => {
+    const { convertDocx } = await import('./converter');
+    const indented = '\n      <w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>\n      <w:sz w:val="32"/>\n      <w:szCs w:val="32"/>\n    ';
+    const { styles, docx } = await exportedStyles('header-font-style: normal', ['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:b/></w:rPr>'],
+      heading(1, '\n    <w:basedOn w:val="Normal"/>\n    <w:rPr>' + indented + '</w:rPr>\n  '));
+    const rPr = /<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(extractStyleBlock(styles, 'Heading1')!)![1];
+    expect(rPr.replace(/>\s+</g, '><').trim()).toBe('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:b w:val="0"/><w:sz w:val="32"/><w:szCs w:val="32"/>');
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.headerFontStyle).toEqual(['normal']);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(noSize(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), 'Heading1'))).toBe(noSize(extractStyleBlock(styles, 'Heading1')));
+  });
+
   // The style's own off stands for the explicit off, as it comes
   it('a heading that turns off itself what its base turns on keeps its own off, once and in order', async () => {
     const { convertDocx } = await import('./converter');
