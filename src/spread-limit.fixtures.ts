@@ -70,6 +70,13 @@ export const SPREAD_LIMIT_CASES: Record<string, (n: number) => Promise<string> |
     const md = await editedRoundTrip('| a |\n|---|\n' + '| b |\n'.repeat(n), xml => xml.replace(/<w:tblGrid>[\s\S]*?<\/w:tblGrid>/, ''));
     return String(count(md, /\| b \|/g));
   },
+  // URLs whose colons import escapes, so linkify doesn't link them, and
+  // which only its search of the Markdown finds, where the tag after each
+  // is a token of its own
+  'the URLs before an = before a highlight': async n =>
+    String(count(await roundTrip('a ' + 'https\\://e.com1.&lt;b> '.repeat(n) + 'x&#61;==b==\n'), /https\\:/g)),
+  'the URLs before a scheme whose host is struck': async n =>
+    String(count(await roundTrip('https\\://e.com1.&lt;b> '.repeat(n) + 'https\\://~~e.com~~\n'), /https\\:/g)),
   'a document\'s links': async n => String(count(await roundTrip(repeat(n, i => '[a](http://e.com/' + i + ')', ' ') + '\n'), /\]\(http/g)),
   'a pipe table\'s rows': async n => String(count(await roundTrip('| a |\n|---|\n' + '| b |\n'.repeat(n)), /\| b \|/g)),
   'a grid table\'s rows': async n => String(count(await roundTrip('+---+\n| a |\n+===+\n' + '| b |\n+---+\n'.repeat(n)), /\| b +\|/g)),

@@ -32,6 +32,8 @@ const expected: Record<string, string> = {
   'the warnings of a note\'s table\'s numbers': String(N),
   'the warnings of a note': '2',
   'a table\'s rows without its grid': String(N),
+  'the URLs before an = before a highlight': String(N),
+  'the URLs before a scheme whose host is struck': String(N + 1),
   'a document\'s links': String(N),
   'a pipe table\'s rows': String(N),
   'a grid table\'s rows': String(N),

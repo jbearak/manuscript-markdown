@@ -24,14 +24,35 @@ export function commentsEnd(text: string, start = 0): number {
   return end;
 }
 
+// A <br>, and the whitespace between two, read one at a time: a regex of all
+// of them, as /^(?:<br\s*\/?>\s*)+$/i, failed in Bun 1.3.9, which builds the
+// CLI, past some 700,000 breaks, and so read them as text
+const BREAK_AT = /<br\s*\/?>/iy;
+const WHITESPACE_AT = /\s*/y;
+const SPACES_AT = /[ \t]*/y;
+
+/** Whether `text` from `from` to its end is line breaks, with what `gap`
+ *  matches between them and after the last */
+function breaksToEnd(text: string, from: number, gap: RegExp): boolean {
+  let at = from;
+  do {
+    BREAK_AT.lastIndex = at;
+    if (!BREAK_AT.test(text)) return false;
+    gap.lastIndex = BREAK_AT.lastIndex;
+    gap.test(text);
+    at = gap.lastIndex;
+  } while (at < text.length);
+  return true;
+}
+
 /** Whether export reads an HTML block's text as line breaks, alone or after
  *  comments, with the spaces and tabs after each comment and between the
  *  breaks after them, not as text, with the spaces before them as text */
 export function isLineBreakBlock(content: string): boolean {
   const text = content.trim();
-  if (/^(?:<br\s*\/?>\s*)+$/i.test(text)) return true;
+  if (breaksToEnd(text, 0, WHITESPACE_AT)) return true;
   const end = commentsEnd(text);
-  return end > 0 && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(end));
+  return end > 0 && breaksToEnd(text, end, SPACES_AT);
 }
 
 export type HtmlBlockKind = 'grid' | 'comment' | 'raw' | 'image' | 'breaks' | 'tables' | 'text';
