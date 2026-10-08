@@ -24,6 +24,7 @@ import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTab
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
 import { commentsEnd, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
+import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { pushAll } from './arrays';
@@ -42,9 +43,6 @@ const TABLE_COL_WIDTHS_RE = /^<!--\s*table-col-widths:\s*(.+?)\s*-->$/;
 const TABLE_NUMBER_FORMAT_RE = /^<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(.+?)\s*-->$/i;
 const REFERENCES_RE = /^<!--\s*(?:references|bibliography)\s*-->$/i;
 const INDENT_RE = /^<!--\s*(no-indent|indent)\s*-->$/i;
-const INLINE_STYLE_RE = /^<!--\s*style:\s*(.+?)\s*-->([\s\S]*?)<!--\s*\/style\s*-->$/i;
-const STYLE_OPEN_RE = /^<!--\s*style:\s*(.+?)\s*-->$/i;
-const STYLE_CLOSE_RE = /^<!--\s*\/style\s*-->$/i;
 const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|pc)?';
 
 // --- Implementation notes ---
@@ -159,6 +157,11 @@ export interface MdToken {
   bibliographyMarker?: true;  // sentinel: <!-- references --> / <!-- bibliography --> placement marker
   customStyleOpen?: string;   // sentinel: start of custom style block (style name)
   customStyleClose?: true;    // sentinel: end of custom style block
+  itemCustomStyle?: string;   // a paragraph in a list item in a style block in that item (see extractListItems)
+  itemStyleOpen?: string;     // a style block opens in a list item here, which closes one open at the top level (see applyCustomStyleSentinels)
+  closesItemStyle?: string;   // the style of a block open in the item where itemStyleOpen's opens, which it closes
+  itemFence?: string;         // the text of a style block's fence in a list item here, which has no comment's token, for parseMd's search of the source for the comments after it; with no itemStyleOpen, a closing one, which applyCustomStyleSentinels drops
+  closesImplicitly?: true;    // sentinel: end of a custom style block where one opens in a list item, with no fence of its own
   indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override from <!-- indent --> / <!-- no-indent -->
   listDirective?: 'indent' | 'no-indent'; // a list item right after a directive that comes right after an item, which ends that item's list (see listItemIndentOverrideProps)
   embedIdx?: number;          // index into embed directives array, for round-trip recovery
@@ -799,8 +802,8 @@ export function startsHtmlBlock(text: string): boolean {
  *  doesn't read (see parseMd). */
 export function directiveRest(comment: string): string | undefined {
   const text = comment.trim();
-  const inlineStyle = INLINE_STYLE_RE.exec(text);
-  if (inlineStyle) return inlineStyle[2];
+  const fence = styleFence(text);
+  if (fence) return fence.kind === 'inline' ? fence.content : '';
   const fontSize = TABLE_FONT_SIZE_RE.exec(text);
   const font = TABLE_FONT_RE.exec(text);
   const colWidths = TABLE_COL_WIDTHS_RE.exec(text);
@@ -810,7 +813,7 @@ export function directiveRest(comment: string): string | undefined {
     : colWidths ? parseColWidths(colWidths[1]) !== undefined
     : format ? (format[1].toLowerCase() === 'digits' ? parseTableDigits(format[2])
       : format[1].toLowerCase() === 'decimal-mark' ? parseTableDecimalMark(format[2]) : parseTableDigitGrouping(format[2])) !== undefined
-    : [ORIENTATION_OPEN_RE, ORIENTATION_CLOSE_RE, TABLE_ORIENTATION_RE, REFERENCES_RE, INDENT_RE, STYLE_OPEN_RE, STYLE_CLOSE_RE].some(re => re.test(text));
+    : [ORIENTATION_OPEN_RE, ORIENTATION_CLOSE_RE, TABLE_ORIENTATION_RE, REFERENCES_RE, INDENT_RE].some(re => re.test(text));
   return reads ? '' : undefined;
 }
 
@@ -1641,12 +1644,13 @@ function paragraphsBefore(tokens: MdToken[]): Array<MdToken | undefined> {
   // The last token Word gets a paragraph for, and the last block
   // generateDocumentXml reads, for whether it writes comment bodies between
   // two lists. It reads none after a directive, which is no list's, so a
-  // directive gives the same answer
+  // directive gives the same answer, but for the close of a style block
+  // Word gets nothing for, which it reads past (see isImplicitStyleClose)
   let last: MdToken | undefined;
   let prev: MdToken | undefined;
   tokens.forEach((token, at) => {
     before.push(last);
-    if (omitsCommentBodies(at, prev)) return;
+    if (omitsCommentBodies(at, prev) || isImplicitStyleClose(token)) return;
     prev = token;
     if (isStyleDirective(token)) return;
     if (isQuoteCommentBodies(token) && last?.type === 'blockquote' && !last.alertLast && takesQuoteCommentBodies(last)) return;
@@ -1865,6 +1869,7 @@ function blockquoteListPlaces(tokens: MdToken[]): Map<number, BlockquotePlace> {
   // The depth of the deepest item import has open
   let open = 0;
   for (const token of tokens) {
+    if (isImplicitStyleClose(token)) continue;
     const listLevel = token.listContinuation?.level ?? 0;
     if (token.type === 'blockquote') {
       const group = token.blockquoteGroupIndex;
@@ -1932,6 +1937,7 @@ export function annotateBlockquoteGroupIndices(tokens: MdToken[]): void {
   let groupIndex = 0;
   let inGroup = false;
   for (const token of tokens) {
+    if (isImplicitStyleClose(token)) continue;
     if (token.type !== 'blockquote') {
       if (inGroup) {
         groupIndex++;
@@ -2539,6 +2545,14 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const origLines = (originalText ?? markdown).split('\n');
     let searchFrom = 0; // track position to handle duplicate comment text
     for (const tok of result) {
+      // A style block's fence in a list item, which has no comment's token,
+      // so a comment of its text after it would be found at its line
+      if (tok.itemFence !== undefined) {
+        let at = searchFrom;
+        while (at < origLines.length && origLines[at].trim() !== tok.itemFence) at++;
+        if (at < origLines.length) searchFrom = at + 1;
+        continue;
+      }
       const withIds = isCommentsWithIds(tok);
       if (!withIds && (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment')) continue;
       if (withIds && !tok.sourceRange) continue;
@@ -2890,9 +2904,14 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
       // one list, as two of bullets make. The blank line before it goes
       // before the item, as import writes it before the directive. Of
       // directives in a row, the last one, closest to the item, holds, which
-      // this scan from the end gave the item first
-      const before = result[i - 1];
-      if (target === i + 1 && before && (before.type === 'list_item' || before.listContinuation)) {
+      // this scan from the end gave the item first. A style block's fences,
+      // which Word gets no paragraph for, can go between, on either side
+      let last = i - 1;
+      while (last >= 0 && isStyleFenceToken(result[last])) last--;
+      const before = result[last];
+      let between = i + 1;
+      while (between < target && isStyleFenceToken(result[between])) between++;
+      if (between === target && before && (before.type === 'list_item' || before.listContinuation)) {
         result[target].listDirective = result[target].indentOverride ?? override;
         const line = result[i].sourceRange?.[0];
         if (line !== undefined && line > 0 && /^[ \t]*\r?$/.test(sourceLines[line - 1] ?? 'x')) result[target].blankLineBefore = true;
@@ -2917,23 +2936,49 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   return result;
 }
 
+/** Whether `token` is the close applyCustomStyleSentinels puts in where a
+ *  style block opens in a list item while one is open at the top level. It
+ *  has no fence, and Word gets nothing for it, so each walk over the tokens
+ *  that reads where lists and quotes are, as import reads Word's
+ *  paragraphs, passes over it as if it weren't there */
+function isImplicitStyleClose(token: MdToken | undefined): boolean {
+  return !!token?.closesImplicitly;
+}
+
 /** Convert <!-- style: X --> / <!-- /style --> HTML comments into customStyleOpen/customStyleClose sentinel tokens. */
 function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], references?: unknown): void {
   let activeStyle: string | undefined;
+  // A block that opens in another, `outer`, closes it
+  const closeOuter = (outer = activeStyle) => {
+    if (outer && warnings) {
+      warnings.push('Nested <!-- style: --> directives are not supported; outer style "' + outer + '" closed implicitly.');
+    }
+  };
+  // The tokens, with sentinels for fences, which go back in `tokens` at
+  // the end, as a splice for each fence took time for each token after it
+  const out: MdToken[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].type !== 'paragraph' || tokens[i].runs.length !== 1) continue;
-    const run = tokens[i].runs[0];
-    if (run.type !== 'html_comment') continue;
-    const text = run.text.trim();
+    // The closing fence of a style block in a list item, which has done
+    // its work in the item (see extractListItems)
+    if (tokens[i].itemFence !== undefined && tokens[i].itemStyleOpen === undefined) continue;
+    // A style block in a list item, whose paragraphs take its style (see
+    // itemCustomStyle), closes one open here too, which has no fence of
+    // its own there, as one at the top level would end the item, or one
+    // open in the item, whose paragraphs after it take its own style
+    if (tokens[i].itemStyleOpen !== undefined) {
+      closeOuter(activeStyle ?? tokens[i].closesItemStyle);
+      if (activeStyle) out.push({ type: 'paragraph', runs: [], customStyleClose: true, closesImplicitly: true });
+      activeStyle = undefined;
+      continue;
+    }
+    const run = tokens[i].type === 'paragraph' && tokens[i].runs.length === 1 ? tokens[i].runs[0] : undefined;
+    const fence = run?.type === 'html_comment' ? styleFence(run.text) : undefined;
 
     // Single-line inline style: <!-- style: X -->content<!-- /style -->
-    const inlineMatch = text.match(INLINE_STYLE_RE);
-    if (inlineMatch) {
-      if (activeStyle && warnings) {
-        warnings.push('Nested <!-- style: --> directives are not supported; outer style "' + activeStyle + '" closed implicitly.');
-      }
-      const styleName = inlineMatch[1];
-      const content = inlineMatch[2];
+    if (fence?.kind === 'inline') {
+      closeOuter();
+      const styleName = fence.style;
+      const content = fence.content;
 
       const openSentinel: MdToken = { type: 'paragraph', runs: [], customStyleOpen: styleName };
       openSentinel.blankLinesBefore = tokens[i].blankLinesBefore;
@@ -2952,33 +2997,32 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
       closeSentinel.blankLinesBefore = 0; // inline: no blank line between content and close sentinel
       closeSentinel.blankLinesAfter = tokens[i].blankLinesAfter;
 
-      tokens.splice(i, 1, openSentinel, contentToken, closeSentinel);
-      i += 2; // skip past all three (loop's i++ handles the third)
+      out.push(openSentinel, contentToken, closeSentinel);
       activeStyle = undefined; // self-contained block, not open
       continue;
     }
 
-    const openMatch = text.match(STYLE_OPEN_RE);
-    if (openMatch) {
-      if (activeStyle && warnings) {
-        warnings.push('Nested <!-- style: --> directives are not supported; outer style "' + activeStyle + '" closed implicitly.');
-      }
-      const sentinel: MdToken = { type: 'paragraph', runs: [], customStyleOpen: openMatch[1] };
+    if (fence?.kind === 'open') {
+      closeOuter();
+      const sentinel: MdToken = { type: 'paragraph', runs: [], customStyleOpen: fence.style };
       sentinel.blankLinesBefore = tokens[i].blankLinesBefore;
       sentinel.blankLinesAfter = tokens[i].blankLinesAfter;
-      tokens.splice(i, 1, sentinel);
-      activeStyle = openMatch[1];
-    } else if (STYLE_CLOSE_RE.test(text)) {
-      if (activeStyle) {
-        const sentinel: MdToken = { type: 'paragraph', runs: [], customStyleClose: true };
-        sentinel.blankLinesBefore = tokens[i].blankLinesBefore;
-        sentinel.blankLinesAfter = tokens[i].blankLinesAfter;
-        tokens.splice(i, 1, sentinel);
-        activeStyle = undefined;
-      }
-      // If not in a style block, leave the comment as-is (user error, but harmless)
+      out.push(sentinel);
+      activeStyle = fence.style;
+    } else if (fence?.kind === 'close' && activeStyle) {
+      const sentinel: MdToken = { type: 'paragraph', runs: [], customStyleClose: true };
+      sentinel.blankLinesBefore = tokens[i].blankLinesBefore;
+      sentinel.blankLinesAfter = tokens[i].blankLinesAfter;
+      out.push(sentinel);
+      activeStyle = undefined;
+    } else {
+      // A closing fence not in a style block stays a comment (user error,
+      // but harmless)
+      out.push(tokens[i]);
     }
   }
+  tokens.length = out.length;
+  out.forEach((token, k) => { tokens[k] = token; });
 }
 
 /** Whether `run` ends a line of the source, as a line end and a \ before
@@ -3323,6 +3367,11 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         // rule, which left an empty paragraph. An item's continuation is the
         // quote's, not indented as under the item, and a quote in the item,
         // whose level counts from the item's, one in this
+        // A style block's fence in a list item here, whose paragraphs are
+        // the quote's, in its style, goes, as a comment there did before
+        // list items held style blocks, so it closes no block open around
+        // the quote (see applyCustomStyleSentinels)
+        if (blockquoteTokens.some(t => t.itemFence !== undefined)) warnings?.push(droppedListBlockWarning('HTML block'));
         for (const warning of new Set(blockquoteTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_QUOTE_CODE_WARNING : QUOTE_BLOCK_WARNINGS[t.type]))) {
           if (warning) warnings?.push(warning + ' (not supported). Move it outside the quote for round-trip fidelity.');
         }
@@ -3332,6 +3381,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         // annotateBlockquoteSpacing)
         const span = (a: [number, number] | undefined, b: [number, number]): [number, number] => a ? [Math.min(a[0], b[0]), Math.max(a[1], b[1])] : b;
         for (const t of blockquoteTokens) {
+          if (t.itemFence !== undefined) continue;
           if (t.type === 'table' || t.type === 'hr' || isEmptyCodeBlock(t)) {
             const previous = quoted[quoted.length - 1];
             if (t.sourceRange && previous) previous.droppedRange = span(previous.droppedRange, t.sourceRange);
@@ -3342,6 +3392,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             : {
               ...t,
               listContinuation: undefined,
+              itemCustomStyle: undefined,
               trailingBlankLine: undefined,
               ...(t.type === 'code_block' ? { runs: t.runs.flatMap(codeBlockLines) } : {}),
             };
@@ -4106,19 +4157,46 @@ const DROPPED_LIST_BLOCK_TYPES = new Set([
   'fence', 'code_block', 'blockquote_open', 'table_open', 'hr',
 ]);
 
+/** Whether `token`, as parseMd has it before applyCustomStyleSentinels, is
+ *  a style block's fence on a line of its own: a comment at the top level,
+ *  or the marker of one in a list item, whose comment has no token (see
+ *  MdToken.itemFence) */
+function isStyleFenceToken(token: MdToken): boolean {
+  if (token.itemFence !== undefined) return true;
+  if (token.type !== 'paragraph' || token.runs.length !== 1 || token.runs[0].type !== 'html_comment') return false;
+  const kind = styleFence(token.runs[0].text)?.kind;
+  return kind === 'open' || kind === 'close';
+}
+
 /** Whether a list item drops `text`, a comment alone in an HTML block in
- *  the item after its text, as a directive, which the item can't hold.
- *  Import asks it before it writes a list's indent directive in an item
- *  (see writesListDirective there) */
+ *  the item after its text, as a directive, which the item can't hold. A
+ *  style block's fence on a line of its own reads as one too, but
+ *  extractListItems reads it first, and keeps one that opens a block, or
+ *  closes one open in the item. Import asks it only of a list's indent
+ *  directive, before it writes one in an item (see writesListDirective
+ *  there) */
 export function itemDropsComment(text: string): boolean {
   return directiveRest(text) !== undefined;
+}
+
+/** A quote or list in a style block in a list item, whose paragraphs alone
+ *  take the style (see itemCustomStyle) */
+function styleInItemWarning(kind: string): string {
+  return kind + ' inside a style block in a list item exported without the style (not supported). Move the style block outside the list for round-trip fidelity.';
 }
 
 function droppedListBlockWarning(kind: string): string {
   return kind + ' inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.';
 }
 
-function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[]): MdToken[] {
+/** The style block open in a list item, which the item's paragraphs after
+ *  its opening fence take, with the level of the item it opened in. A list
+ *  and its sublists share one, as a block that opens in an item closes one
+ *  open in an item above it, as it does one open in its own item, and as a
+ *  block that opens in another does at the top level */
+interface ItemStyleBlock { open?: { style: string; level: number } }
+
+function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[], styleBlock: ItemStyleBlock = {}): MdToken[] {
   const items: MdToken[] = [];
   let i = 0;
   let itemOrdinal = 0;
@@ -4136,6 +4214,10 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
       const childSegments: Array<{ startIndex: number; order: number; items: MdToken[] }> = [];
       let childSegmentOrder = 0;
       let foundFirstParagraph = false;
+      // The style of a block in the item, which its paragraphs take, as a
+      // block's do at the top level, between fences in the item, but not
+      // one open in an item above it, whose sublist keeps no style
+      const itemStyle = () => styleBlock.open?.level === level ? styleBlock.open.style : undefined;
       // The item's own lines: its first paragraph's, or else its marker line
       const itemMap = tokens[i].map;
       let itemRange: [number, number] | undefined = itemMap ? [itemMap[0], itemMap[0] + 1] : undefined;
@@ -4167,11 +4249,13 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
                   level,
                   ...(continuationMarkerWidth !== undefined ? { markerWidth: continuationMarkerWidth } : {}),
                 },
+                ...(itemStyle() ? { itemCustomStyle: itemStyle() } : {}),
               }],
             });
           }
           j = paragraphClose;
         } else if (itemTokens[j].type === 'blockquote_open') {
+          if (itemStyle()) warnings?.push(styleInItemWarning('Blockquote'));
           const blockquoteClose = findClosingToken(itemTokens, j, 'blockquote_close');
           const blockquoteTokens = convertTokens(itemTokens.slice(j, blockquoteClose + 1), 0, 0, warnings, sourceLines);
           childSegments.push({
@@ -4188,6 +4272,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           });
           j = blockquoteClose;
         } else if (itemTokens[j].type === 'bullet_list_open' || itemTokens[j].type === 'ordered_list_open') {
+          if (itemStyle()) warnings?.push(styleInItemWarning('List'));
           const subClose = findClosingToken(itemTokens, j, itemTokens[j].type.replace('_open', '_close'));
           const subOrdered = itemTokens[j].type === 'ordered_list_open';
           const subStartAttr = itemTokens[j].attrGet('start');
@@ -4195,7 +4280,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           childSegments.push({
             startIndex: itemTokens[j].map?.[0] ?? j,
             order: childSegmentOrder++,
-            items: extractListItems(itemTokens.slice(j + 1, subClose), subOrdered, level + 1, warnings, subStart, sourceLines),
+            items: extractListItems(itemTokens.slice(j + 1, subClose), subOrdered, level + 1, warnings, subStart, sourceLines, styleBlock),
           });
           j = subClose;
         } else if (itemTokens[j].type === 'inline' && !foundFirstParagraph) {
@@ -4217,6 +4302,30 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           const first = !foundFirstParagraph && childSegments.length === 0 && blocks.length === 1;
           const directive = !first && blocks.length === 1 && blocks[0].runs.length === 1 && blocks[0].runs[0].type === 'html_comment'
             && itemDropsComment(blocks[0].runs[0].text);
+          // A style block's fences in the item, which its paragraphs after
+          // take the style of, up to the closing one or the item's end. Not
+          // one on one line, which the item can't hold, as a directive
+          const fenceText = fate !== 'dropped' && !first && blocks.length === 1 && blocks[0].runs.length === 1 && blocks[0].runs[0].type === 'html_comment'
+            ? blocks[0].runs[0].text.trim() : '';
+          const fence = styleFence(fenceText);
+          // Its own line, or the list's would be the marker's, which
+          // annotateBlockquoteSpacing would compare in full for each
+          const fenceMap = itemTokens[j].map;
+          const fenceRange = fenceMap ? { sourceRange: [fenceMap[0], fenceMap[1]] as [number, number] } : {};
+          if (fence?.kind === 'open') {
+            // Where it opens, for the blocks at the top level, of which it
+            // closes one open there, as it does one open in the item or an
+            // item above it
+            const closes = styleBlock.open?.style;
+            childSegments.push({ startIndex: itemTokens[j].map?.[0] ?? j, order: childSegmentOrder++, items: [{ type: 'paragraph', runs: [], itemStyleOpen: fence.style, ...(closes ? { closesItemStyle: closes } : {}), itemFence: fenceText, ...fenceRange }] });
+            styleBlock.open = { style: fence.style, level };
+            continue;
+          }
+          if (itemStyle() && fence?.kind === 'close') {
+            childSegments.push({ startIndex: itemTokens[j].map?.[0] ?? j, order: childSegmentOrder++, items: [{ type: 'paragraph', runs: [], itemFence: fenceText, ...fenceRange }] });
+            styleBlock.open = undefined;
+            continue;
+          }
           if (fate === 'dropped' || directive) {
             warnings?.push(droppedListBlockWarning('HTML block'));
           } else if (first) {
@@ -4235,6 +4344,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
                   level,
                   ...(continuationMarkerWidth !== undefined ? { markerWidth: continuationMarkerWidth } : {}),
                 },
+                ...(itemStyle() ? { itemCustomStyle: itemStyle() } : {}),
               })),
             });
           }
@@ -4250,6 +4360,9 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           if (itemTokens[j].type === 'table_open') j = findClosingToken(itemTokens, j, 'table_close');
         }
       }
+
+      // A block open in the item ends with it
+      if (itemStyle()) styleBlock.open = undefined;
 
       // As GFM, a box only at the start of the item's first block, a paragraph
       const taskInfo = itemTokens[0]?.type === 'paragraph_open' || itemTokens[0]?.type === 'inline' ? extractTaskListItem(runs) : undefined;
@@ -8115,6 +8228,13 @@ function holdsOnlyCommentBodies(token: MdToken): boolean {
     && withoutCommentBodyLines(token.runs).every(run => run.type === 'comment_body_with_id');
 }
 
+/** The style of a paragraph in a list item: that of a style block in the
+ *  item, where the frontmatter declares it, which import reads the block
+ *  back in the item by, with the item's indent, or else the continuation's */
+function listContinuationStyleId(token: MdToken, state: DocxGenState): string {
+  return token.itemCustomStyle && state.customStyles?.[token.itemCustomStyle] ? customStyleId(token.itemCustomStyle) : 'ManuscriptListContinuation';
+}
+
 /** Whether a paragraph is comments alone, as `<!-- a note -->` or a
  *  directive that applies to nothing, which Word gets hidden. */
 function isHiddenParagraph(token: MdToken): boolean {
@@ -8148,11 +8268,12 @@ function isCommentBodyParagraph(token: MdToken): boolean {
  */
 function commentBodiesOmitted(tokens: MdToken[]): (ti: number, prev: MdToken | undefined) => boolean {
   // For each index, the first token from it on that isn't such a paragraph,
-  // found at once, so a run of them is read once
+  // or the close of a style block Word gets nothing for (see
+  // isImplicitStyleClose), found at once, so a run of them is read once
   const past = new Int32Array(tokens.length + 1);
   past[tokens.length] = tokens.length;
-  for (let i = tokens.length - 1; i >= 0; i--) past[i] = isCommentBodyParagraph(tokens[i]) ? past[i + 1] : i;
-  return (ti, prev) => past[ti] !== ti && !(!tokens[ti].listContinuation
+  for (let i = tokens.length - 1; i >= 0; i--) past[i] = isCommentBodyParagraph(tokens[i]) || isImplicitStyleClose(tokens[i]) ? past[i + 1] : i;
+  return (ti, prev) => isCommentBodyParagraph(tokens[ti]) && !(!tokens[ti].listContinuation
     && (prev?.type === 'list_item' || !!prev?.listContinuation)
     && tokens[past[ti + 1]]?.type === 'list_item');
 }
@@ -8233,7 +8354,12 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
     case 'paragraph':
       if (token.listContinuation) {
         const leftIndent = 720 * token.listContinuation.level;
-        pPr = '<w:pPr><w:pStyle w:val="ManuscriptListContinuation"/><w:ind w:left="' + leftIndent + '"/></w:pPr>';
+        // In a style block in the item, the block's style, with the item's
+        // indent, which import reads it back in the item by
+        const undeclared = token.itemCustomStyle && !state.customStyles?.[token.itemCustomStyle]
+          ? 'Custom style "' + token.itemCustomStyle + '" used in <!-- style: --> directive but not declared in frontmatter styles.' : undefined;
+        if (undeclared && !state.warnings.includes(undeclared)) state.warnings.push(undeclared);
+        pPr = '<w:pPr><w:pStyle w:val="' + listContinuationStyleId(token, state) + '"/><w:ind w:left="' + leftIndent + '"/></w:pPr>';
       }
       break;
     case 'heading': {
@@ -8359,11 +8485,12 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   // completely hidden; without this, Word Online may show the paragraph after
   // Word Desktop saves its "Show Hidden Text" preference into settings.xml.
   if (token.type === 'paragraph' && token.runs.length > 0 && token.runs.every(r => r.type === 'html_comment')) {
-    // One in a list item keeps a continuation's style and indent, which
-    // import reads it in the item by, and one in a style block the block's
-    // style, which import reads the block by
+    // One in a list item keeps a continuation's style, or that of a style
+    // block in the item, and indent, which import reads it in the item by,
+    // and one in a style block the block's style, which import reads the
+    // block by
     pPr = token.listContinuation
-      ? '<w:pPr><w:pStyle w:val="ManuscriptListContinuation"/><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:ind w:left="' + 720 * token.listContinuation.level + '"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>'
+      ? '<w:pPr><w:pStyle w:val="' + listContinuationStyleId(token, state) + '"/><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:ind w:left="' + 720 * token.listContinuation.level + '"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>'
       : state.activeCustomStyle
         ? '<w:pPr><w:pStyle w:val="' + customStyleId(state.activeCustomStyle) + '"/>' + HIDDEN_PARAGRAPH_PPR.slice('<w:pPr>'.length)
         : HIDDEN_PARAGRAPH_PPR;
@@ -9058,7 +9185,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // The block Word gets after the one at index ti
   const nextBlock = (ti: number): MdToken | undefined => {
     let next = ti + 1;
-    while (next < tokens.length && omitsCommentBodies(next, tokens[ti])) next++;
+    while (next < tokens.length && (omitsCommentBodies(next, tokens[ti]) || isImplicitStyleClose(tokens[next]))) next++;
     return tokens[next];
   };
   let body = '';
@@ -9179,7 +9306,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     if (token.type === 'list_item') {
       openListOrdered.length = token.level ?? 1;
       openListOrdered[(token.level ?? 1) - 1] = !!token.ordered;
-    } else if (!token.listContinuation) {
+    } else if (!token.listContinuation && !isImplicitStyleClose(token)) {
       openListOrdered.length = 0;
     }
     // Any close sentinel, or table with its own section, directly preceding any
@@ -9227,9 +9354,13 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         state.activeCustomStyle = token.customStyleOpen;
         biblAtSectionStart = biblFirst;
       } else {
-        if (token.blankLinesBefore !== undefined) sentinelGaps['csc' + sentinelCscIdx] = token.blankLinesBefore;
-        if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
-        sentinelCscIdx++;
+        // One that closes with no fence, which import doesn't write either,
+        // takes no place among the fences' gaps
+        if (!isImplicitStyleClose(token)) {
+          if (token.blankLinesBefore !== undefined) sentinelGaps['csc' + sentinelCscIdx] = token.blankLinesBefore;
+          if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
+          sentinelCscIdx++;
+        }
         state.activeCustomStyle = undefined;
         biblAtSectionStart = biblFirst;
       }
@@ -9238,7 +9369,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       hiddenAtSectionStart = hiddenBefore;
       hiddenXml = hiddenXmlBefore;
       if (prevToken?.type === 'heading') state.afterHeading = true;
-      prevToken = undefined;
+      // Which goes between a list item's paragraphs, where nothing else does
+      if (!isImplicitStyleClose(token)) prevToken = undefined;
       continue;
     }
 

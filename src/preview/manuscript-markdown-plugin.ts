@@ -26,6 +26,7 @@ import { pushAll, spliceAll } from '../arrays';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { parseFrontmatter, type ColorScheme } from '../frontmatter';
+import { styleFence } from '../style-fence';
 import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
@@ -1960,29 +1961,25 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // Core rule: wrap <!-- style: X -->...<!-- /style --> blocks in <div class="ms-custom-style ms-custom-style-{name}">
   md.core.ruler.after('manuscript_markdown_alert_blockquote', 'manuscript_custom_style_wrap', (state: StateCore) => {
     const tokens = state.tokens;
-    const OPEN_RE = /^<!--\s*style:\s*(.+?)\s*-->\s*$/i;
-    const CLOSE_RE = /^<!--\s*\/style\s*-->\s*$/i;
     // First pass (reverse): find close directives and record their indices
     const closeIndices: number[] = [];
     for (let i = tokens.length - 1; i >= 0; i--) {
       const tok = tokens[i];
       if (tok.type !== 'html_block') continue;
-      const content = (tok.content || '').trim();
-      if (CLOSE_RE.test(content)) closeIndices.push(i);
+      if (styleFence(tok.content || '')?.kind === 'close') closeIndices.push(i);
     }
     // Second pass (reverse): match opens with closes (stack-based pairing)
     const pairedCloses = new Set<number>();
     for (let i = tokens.length - 1; i >= 0; i--) {
       const tok = tokens[i];
       if (tok.type !== 'html_block') continue;
-      const content = (tok.content || '').trim();
-      const openMatch = content.match(OPEN_RE);
-      if (openMatch) {
+      const fence = styleFence(tok.content || '');
+      if (fence?.kind === 'open') {
         // Find the nearest unpaired close after this open
         const closeIdx = closeIndices.find(ci => ci > i && !pairedCloses.has(ci));
         if (closeIdx !== undefined) {
           pairedCloses.add(closeIdx);
-          const safeName = openMatch[1].replace(/[^a-zA-Z0-9-]/g, '-');
+          const safeName = fence.style.replace(/[^a-zA-Z0-9-]/g, '-');
           const divOpen = new state.Token('html_block', '', 0);
           divOpen.content = '<div class="ms-custom-style ms-custom-style-' + safeName + '">\n';
           tokens.splice(i, 1, divOpen);

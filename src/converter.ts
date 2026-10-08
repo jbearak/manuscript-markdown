@@ -1571,6 +1571,7 @@ export type ContentItem =
       titleXml?: string;       // a title paragraph's XML, for what it sets itself (see titleOwnProperties)
       blockquoteLevel?: number; // 1+ if Quote/IntenseQuote paragraph style
       listContinuation?: ListContinuation; // parent list context for continuation paragraphs/blocks
+      itemContinuation?: ListContinuation; // a list item's: the context a paragraph in it takes (see continuationOf)
       alertType?: GfmAlertType; // present for GitHub alert styles
       isCodeBlock?: boolean;   // true if Word "Code Block" paragraph style
       blockquoteGroupIndex?: number; // sequential group index from md→docx gap metadata
@@ -1605,8 +1606,9 @@ export type ContentItem =
   | { type: 'portrait_open' }
   | { type: 'portrait_close' }
   | { type: 'bibliography_marker' }
-  | { type: 'custom_style_open'; styleName: string }
-  | { type: 'custom_style_close' };
+  // In a list item (`inItem`), as a block of its paragraphs in the style
+  | { type: 'custom_style_open'; styleName: string; inItem?: ListContinuation }
+  | { type: 'custom_style_close'; inItem?: ListContinuation };
 export interface FootnoteBody {
   id: string;
   content: ContentItem[];
@@ -4990,6 +4992,14 @@ function lineBeforeComment(segment: ContentItem[], i: number): string | undefine
   if (prev?.type !== 'html_comment') return undefined;
   const end = prev.text.lastIndexOf('\n');
   return end === -1 ? undefined : prev.text.slice(end + 1);
+}
+
+/** Whether `text`, the Markdown of a paragraph whose lines start with
+ *  `prefix`, as a list item's indent, ends in an HTML block that the line
+ *  after it would go on in, as a <div>'s, which only a blank line ends */
+function htmlBlockGoesOn(text: string, prefix: string): boolean {
+  const lines = text.replace(/^\n+|\n+$/g, '').split('\n').map(line => line.startsWith(prefix) ? line.slice(prefix.length) : line);
+  return htmlBlocksIn(lines.join('\n') + '\nx').some(block => block.end === lines.length + 1);
 }
 
 /** A hidden comment as inline Markdown reads one: one with no end, which
@@ -12005,6 +12015,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[], blockquoteP
           level: item.listMeta.level,
           ...(markerWidth !== undefined ? { markerWidth } : {}),
         });
+        item.itemContinuation = continuationOf(listContexts.get(item.listMeta.level)!, listContexts);
         lastListLevel = item.listMeta.level;
         currentBlockquoteGroupIndex = undefined;
         lastBlockquoteLevel = undefined;
@@ -12070,7 +12081,10 @@ function annotateStructuralParagraphMetadata(content: ContentItem[], blockquoteP
         else endItemsUnder(parent);
       }
 
-      if (item.generatedListContinuation && item.paragraphLeftIndentTwips !== undefined) {
+      // A paragraph in a style block in a list item has the block's style,
+      // with the item's indent, which export writes as the continuation's
+      // (see generateParagraph in md-to-docx.ts)
+      if ((item.generatedListContinuation || item.customStyleName) && item.paragraphLeftIndentTwips !== undefined) {
         const continuationLevel = item.paragraphLeftIndentTwips / 720 - 1;
         const context = listContexts.get(continuationLevel);
         if (context) item.listContinuation = continuationOf(context, listContexts);
@@ -13281,18 +13295,22 @@ export function buildMarkdown(
    *  list is open, as Markdown has no way to skip a level. Indented for the
    *  level Word gives it, it would nest under another item, or read as
    *  code. A paragraph in an item goes at that item's level, and where no
-   *  item is open, as after one with no text, in none. */
+   *  item is open, as after one with no text, in none, and so does a style
+   *  block's fence in an item, with the paragraphs it goes around. */
   const atOpenListDepth = (item: ContentItem): ContentItem => {
+    if ((item.type === 'custom_style_open' || item.type === 'custom_style_close') && item.inItem) {
+      const inItem = continuationAtOpenDepth(item.inItem);
+      return inItem === item.inItem ? item : { ...item, inItem };
+    }
     if (item.type !== 'para' || item.headingLevel) return item;
     const { listMeta, listContinuation } = item;
     if (listMeta) {
       const level = listWordLevels.filter(open => open < listMeta.level).length;
       return level === listMeta.level ? item : { ...item, listMeta: { ...listMeta, level } };
     }
-    if (listContinuation && listWordLevels.length === 0) return { ...item, listContinuation: undefined };
     if (listContinuation) {
-      const level = Math.max(0, listWordLevels.filter(open => open <= listContinuation.level).length - 1);
-      return level === listContinuation.level ? item : { ...item, listContinuation: { ...listContinuation, level } };
+      const atDepth = continuationAtOpenDepth(listContinuation);
+      return atDepth === listContinuation ? item : { ...item, listContinuation: atDepth };
     }
     return item;
   };
@@ -13307,6 +13325,13 @@ export function buildMarkdown(
    *  open above it */
   const endItemsAboveWordLevel = (wordLevel: number) => {
     endItemsUnder(listWordLevels.filter(open => open < wordLevel).length - 1);
+  };
+  /** A list item's context, `listContinuation`, at the level of the open
+   *  item it goes in, or none where none is open (see atOpenListDepth) */
+  const continuationAtOpenDepth = (listContinuation: ListContinuation): ListContinuation | undefined => {
+    if (listWordLevels.length === 0) return undefined;
+    const level = Math.max(0, listWordLevels.filter(open => open <= listContinuation.level).length - 1);
+    return level === listContinuation.level ? listContinuation : { ...listContinuation, level };
   };
   let codeBlockGroupIndex = 0;
   let lastAlertParagraphKey: string | undefined;
@@ -13390,6 +13415,8 @@ export function buildMarkdown(
   // renderTableOrFallback)
   let lastTableJoin: string | undefined;
   let lastWasSectionSentinel = false; // true after landscape/portrait open/close rendering
+  let afterItemFence = false; // after a style block's opening fence in a list item, which its paragraph goes right after
+  let lastParagraphStart = 0; // where the output of the last paragraph starts
   let lastSentinelAfterGapKey: string | undefined; // after-gap key of the last rendered sentinel
   let skipNextLandscapeClose = false;
   let skipNextPortraitClose = false;
@@ -13521,11 +13548,20 @@ export function buildMarkdown(
 
     if (item.type === 'para') {
       if (lastListType !== undefined) listContentEnd = output.length;
+      lastParagraphStart = output.length;
       // A pending heading marker still unconsumed here means the revised
       // heading paragraph had no inline content — serialize it as its own
       // empty span before starting the next paragraph.
       flushPendingHeadingCriticMarker();
       if (item.isBlockquoteSpacer) {
+        i++;
+        continue;
+      }
+      // The empty paragraph of a tracked mark before a style block's fence
+      // in a list item, whose break the paragraph before it took (see
+      // joinTrackedParagraphBreaks), which would write the item's indent
+      const nextItem = mergedContent[i + 1];
+      if (item.breakRevision && item.listContinuation && (nextItem?.type === 'custom_style_open' || nextItem?.type === 'custom_style_close') && nextItem.inItem) {
         i++;
         continue;
       }
@@ -13639,8 +13675,12 @@ export function buildMarkdown(
           // And where the source had one, which made the list loose. After a
           // style block's fence, which ends a list in Markdown, as Word's
           // list goes on through the block, the blank lines after the fence
+          // After a style block's opening fence in the item, whose line end
+          // is there already, a sublist the block opened before (see
+          // sublistInBlock)
           output.push(afterSentinel && incomingSep !== null ? incomingSep
-            : '\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts || afterHtmlBlock || item.blankLineBefore ? 1 : 0)));
+            : (afterItemFence ? '' : '\n') + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts || afterHtmlBlock || item.blankLineBefore ? 1 : 0)));
+          afterItemFence = false;
         } else if (item.listContinuation) {
           // Plain continuation paragraphs are block children of the list item
           // and therefore require a blank line. An imported empty paragraph
@@ -13648,7 +13688,8 @@ export function buildMarkdown(
           // appending another one on every round trip. Blockquotes carry their
           // own visible prefix and need only the line transition, plus the
           // blank lines the source had before them.
-          ensureTrailingNewlines(item.blockquoteLevel ? 1 + blankLinesBeforeListQuote(item) : 1 + blankLinesAfterListQuote());
+          ensureTrailingNewlines(afterItemFence ? 1 : item.blockquoteLevel ? 1 + blankLinesBeforeListQuote(item) : 1 + blankLinesAfterListQuote());
+          afterItemFence = false;
           if (item.blockquoteLevel && lastBlockquoteGroupIndex !== undefined && item.blockquoteGroupIndex !== undefined
             && item.blockquoteGroupIndex !== lastBlockquoteGroupIndex && blockquoteGaps?.get(lastBlockquoteGroupIndex) === 0) {
             output.push(adjoiningQuoteGroups(item));
@@ -14146,6 +14187,21 @@ export function buildMarkdown(
       continue;
     }
 
+    // A style block in a list item, after a blank line, with the item's
+    // indent, and the paragraphs in it on the lines after it. Export writes
+    // no fence there, so the sentinel gaps don't count it
+    if ((item.type === 'custom_style_open' || item.type === 'custom_style_close') && item.inItem) {
+      // The closing one after a blank line where the paragraph before it is
+      // an HTML block that only a blank line ends, as a <div>'s, which would
+      // take it in
+      const prefix = listContinuationIndent(item.inItem);
+      const blockGoesOn = item.type === 'custom_style_close' && htmlBlockGoesOn(output.slice(lastParagraphStart).join(''), prefix);
+      ensureTrailingNewlines(item.type === 'custom_style_open' || blockGoesOn ? 2 : 1);
+      output.push(prefix + (item.type === 'custom_style_open' ? '<!-- style: ' + item.styleName + ' -->\n' : '<!-- /style -->'));
+      afterItemFence = item.type === 'custom_style_open';
+      i++;
+      continue;
+    }
     if (item.type === 'custom_style_open') {
       const gapKey = 'cso' + sentinelCsoIdx;
       sentinelCsoIdx++;
@@ -15887,8 +15943,72 @@ export async function convertDocx(
   // runs of paragraphs that share a customStyleName.
   {
     let activeStyle: string | undefined;
-    for (let i = 0; i < docContent.length; i++) {
-      const item = docContent[i];
+    // The paragraphs of a list item a style block in it is open for, which
+    // ends at anything else
+    let inItem: ListContinuation | undefined;
+    // The items with the sentinels, which go back in docContent at the end,
+    // as a splice for each sentinel took time for each item after it
+    const out: ContentItem[] = [];
+    // A tracked mark on `para`, which a style block in a list item starts
+    // or ends at, is the break that ends the paragraph before it, which
+    // stays before the block's fence, on an empty paragraph, as at the top
+    // level (below), in the item (`listContinuation`), where the paragraph
+    // before it is. The paragraph after it
+    const markBeforeFence = (para: ContentItem, listContinuation: ListContinuation): ContentItem => {
+      if (para.type !== 'para' || !para.breakRevision) return para;
+      const { breakRevision, ...rest } = para;
+      out.push({ type: 'para', breakRevision, listContinuation });
+      return rest;
+    };
+    // The level of a list item, as buildMarkdown writes one
+    const itemLevel = (entry: ContentItem): number | undefined => entry.type === 'para' && entry.listMeta && !entry.headingLevel && !entry.isCodeBlock && !entry.isTitle ? entry.listMeta.level : undefined;
+    // The paragraph a block opened in a list item before a sublist at
+    // `across` goes on to, past the sublist (see below)
+    let across: ContentItem | undefined;
+    /** Where the item at `at`, with no custom style, is in a sublist of an
+     *  item in the block open at the top level, which a closing fence there
+     *  would end: the item a block that closes it goes in, the one before
+     *  it at its level, or else the one its sublist is in, and with the
+     *  latter, that item's paragraph in a custom style right after the
+     *  sublist, if one is. Export closes a block at the top level with no
+     *  fence where a block opens in an item (see applyCustomStyleSentinels
+     *  in md-to-docx.ts), and the sublist of an item in a block that opens
+     *  in it keeps no style (see extractListItems), so this is where one
+     *  opened in the item before the sublist, or at the end of the item
+     *  before, which keeps the sublist one list. The items before it are
+     *  in `out`, with their sentinels */
+    const sublistInBlock = (at: number): { host: ParaItem; styled?: ParaItem } | undefined => {
+      const depth = itemLevel(docContent[at]);
+      if (!depth) return undefined;
+      let host: ParaItem | undefined;
+      for (let k = out.length - 1; k >= 0 && !host; k--) {
+        const before = out[k];
+        const beforeLevel = itemLevel(before);
+        if (beforeLevel !== undefined) {
+          if (beforeLevel <= depth) host = before as ParaItem;
+        } else if (before.type === 'para' ? !before.listContinuation : isStructuralBoundaryItem(before)) {
+          return undefined;
+        }
+      }
+      if (!host?.itemContinuation || host.customStyleName !== activeStyle) return undefined;
+      const level = host.listMeta!.level;
+      if (level === depth) return { host };
+      for (let k = at; k < docContent.length; k++) {
+        const next = docContent[k];
+        if (next.type !== 'para') {
+          if (isStructuralBoundaryItem(next)) return { host };
+          continue;
+        }
+        if (!next.customStyleName && (itemLevel(next) ?? next.listContinuation?.level ?? -1) > level) continue;
+        const styled = next.customStyleName && !next.listMeta && !next.blockquoteLevel && next.listContinuation?.level === level ? next : undefined;
+        return { host, ...(styled ? { styled } : {}) };
+      }
+      return { host };
+    };
+    /** The item at `i`, after the sentinels and marks that go before it,
+     *  which this puts in `out` */
+    const place = (i: number): ContentItem => {
+      let item = docContent[i];
       // Only structural items (para, table, landscape/portrait sentinels,
       // bibliography_marker) should trigger style transitions. Inline items
       // (text, image, math, hardbreak, etc.) live inside a para and don't
@@ -15897,13 +16017,58 @@ export async function convertDocx(
         || item.type === 'landscape_open' || item.type === 'landscape_close'
         || item.type === 'portrait_open' || item.type === 'portrait_close'
         || item.type === 'bibliography_marker';
-      if (!isStructural) continue;
+      if (!isStructural) return item;
       const styleName = (item.type === 'para' && item.customStyleName) ? item.customStyleName : undefined;
-      // A paragraph or quote in a list item, which takes the list's style and
-      // not the block's, is in the block the item is in, or in none with it,
-      // as a style fence can't go in an item. The items of a list in a block
-      // take its style (see generateParagraph in md-to-docx.ts)
-      if (!styleName && item.type === 'para' && item.listContinuation) continue;
+      if (inItem) {
+        // The sublist the block opened before, up to its paragraph
+        if (across && item !== across) return item;
+        across = undefined;
+        if (item.type === 'para' && !item.blockquoteLevel && item.listContinuation?.level === inItem.level && styleName === activeStyle) return item;
+        item = markBeforeFence(item, inItem);
+        out.push({ type: 'custom_style_close', inItem });
+        activeStyle = inItem = undefined;
+      }
+      // A paragraph in a list item in a custom style is in a block in the
+      // item, as export gives no other paragraph in an item one, but the
+      // continuation's, in a block its item is in too (see
+      // listContinuationStyleId in md-to-docx.ts). A block open at the top
+      // level, as one the item is in, closes here with no fence of its own,
+      // which would end the item before the paragraph, as export closes one
+      // where a block opens in an item (see applyCustomStyleSentinels)
+      if (styleName && item.type === 'para' && item.listContinuation && !item.blockquoteLevel) {
+        const continuation = item.listContinuation;
+        item = markBeforeFence(item, continuation);
+        inItem = continuation;
+        out.push({ type: 'custom_style_open', styleName, inItem });
+        activeStyle = styleName;
+        return item;
+      }
+      // A paragraph or quote in a list item with no custom style, which
+      // takes the list's style and not the block's, is in the block the item
+      // is in, or in none with it. The items of a list in a block take its
+      // style (see generateParagraph in md-to-docx.ts)
+      if (!styleName && item.type === 'para' && item.listContinuation) return item;
+      // An item with no custom style in a sublist of an item in a block open
+      // at the top level, which a fence there would end. The block in the
+      // item that closes it opens before the sublist, and goes on past it
+      // to its paragraph after it, or else is empty, of the block's own
+      // style, in that item or the one before at the sublist's level
+      const sublist = activeStyle && !inItem && !styleName ? sublistInBlock(i) : undefined;
+      if (sublist) {
+        const continuation = sublist.host.itemContinuation!;
+        item = markBeforeFence(item, continuation);
+        const style = sublist.styled?.customStyleName ?? activeStyle!;
+        out.push({ type: 'custom_style_open', styleName: style, inItem: continuation });
+        if (sublist.styled) {
+          inItem = continuation;
+          activeStyle = style;
+          across = sublist.styled;
+        } else {
+          out.push({ type: 'custom_style_close', inItem: continuation });
+          activeStyle = undefined;
+        }
+        return item;
+      }
       // A tracked mark before a paragraph a style block starts or ends at is
       // the break that ends the paragraph before it, which the block keeps
       // from joining the text after (see joinTrackedParagraphBreaks): it
@@ -15911,31 +16076,30 @@ export async function convertDocx(
       // is on where that holds nothing else, which then doesn't end the style
       if (item.type === 'para' && item.breakRevision && (styleName ? styleName !== activeStyle : activeStyle)) {
         const { breakRevision, ...para } = item;
-        if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) continue;
-        docContent.splice(i, 1, { type: 'para', breakRevision }, para);
-        i++;
+        if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) return item;
+        out.push({ type: 'para', breakRevision });
+        item = para;
       }
       if (styleName && styleName !== activeStyle) {
         // Close previous style if open
-        if (activeStyle) {
-          docContent.splice(i, 0, { type: 'custom_style_close' });
-          i++; // skip past the close we just inserted
-        }
+        if (activeStyle) out.push({ type: 'custom_style_close' });
         // Open new style
-        docContent.splice(i, 0, { type: 'custom_style_open', styleName });
-        i++; // skip past the open we just inserted
+        out.push({ type: 'custom_style_open', styleName });
         activeStyle = styleName;
       } else if (!styleName && activeStyle) {
         // Style run ended
-        docContent.splice(i, 0, { type: 'custom_style_close' });
-        i++; // skip past the close we just inserted
+        out.push({ type: 'custom_style_close' });
         activeStyle = undefined;
       }
-    }
+      return item;
+    };
+    for (let i = 0; i < docContent.length; i++) out.push(place(i));
     // Close any still-open style at end of document
     if (activeStyle) {
-      docContent.push({ type: 'custom_style_close' });
+      out.push({ type: 'custom_style_close', ...(inItem ? { inItem } : {}) });
     }
+    docContent.length = out.length;
+    out.forEach((item, k) => { docContent[k] = item; });
   }
 
   // Build unified notes map with renumbered labels
