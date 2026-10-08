@@ -387,6 +387,61 @@ describe('Custom Styles — OOXML Generation', () => {
 // Group E: Round-Trip MD → DOCX → MD
 // ============================================================
 describe('Custom Styles — Round-Trip', () => {
+  it.each([
+    ['indent', '720'],
+    ['no-indent', '0'],
+  ])('gives the paragraph of a style block on one line the %s of a directive before it', async (directive, firstLine) => {
+    // Export skipped the block, a comment till its sentinels, as it does
+    // comments, for the paragraph after it, so Word got the directive as a
+    // hidden paragraph and the block's paragraph no indent of its own.
+    // Import wrote the directive back before the block, which the next
+    // export gave the paragraph, so Word's document changed, and the
+    // directive came back in the block on the next trip
+    const head = '---\nstyles:\n  box:\n    font-style: italic\n---\n\n';
+    const JSZip = (await import('jszip')).default;
+    const documentXml = async (docx: Uint8Array) => (await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .replace(/ w(?:14)?:(?:paraId|textId|rsidR|rsidRDefault)="[^"]*"/g, '');
+    const { docx } = await convertMdToDocx(head + '<!-- ' + directive + ' -->\n\n<!-- style: box -->p0<!-- /style -->\n');
+    const xml = await documentXml(docx);
+    expect(xml).toContain('<w:pPr><w:pStyle w:val="MsCustomBox"/><w:ind w:firstLine="' + firstLine + '"/></w:pPr><w:r><w:t>p0</w:t>');
+    expect(xml).not.toContain(directive + ' --&gt;');
+    // In the block, as import writes a directive before a paragraph in one
+    const back = head + '<!-- style: box -->\n<!-- ' + directive + ' -->\np0\n<!-- /style -->\n';
+    expect((await convertDocx(docx)).markdown).toBe(back);
+    const again = await convertMdToDocx(back);
+    expect(await documentXml(again.docx)).toBe(xml);
+    expect((await convertDocx(again.docx)).markdown).toBe(back);
+  });
+
+  it('gives an indent directive before a style block on one line of comments alone to the paragraph after it', async () => {
+    // Word shows nothing of the block's paragraph, which export doesn't
+    // count among the paragraphs whose indent overrides it keeps, but it
+    // gave the block the directive, so the paragraph after it kept the
+    // indent of double spacing, and import lost the directive
+    const head = '---\nline-spacing: double\nstyles:\n  box:\n    font-style: italic\n---\n\n';
+    const JSZip = (await import('jszip')).default;
+    const documentXml = async (docx: Uint8Array) => (await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .replace(/ w(?:14)?:(?:paraId|textId|rsidR|rsidRDefault)="[^"]*"/g, '');
+    const { docx } = await convertMdToDocx(head + 'x\n\n<!-- no-indent -->\n<!-- style: box --><!-- c --><!-- /style -->\n\np1\n');
+    const xml = await documentXml(docx);
+    expect(xml).toContain('<w:p><w:pPr><w:ind w:firstLine="720"/></w:pPr><w:r><w:t>x</w:t>');
+    expect(xml).toContain('<w:p><w:r><w:t>p1</w:t>');
+    const back = (await convertDocx(docx)).markdown;
+    expect(back).toEndWith('<!-- /style -->\n\n<!-- no-indent -->\np1\n');
+    const again = await convertMdToDocx(back);
+    expect(await documentXml(again.docx)).toBe(xml);
+    expect((await convertDocx(again.docx)).markdown).toBe(back);
+  });
+
+  it('parses many indent directives before a style block on one line in linear time', () => {
+    // Four times as many take about four times as long, not sixteen. The
+    // scan for each directive's paragraph parsed the block's text again,
+    // and read each directive after it
+    const md = (n: number) => '<!-- indent -->\n'.repeat(n) + '<!-- style: box -->' + '**b** '.repeat(n) + '<!-- /style -->\n';
+    const [small, large] = [md(1000), md(4000)];
+    expect(fastestRun(() => parseMd(large)) / fastestRun(() => parseMd(small))).toBeLessThan(8);
+  }, 30000);
+
   it('single style wrapping one paragraph', async () => {
     const md = [
       '---',

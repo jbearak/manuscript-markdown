@@ -470,6 +470,7 @@ Fourth paragraph (indent explicitly forced).
 
 - `<!-- no-indent -->` suppresses the first-line indent on the next paragraph, even when document-level indent mode is active. When placed before a list, it applies to all items in the list.
 - `<!-- indent -->` forces a first-line indent on the next paragraph, even after a heading or without document-level indent mode. Uses the document's `paragraph-indent` value (default 0.5 inches). Also applies to lists.
+- A directive applies to the next paragraph Word shows. Comments, a style block's fences and a block on one line of comments alone, which Word shows nothing of, don't count, so a directive before `<!-- style: box -->` applies to the block's first paragraph. So does one before a block on one line, as `<!-- style: box -->Text<!-- /style -->`, whose text is the paragraph. Import writes the directive right before its paragraph, after the block's opening fence.
 
 Both directives are consumed during parsing (they do not appear in the DOCX) and are preserved through round-trips via `MANUSCRIPT_INDENT_OVERRIDES` and `MANUSCRIPT_LIST_INDENT_OVERRIDES` custom properties, and `MANUSCRIPT_LIST_ITEM_INDENT_OVERRIDES` for one between two lists of the same type, as of bullets, which Word has as one list.
 
