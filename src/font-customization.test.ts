@@ -783,3 +783,27 @@ describe('Font customization unit tests', () => {
     });
   });
 });
+
+// XML allows any whitespace between an element's name and its attributes,
+// and between attributes, as a line break where a tool wraps long lines
+describe('styles with other whitespace before an attribute', () => {
+  const md = '---\nheader-font-size: 20\nheader-font-style: bold-underline-center\nstyles:\n  pullquote:\n    font: Georgia\n---\n\n# One\n\n<!-- style: pullquote -->\n\nStyled text.\n\n<!-- /style -->\n';
+
+  it.each([
+    ['a line break before a style\'s first attribute', '<w:style w:', '<w:style\n  w:'],
+    ['two spaces before a size', '<w:sz w:val=', '<w:sz  w:val='],
+    ['a line break before an underline\'s value', '<w:u w:val=', '<w:u\n  w:val='],
+    ['two spaces before a centering\'s value', '<w:jc w:val=', '<w:jc  w:val='],
+    // Only the underline's own value turns it off
+    ['an underline beside another property that is none', '<w:u w:val="single"/>', '<w:u w:val="single"/><w:effect w:val="none"/>'],
+  ])('a heading\'s and a custom style\'s font reads back with %s', async (_name, from, to) => {
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    // Without the copy export keeps, custom styles come from styles.xml
+    zip.remove('docProps/custom.xml');
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).split(from).join(to));
+    const { metadata } = parseFrontmatter((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect([metadata.headerFontSize, metadata.headerFontStyle, metadata.styles?.pullquote?.font]).toEqual([[20], ['bold-underline-center'], 'Georgia']);
+  });
+});
