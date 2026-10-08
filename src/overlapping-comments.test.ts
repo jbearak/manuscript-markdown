@@ -643,13 +643,13 @@ describe('Overlapping comments: where the bodies go', () => {
 
   const quoted = '> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}';
   test.each([
-    ['a quote right after them', '> ' + seen + '\n' + bodies + '\n> next', quoted + '\n\n> next', quoted + '\n>\n> next'],
-    ['a quote after a blank line', '> ' + seen + '\n\n' + bodies + '\n> next', quoted + '\n\n> next', quoted + '\n>\n> next'],
-    ['an alert', '> ' + seen + '\n\n' + bodies + '\n> [!NOTE]\n> next', quoted + '\n> [!NOTE]\n> next', quoted + '\n> [!NOTE]\n> next'],
-  ])('keep %s apart from the quote they go into', async (_, md, back, again) => {
+    ['a quote right after them', '> ' + seen + '\n' + bodies + '\n> next', quoted + '\n\n> next'],
+    ['a quote after a blank line', '> ' + seen + '\n\n' + bodies + '\n> next', quoted + '\n\n> next'],
+    ['an alert', '> ' + seen + '\n\n' + bodies + '\n> [!NOTE]\n> next', quoted + '\n> [!NOTE]\n> next'],
+  ])('keep %s apart from the quote they go into', async (_, md, back) => {
     expect(await imported(md)).toBe(back);
-    // A blank line between two quotes reads as one, as without bodies
-    expect(await imported(back)).toBe(again);
+    // A blank line between two quotes keeps them two, as without bodies
+    expect(await imported(back)).toBe(back);
   });
 
   test('keep the blocks around a paragraph of bodies apart', async () => {

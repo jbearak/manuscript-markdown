@@ -3675,10 +3675,9 @@ describe('List blockquote round-trip', () => {
     expect(await roundTripBody(md)).toBe(md);
   });
 
-  it('keeps later quote spacing when earlier quotes merge or code holds a > line', async () => {
-    // Word can't tell two adjacent quotes from one with two paragraphs, so
-    // they come back as one, but the spacing of later quotes must not shift
-    expect(await roundTripBody('> a\n\n> b\n\npara\n\n\n> c')).toBe('> a\n>\n> b\n\npara\n\n\n> c');
+  it('keeps later quote spacing after two quotes a blank line apart or code holding a > line', async () => {
+    // The two quotes stay two, and the spacing of later quotes doesn't shift
+    expect(await roundTripBody('> a\n\n> b\n\npara\n\n\n> c')).toBe('> a\n\n> b\n\npara\n\n\n> c');
     const fenced = '```\n> code\n```\n\npara\n\n\n> c';
     expect(await roundTripBody(fenced)).toBe(fenced);
     // Nor match the same text in a code block above it
@@ -3827,6 +3826,50 @@ describe('List blockquote round-trip', () => {
     ].join('\n');
     const { warnings } = await convertMdToDocx(md);
     expect(warnings).toEqual([]);
+  });
+});
+
+describe('Quotes a blank line separates', () => {
+  /** Each paragraph of Word's body: a quote's spacer, an empty paragraph,
+   *  or its style and text */
+  async function paragraphs(docx: Uint8Array): Promise<string[]> {
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.slice(xml.indexOf('<w:body>'), xml.lastIndexOf('<w:sectPr')).matchAll(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g)].map(([p]) => {
+      if (/w:lineRule="exact"/.test(p) && /<w:pBdr>/.test(p)) return 'spacer';
+      const text = [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join('');
+      return text ? (/<w:pStyle w:val="(\w+)"/.exec(p)?.[1] ?? '') + ' ' + text : 'empty';
+    });
+  }
+
+  it('writes two quotes as two in Word, with an empty paragraph between', async () => {
+    // Word had one quote of two paragraphs, as for > A\n>\n> B
+    expect(await paragraphs((await convertMdToDocx('> A\n\n> B')).docx)).toEqual([
+      'spacer', 'GitHubBlockquote A', 'spacer', 'empty', 'spacer', 'GitHubBlockquote B', 'spacer',
+    ]);
+    expect(await paragraphs((await convertMdToDocx('> A\n>\n> B')).docx)).toEqual([
+      'spacer', 'GitHubBlockquote A', 'GitHubBlockquote B', 'spacer',
+    ]);
+  });
+
+  it.each([
+    ['two quotes', '> A\n\n> B'],
+    ['two quotes with two blank lines between', '> A\n\n\n> B'],
+    ['three quotes', '> A\n\n> B\n\n> C'],
+    ['two quotes between paragraphs', 'p\n\n> A\n\n> B\n\nq'],
+    ['two nested quotes', '> > A\n\n> > B'],
+    ['two nested quotes in one quote', '> > A\n>\n> > B'],
+    ['two quotes in a list item', '- x\n\n  > A\n\n  > B'],
+    ['two quotes in a numbered item before the next', '1. x\n\n   > A\n\n   > B\n\n2. y'],
+    ['two quotes in the Quote style', '---\nblockquote-style: Quote\n---\n\n> A\n\n> B'],
+  ])('keeps %s apart', async (_name, md) => {
+    const { convertDocx } = await import('./converter');
+    const first = (await convertMdToDocx(md)).docx;
+    const once = (await convertDocx(first)).markdown;
+    expect(once).toBe(md + '\n');
+    const second = (await convertMdToDocx(once)).docx;
+    expect(await paragraphs(second)).toEqual(await paragraphs(first));
+    expect((await convertDocx(second)).markdown).toBe(once);
   });
 });
 

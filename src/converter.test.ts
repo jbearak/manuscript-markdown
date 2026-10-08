@@ -11165,6 +11165,64 @@ describe('An alert with nothing after its marker', () => {
   });
 });
 
+describe('A quote after another at its level', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+
+  /** Word's document for `md`, its body changed by `edit`, without the
+   *  custom property that keeps the blank lines between quotes */
+  async function edited(md: string, edit: (body: string) => string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    zip.file('word/document.xml', edit(await zip.file('word/document.xml')!.async('string')));
+    const custom = zip.file('docProps/custom.xml');
+    if (custom) zip.file('docProps/custom.xml', (await custom.async('string')).replace(/<property\b[^>]*name="MANUSCRIPT_BLOCKQUOTE_GAPS_[^"]*"[^>]*>[\s\S]*?<\/property>/g, ''));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** A quote's group ended after the paragraph of `text`, and another
+   *  started, with their spacers, as two quotes with nothing between */
+  const splitAfter = (text: string) => (xml: string) => {
+    const spacer = /<w:p\b[^>]*><w:pPr><w:pBdr>(?:(?!<\/w:p>)[\s\S])*?w:lineRule="exact"(?:(?!<\/w:p>)[\s\S])*?<\/w:p>/.exec(xml)![0];
+    const end = xml.indexOf('</w:p>', xml.indexOf('<w:t>' + text + '</w:t>')) + '</w:p>'.length;
+    return xml.slice(0, end) + spacer + spacer + xml.slice(end);
+  };
+  /** The empty paragraphs export writes between quote groups taken out */
+  const joined = (xml: string) => xml.replace(/<w:p\b[^>]*><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p>/g, '');
+
+  test.each([
+    ['a quote', '> A\n>\n> B', splitAfter('A'), '> A\n\n> B\n'],
+    ['a nested quote', '> > A\n> >\n> > B', splitAfter('A'), '> > A\n>\n> > B\n'],
+    ['a quote in a list item', '- x\n\n  > A\n  >\n  > B', splitAfter('A'), '- x\n\n  > A\n\n  > B\n'],
+    ['a nested quote in a list item', '- x\n\n  > > A\n  > >\n  > > B', splitAfter('A'), '- x\n\n  > > A\n  >\n  > > B\n'],
+    ['an alert', '> [!NOTE]\n> A\n\n> B', joined, '> [!NOTE]\n> A\n\n> B\n'],
+  ])('keeps its text out of %s', async (_name, md, edit, expected) => {
+    // Import wrote no line between them, so the second's text continued
+    // the first's paragraph, as in > A\n> B, which the next export wrote
+    // as one
+    const once = strip((await convertDocx(await edited(md, edit))).markdown);
+    expect(once).toBe(expected);
+    expect(strip((await convertDocx((await convertMdToDocx(once)).docx)).markdown)).toBe(once);
+  });
+
+  test('keeps an empty paragraph between two quotes through the next trip', async () => {
+    // Export wrote the two quotes Markdown has for it as one, with no empty
+    // paragraph between
+    const quote = (text: string) => '<w:p><w:pPr><w:pStyle w:val="GitHubBlockquote"/></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p>';
+    const once = strip((await convertDocx(await buildSyntheticDocx(wrapDocumentXml(quote('A') + '<w:p/>' + quote('B'))))).markdown);
+    expect(once).toBe('> A\n\n> B\n');
+    const docx = (await convertMdToDocx(once)).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:t>A<\/w:t><\/w:r><\/w:p>(?:<w:p\b[^>]*><w:pPr><w:pBdr>(?:(?!<\/w:p>).)*<\/w:p>)<w:p\b[^>]*><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p>/);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(once);
+  });
+
+  test.each([
+    ['an alert', '> A\n> [!NOTE]\n> B'],
+    ['another alert', '> [!NOTE]\n> A\n> [!TIP]\n> B'],
+  ])('writes no line before %s, whose marker starts it', async (_name, md) => {
+    expect(strip((await convertDocx(await edited(md, joined))).markdown)).toBe(md + '\n');
+  });
+});
+
 describe('Blocks a quote can\'t hold', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
 

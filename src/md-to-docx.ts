@@ -124,6 +124,7 @@ export interface MdToken {
   alertFirst?: boolean;     // first paragraph in an alert block (for spacing)
   alertLast?: boolean;      // last paragraph in an alert block (for spacing)
   blockquoteGroupIndex?: number; // sequential index of the blockquote group this token belongs to
+  quoteStart?: boolean;     // for quote paragraphs: the first of its quote at its level, which starts a group (see annotateBlockquoteBoundaries)
   trailingBlankLine?: boolean;   // for code blocks: blank line follows in source markdown
   blankLinesBefore?: number;     // for HTML comments: blank lines before this token in source
   blankLinesAfter?: number;      // for HTML comments: blank lines after this token in source
@@ -1335,9 +1336,10 @@ function annotateBlockquoteBoundaries(tokens: MdToken[]): void {
     i++;
     // Continue the group while the next token has the same alertType/level
     // and list depth AND is not an alertLead (which signals a new [!TYPE]
-    // marker group).
+    // marker group), nor starts another quote, as after a blank line, which
+    // Word otherwise couldn't tell from a paragraph of the same quote.
     while (i < tokens.length && tokens[i].type === 'blockquote' && tokens[i].alertType === alertType && tokens[i].level === level
-      && tokens[i].listContinuation?.level === listLevel && !tokens[i].alertLead) {
+      && tokens[i].listContinuation?.level === listLevel && !tokens[i].alertLead && !tokens[i].quoteStart) {
       i++;
     }
     tokens[start].alertFirst = true;
@@ -1878,8 +1880,9 @@ function criticBlockSegment(token: MdToken, runs: MdRun[], index: number): MdTok
   }
   return {
     ...token, runs,
-    // Only the first paragraph in a split alert emits its title.
-    ...(token.type === 'blockquote' && index > 0 ? { alertLead: undefined } : {}),
+    // Only the first paragraph in a split alert emits its title, and only
+    // the first in a split quote starts it.
+    ...(token.type === 'blockquote' && index > 0 ? { alertLead: undefined, quoteStart: undefined } : {}),
   };
 }
 
@@ -2941,6 +2944,10 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           quoted.push(kept);
         }
         const annotated = annotateBlockquoteAlert(quoted, bqLevel);
+        // Its first paragraph at its own level starts a group of its own, as
+        // a quote nested in it starts its own
+        const own = annotated.find(t => t.level === bqLevel);
+        if (own) own.quoteStart = true;
         // And its first and last lines, which a dropped block, or a nested
         // quote that held only one, can have been, not the blank lines its
         // range ends with
