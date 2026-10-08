@@ -14494,18 +14494,17 @@ describe('An alert whose first paragraph holds spaces or tabs alone', () => {
     // Each token looked back past every paragraph of bodies before it for
     // the paragraph Word gets before it: some 16 times as long at 2,000 as
     // at 500 before, about 3 after
+    // Each run parses the Markdown three times, as once at 500 took about
+    // 2 ms, where the timer's noise could decide the ratio
     const time = (count: number) => {
       const md = Array.from({ length: count }, (_, i) => '{#c' + i + '>>b<<}').join('\n\n') + '\n';
-      let best = Infinity;
-      for (let run = 0; run < 3; run++) {
-        const start = performance.now();
-        parseMd(md);
-        best = Math.min(best, performance.now() - start);
-      }
-      return best;
+      return fastestRun(() => {
+        for (let k = 0; k < 3; k++) parseMd(md);
+      });
     };
     time(500);
-    expect(time(2000) / time(500)).toBeLessThan(8);
+    const small = time(500);
+    expect(time(2000) / small).toBeLessThan(8);
   }, 30000);
 
   test('keeps a no-break space on the marker\'s line, which import keeps', async () => {

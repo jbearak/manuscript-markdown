@@ -32,6 +32,7 @@ import { type GfmAlertType } from './gfm';
 import { getDisplayWidth } from './grid-table-preprocess';
 import { parseFrontmatter, serializeFrontmatter, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { alertColorsByScheme, setDefaultColorScheme, getDefaultColorScheme, GITHUB_ALERT_COLORS, GUTTMACHER_ALERT_COLORS } from './alert-colors';
+import { fastestRun } from './test-timing';
 
 function makeState(): DocxGenState {
   return {
@@ -6124,7 +6125,12 @@ describe('Comments a paragraph reads inline', () => {
     // As import writes one a line break ends, whose block the regex that
     // found the comments at its start read many times slower past some
     // tens of thousands of a comment's characters: about 35 before, 2.5 after
-    const read = (n: number) => () => parseMd('<!-- ' + 'a'.repeat(n) + ' -->' + breaks + '\n');
+    // Each run reads the comment 20 times, some milliseconds of work, as
+    // once took under a millisecond, where the timer's noise decided the
+    // ratio
+    const read = (n: number) => () => {
+      for (let k = 0; k < 20; k++) parseMd('<!-- ' + 'a'.repeat(n) + ' -->' + breaks + '\n');
+    };
     expect(parseMd('<!-- a -->' + breaks + '\n')[0].runs?.map(run => run.type)).toContain('hardbreak');
     expect(growth(read(40000), read(160000))).toBeLessThan(8);
   });
@@ -6401,27 +6407,22 @@ describe('Blank lines before list items', () => {
   it('records the items of a long loose list in linear time', async () => {
     // Each item copied the places of all those before it, which took time
     // in the square of their number. Four times the items take about four
-    // times as long, not sixteen. The fastest of five runs of each, by
-    // turns, which a pause for garbage collection slows neither more than
-    // the other.
+    // times as long, not sixteen. A list of tens of thousands took under a
+    // millisecond, where the timer's and the JIT's noise decided the ratio,
+    // so each run records a list of hundreds many times, some milliseconds
+    // of work, at sizes where copying them fails in seconds, not minutes.
     const { recordListBlankLine } = await import('./md-to-docx');
-    const record = (n: number) => () => {
+    const record = (n: number) => {
       const blankLines = new Map<number, number[]>();
       for (let place = 1; place <= n; place++) recordListBlankLine(blankLines, 0, place);
       return blankLines;
     };
-    const time = (work: () => unknown) => {
-      const start = performance.now();
-      work();
-      return performance.now() - start;
-    };
-    let small = Infinity;
-    let large = Infinity;
-    for (let k = 0; k < 5; k++) {
-      large = Math.min(large, time(record(40000)));
-      small = Math.min(small, time(record(10000)));
-    }
-    expect(record(3)().get(0)).toEqual([1, 2, 3]);
-    expect(large / small).toBeLessThan(8);
+    const time = (n: number) => fastestRun(() => {
+      for (let k = 0; k < 10000; k++) record(n);
+    });
+    expect(record(3).get(0)).toEqual([1, 2, 3]);
+    time(100);
+    const small = time(100);
+    expect(time(400) / small).toBeLessThan(8);
   }, 60000);
 });

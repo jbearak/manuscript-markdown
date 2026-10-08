@@ -1520,17 +1520,19 @@ describe('BibTeX field reader', () => {
   it('reads a body of quoted values in groups that end none in time linear in its length', () => {
     const bib = (n: number) => '@article{k,\n{' + 'x="{'.repeat(n) + '}'.repeat(n + 1) + ', year={2020}\n}';
     expect(parseBibtex(bib(4000)).get('k')?.fields.get('year')).toBe('2020');
+    // Each run parses the body 40 times, some milliseconds of work, as one
+    // parse took under a millisecond, where the timer's noise decided the
+    // ratio, at sizes where reading the body again for each value fails in
+    // seconds
     const time = (n: number) => {
       const text = bib(n);
-      let fastest = Infinity;
-      for (let k = 0; k < 5; k++) {
-        const start = performance.now();
-        parseBibtex(text);
-        fastest = Math.min(fastest, performance.now() - start);
-      }
-      return fastest;
+      return fastestRun(() => {
+        for (let k = 0; k < 40; k++) parseBibtex(text);
+      });
     };
-    expect(time(16000) / time(4000)).toBeLessThan(8);
+    time(1000);
+    const small = time(1000);
+    expect(time(4000) / small).toBeLessThan(8);
   }, 30000);
 
   it.each([
@@ -1538,8 +1540,6 @@ describe('BibTeX field reader', () => {
     ['quoted', (text: string) => '"' + text + '"'],
   ])('reads a long %s value, and the fields after it, in linear time', (_name, delimit) => {
     const text = 'a b '.repeat(150000) + 'c';
-    const start = performance.now();
-    expect(fields('  title = ' + delimit(text) + ',\n  year = {2020}')).toEqual({ title: text, year: '2020' });
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => expect(fields('  title = ' + delimit(text) + ',\n  year = {2020}')).toEqual({ title: text, year: '2020' }))).toBeLessThan(1000);
+  }, 30000);
 });
