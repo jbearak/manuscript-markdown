@@ -13,7 +13,7 @@ import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, n
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import { paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
-import { ZoteroBiblData, zoteroStyleFullId } from './converter';
+import { imageAltMarkdown, ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
@@ -221,13 +221,14 @@ export interface MdRun {
 }
 
 /** An image's Markdown: as written, or for a reference, inline, with its
- *  destination as markdown-it encoded it */
+ *  destination as markdown-it encoded it, and its alt text as import
+ *  writes Word's, which reads back as it */
 function imageMarkdownSource(token: ManuscriptToken, alt: string, attrs: string | undefined): string {
   const src = token.attrGet?.('src') || '';
   const title = token.attrGet?.('title');
   // With the line breaks of CriticMarkup in it, which the source slice
   // has as the placeholders preprocessCriticMarkup wrote
-  const source: string = token.meta?.source !== undefined ? restoreCriticLineBreaks(token.meta.source) : '![' + alt.replace(/[\\[\]]/g, c => '\\' + c) + ']('
+  const source: string = token.meta?.source !== undefined ? restoreCriticLineBreaks(token.meta.source) : '![' + imageAltMarkdown(alt) + ']('
     + (/[\s()<>]/.test(src) ? '<' + src + '>' : src)
     + (title ? ' "' + title.replace(/["\\]/g, c => '\\' + c) + '"' : '') + ')';
   return source + (attrs !== undefined ? '{' + attrs + '}' : '');
