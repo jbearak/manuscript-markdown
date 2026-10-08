@@ -15258,7 +15258,74 @@ const FONT_STYLE_TOGGLES = ['w:b', 'w:i', 'w:u', 'w:smallCaps', 'w:caps'];
  *  (w:rPrChange, w:pPrChange), which Word doesn't show */
 const withoutFormatChanges = (xml: string) => xml.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, '');
 
-/** Extract heading/title font properties from word/styles.xml for round-trip. */
+// An XML start tag's attributes after its name, as an XML parser reads
+// them: each after whitespace, with any whitespace around its =, and its
+// value in double or single quotes, which may hold a >
+const XML_TAG_ATTRIBUTES = '(?:\\s+[^\\s=/>]+\\s*=\\s*(?:"[^"]*"|\'[^\']*\'))*\\s*';
+
+/** The start tag of the first element `name` in `xml` from `from`, as
+ *  `<w:sz w:val="22"/>`, with its attributes as XML may spell them (see
+ *  XML_TAG_ATTRIBUTES), where it starts and ends, and whether it's empty,
+ *  as `<w:rPr/>`. By its name with the w prefix, as import's other
+ *  readers take WordprocessingML's (see readZipXml). Undefined for none. */
+function xmlStartTag(xml: string, name: string, from = 0): { tag: string; start: number; end: number; empty: boolean } | undefined {
+  const start = new RegExp('<' + name + XML_TAG_ATTRIBUTES + '(/?)>', 'g');
+  start.lastIndex = from;
+  const match = start.exec(xml);
+  return match ? { tag: match[0], start: match.index, end: match.index + match[0].length, empty: match[1] === '/' } : undefined;
+}
+
+/** The first element `name` in `xml` from `from` (see xmlStartTag), with
+ *  its content, '' where it's empty, up to the first end tag of its name,
+ *  as the elements read so don't hold their own, and where it ends.
+ *  Undefined for none, or one with no end. */
+function xmlElement(xml: string, name: string, from = 0): { tag: string; content: string; start: number; end: number } | undefined {
+  const start = xmlStartTag(xml, name, from);
+  if (!start) return undefined;
+  if (start.empty) return { tag: start.tag, content: '', start: start.start, end: start.end };
+  const close = new RegExp('</' + name + '\\s*>', 'g');
+  close.lastIndex = start.end;
+  const end = close.exec(xml);
+  return end ? { tag: start.tag, content: xml.slice(start.end, end.index), start: start.start, end: end.index + end[0].length } : undefined;
+}
+
+/** An attribute of a start tag (see xmlStartTag), by its name, as `w:val`,
+ *  with its character references decoded, as export escapes a name such as
+ *  "A & B", or undefined where it hasn't it */
+function xmlAttribute(tag: string, name: string): string | undefined {
+  for (const [, attribute, double, single] of tag.matchAll(/\s([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    if (attribute !== name) continue;
+    return (double ?? single).replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));/g, (_, dec: string, hex: string, entity: string) =>
+      dec ? String.fromCodePoint(Number(dec)) : hex ? String.fromCodePoint(parseInt(hex, 16))
+        : ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[entity]);
+  }
+  return undefined;
+}
+
+/** An attribute of the first element `name` in `xml` (see xmlStartTag and
+ *  xmlAttribute) */
+function xmlElementAttribute(xml: string, name: string, attribute: string): string | undefined {
+  const element = xmlStartTag(xml, name);
+  return element && xmlAttribute(element.tag, attribute);
+}
+
+/** A whole number an attribute holds, as a size in half-points, with the
+ *  whitespace a schema's number may have around it */
+function xmlNumber(value: string | undefined): number | undefined {
+  return value !== undefined && /^\s*\d+\s*$/.test(value) ? Number(value) : undefined;
+}
+
+/** Whether an attribute's value is on, as an ST_OnOff's: true, 1 or on */
+function xmlOn(value: string | undefined): boolean {
+  return value === 'true' || value === '1' || value === 'on';
+}
+
+/**
+ * Extract heading/title font properties from word/styles.xml for round-trip.
+ * Each element and attribute as an XML parser reads it (see xmlElement and
+ * xmlAttribute), so a style written with whitespace around an attribute's =,
+ * or in single quotes, reads as it does in double quotes.
+ */
 function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTableFontSize?: boolean; builtInIds?: Map<string, string>; titleParagraphs?: string[] }): Partial<Frontmatter> {
   const result: Partial<Frontmatter> = {};
   // The document's ID of each built-in style it gives another, by the ID
@@ -15266,12 +15333,10 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   const documentIds = new Map<string, string>();
   for (const [id, builtInId] of opts?.builtInIds ?? []) if (!documentIds.has(builtInId)) documentIds.set(builtInId, id);
 
-  /** Where the next w:style element starts from `from`, or -1, with any
-   *  whitespace before its first attribute */
-  function nextStyleStart(from: number): number {
-    const start = /<w:style\s/g;
-    start.lastIndex = from;
-    return start.exec(stylesXml)?.index ?? -1;
+  // Each w:style element: its start tag and all of it
+  const styleElements: { tag: string; block: string }[] = [];
+  for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
+    styleElements.push({ tag: style.tag, block: stylesXml.slice(style.start, style.end) });
   }
 
   /** The w:style element of the paragraph style `id`, or of the document's
@@ -15284,34 +15349,21 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   function styleBlock(id: string, anyType = false): string | null {
     const styleId = documentIds.get(id) ?? id;
     let caseless: string | null = null;
-    let searchFrom = 0;
-    while (true) {
-      const idx = nextStyleStart(searchFrom);
-      if (idx === -1) return caseless;
-      // A style written as <w:style .../> is its tag alone, and the next
-      // </w:style> closes another
-      const tagEnd = stylesXml.indexOf('>', idx) + 1;
-      if (tagEnd === 0) return caseless;
-      const empty = stylesXml[tagEnd - 2] === '/';
-      const closeTag = empty ? tagEnd : stylesXml.indexOf('</w:style>', tagEnd);
-      if (closeTag === -1) return caseless;
-      const block = stylesXml.substring(idx, empty ? tagEnd : closeTag + '</w:style>'.length);
-      const tag = block.slice(0, tagEnd - idx);
+    for (const { tag, block } of styleElements) {
       // A style without a type is a paragraph style
-      const paragraph = (/\sw:type\s*=\s*"([^"]*)"/.exec(tag)?.[1] ?? 'paragraph') === 'paragraph';
-      if (block.includes('w:styleId="' + styleId + '"') && (paragraph || anyType)) return withoutFormatChanges(block);
-      caseless ??= paragraph && /\sw:styleId\s*=\s*"([^"]*)"/.exec(tag)?.[1].toLowerCase() === styleId.toLowerCase() ? withoutFormatChanges(block) : null;
-      searchFrom = idx + block.length;
+      const paragraph = (xmlAttribute(tag, 'w:type') ?? 'paragraph') === 'paragraph';
+      const ownId = xmlAttribute(tag, 'w:styleId');
+      if (ownId === styleId && (paragraph || anyType)) return withoutFormatChanges(block);
+      caseless ??= paragraph && ownId?.toLowerCase() === styleId.toLowerCase() ? withoutFormatChanges(block) : null;
     }
+    return caseless;
   }
 
   // Helper: a style block's style-level rPr, or '' for none
   function blockRPr(block: string): string {
-    // Skip past pPr to find style-level rPr
-    const pPrEnd = block.indexOf('</w:pPr>');
-    const rPrStart = block.indexOf('<w:rPr>', pPrEnd !== -1 ? pPrEnd : 0);
-    const rPrEnd = block.indexOf('</w:rPr>', rPrStart !== -1 ? rPrStart : 0);
-    return rPrStart !== -1 && rPrEnd !== -1 ? block.substring(rPrStart, rPrEnd + '</w:rPr>'.length) : '';
+    // Skip past pPr, which holds its paragraph mark's, to find style-level rPr
+    const rPr = xmlElement(block, 'w:rPr', xmlElement(block, 'w:pPr')?.end ?? 0);
+    return rPr ? block.slice(rPr.start, rPr.end) : '';
   }
 
   // Helper: find a style block by styleId and extract rPr content, of a
@@ -15322,38 +15374,20 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return block === null ? null : blockRPr(block);
   }
 
-  function extractAttr(rpr: string, prefix: string): string | null {
-    const idx = rpr.indexOf(prefix);
-    if (idx === -1) return null;
-    const start = idx + prefix.length;
-    const end = rpr.indexOf('"', start);
-    return end !== -1 ? rpr.substring(start, end) : null;
-  }
-
   function extractFont(rpr: string): string | undefined {
-    // Export escapes a name such as "A & B"
-    const v = extractAttr(rpr, 'w:ascii="')?.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));/g, (_, dec: string, hex: string, name: string) =>
-      dec ? String.fromCodePoint(Number(dec)) : hex ? String.fromCodePoint(parseInt(hex, 16))
-        : ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[name]);
-    return v || undefined;
+    return xmlElementAttribute(rpr, 'w:rFonts', 'w:ascii') || undefined;
   }
 
   function extractSizeHp(rpr: string): number | undefined {
-    const v = /<w:sz\b[^>]*?\sw:val="(\d+)"/.exec(rpr)?.[1];
-    return v ? Number(v) : undefined;
+    return xmlNumber(xmlElementAttribute(rpr, 'w:sz', 'w:val'));
   }
 
   function isXmlToggleOn(rpr: string, tag: string): boolean {
-    // Self-closing with no attributes: <w:b/>
-    if (rpr.includes('<' + tag + '/>')) return true;
-    // Tag with attributes: <w:b w:val="true"/>  or  <w:b w:val="1">
-    const re = new RegExp('<' + tag + '\\s[^>]*?(?:/>|>)');
-    const m = re.exec(rpr);
-    if (!m) return false;
-    const vm = /w:val="([^"]*)"/.exec(m[0]);
-    if (!vm) return true; // present with no w:val → on
-    const v = vm[1];
-    return v === 'true' || v === '1' || v === 'on';
+    const element = xmlStartTag(rpr, tag);
+    if (!element) return false;
+    // Present with no w:val, as <w:b/>, is on
+    const value = xmlAttribute(element.tag, 'w:val');
+    return value === undefined || xmlOn(value);
   }
 
   function extractStyle(rpr: string, ppr?: string | null): string {
@@ -15361,20 +15395,19 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     if (isXmlToggleOn(rpr, 'w:b')) parts.push('bold');
     if (isXmlToggleOn(rpr, 'w:i')) parts.push('italic');
     // Underline: bare <w:u/> or any w:val except "none"
-    const underline = /<w:u\b[^>]*>/.exec(rpr)?.[0];
-    if (underline && !/\sw:val="none"/.test(underline)) parts.push('underline');
+    const underline = xmlStartTag(rpr, 'w:u');
+    if (underline && xmlAttribute(underline.tag, 'w:val') !== 'none') parts.push('underline');
     if (isXmlToggleOn(rpr, 'w:smallCaps')) parts.push('smallcaps');
     if (isXmlToggleOn(rpr, 'w:caps')) parts.push('allcaps');
     // Center alignment from pPr (paragraph-level property)
-    if (ppr && /<w:jc\b[^>]*?\sw:val="center"/.test(ppr)) parts.push('center');
+    if (ppr && xmlElementAttribute(ppr, 'w:jc', 'w:val') === 'center') parts.push('center');
     return parts.length > 0 ? parts.join('-') : 'normal';
   }
 
   /** Extract pPr content from a style block. */
   function blockPPr(block: string): string | null {
-    const pPrStart = block.indexOf('<w:pPr');
-    const pPrEnd = block.indexOf('</w:pPr>');
-    return pPrStart !== -1 && pPrEnd !== -1 ? block.substring(pPrStart, pPrEnd + '</w:pPr>'.length) : null;
+    const pPr = xmlElement(block, 'w:pPr');
+    return pPr ? block.slice(pPr.start, pPr.end) : null;
   }
 
   /** Extract pPr content from a style block, of a paragraph style but with
@@ -15386,9 +15419,9 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   // The document defaults' run and paragraph properties (w:docDefaults), as
   // Word shows them
-  const docDefaults = withoutFormatChanges(/<w:docDefaults\b[\s\S]*?<\/w:docDefaults>/.exec(stylesXml)?.[0] ?? '');
-  const defaultRPr = /<w:rPrDefault>\s*<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(docDefaults)?.[1] ?? '';
-  const defaultPPr = /<w:pPrDefault>\s*<w:pPr>([\s\S]*?)<\/w:pPr>/.exec(docDefaults)?.[1] ?? '';
+  const docDefaults = withoutFormatChanges(xmlElement(stylesXml, 'w:docDefaults')?.content ?? '');
+  const defaultRPr = xmlElement(xmlElement(docDefaults, 'w:rPrDefault')?.content ?? '', 'w:rPr')?.content ?? '';
+  const defaultPPr = xmlElement(xmlElement(docDefaults, 'w:pPrDefault')?.content ?? '', 'w:pPr')?.content ?? '';
 
   /**
    * The font style a style shows (see extractStyle). A style that doesn't set
@@ -15419,14 +15452,13 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
       const block = styleBlock(id);
       if (block === null) break;
       chain.push(block);
-      id = /<w:basedOn\s+w:val\s*=\s*"([^"]*)"/.exec(block)?.[1];
+      id = xmlElementAttribute(block, 'w:basedOn', 'w:val');
     }
     // The nearest element, a paragraph's own first, self-closing, as
     // <w:b></w:b> means what <w:b/> does
     const nearest = (ownProperties: string, properties: (block: string) => string, defaults: string, tag: string) => {
-      const element = new RegExp('<' + tag + '\\b[^>]*>');
-      const found = element.exec(ownProperties) ?? chain.map(block => element.exec(properties(block))).find(m => m !== null) ?? element.exec(defaults);
-      return found ? found[0].replace(/\s*\/?>$/, '/>') : '';
+      const found = xmlStartTag(ownProperties, tag) ?? chain.map(block => xmlStartTag(properties(block), tag)).find(m => m !== undefined) ?? xmlStartTag(defaults, tag);
+      return found ? found.tag.replace(/\s*\/?>$/, '/>') : '';
     };
     const rpr = FONT_STYLE_TOGGLES.map(tag => nearest(own.rPr, blockRPr, defaultRPr, tag)).join('');
     const style = extractStyle(rpr, nearest(own.pPr, block => blockPPr(block) ?? '', defaultPPr, 'w:jc'));
@@ -15442,12 +15474,17 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   function titleOwnProperties(paragraph: string): { rPr: string; pPr: string } {
     // As Word shows it
     const live = withoutFormatChanges(paragraph);
-    const pPr = live.match(/<w:pPr\b[^>]*>([\s\S]*?)<\/w:pPr>/)?.[1]?.replace(/<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>/, '') ?? '';
-    const runs = [...live.matchAll(/<w:r(?:\s[^>/]*)?>([\s\S]*?)<\/w:r>/g)].map(m => m[1]).filter(run => /<w:t\b/.test(run));
+    // Its pPr's but its mark's rPr
+    const pPrContent = xmlElement(live, 'w:pPr')?.content ?? '';
+    const markRPr = xmlElement(pPrContent, 'w:rPr');
+    const pPr = markRPr ? pPrContent.slice(0, markRPr.start) + pPrContent.slice(markRPr.end) : pPrContent;
+    const runs: string[] = [];
+    for (let run = xmlElement(live, 'w:r'); run; run = xmlElement(live, 'w:r', run.end)) {
+      if (xmlStartTag(run.content, 'w:t')) runs.push(run.content);
+    }
     const rPr = FONT_STYLE_TOGGLES.map(tag => {
-      const element = new RegExp('<' + tag + '\\b[^>]*>');
       const on = runs.map(run => {
-        const found = element.exec(/<w:rPr\b[^>]*>([\s\S]*?)<\/w:rPr>/.exec(run)?.[1] ?? '')?.[0];
+        const found = xmlStartTag(xmlElement(run, 'w:rPr')?.content ?? '', tag)?.tag;
         return found === undefined ? undefined : extractStyle(found.replace(/\s*\/?>$/, '/>')) !== 'normal';
       });
       if (on.length === 0 || on.some(value => value === undefined || value !== on[0])) return '';
@@ -15559,20 +15596,12 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   // Custom named styles: detect "Custom: ..." styles for fallback extraction
   const extractedCustomStyles: Record<string, CustomStyleDef> = {};
-  let csSearchPos = 0;
-  while (true) {
-    const idx = stylesXml.indexOf('w:customStyle="1"', csSearchPos);
-    if (idx === -1) break;
-    // Find enclosing <w:style> block
-    const styleStart = [...stylesXml.slice(0, idx).matchAll(/<w:style\s/g)].pop()?.index ?? -1;
-    const styleEnd = stylesXml.indexOf('</w:style>', idx);
-    if (styleStart === -1 || styleEnd === -1) { csSearchPos = idx + 17; continue; }
-    const block = stylesXml.substring(styleStart, styleEnd + '</w:style>'.length);
-    const nameMatch = block.match(/w:name\s+w:val="Custom:\s*([^"]+)"/);
-    if (!nameMatch) { csSearchPos = styleEnd + 10; continue; }
+  for (const { tag, block } of styleElements) {
+    if (!xmlOn(xmlAttribute(tag, 'w:customStyle'))) continue;
+    const nameMatch = /^Custom:\s*(.+)$/.exec(xmlElementAttribute(block, 'w:name', 'w:val') ?? '');
+    if (!nameMatch) continue;
     const styleName = nameMatch[1].trim();
-    const csStyleIdMatch = block.match(/w:styleId="([^"]+)"/);
-    const csStyleId = csStyleIdMatch ? csStyleIdMatch[1] : '';
+    const csStyleId = xmlAttribute(tag, 'w:styleId') ?? '';
     const def: CustomStyleDef = {};
     // A custom style can be a character style
     const csRpr = getStyleRPr(csStyleId, true);
@@ -15586,18 +15615,14 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     }
     const csPpr = getStylePPr(csStyleId, true);
     if (csPpr) {
-      const beforeMatch = csPpr.match(/w:before="(\d+)"/);
-      if (beforeMatch) def.spacingBefore = parseInt(beforeMatch[1], 10) / 20;
-      const afterMatch = csPpr.match(/w:after="(\d+)"/);
-      if (afterMatch) def.spacingAfter = parseInt(afterMatch[1], 10) / 20;
-      const firstLineMatch = csPpr.match(/w:firstLine="(\d+)"/);
-      if (firstLineMatch) {
-        const firstLineTwips = parseInt(firstLineMatch[1], 10);
-        def.paragraphIndent = firstLineTwips === 0 ? 'none' : firstLineTwips / 1440;
-      }
+      const before = xmlNumber(xmlElementAttribute(csPpr, 'w:spacing', 'w:before'));
+      if (before !== undefined) def.spacingBefore = before / 20;
+      const after = xmlNumber(xmlElementAttribute(csPpr, 'w:spacing', 'w:after'));
+      if (after !== undefined) def.spacingAfter = after / 20;
+      const firstLineTwips = xmlNumber(xmlElementAttribute(csPpr, 'w:ind', 'w:firstLine'));
+      if (firstLineTwips !== undefined) def.paragraphIndent = firstLineTwips === 0 ? 'none' : firstLineTwips / 1440;
     }
     extractedCustomStyles[styleName] = def;
-    csSearchPos = styleEnd + 10;
   }
   if (Object.keys(extractedCustomStyles).length > 0) result.styles = extractedCustomStyles;
 
