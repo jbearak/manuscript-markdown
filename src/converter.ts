@@ -6670,7 +6670,9 @@ export async function extractDocumentContent(
               // Taken back below if the paragraph has content
               horizontalRule = !headingLevel && !listMeta && !isTitle && !blockquoteLevel && !isCodeBlock
                 && !generatedListContinuation && !customStyle && hasOnlyBottomBorder(pPrChildren);
-              if (!listMeta && !headingLevel && !blockquoteLevel && !isCodeBlock && !customStyle) taskLevel = parseTaskIndentLevel(pPrChildren);
+              // A task item in a style block takes the block's style, as an
+              // item does (see generateParagraph in md-to-docx.ts)
+              if (!listMeta && !headingLevel && !blockquoteLevel && !isCodeBlock) taskLevel = parseTaskIndentLevel(pPrChildren);
               const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
               if (pRPrElement) {
                 const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
@@ -10825,7 +10827,8 @@ function isStructuralBoundaryItem(item: ContentItem): boolean {
  *  of the other type than the block's top-level item before it, as Markdown
  *  starts a new list there, or where Word starts the numbering over. A style
  *  fence, which import puts in after this, ends no block, as export writes
- *  no paragraph for one, and a list's paragraphs get no custom style */
+ *  no paragraph for one, and the items of a list on either side of one are
+ *  numbered on as one list */
 function* listBlockPlaces(content: ContentItem[]): Generator<[ParaItem, number, number]> {
   let block = -1;
   let place = 0;
@@ -13099,6 +13102,8 @@ export function buildMarkdown(
     // Compute incoming separator from the previous item (consumed once per iteration).
     // null means "no special handling, use default \n\n".
     let incomingSep: string | null = null;
+    // Whether that's the separator after a section's or style block's fence
+    let afterSentinel = false;
     if (lastRenderedHtmlCommentIndex !== undefined) {
       const gapCount = htmlCommentAfterGaps?.get(lastRenderedHtmlCommentIndex);
       if (gapCount !== undefined) {
@@ -13113,6 +13118,7 @@ export function buildMarkdown(
       } else {
         incomingSep = '\n';
       }
+      afterSentinel = true;
       lastWasSectionSentinel = false;
       lastSentinelAfterGapKey = undefined;
     }
@@ -13234,8 +13240,11 @@ export function buildMarkdown(
           const interrupts = startsList && !lastListItemEmpty && (isEmptyListItem(i)
             || (meta.type === 'ordered' && (meta.wordNumber ?? meta.startNumber ?? 1) !== 1));
           const afterHtmlBlock = listHtmlBlockOpen && meta.level > (lastListLevel ?? 0);
-          // And where the source had one, which made the list loose
-          output.push('\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts || afterHtmlBlock || item.blankLineBefore ? 1 : 0)));
+          // And where the source had one, which made the list loose. After a
+          // style block's fence, which ends a list in Markdown, as Word's
+          // list goes on through the block, the blank lines after the fence
+          output.push(afterSentinel && incomingSep !== null ? incomingSep
+            : '\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts || afterHtmlBlock || item.blankLineBefore ? 1 : 0)));
         } else if (item.listContinuation) {
           // Plain continuation paragraphs are block children of the list item
           // and therefore require a blank line. An imported empty paragraph
@@ -13381,9 +13390,10 @@ export function buildMarkdown(
         ? nextOrderedNumber(item.listMeta, orderedListCounters, listTypeByLevel, lastListLevel)
         : undefined;
       // Markdown carries a top-level list on across blank lines, so where
-      // Word starts one over, a comment keeps the two apart
+      // Word starts one over, a comment keeps the two apart, but for a fence
+      // right before the item, which does
       const carriesOn = item.listMeta?.level === 0 && topOrderedNext !== undefined && listContentEnd !== undefined
-        && output.slice(listContentEnd).every(part => !part.trim());
+        && output.slice(listContentEnd).every(part => !part.trim()) && !afterSentinel;
       if (orderedItem && carriesOn && (orderedItem.restarts || (orderedItem.isNew && orderedItem.number !== topOrderedNext))) {
         while (output.length > 0 && !output[output.length - 1].trim()) output.pop();
         if (output.length > 0) output[output.length - 1] = output[output.length - 1].replace(/\n+$/, '');
@@ -15371,6 +15381,11 @@ export async function convertDocx(
         || item.type === 'bibliography_marker';
       if (!isStructural) continue;
       const styleName = (item.type === 'para' && item.customStyleName) ? item.customStyleName : undefined;
+      // A paragraph or quote in a list item, which takes the list's style and
+      // not the block's, is in the block the item is in, or in none with it,
+      // as a style fence can't go in an item. The items of a list in a block
+      // take its style (see generateParagraph in md-to-docx.ts)
+      if (!styleName && item.type === 'para' && item.listContinuation) continue;
       // A tracked mark before a paragraph a style block starts or ends at is
       // the break that ends the paragraph before it, which the block keeps
       // from joining the text after (see joinTrackedParagraphBreaks): it

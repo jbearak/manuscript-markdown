@@ -536,6 +536,37 @@ describe('Custom Styles — Round-Trip', () => {
   });
 });
 
+describe('Custom Styles — List items', () => {
+  const styled = '---\nstyles:\n  box:\n    font-style: italic\n---\n\n';
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  it.each([
+    ['an item after a list', '- a\n\n<!-- style: box -->\n- b\n<!-- /style -->\n'],
+    ['an item and a paragraph after a list', '- a\n\n<!-- style: box -->\n- b\n\nstyled\n<!-- /style -->\n'],
+    ['a list', '<!-- style: box -->\n- b\n- c\n<!-- /style -->\n'],
+    ['a list after a paragraph', '<!-- style: box -->\nstyled\n\n- b\n<!-- /style -->\n'],
+    ['a numbered item after a list', '1. a\n\n<!-- style: box -->\n2. b\n<!-- /style -->\n'],
+    ['task items', '<!-- style: box -->\n- [ ] b\n- [x] c\n<!-- /style -->\n'],
+    ['an item with a sublist, a paragraph and a quote', '<!-- style: box -->\n- b\n  - c\n\n  para\n\n  > q\n- d\n<!-- /style -->\n'],
+    ['an item before more of its list', '- a\n\n<!-- style: box -->\n- b\n<!-- /style -->\n\n- c\n'],
+    ['a list before a numbered list that starts over', '<!-- style: box -->\n1. b\n2. c\n<!-- /style -->\n\n1. d\n'],
+    ['an item, after an item with a paragraph that isn\'t', '- a\n\n  para\n\n<!-- style: box -->\n- b\n<!-- /style -->\n'],
+  ])('keeps %s in a style block', async (_name, body) => {
+    // A list item took no style of the block's in Word, so import wrote it
+    // out of the block, which went around the block's paragraphs alone
+    const md = styled + body;
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  it('gives a list item in the block its style, under its numbering', async () => {
+    const { docx } = await convertMdToDocx(styled + '<!-- style: box -->\n- b\n<!-- /style -->\n');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:pPr><w:pStyle w:val="MsCustomBox"\/><w:numPr>(?:(?!<\/w:p>).)*<w:t>b<\/w:t>/);
+  });
+});
+
 // ============================================================
 // Group F: Preview Plugin
 // ============================================================

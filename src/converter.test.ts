@@ -2942,10 +2942,10 @@ describe('Loose lists', () => {
 
   test('keeps a list tight that a blank line after a style fence starts', async () => {
     // A list of its own in Markdown, which the blank line doesn't make
-    // loose, though import joins it to the list before the fence
-    const markdown = await roundTrip(styled + '- a\n\n<!-- style: box -->\n\n- b\n\nstyled\n<!-- /style -->\n');
-    expect(markdown).toStartWith(styled + '- a\n- b\n\n');
-    expect(await roundTrip(markdown)).toBe(markdown);
+    // loose, though Word's list goes on through the fence
+    const md = styled + '- a\n\n<!-- style: box -->\n\n- b\n\nstyled\n<!-- /style -->\n';
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
   });
 });
 
