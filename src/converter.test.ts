@@ -15914,6 +15914,86 @@ describe('round-trip regression: a brace after an image', () => {
   });
 });
 
+describe('round-trip regression: an image in a tracked change with text', () => {
+  // Minimal 1x1 white PNG (67 bytes)
+  const TINY_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
+    'Nl7BcQAAAABJRU5ErkJggg==', 'base64');
+  const tmpDir = join(require('os').tmpdir(), 'mms-test-span-img-' + Date.now());
+  const IMG = '![alt](image.png){width=100 height=100}';
+
+  beforeAll(() => {
+    const { mkdirSync, writeFileSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+  });
+  afterAll(() => require('fs').rmSync(tmpDir, { recursive: true, force: true }));
+
+  const toMarkdown = async (md: string) => (await convertDocx((await convertMdToDocx(md, { sourceDir: tmpDir })).docx)).markdown;
+
+  test.each([
+    ['text before', 'a {++b ' + IMG + '++} c'],
+    ['text after', 'a {++' + IMG + ' b++} c'],
+    ['a word right after its size', 'a {++' + IMG + 'b++} c'],
+    ['text around', 'a {++b ' + IMG + ' d++} c'],
+    ['another image right after', 'a {++' + IMG + IMG + '++} c'],
+    ['an equation before', 'a {++$x$ ' + IMG + '++} c'],
+    ['text before, deleted', 'a {--b ' + IMG + '--} c'],
+    ['text before, as HTML', 'a {++b <img src="image.png" alt="alt" width="100" height="100">++} c'],
+    ['text before, in a link', 'a {++b [' + IMG + '](https://example.com/)++} c'],
+    ['text before, where export can\'t embed it', 'a {++b ![alt](missing.png)++} c'],
+    ['text before, in a table\'s cell', '| h |\n| --- |\n| a {++b ' + IMG + '++} c |'],
+  ])('keeps one span of an image with %s', async (_name, md) => {
+    // Import ended the span at the image, a {++b ++}{++![alt](image.png)++} c
+    const once = await toMarkdown(md);
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(md + '\n');
+    expect(await toMarkdown(once)).toBe(once);
+  });
+
+  // Import escapes a backtick in Word's alt text, which pairs with no other
+  const TICK = '![a\\`b](image.png){width=100 height=100}';
+  test.each([
+    ['right after', '{++' + TICK + ' `x`++}'],
+    ['after text', '{++' + TICK + ' and `x`++}'],
+    ['before and after', '{++`x` ' + TICK + ' `y`++}'],
+    ['after, the image in a link', '{++[' + TICK + '](https://example.com/) `x`++}'],
+    ['in text right after', '{++' + TICK + 'x\\`++}'],
+  ])('keeps one span of an image whose alt text from Word has a backtick, with a backtick %s', async (_name, md) => {
+    const once = await toMarkdown(md);
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(md + '\n');
+    expect(await toMarkdown(once)).toBe(once);
+  });
+
+  // An image export can't embed keeps its Markdown as it was, whose
+  // backtick has no escape
+  const MISSING = '![a`b](missing.png)';
+  const NESTED = '![a[b]c`d](missing.png)';
+  test.each([
+    ['code right after', '{++' + MISSING + '++}{++ `x`++}', '{++' + MISSING + ' ++}{++`x`++}'],
+    ['code after text', '{++' + MISSING + '++}{++ and `x`++}', '{++' + MISSING + ' and ++}{++`x`++}'],
+    ['code before and after', '{++`x` ++}{++' + MISSING + '++}{++ `y`++}', '{++`x` ++}{++' + MISSING + ' ++}{++`y`++}'],
+    ['code after, the image in a link', '{++[' + MISSING + '](https://example.com/)++}{++ `x`++}', '{++[' + MISSING + '](https://example.com/) ++}{++`x`++}'],
+    ['code, past brackets in its alt text', '{++' + NESTED + '++}{++ `x`++}', '{++' + NESTED + ' ++}{++`x`++}'],
+    ['a backtick in text right after', '{++' + MISSING + '++}{++x`++}', '{++' + MISSING + '++}{++x\\`++}'],
+    ['a backtick in text right after, past brackets in its alt text', '{++' + NESTED + '++}{++x`++}', '{++' + NESTED + '++}{++x\\`++}'],
+  ])('keeps the span of an image whose alt text has a backtick apart from %s', async (_name, md, expected) => {
+    // Joined, the backtick paired past the image's ] with the code's, as
+    // import read the alt text only up to its first ], or with the text's,
+    // which import escapes but which still closes code; the next export
+    // read both as text
+    const once = await toMarkdown(md);
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+    expect(await toMarkdown(once)).toBe(once);
+  });
+
+  test('joins text with a backtick to the span of an image after it', async () => {
+    // An escaped backtick can't open code
+    const once = await toMarkdown('{++x`++}{++' + MISSING + '++}');
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe('{++x\\`' + MISSING + '++}\n');
+    expect(await toMarkdown(once)).toBe(once);
+  });
+});
+
 describe('round-trip regression: images export cannot embed', () => {
   async function roundTrip(md: string, sourceDir?: string) {
     const { docx, warnings } = await convertMdToDocx(md, sourceDir ? { sourceDir } : undefined);
