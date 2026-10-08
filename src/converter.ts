@@ -4532,19 +4532,20 @@ function trailingBreakOf(before: string, piece: string, after: string): Trailing
   return backslashes % 2 === 1 ? { before: before + piece.slice(0, -2), after } : undefined;
 }
 
-/** `out` and then `comment`, a hidden comment's Markdown, with the line
- *  break `out` ends with (`trailing`, where `out` is the Markdown that break
- *  ends) as <br> where the comment would start the next line and an HTML
- *  block there, as the line is written after a \ and a line end: one
- *  starts at a line's <!--, which would end the paragraph before it and
- *  leave the \ there as text. Not where its hidden run starts with spaces
- *  or tabs, which withoutHiddenCommentSpace leaves at a line's start, and
- *  which go there as references (see keepParagraphWhitespace), after which
- *  none starts, but for the indent of a comment over lines, which starts
- *  one. The comments on the rest of the line (`rest`, see lineAfterBreak)
- *  go after the <br> too, those before the first thing it shows without
- *  the whitespace their hidden runs hold outside them, as that indent,
- *  which Word hides, and which withoutHiddenCommentSpace left as a line's
+/** `out` and then `comment`, a hidden comment's Markdown in a paragraph,
+ *  with the line break `out` ends with (`trailing`, where `out` is the
+ *  Markdown that break ends) as <br> where the comment would start the next
+ *  line and an HTML block there, as the line is written after a \ and a
+ *  line end: one starts at a line's <!--, which would end the paragraph
+ *  before it and leave the \ there as text. Not where its hidden run starts
+ *  with spaces or tabs, which withoutHiddenCommentSpace leaves at a line's
+ *  start, and which go there as references (see keepParagraphWhitespace),
+ *  after which none starts, and the comment goes on the paragraph's line,
+ *  but for the indent of a comment over lines, which starts one. The
+ *  comments on the rest of the line (`rest`, see lineAfterBreak) go after
+ *  the <br> too, those before the first thing it shows without the
+ *  whitespace their hidden runs hold outside them, as that indent, which
+ *  Word hides, and which withoutHiddenCommentSpace left as a line's
  *  start's, but the paragraph would show after the <br>, and the index of
  *  the last of them is returned with the Markdown, or -1. Only where export
  *  reads that line after a <br>, in a heading as a heading's (`opts`), as
@@ -4553,15 +4554,16 @@ function trailingBreakOf(before: string, piece: string, after: string): Trailing
  *  block that starts and ends with a comment hides, but a paragraph shows.
  *  A comment with a blank line in it stays in its block, which keeps it
  *  hidden, as does one with a line that would start a block, and one in a
- *  heading over lines. A list item's or quote's prefixes on the lines after
- *  change none of that, as its paragraph reads as one does alone. A
- *  table's cell keeps the break, which it writes as its cells take one,
- *  and which starts no block there, but the comments at its line's start
- *  go without the whitespace outside them too, which the cell would show
- *  after the break, as a pipe table's <br> or a grid table's line holds
- *  it. The break is kept apart from `out`, as reading the end of `out`
- *  would take time in its length for each comment */
-function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, opts: InlineRangeOpts | undefined, comment: string, rest: () => { line: string; raw: string; payloads: string[]; last: number }): [string, number] {
+ *  heading over lines, and it goes there as it is (`block`), not as in a
+ *  paragraph (see keepCommentInParagraph). A list item's or quote's
+ *  prefixes on the lines after change none of that, as its paragraph reads
+ *  as one does alone. A table's cell keeps the break, which it writes as
+ *  its cells take one, and which starts no block there, but the comments at
+ *  its line's start go without the whitespace outside them too, which the
+ *  cell would show after the break, as a pipe table's <br> or a grid
+ *  table's line holds it. The break is kept apart from `out`, as reading
+ *  the end of `out` would take time in its length for each comment */
+function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, opts: InlineRangeOpts | undefined, comment: string, rest: () => { line: string; raw: string; payloads: string[]; last: number }, block = comment): [string, number] {
   if (!trailing || trailing.after !== out) return [out + comment, -1];
   const { line, raw, payloads, last } = rest();
   if (opts?.cell) return [out + payloads[0], last];
@@ -4569,21 +4571,23 @@ function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, op
   // after which no block starts (see lineStartsAfterBreaks)
   if (/^[ \t]/.test(raw) && lineStartsAfterBreaks('x\\\n' + raw).includes(3)) return [out + comment, -1];
   return readsCommentsInline((opts?.heading ? '# ' : '') + 'x<br>' + line, payloads, false, opts?.heading) && !/\S/.test(outsideComments(payloads.join('')))
-    ? [trailing.before + '<br>' + payloads[0], last] : [out + comment, -1];
+    ? [trailing.before + '<br>' + payloads[0], last] : [out + block, -1];
 }
 
 /** The rest of the line after a line break that the hidden comment at
  *  segment[i], before `end`, starts, as export would read it after a <br>:
- *  the Markdown of its hidden comments (`payloads`), the first `first`, with
- *  the text of the other runs as an x for each word, which escaped text
- *  reads as, up to the line's end. The comments before the first thing the
- *  line shows, which withoutHiddenCommentSpace left as a line's start's, go
- *  without the whitespace outside them (see breakBeforeComment), and `last`
- *  is the index of the last of them. Those after it are as that left them,
- *  as it left them after text. The line with them all as it left them, as
- *  it's written after a \ and a line end, is `raw`. Each item is read
- *  once, for the one break before it */
-function lineAfterBreak(segment: ContentItem[], i: number, end: number, first: string): { line: string; raw: string; payloads: string[]; last: number } {
+ *  the Markdown in a paragraph of its hidden comments (`payloads`, see
+ *  keepCommentInParagraph), in a list item with the indent of its text,
+ *  `listLinePrefix`, the first `first`, with the text of the other runs as
+ *  an x for each word, which escaped text reads as, up to the line's end.
+ *  The comments before the first thing the line shows, which
+ *  withoutHiddenCommentSpace left as a line's start's, go without the
+ *  whitespace outside them (see breakBeforeComment), and `last` is the
+ *  index of the last of them. Those after it are as that left them, as it
+ *  left them after text. The line with them all as it left them, as it's
+ *  written after a \ and a line end, is `raw`. Each item is read once, for
+ *  the one break before it */
+function lineAfterBreak(segment: ContentItem[], i: number, end: number, first: string, listLinePrefix?: string): { line: string; raw: string; payloads: string[]; last: number } {
   const payloads: string[] = [];
   let line = '';
   let raw = '';
@@ -4593,7 +4597,8 @@ function lineAfterBreak(segment: ContentItem[], i: number, end: number, first: s
   for (let k = i; k < end; k++) {
     const item = segment[k];
     if (item.type === 'html_comment') {
-      const markdown = k === i ? first : markdownComment(item.text, segment[k + 1]?.type === 'html_comment');
+      const markdown = k === i ? first
+        : keepCommentInParagraph(markdownComment(item.text, segment[k + 1]?.type === 'html_comment'), lineBeforeComment(segment, k), listLinePrefix);
       const payload = shown ? markdown : withoutSpaceOutsideComments(markdown);
       if (!shown) last = k;
       payloads.push(payload);
@@ -4627,13 +4632,16 @@ function showsInline(item: ContentItem): boolean {
  *  it's `open`, which runs to the end of the line with its first -->, after
  *  which a paragraph starts, at `from` in the Markdown, and `closed` once
  *  that --> is written. A line break in it stays as it is, as the block
- *  keeps the line's text */
+ *  keeps the line's text, and so do its comments' lines, whatever they
+ *  start with */
 interface HtmlBlock { open: boolean; closed: boolean; from: number }
 
 /** Whether a hidden comment after `out`, the Markdown before it, begins an
  *  HTML block, as one after up to three spaces or tabs at the start of its
  *  paragraph, which starts at `from`, does, but not in a heading or a
- *  table's cell, which hold only inline Markdown */
+ *  table's cell, which hold only inline Markdown. Where the paragraph writes
+ *  that whitespace as references, which makes it a paragraph's text, a line
+ *  of the comment that starts a block still ends it */
 function beginsHtmlBlock(out: string, from: number, opts: InlineRangeOpts | undefined): boolean {
   return !opts?.heading && !opts?.cell && out.length - from <= 3 && /^[ \t]*$/.test(out.slice(from));
 }
@@ -4642,7 +4650,8 @@ function beginsHtmlBlock(out: string, from: number, opts: InlineRangeOpts | unde
  *  long, where `block` is open: where the line with the block's first -->
  *  ends in it, the block does, and the paragraph after it starts. Read from
  *  the pieces, as reading the Markdown would take time in its length. One a
- *  renderer doesn't note, as a tracked change's, leaves the block open */
+ *  renderer doesn't note, as a tracked change's, leaves the block open,
+ *  where its comments go as they are */
 function noteHtmlBlock(block: HtmlBlock, piece: string, length: number): void {
   if (!block.open) return;
   let at = 0;
@@ -4656,6 +4665,47 @@ function noteHtmlBlock(block: HtmlBlock, piece: string, length: number): void {
   if (end === -1) return;
   block.open = false;
   block.from = length - piece.length + end + 1;
+}
+
+/** A line, as of a hidden comment, that would end the paragraph it's in or
+ *  make it a heading: one that starts a block (see startsBlockLine), a rule,
+ *  or a heading's underline */
+function breaksParagraph(line: string): boolean {
+  // The whitespace after a rule's last character goes to that character's
+  // own [ \t]*, not to one after the group too, which would try each split
+  // of it between the two, in time in the square of its length
+  return startsBlockLine(line) || /^[ \t]{0,3}(?:=+[ \t]*|-+[ \t]*|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(line);
+}
+
+/** A hidden comment's Markdown in a paragraph, `text`, with each of its
+ *  lines after a line end that would end the paragraph indented by four
+ *  spaces, at which none does, as code can't interrupt a paragraph, so the
+ *  comment stays in it, hidden. In a list item, such a line takes the indent
+ *  of the item's text, `listLinePrefix`, past which the four count, and so
+ *  does one that starts with a space or tab, which the item's indent would
+ *  take from the comment, and an empty last line, which the comment Word
+ *  split from this one goes on; export reads that indent as the item's, not
+ *  the comment's. Other lines go on the paragraph as they are. Its first
+ *  line goes on the line before it, but after a comment Word split it from,
+ *  whose last line, `before`, is the start of its line. Where that line
+ *  would end the paragraph by itself, the comment before indented it, and
+ *  four spaces more would go in the line, after its start. A blank line
+ *  ends the paragraph whatever its indent */
+function keepCommentInParagraph(text: string, before: string | undefined, listLinePrefix = ''): string {
+  return text.replace(/(^|\n)([^\n]*)/g, (match, end: string, line: string, offset: number) => {
+    if (offset === 0) return before !== undefined && !breaksParagraph(before) && breaksParagraph(before + line) ? '    ' + line : match;
+    if (breaksParagraph(line)) return end + listLinePrefix + '    ' + line;
+    return /^[ \t]/.test(line) || line === '' && offset === text.length - 1 ? end + listLinePrefix + line : match;
+  });
+}
+
+/** The start of the line a hidden comment at segment[i] starts on, where
+ *  that's in the comment before it, which Word split it from */
+function lineBeforeComment(segment: ContentItem[], i: number): string | undefined {
+  const prev = segment[i - 1];
+  if (prev?.type !== 'html_comment') return undefined;
+  const end = prev.text.lastIndexOf('\n');
+  return end === -1 ? undefined : prev.text.slice(end + 1);
 }
 
 /** A hidden comment as inline Markdown reads one: one with no end, which
@@ -8257,7 +8307,12 @@ function formatCommentBodyWithId(cid: string, c: Comment, timezone?: string): st
  *  marker as text (see escapeMarkdownChars), as it doesn't at the top level,
  *  whether it's a heading, whose text is inline, and whether it's a pipe or
  *  grid table's cell, whose text is inline too */
-type InlineRangeOpts = { stopBeforeDisplayMath?: boolean; nested?: boolean; heading?: boolean; cell?: boolean };
+type InlineRangeOpts = {
+  stopBeforeDisplayMath?: boolean; nested?: boolean; heading?: boolean; cell?: boolean;
+  // The indent of a list item's text, which a line of a hidden comment in
+  // it takes (see keepCommentInParagraph)
+  listLinePrefix?: string;
+};
 
 /** A segment's runs from the start of a paragraph to `end` as text, by
  *  `end`: their text, with anything else as a character that is no syntax,
@@ -8806,8 +8861,11 @@ function renderInlineRange(
         out += comment;
         noteHtmlBlock(htmlBlock, comment, out.length);
       } else {
+        // As it is in a table's cell, where no line of it starts a block
+        const inParagraph = opts?.cell ? comment : keepCommentInParagraph(comment, lineBeforeComment(segment, i), opts?.listLinePrefix);
         let last: number;
-        [out, last] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(comment) : comment, () => lineAfterBreak(segment, i, segmentEnd, comment));
+        [out, last] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
+          () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment);
         inlineThrough = Math.max(inlineThrough, last);
       }
       if (item.commentIds.size > 0) {
@@ -9043,16 +9101,21 @@ function renderInlineRangeWithIds(
   // order they opened in, which those that end together end in: export
   // numbers comments in the order they open, and import reads ranges that
   // end together by number, so another order wouldn't come back
-  function enterComments(currentIds: Set<string>): void {
+  /** Writes the ID syntax that ends the ranges not in `currentIds` and
+   *  starts those new in them, and returns it */
+  function enterComments(currentIds: Set<string>): string {
+    let markers = '';
     for (const cid of prevCommentIds) {
       if (!currentIds.has(cid)) {
-        out += `{/${remap(cid)}}`;
+        markers += `{/${remap(cid)}}`;
         collectBody(cid);
       }
     }
     const opening = [...currentIds].sort().filter(cid => !prevCommentIds.has(cid));
-    for (const cid of opening) out += `{#${remap(cid)}}`;
+    for (const cid of opening) markers += `{#${remap(cid)}}`;
+    out += markers;
     prevCommentIds = new Set([...prevCommentIds].filter(cid => currentIds.has(cid)).concat(opening));
+    return markers;
   }
 
   while (i < segment.length) {
@@ -9154,7 +9217,7 @@ function renderInlineRangeWithIds(
     // html_comment: emit raw <!-- ... --> with comment ID tracking
     if (item.type === 'html_comment') {
       const currentIds = item.commentIds;
-      enterComments(currentIds);
+      const markers = enterComments(currentIds);
       // Without the indent export put in its hidden run, where ID syntax
       // starts the paragraph, which it makes one rather than an HTML block
       // whose indent that was, so the indent would be text Word shows
@@ -9166,8 +9229,14 @@ function renderInlineRangeWithIds(
         out += comment;
         noteHtmlBlock(htmlBlock, comment, out.length);
       } else {
+        // The line it starts on, with the ID syntax written before it on
+        // the line, which keeps the line from starting a block. As it is in
+        // a table's cell, where no line of it starts a block
+        const before = lineBeforeComment(segment, i);
+        const inParagraph = opts?.cell ? comment : keepCommentInParagraph(comment, before === undefined ? undefined : before + markers, opts?.listLinePrefix);
         let last: number;
-        [out, last] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(comment) : comment, () => lineAfterBreak(segment, i, segmentEnd, comment));
+        [out, last] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
+          () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment);
         inlineThrough = Math.max(inlineThrough, last);
       }
       i++;
@@ -13679,7 +13748,9 @@ export function buildMarkdown(
       continue;
     }
 
-    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading }, renderOpts);
+    const rendered = renderInlineRange(mergedContent, i, comments, {
+      stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading, ...(quoteLinePrefix ? {} : { listLinePrefix }),
+    }, renderOpts);
     if (rendered.nextIndex <= i) {
       throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
