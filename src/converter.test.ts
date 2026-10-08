@@ -3744,6 +3744,53 @@ describe('A Word comment on an HTML comment', () => {
     expect(Math.min(time(40000), time(40000)) / small).toBeLessThan(8);
   });
 
+  test('checks paragraphs whose comments\' ranges link each to the next in linear time', async () => {
+    // Each paragraph has a comment that a line break puts at a line's start,
+    // which ID syntax keeps in the paragraph, and a Word comment's range over
+    // it, a table's comment and the next paragraph's first comment, in two
+    // ranges of one ID, as Word doesn't write but a document can hold. The
+    // last paragraph's comment has text outside it, so it doesn't read back,
+    // which takes the range before it out of ID syntax, so the one before
+    // doesn't either, and so on back. A check of all the paragraphs again
+    // for each took time in the square of their number.
+    const startAt = (k: number) => '<w:commentRangeStart w:id="' + k + '"/>';
+    const endAt = (k: number) => '<w:commentRangeEnd w:id="' + k + '"/>';
+    const chain = (n: number) => {
+      let xml = '';
+      let notes = '';
+      for (let k = 0; k < n; k++) {
+        xml += '<w:p>' + visible('x');
+        if (k > 0) xml += startAt(k - 1) + hidden(k === n - 1 ? '<!-- a -->secret<!-- z -->' : '<!-- a -->') + endAt(k - 1) + '<w:r><w:commentReference w:id="' + (k - 1) + '"/></w:r>';
+        if (k < n - 1) {
+          xml += '<w:r><w:br/></w:r>' + startAt(k) + hidden('<!-- b -->') + '</w:p>'
+            + '<w:tbl><w:tr><w:tc><w:p>' + hidden('<!-- t -->') + endAt(k) + '</w:p></w:tc></w:tr></w:tbl>';
+          notes += '<w:comment w:id="' + k + '" w:author="A" w:date="2024-01-15T10:30:00Z"><w:p><w:r><w:t>n</w:t></w:r></w:p></w:comment>';
+        } else xml += '</w:p>';
+      }
+      return buildSyntheticDocx(wrapDocumentXml(xml), {
+        'word/comments.xml': '<?xml version="1.0"?><w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + notes + '</w:comments>',
+      });
+    };
+    const [small, large] = [await chain(150), await chain(600)];
+    let markdown = '';
+    const time = async (docx: Uint8Array) => {
+      const start = performance.now();
+      markdown = (await convertDocx(docx)).markdown;
+      return performance.now() - start;
+    };
+    // The fastest of three runs of each, by turns
+    let smallTime = Infinity;
+    let largeTime = Infinity;
+    for (let k = 0; k < 3; k++) {
+      smallTime = Math.min(smallTime, await time(small));
+      largeTime = Math.min(largeTime, await time(large));
+    }
+    // No range is in ID syntax, as each paragraph took the one before out
+    expect(markdown).toContain('x<!-- a -->{>>');
+    expect(markdown).not.toMatch(/\{#\d+\}<!--/);
+    expect(largeTime / smallTime).toBeLessThan(8);
+  }, 60000);
+
   test('keeps an image Word put a comment on after a comment with no --> in a run of its own', async () => {
     // Its run, which starts a payload with a ZWSP, went on the comment's, as
     // the rest of the comment Word split from it, with the comment on it
