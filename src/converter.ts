@@ -221,6 +221,9 @@ export interface ListMeta {
   wordStarts?: boolean; // ordered: Word starts its level's numbering over at the item
   bulletMarker?: '-' | '*' | '+'; // authored unordered-list marker for round-trip
   taskChecked?: boolean; // a task list item, checked or not
+  // Numbered by its style alone, with no numId of its own, as export writes
+  // no item, but a paragraph a template's style numbers (see listBlockPlaces)
+  byStyle?: boolean;
 }
 
 export const DEFAULT_FORMATTING: Readonly<RunFormatting> = Object.freeze({
@@ -1563,6 +1566,7 @@ export type ContentItem =
       type: 'para';
       headingLevel?: number;   // 1–6 if heading, undefined otherwise
       listMeta?: ListMeta;     // present if list item
+      paraId?: string;         // its w14:paraId, where it's asked for (see listPlacesOf)
       isTitle?: boolean;       // true if Word "Title" paragraph style
       titleXml?: string;       // a title paragraph's XML, for what it sets itself (see titleOwnProperties)
       blockquoteLevel?: number; // 1+ if Quote/IntenseQuote paragraph style
@@ -1584,6 +1588,7 @@ export type ContentItem =
       indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override for round-trip
       blankParagraphs?: number; // paragraphs of spaces and tabs alone it stands for (see dropBlankParagraphText), which count among export's paragraphs, or that a cleanup dropped before it (see dropCodeBlockSeparators)
       listBlockStart?: boolean; // the first item of a list block, which a list indent override goes before
+      blankLineBefore?: boolean; // a list item the source had a blank line before (see extractListBlankLines)
       paraMarkRevision?: RevisionInfo; // w:ins/w:del on the paragraph mark (pPr > rPr) — whole paragraph inserted/deleted
       breakRevision?: RevisionInfo; // w:ins/w:del on the previous paragraph's mark, which is the break before this one
     }
@@ -2457,6 +2462,7 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
   return {
     type: def.type,
     level,
+    ...(own?.numId === undefined ? { byStyle: true } : {}),
     ...(startNumber !== undefined ? { startNumber } : {}),
     ...(def.type === 'ordered' && counted ? { wordNumber: counted.number, wordStarts: counted.starts } : {}),
   };
@@ -2464,6 +2470,33 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
 
 function listParagraph(parsed: ListMeta | UnnumberedListParagraph | undefined): { listMeta?: ListMeta; unnumberedListLevel?: number } {
   return parsed && 'unnumberedLevel' in parsed ? { unnumberedListLevel: parsed.unnumberedLevel } : { listMeta: parsed };
+}
+
+/** The list Word numbers a paragraph of a style in by the style alone, as
+ *  import reads it (see parseListMeta), by the style's ID, or undefined for
+ *  a paragraph that names none, in a document of `stylesXml` and
+ *  `numberingXml`, or the level it puts the paragraph at where Word shows
+ *  no number there, which import reads as a paragraph of the item above,
+ *  or undefined where the style does neither, and in all, undefined where
+ *  no style does either. Export asks it of a template's, where import's
+ *  list blocks are then Word's numbering's, which export reads back from
+ *  its document (see listPlacesOf), and whose default style numbers a
+ *  bulleted task item, which takes no numbering of its own, in the style's
+ *  list */
+export async function styleListMeta(stylesXml: string, numberingXml: string | undefined): Promise<((styleId: string | undefined) => ListMeta | UnnumberedListParagraph | undefined) | undefined> {
+  const zip = new JSZip();
+  zip.file('word/styles.xml', stylesXml);
+  if (numberingXml !== undefined) zip.file('word/numbering.xml', numberingXml);
+  const { defs, styles } = await parseNumberingDefinitions(zip);
+  const lists = new Map<string | undefined, ListMeta | UnnumberedListParagraph | undefined>();
+  const list = (styleId: string | undefined) => {
+    if (!lists.has(styleId)) {
+      const pPr: XmlNode[] = styleId === undefined ? [] : [{ 'w:pStyle': [], ':@': { '@_w:val': styleId } }];
+      lists.set(styleId, parseListMeta(pPr, defs, undefined, undefined, styles));
+    }
+    return lists.get(styleId);
+  };
+  return [undefined, ...styles.styles.keys()].some(list) ? list : undefined;
 }
 
 async function loadZip(data: Uint8Array): Promise<JSZip> {
@@ -4551,6 +4584,25 @@ export async function extractListIndentOverrides(data: Uint8Array | JSZip): Prom
   } catch { return null; }
 }
 
+/** The items export recorded a blank line before, by list block and their
+ *  place in it (see listBlankLineProps there) */
+export async function extractListBlankLines(data: Uint8Array | JSZip): Promise<Map<number, Set<number>> | null> {
+  const mappingJson = await extractChunkedCustomProp(data, 'MANUSCRIPT_LIST_BLANK_LINES');
+  if (!mappingJson) return null;
+  try {
+    const obj = JSON.parse(mappingJson);
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+    const map = new Map<number, Set<number>>();
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      const block = parseInt(k, 10);
+      if (isNaN(block) || !Array.isArray(v)) continue;
+      const places = new Set(v.filter((place): place is number => Number.isInteger(place) && place > 0));
+      if (places.size > 0) map.set(block, places);
+    }
+    return map.size > 0 ? map : null;
+  } catch { return null; }
+}
+
 // Extract blockquote gap metadata from custom XML properties.
 // Returns a Map<number, number> mapping group index → blank-line count between
 // that group and the next.  Uses the same chunked-JSON pattern as code block
@@ -6263,6 +6315,9 @@ export async function extractDocumentContent(
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
     footnoteCrossRefMap?: Map<string, string>;
     styleLayouts?: StyleLayouts;
+    /** The paragraphs, by their w14:paraId, whose para items keep it (see
+     *  listPlacesOf) */
+    paraIdsOf?: ReadonlySet<string>;
   }
 ): Promise<DocumentContentResult> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
@@ -6837,6 +6892,7 @@ export async function extractDocumentContent(
           if (!paraChildren.some(child => child['w:pPr'])) {
             ({ listMeta, unnumberedListLevel } = listParagraph(parseListMeta([], numberingDefs, numberingStartOverrides, countListItem, numberingResult.styles)));
           }
+          const paraId = node[':@']?.['@_w14:paraId'];
           if (isSpacerParagraph) {
             // Keep a structural-only boundary so adjacent same-type alerts remain
             // separate even when generated labels are disabled. Table cells cannot
@@ -6921,6 +6977,7 @@ export async function extractDocumentContent(
             if (spacerShaped) paraItem.spacerShaped = true;
             if (horizontalRule) paraItem.horizontalRule = true;
             if (taskLevel !== undefined) paraItem.taskLevel = taskLevel;
+            if (typeof paraId === 'string' && options?.paraIdsOf?.has(paraId)) paraItem.paraId = paraId;
             // Only a paragraph that's nothing else goes in an item for it
             if (unnumberedListLevel !== undefined && !headingLevel && !isTitle && !blockquoteLevel && !isCodeBlock && !generatedListContinuation && !customStyle) {
               paraItem.unnumberedListLevel = unnumberedListLevel;
@@ -11012,12 +11069,15 @@ function markTaskListItems(content: ContentItem[]): void {
     // The text after the box, which a comment on the box goes on over
     const after = prefix.length > 2 ? box[box.length - 1] : content[i + 1 + box.length];
     const afterIds = after && 'commentIds' in after ? after.commentIds : undefined;
+    // An item export wrote, as a bulleted task item takes no numbering, but
+    // one a template's style numbers
+    const ownItem = (meta: ListMeta | undefined): ListMeta | undefined => meta?.byStyle ? { ...meta, byStyle: false } : meta;
     if (box.some(text => text.revision || (text.text !== '' && [...text.commentIds].some(id => !afterIds?.has(id))))) {
-      item.listMeta ??= { type: 'bullet', level: item.taskLevel! };
+      item.listMeta = ownItem(item.listMeta) ?? { type: 'bullet', level: item.taskLevel! };
       continue;
     }
     const taskChecked = glyph[1] === '☒';
-    item.listMeta = item.listMeta ? { ...item.listMeta, taskChecked } : { type: 'bullet', level: item.taskLevel!, taskChecked };
+    item.listMeta = item.listMeta ? { ...ownItem(item.listMeta)!, taskChecked } : { type: 'bullet', level: item.taskLevel!, taskChecked };
     let remove = 2;
     box.forEach((text, k) => {
       const take = Math.min(remove, text.text.length);
@@ -11047,6 +11107,77 @@ function isStructuralBoundaryItem(item: ContentItem): boolean {
     || item.type === 'bibliography_marker'
     || item.type === 'custom_style_open'
     || item.type === 'custom_style_close';
+}
+
+/** Each list item in content, with the index of its list block and its
+ *  place in the block, counting the items at every level, as export counts
+ *  them (see listBlockIndex there). A block ends at anything but an item or
+ *  a continuation, as a heading, code or title Word numbered, which
+ *  buildMarkdown writes as a heading, code or the title, or a paragraph a
+ *  template's style numbers, with no numbering of its own, which export
+ *  wrote as a paragraph, as it writes each item's, and at a top-level item
+ *  of the other type than the block's top-level item before it, as Markdown
+ *  starts a new list there, or where Word starts the numbering over. A style
+ *  fence, which import puts in after this, ends no block, as export writes
+ *  no paragraph for one, and a list's paragraphs get no custom style */
+function* listBlockPlaces(content: ContentItem[]): Generator<[ParaItem, number, number]> {
+  let block = -1;
+  let place = 0;
+  let inList = false;
+  // The type of the block's last top-level item
+  let topType: 'bullet' | 'ordered' | undefined;
+  for (const item of content) {
+    if (item.type === 'para' && item.listMeta && !item.listMeta.byStyle && !item.headingLevel && !item.isCodeBlock && !item.isTitle) {
+      if (item.listMeta.level === 0) {
+        if (inList && topType !== undefined && (item.listMeta.type !== topType || item.listMeta.wordStarts)) inList = false;
+        topType = item.listMeta.type;
+      }
+      if (!inList) {
+        block++;
+        place = 0;
+        inList = true;
+      }
+      yield [item, block, place++];
+    } else if (item.type === 'para' ? !item.listContinuation : isStructuralBoundaryItem(item)) {
+      inList = false;
+      topType = undefined;
+    }
+  }
+}
+
+/** The body's content as import reads its structure, from
+ *  extractDocumentContent's, which this changes: task items made list
+ *  items, and the spacers around code blocks, tables and quotes taken out.
+ *  Returns the quotes' spacing the spacers gave. Export repeats it on its
+ *  own document (see listPlacesOf) */
+function structureBody(content: ContentItem[], blockquotePlaces: Map<number, BlockquotePlace> | null): ReturnType<typeof annotateStructuralParagraphMetadata> {
+  // A task item is a list item, which the code block's spacer goes before
+  markTaskListItems(content);
+  dropCodeBlockSeparators(content);
+  dropTableSeparators(content, item => isPlainEmptyParagraph(item) && item.emptyParagraphCount === 1 && !item.paraMarkRevision);
+  const derived = annotateStructuralParagraphMetadata(content, blockquotePlaces);
+  // Spacer markers have served their sole purpose as grouping boundaries; remove
+  // them before all later structural scans and Markdown rendering.
+  for (let i = content.length - 1; i >= 0; i--) {
+    const item = content[i];
+    if (item.type === 'para' && item.isBlockquoteSpacer) content.splice(i, 1);
+  }
+  return derived;
+}
+
+/** The list block and place in it of each list item of the document in
+ *  `zip` whose paragraph's w14:paraId is in `paraIds`, as convertDocx reads
+ *  them (see listBlockPlaces), from the same inputs (see
+ *  documentContentInputs). Export asks it of its own finished document
+ *  where a template's styles number paragraphs, as import reads the blocks
+ *  then by Word's numbering, and keys its records of the lists by them */
+export async function listPlacesOf(zip: JSZip, paraIds: ReadonlySet<string>): Promise<Map<string, [number, number]>> {
+  const { zoteroCitations, keyMap, options, blockquotePlaces } = await documentContentInputs(zip);
+  const { content } = await extractDocumentContent(zip, zoteroCitations, keyMap, { ...options, paraIdsOf: paraIds });
+  structureBody(content, blockquotePlaces);
+  const places = new Map<string, [number, number]>();
+  for (const [item, block, place] of listBlockPlaces(content)) if (item.paraId) places.set(item.paraId, [block, place]);
+  return places;
 }
 
 function paragraphHasContent(content: ContentItem[], paraIndex: number): boolean {
@@ -13397,7 +13528,8 @@ export function buildMarkdown(
           const interrupts = startsList && !lastListItemEmpty && (isEmptyListItem(i)
             || (meta.type === 'ordered' && (meta.wordNumber ?? meta.startNumber ?? 1) !== 1));
           const afterHtmlBlock = listHtmlBlockOpen && meta.level > (lastListLevel ?? 0);
-          output.push('\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts || afterHtmlBlock ? 1 : 0)));
+          // And where the source had one, which made the list loose
+          output.push('\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts || afterHtmlBlock || item.blankLineBefore ? 1 : 0)));
         } else if (item.listContinuation) {
           // Plain continuation paragraphs are block children of the list item
           // and therefore require a blank line. An imported empty paragraph
@@ -14896,6 +15028,84 @@ type AwaitedRecord<T extends Record<string, PromiseLike<unknown>>> = {
   [K in keyof T]: Awaited<T[K]>;
 };
 
+/** What extractDocumentContent reads the body of the document in `zip`
+ *  with, as convertDocx reads it: its citations, its comments, its
+ *  numbering, relationships and style layouts, its custom styles, the notes
+ *  its cross-references go to, and the records of its sections. Each of
+ *  them can make an item, or decide what an item is. With them, the
+ *  records of its quotes' places in lists, which structureBody reads the
+ *  quotes with (`blockquotePlaces`). Export's read-back of
+ *  its own document (listPlacesOf) takes them here too, so its items, and
+ *  the structure import reads from them, are convertDocx's. Only what names
+ *  the files and keys an item writes can differ there: `format`, which
+ *  names the citations' keys, and `imageFolder`, which names the images'
+ *  files. convertDocx uses the rest of what this returns besides: the
+ *  comments, whose bodies it writes, the notes' citations, and the custom
+ *  styles, which go in the frontmatter */
+async function documentContentInputs(zip: JSZip, format: CitationKeyFormat = 'authorYearTitle', imageFolder?: string) {
+  const { comments, threads, zoteroCitations, footnoteCitations, endnoteCitations, footnoteCrossRefMapping, storedCustomStyles, sections, numbering, rels, styleLayouts, blockquotePlaces } = await allNamed({
+    comments: extractComments(zip),
+    threads: extractCommentThreads(zip),
+    zoteroCitations: extractZoteroCitations(zip),
+    footnoteCitations: extractZoteroCitations(zip, 'word/footnotes.xml'),
+    endnoteCitations: extractZoteroCitations(zip, 'word/endnotes.xml'),
+    footnoteCrossRefMapping: extractFootnoteCrossRefMapping(zip),
+    storedCustomStyles: extractCustomStyles(zip),
+    sections: sectionRecords(zip),
+    numbering: parseNumberingDefinitions(zip),
+    rels: parseDocumentRelationships(zip),
+    styleLayouts: parseStyleLayouts(zip),
+    blockquotePlaces: extractBlockquoteListLevelMapping(zip),
+  });
+  // Group reply comments under their parents and get IDs to exclude from ranges
+  const replyIds = groupCommentThreads(comments, threads);
+  const commentBodies = new Set(comments.keys());
+  // One key for each item, wherever it's cited, and a .bib entry for it: the
+  // body's items take theirs first, then the footnotes', then the endnotes'
+  const allCitations = [...zoteroCitations, ...footnoteCitations, ...endnoteCitations];
+  const keyMap = buildCitationKeyMap(allCitations, format);
+  // One set of image files for the document and its notes, whose images'
+  // relationships are each part's own
+  const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
+  const options = {
+    numberingDefs: numbering.defs,
+    numberingStartOverrides: numbering.startOverrides,
+    numberingInstances: numbering.instances,
+    numberingStyles: numbering.styles,
+    relationshipMap: rels.hyperlinks,
+    replyIds,
+    commentBodies,
+    imageRelationships: rels.images,
+    imageFolder,
+    imageFiles,
+    ...sections,
+    customStyles: storedCustomStyles ?? undefined,
+    footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined,
+    styleLayouts,
+  };
+  return { zoteroCitations, keyMap, options, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles };
+}
+
+/** The records of the document's sections that export writes in custom
+ *  properties, which decide its section fences, as extractDocumentContent
+ *  takes them. convertDocx and listPlacesOf both read them here */
+async function sectionRecords(zip: JSZip): Promise<{ portraitBreakOrdinals?: Set<number>; referencesBeforeSections?: Set<number>; hiddenBeforeSections?: Map<number, number>; hiddenAfterSections?: Map<number, number>; templatePageSections?: Set<number> }> {
+  const records = await allNamed({
+    portraitBreakOrdinals: extractPortraitBreakOrdinals(zip),
+    referencesBeforeSections: extractBreakOrdinals(zip, 'MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_'),
+    hiddenBeforeSections: extractSectionCounts(zip, 'MANUSCRIPT_HIDDEN_BEFORE_SECTIONS_'),
+    hiddenAfterSections: extractSectionCounts(zip, 'MANUSCRIPT_HIDDEN_AFTER_SECTIONS_'),
+    templatePageSections: extractBreakOrdinals(zip, 'MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_'),
+  });
+  return {
+    portraitBreakOrdinals: records.portraitBreakOrdinals ?? undefined,
+    referencesBeforeSections: records.referencesBeforeSections ?? undefined,
+    hiddenBeforeSections: records.hiddenBeforeSections ?? undefined,
+    hiddenAfterSections: records.hiddenAfterSections ?? undefined,
+    templatePageSections: records.templatePageSections ?? undefined,
+  };
+}
+
 async function allNamed<T extends Record<string, PromiseLike<unknown>>>(promises: T): Promise<AwaitedRecord<T>> {
   const entries = await Promise.all(Object.entries(promises).map(
     async ([key, promise]) => [key, await promise] as const,
@@ -15279,23 +15489,17 @@ export async function convertDocx(
 ): Promise<ConvertResult> {
   const zip = await loadZip(data);
   const {
-    comments,
-    zoteroCitations,
-    footnoteCitations,
-    endnoteCitations,
+    inputs,
     zoteroPrefs,
     author,
     commentIdMapping,
     footnoteIdMapping,
-    footnoteCrossRefMapping,
     codeBlockLangMapping,
     noteCodeBlockStarts,
-    threads,
     codeBlockStyling,
     blockquoteGapMapping,
     blockquotePreContentBlankLineMapping,
     blockquotePostContentBlankLineMapping,
-    blockquoteListLevelMapping,
     blockquoteAlertStyleMapping,
     blockquoteAlertMarkerAloneGroups,
     imageFormatMapping,
@@ -15322,17 +15526,11 @@ export async function convertDocx(
     storedBibliographyPath,
     landscapeTableMapping,
     portraitTableMapping,
-    portraitBreaks,
-    referencesBeforeSections,
-    hiddenBeforeSections,
-    hiddenAfterSections,
-    templatePageSections,
     explicitTableFontSize,
     storedFieldOrder,
     htmlCommentAfterGapMapping,
     sentinelGapMapping,
     defaultTableColWidths,
-    storedCustomStyles,
     storedTableBorders,
     storedLineSpacing,
     storedParagraphIndent,
@@ -15342,28 +15540,23 @@ export async function convertDocx(
     storedDefaultCsl,
     storedIndentOverrides,
     storedListIndentOverrides,
+    storedListBlankLines,
     embedDirectiveMapping,
     defaultTableDigits,
     defaultTableDecimalMark,
     defaultTableDigitGrouping,
   } = await allNamed({
-    comments: extractComments(zip),
-    zoteroCitations: extractZoteroCitations(zip),
-    footnoteCitations: extractZoteroCitations(zip, 'word/footnotes.xml'),
-    endnoteCitations: extractZoteroCitations(zip, 'word/endnotes.xml'),
+    inputs: documentContentInputs(zip, format, options?.imageFolder),
     zoteroPrefs: extractZoteroPrefs(zip),
     author: extractAuthor(zip),
     commentIdMapping: extractCommentIdMapping(zip),
     footnoteIdMapping: extractFootnoteIdMapping(zip),
-    footnoteCrossRefMapping: extractFootnoteCrossRefMapping(zip),
     codeBlockLangMapping: extractCodeBlockLanguageMapping(zip),
     noteCodeBlockStarts: extractIdMappingFromCustomXml(zip, 'MANUSCRIPT_NOTE_CODE_BLOCKS'),
-    threads: extractCommentThreads(zip),
     codeBlockStyling: extractCodeBlockStyling(zip),
     blockquoteGapMapping: extractBlockquoteGapMapping(zip),
     blockquotePreContentBlankLineMapping: extractBlockquotePreContentBlankLineMapping(zip),
     blockquotePostContentBlankLineMapping: extractBlockquotePostContentBlankLineMapping(zip),
-    blockquoteListLevelMapping: extractBlockquoteListLevelMapping(zip),
     blockquoteAlertStyleMapping: extractBlockquoteAlertStyleMapping(zip),
     blockquoteAlertMarkerAloneGroups: extractBlockquoteAlertMarkerAloneGroups(zip),
     imageFormatMapping: extractImageFormatMapping(zip),
@@ -15390,17 +15583,11 @@ export async function convertDocx(
     storedBibliographyPath: extractBibliographyPath(zip),
     landscapeTableMapping: extractLandscapeTableMapping(zip),
     portraitTableMapping: extractPortraitTableMapping(zip),
-    portraitBreaks: extractPortraitBreakOrdinals(zip),
-    referencesBeforeSections: extractBreakOrdinals(zip, 'MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_'),
-    hiddenBeforeSections: extractSectionCounts(zip, 'MANUSCRIPT_HIDDEN_BEFORE_SECTIONS_'),
-    hiddenAfterSections: extractSectionCounts(zip, 'MANUSCRIPT_HIDDEN_AFTER_SECTIONS_'),
-    templatePageSections: extractBreakOrdinals(zip, 'MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_'),
     explicitTableFontSize: extractExplicitTableFontSize(zip),
     storedFieldOrder: extractFrontmatterFieldOrder(zip),
     htmlCommentAfterGapMapping: extractHtmlCommentAfterGapMapping(zip),
     sentinelGapMapping: extractSentinelGapMapping(zip),
     defaultTableColWidths: extractDefaultTableColWidths(zip),
-    storedCustomStyles: extractCustomStyles(zip),
     storedTableBorders: extractTableBorders(zip),
     storedLineSpacing: extractLineSpacing(zip),
     storedParagraphIndent: extractParagraphIndent(zip),
@@ -15410,6 +15597,7 @@ export async function convertDocx(
     storedDefaultCsl: extractDefaultCsl(zip),
     storedIndentOverrides: extractIndentOverrides(zip),
     storedListIndentOverrides: extractListIndentOverrides(zip),
+    storedListBlankLines: extractListBlankLines(zip),
     embedDirectiveMapping: extractEmbedDirectiveMapping(zip),
     defaultTableDigits: extractDefaultTableDigits(zip),
     defaultTableDecimalMark: extractDefaultTableDecimalMark(zip),
@@ -15430,9 +15618,10 @@ export async function convertDocx(
     ?? validWidth(options?.gridTableMaxLineWidthDefault)
     ?? 120;
 
-  // Group reply comments under their parents and get IDs to exclude from ranges
-  const replyIds = groupCommentThreads(comments, threads);
-  const commentBodies = new Set(comments.keys());
+  // The inputs extractDocumentContent reads the body with, which export's
+  // read-back of its own document reads with too
+  const { zoteroCitations, keyMap, options: contentOptions, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles } = inputs;
+  const { numberingDefs, numberingStartOverrides, relationshipMap: docRels, replyIds, commentBodies, imageFiles, styleLayouts, footnoteCrossRefMap } = contentOptions;
 
   // Mark parent comments whose replies were originally in consecutive format
   if (consecutiveReplyParaIds && consecutiveReplyParaIds.size > 0) {
@@ -15443,38 +15632,22 @@ export async function convertDocx(
     }
   }
 
-  // One key for each item, wherever it's cited, and a .bib entry for it: the
-  // body's items take theirs first, then the footnotes', then the endnotes'
-  const allCitations = [...zoteroCitations, ...footnoteCitations, ...endnoteCitations];
-  const keyMap = buildCitationKeyMap(allCitations, format);
-
-  // Parse note-specific rels and numbering for footnote/endnote body parsing
-  const [numberingResult, docRelsParsed, fnRelsParsed, enRelsParsed] = await Promise.all([
-    parseNumberingDefinitions(zip),
-    parseDocumentRelationships(zip),
+  // Parse note-specific rels for footnote/endnote body parsing
+  const [fnRelsParsed, enRelsParsed] = await Promise.all([
     parseDocumentRelationships(zip, 'word/_rels/footnotes.xml.rels'),
     parseDocumentRelationships(zip, 'word/_rels/endnotes.xml.rels'),
   ]);
-  const styleLayouts = await parseStyleLayouts(zip);
-  const numberingDefs = numberingResult.defs;
-  const numberingStartOverrides = numberingResult.startOverrides;
-  const numberingInstances = numberingResult.instances;
-  const numberingStyles = numberingResult.styles;
-  const docRels = docRelsParsed.hyperlinks;
-  const imageRels = docRelsParsed.images;
 
   // Build note contexts with merged rels (note rels + document rels as fallback)
   const fnRelsMerged = new Map([...docRels, ...fnRelsParsed.hyperlinks]);
   const enRelsMerged = new Map([...docRels, ...enRelsParsed.hyperlinks]);
-  // One set of image files for the document and its notes, whose images'
-  // relationships are each part's own
-  const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
   const imageFolder = options?.imageFolder ?? '';
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap };
 
-  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, numberingStyles, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, hiddenBeforeSections: hiddenBeforeSections ?? undefined, hiddenAfterSections: hiddenAfterSections ?? undefined, templatePageSections: templatePageSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
-  // The notes the document references, in its order
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, contentOptions);
+  // The notes the document references, in its order, which are the ones it
+  // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);
   const footnoteParts = await extractFootnotes(zip, fnContext);
   const endnoteParts = await extractEndnotes(zip, enContext);
@@ -15498,22 +15671,12 @@ export async function convertDocx(
   footnoteParts.withImages(shown.footnote);
   endnoteParts.withImages(shown.endnote);
 
-  // A task item is a list item, which the code block's spacer goes before
-  markTaskListItems(docContent);
-  dropCodeBlockSeparators(docContent);
-  dropTableSeparators(docContent, item => isPlainEmptyParagraph(item) && item.emptyParagraphCount === 1 && !item.paraMarkRevision);
   for (const note of [...footnotes.values(), ...endnotes.values()]) dropTableSeparators(note.content, item => !item.isCodeBlock && !item.breakRevision);
   const {
     derivedBlockquoteGaps,
     derivedBlockquotePreContentBlankLines,
     derivedBlockquotePostContentBlankLines,
-  } = annotateStructuralParagraphMetadata(docContent, blockquoteListLevelMapping);
-  // Spacer markers have served their sole purpose as grouping boundaries; remove
-  // them before all later structural scans and Markdown rendering.
-  for (let i = docContent.length - 1; i >= 0; i--) {
-    const item = docContent[i];
-    if (item.type === 'para' && item.isBlockquoteSpacer) docContent.splice(i, 1);
-  }
+  } = structureBody(docContent, blockquotePlaces);
 
   // Post-process: apply per-paragraph indent overrides from custom properties.
   // Uses the same body-paragraph counting as md-to-docx generation: count
@@ -15555,53 +15718,27 @@ export async function convertDocx(
   }
 
   // Post-process: apply per-list-block indent overrides from custom properties.
-  // A list block is a maximal sequence of consecutive 'para' items with listMeta.
+  // A list block is a run of items, as listBlockPlaces counts them.
   if (storedListIndentOverrides) {
-    let listBlockIdx = 0;
-    let inList = false;
-    // The type of the block's last top-level item: a new block starts where
-    // a top-level item changes type, as Markdown starts a new list, or where
-    // Word starts the numbering over
-    let topType: 'bullet' | 'ordered' | undefined;
-    for (const item of docContent) {
-      if (item.type === 'para' && item.listMeta) {
-        if (item.listMeta.level === 0) {
-          if (inList && (item.listMeta.type !== topType || item.listMeta.wordStarts)) inList = false;
-          topType = item.listMeta.type;
-        }
-        if (!inList) {
-          item.listBlockStart = true;
-          // Start of a new list block
-          const override = storedListIndentOverrides.get(listBlockIdx);
-          if (override) item.indentOverride = override as 'indent' | 'no-indent';
-          inList = true;
-          listBlockIdx++;
-        }
-        // Propagate the override from the first list item to all items in this block
-        if (item.indentOverride === undefined) {
-          // Look back to find the override from the first item of this block
-          // (already set above for the first item)
-        }
-      } else if (item.type === 'para' ? !item.listContinuation : isStructuralBoundaryItem(item)) {
-        inList = false;
-        topType = undefined;
+    // The override of each block's first item goes to all its items
+    let blockOverride: 'indent' | 'no-indent' | undefined;
+    for (const [item, block, place] of listBlockPlaces(docContent)) {
+      if (place === 0) {
+        item.listBlockStart = true;
+        const override = storedListIndentOverrides.get(block);
+        if (override) item.indentOverride = override as 'indent' | 'no-indent';
+        blockOverride = item.indentOverride;
+      } else if (blockOverride) {
+        item.indentOverride = blockOverride;
       }
     }
-    // Second pass: propagate override to all items in each list block
-    inList = false;
-    let currentOverride: 'indent' | 'no-indent' | undefined;
-    for (const item of docContent) {
-      if (item.type === 'para' && item.listMeta) {
-        if (!inList || item.listBlockStart) {
-          currentOverride = item.indentOverride;
-          inList = true;
-        } else if (currentOverride) {
-          item.indentOverride = currentOverride;
-        }
-      } else if (item.type === 'para' ? !item.listContinuation : isStructuralBoundaryItem(item)) {
-        inList = false;
-        currentOverride = undefined;
-      }
+  }
+
+  // The blank lines before list items, which make their lists loose, where
+  // the source had them
+  if (storedListBlankLines) {
+    for (const [item, block, place] of listBlockPlaces(docContent)) {
+      if (storedListBlankLines.get(block)?.has(place)) item.blankLineBefore = true;
     }
   }
 

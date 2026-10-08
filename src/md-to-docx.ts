@@ -13,7 +13,7 @@ import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, n
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import { paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
-import { imageAltMarkdown, ZoteroBiblData, zoteroStyleFullId } from './converter';
+import { imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlacesOf, styleListMeta, ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
@@ -122,6 +122,7 @@ export interface MdToken {
   blockquoteSpacing?: BlockquoteSpacing; // on a quote group's first token (see annotateBlockquoteSpacing)
   startNumber?: number;     // for ordered lists: first item's start number (when ≠ 1)
   listStart?: boolean;      // for list items: the first item of its list
+  blankLineBefore?: boolean; // for list items: a blank line before the item's marker in the source (see listBlankLineProps)
   taskChecked?: boolean;    // for GFM task list items
   alertType?: GfmAlertType; // for GFM alerts in blockquotes
   alertLead?: boolean;      // first blockquote paragraph carrying alert header
@@ -4112,6 +4113,10 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
       // As GFM, a box only at the start of the item's first block, a paragraph
       const taskInfo = itemTokens[0]?.type === 'paragraph_open' || itemTokens[0]?.type === 'inline' ? extractTaskListItem(runs) : undefined;
       const sourceLineIndex = tokens[i].map?.[0];
+      // Blank as Markdown reads a line, of spaces and tabs alone (CommonMark
+      // §4.9), not of other whitespace, which trim() takes too: a line of a
+      // no-break space goes on in the item's paragraph, and the list is tight
+      const blankLineBefore = sourceLineIndex !== undefined && sourceLineIndex > 0 && /^[ \t]*\r?$/.test(sourceLines?.[sourceLineIndex - 1] ?? 'x');
       const authoredBulletMarker = !ordered && sourceLineIndex !== undefined
         ? extractBulletMarkerFromSourceLine(sourceLines?.[sourceLineIndex])
         : undefined;
@@ -4123,6 +4128,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
         runs: taskInfo?.runs ?? runs,
         taskChecked: taskInfo?.checked,
         ...(authoredBulletMarker ? { bulletMarker: authoredBulletMarker } : {}),
+        ...(blankLineBefore ? { blankLineBefore } : {}),
       };
       // Attach startNumber only to the first item of an ordered list with start ≠ 1
       if (items.length === 0 && startNumber !== undefined && startNumber !== 1) {
@@ -4247,12 +4253,13 @@ const NOT_XML_CHARACTER = /[^\t\n\r -\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu
 /** A run's text, deleted text or field code, or an equation's text */
 const TEXT_ELEMENT = /<((?:w|m):(?:t|delText|instrText|delInstrText))(\s[^>]*)?>([^<]*)<\/\1>/g;
 
-/** Remove the characters XML can't hold from the package's XML, as the
- *  Markdown's text, URLs or comments can have, which made a part Word
- *  can't read, and say how many */
-async function removeCharactersXmlCantHold(zip: import('jszip'), warnings: string[]): Promise<void> {
+/** Remove the characters XML can't hold from the package's XML, of the
+ *  parts at `paths` or all of them, as the Markdown's text, URLs or
+ *  comments can have, which made a part Word can't read, and return how
+ *  many */
+async function removeCharactersXmlCantHold(zip: import('jszip'), paths = Object.keys(zip.files)): Promise<number> {
   let removed = 0;
-  for (const path of Object.keys(zip.files)) {
+  for (const path of paths) {
     if (zip.files[path].dir || !/\.(?:xml|rels)$/.test(path)) continue;
     const bytes = await zip.file(path)!.async('uint8array');
     // A template's part in UTF-16, which goes as it came
@@ -4272,9 +4279,7 @@ async function removeCharactersXmlCantHold(zip: import('jszip'), warnings: strin
       return '<' + tag + attrs + (preserve ? ' xml:space="preserve"' : '') + '>' + rest + '</' + tag + '>';
     })));
   }
-  if (removed > 0) {
-    warnings.push('Removed ' + removed + ' character' + (removed === 1 ? '' : 's') + ' a Word document can\'t hold, such as control characters');
-  }
+  return removed;
 }
 
 async function extractTemplateParts(templateDocx: Uint8Array): Promise<TemplateParts> {
@@ -4570,6 +4575,10 @@ export interface DocxGenState {
   bodyParagraphIndex: number;      // counter for body paragraphs (for indent override tracking)
   listIndentOverrides: Map<number, 'indent' | 'no-indent'>; // list block index → override
   listBlockIndex: number;          // counter for list blocks (consecutive groups of list_items)
+  listItemOrdinal: number;         // the place of the next list item in its list block
+  listBlankLines: Map<number, number[]>; // list block index → the places in it of items with a blank line before them
+  listItemsRead: ListItemRead[]; // where a template's styles number paragraphs, each list item, which the records take the list block and place of from the written document (see listPlacesOf)
+  listByStyle?: (styleId: string | undefined) => ListMeta | UnnumberedListParagraph | undefined; // the list a template's style numbers its paragraphs in, by style ID, where its styles number any (see styleListMeta)
   embedDirectiveMap: Map<number, string>; // table index → original embed directive text
   embedDirectives: string[]; // ordered list of embed directive texts from preprocessing
 }
@@ -6547,6 +6556,42 @@ function listIndentOverrideProps(overrides: Map<number, 'indent' | 'no-indent'>)
   }
   return chunkCustomProps('MANUSCRIPT_LIST_INDENT_OVERRIDES_', JSON.stringify(mapping));
 }
+/** Records a blank line before the item at `place` in list block `block`,
+ *  in the block's places as they are, as a long loose list has one before
+ *  each item */
+export function recordListBlankLine(blankLines: Map<number, number[]>, block: number, place: number): void {
+  const places = blankLines.get(block);
+  if (places) places.push(place);
+  else blankLines.set(block, [place]);
+}
+
+/** A list item export reads the list block and place of from its document:
+ *  its paragraph's w14:paraId, whether a blank line before it makes its
+ *  list loose, and its indent directive */
+interface ListItemRead { paraId: string; blankLine: boolean; indentOverride?: 'indent' | 'no-indent' }
+
+/** The records of `items` in their list blocks and places, `places`, as
+ *  import reads them: an item's blank line where it isn't its block's first,
+ *  and its directive where it is. An item import reads in no block, which
+ *  isn't one Word shows, has none */
+function recordListItemsRead(state: DocxGenState, items: ListItemRead[], places: Map<string, [number, number]>): void {
+  for (const item of items) {
+    const at = places.get(item.paraId);
+    if (!at) continue;
+    const [block, place] = at;
+    if (place > 0 && item.blankLine) recordListBlankLine(state.listBlankLines, block, place);
+    if (place === 0 && item.indentOverride) state.listIndentOverrides.set(block, item.indentOverride);
+  }
+}
+
+/** The items with a blank line before them in the source, by list block and
+ *  their place in it, counting the items at every level. Word has nothing
+ *  for the blank line, which makes a Markdown list loose, its items' text
+ *  paragraphs, and import, which writes lists tight, puts it back */
+function listBlankLineProps(blankLines: Map<number, number[]>): CustomPropEntry[] {
+  if (blankLines.size === 0) return [];
+  return chunkCustomProps('MANUSCRIPT_LIST_BLANK_LINES_', JSON.stringify(Object.fromEntries(blankLines)));
+}
 
 function gridTableMaxLineWidthProps(fm: Frontmatter): CustomPropEntry[] {
   if (fm.gridTableMaxLineWidth === undefined) return [];
@@ -8482,13 +8527,23 @@ function generateParaId(state: DocxGenState): string {
  * Skips elements that already have w14:paraId (e.g. comment paragraphs).
  */
 function injectParaIds(xml: string, state: DocxGenState): string {
-  const rsid = state.rsid;
   return xml.replace(/<w:p(\s[^>]*)?(\/?>)/g, (match, attrs, close) => {
     // Already has a paraId (e.g. comment paragraphs) — leave it alone
     if (attrs && attrs.includes('w14:paraId')) return match;
-    const pid = generateParaId(state);
-    return '<w:p w14:paraId="' + pid + '" w14:textId="77777777" w:rsidR="' + rsid + '" w:rsidRDefault="' + rsid + '"' + (attrs || '') + close;
+    return paraIdTag(generateParaId(state), state, attrs || '', close);
   });
+}
+
+/** A paragraph's start tag with its w14:paraId, `id`, as injectParaIds
+ *  writes it, and its other attributes, `attrs` */
+function paraIdTag(id: string, state: DocxGenState, attrs: string, close: string): string {
+  return '<w:p w14:paraId="' + id + '" w14:textId="77777777" w:rsidR="' + state.rsid + '" w:rsidRDefault="' + state.rsid + '"' + attrs + close;
+}
+
+/** `xml`, a paragraph, with its w14:paraId `id`, as injectParaIds gives it,
+ *  where export needs it before then */
+function withParaId(xml: string, id: string, state: DocxGenState): string {
+  return xml.replace(/^<w:p(\s[^>]*)?(\/?>)/, (match, attrs, close) => attrs && attrs.includes('w14:paraId') ? match : paraIdTag(id, state, attrs || '', close));
 }
 
 
@@ -8798,6 +8853,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   }
 
   let prevToken: MdToken | undefined;
+  // The token before this one as import counts list blocks: a style fence
+  // writes no paragraph, and a list's paragraphs get no custom style, so
+  // import finds no boundary at one, and the lists on either side of it are
+  // one block there (see listBlockPlaces)
+  let listPrevToken: MdToken | undefined;
   // The document's start, before a title, starts a section as a close does,
   // so a section that opens the document needs no break before it, which
   // would end an empty section, a blank first page
@@ -8841,6 +8901,9 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       }
       continue;
     }
+    // Whether the list open at the item's level before it is ordered, as a
+    // list beside the one the item starts (see besideList)
+    const besideOrdered = token.type === 'list_item' ? openListOrdered[(token.level ?? 1) - 1] : undefined;
     if (token.type === 'list_item') {
       openListOrdered.length = token.level ?? 1;
       openListOrdered[(token.level ?? 1) - 1] = !!token.ordered;
@@ -8874,7 +8937,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       biblAtSectionStart = prevWasClose && !state.inLandscapeSection && !state.inPortraitSection;
       hiddenAtSectionStart = hiddenBefore;
       if (prevToken?.type === 'heading') state.afterHeading = true;
-      prevToken = undefined;
+      prevToken = listPrevToken = undefined;
       continue;
     }
 
@@ -8932,7 +8995,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.inLandscapeSection = true;
       preserveCloseForNextToken = !!prevWasClose;
       if (prevToken?.type === 'heading') state.afterHeading = true;
-      prevToken = undefined;
+      prevToken = listPrevToken = undefined;
       continue;
     }
     if (token.landscapeClose) {
@@ -8944,7 +9007,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.inLandscapeSection = false;
       preserveCloseForNextToken = true;
       if (prevToken?.type === 'heading') state.afterHeading = true;
-      prevToken = undefined;
+      prevToken = listPrevToken = undefined;
       continue;
     }
 
@@ -8962,7 +9025,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.inPortraitSection = true;
       preserveCloseForNextToken = !!prevWasClose;
       if (prevToken?.type === 'heading') state.afterHeading = true;
-      prevToken = undefined;
+      prevToken = listPrevToken = undefined;
       continue;
     }
     if (token.portraitClose) {
@@ -8975,7 +9038,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.inPortraitSection = false;
       preserveCloseForNextToken = true;
       if (prevToken?.type === 'heading') state.afterHeading = true;
-      prevToken = undefined;
+      prevToken = listPrevToken = undefined;
       continue;
     }
 
@@ -9004,13 +9067,52 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // A new list block starts when we see a list_item after a non-list-item,
     // or where import sees a top-level item change type, or start a new
     // numbering instance: at each ordered list after the first.
+    // Where a template's styles number paragraphs, Word's numbering decides
+    // the blocks import reads, with the paragraphs it numbers by their style
+    // alone, which export writes with none of their own, as a bulleted task
+    // item, and where it starts the count over, which only the document
+    // says once it's written. Export reads them from it then (see
+    // listItemsRead), and counts none here
     const isTopItem = token.type === 'list_item' && (token.level ?? 1) === 1;
     const startsTopList = token.type === 'list_item' && startsAdjacentList(token, lastTopItem?.ordered);
-    if (token.type === 'list_item' && ((prevToken?.type !== 'list_item' && !prevToken?.listContinuation) || startsTopList)) {
-      if (token.indentOverride) {
+    const startsBlock = token.type === 'list_item' && ((listPrevToken?.type !== 'list_item' && !listPrevToken?.listContinuation) || startsTopList);
+    if (startsBlock) {
+      if (token.indentOverride && !state.listByStyle) {
         state.listIndentOverrides.set(state.listBlockIndex, token.indentOverride);
       }
       state.listBlockIndex++;
+      state.listItemOrdinal = 0;
+    }
+    let readParaId: string | undefined;
+    if (token.type === 'list_item') {
+      // A blank line before an item after its block's first, as between
+      // items or before a sublist, which makes its list loose. Not after a
+      // quote, whose blank lines after it the source had are the quote's
+      // (see blockquotePostContentBlankLines), as the parsed text has one
+      // there deLazifyBlockquotes put in where the source had none. Nor
+      // after a style fence, where the item starts a list of its own, which
+      // the blank line doesn't make loose. Nor before the first item of a
+      // list that markdown-it starts right after an item of another list at
+      // its level or deeper, as at another bullet or delimiter: at the top
+      // level, where the blank line makes neither list loose, and in an
+      // item, where both are of bullets, which Word has as one list, so the
+      // record would make that list loose. In an item, the blank line makes
+      // the item's list loose, which import keeps where it writes the lists
+      // apart, as lists of two types, or of numbers, which Word starts over,
+      // but not two of bullets. A sublist's first item comes right after its
+      // parent item instead, and there the blank line makes the parent's
+      // list loose
+      const level = token.level ?? 1;
+      const besideList = !!token.listStart && prevToken?.type === 'list_item' && (prevToken.level ?? 1) >= level
+        && (level === 1 || !token.ordered && besideOrdered === false);
+      const blankLine = !!token.blankLineBefore && !!prevToken && prevToken.type !== 'blockquote' && !besideList;
+      if (state.listByStyle) {
+        readParaId = generateParaId(state);
+        state.listItemsRead.push({ paraId: readParaId, blankLine, ...(token.indentOverride ? { indentOverride: token.indentOverride } : {}) });
+      } else if (blankLine && state.listItemOrdinal > 0) {
+        recordListBlankLine(state.listBlankLines, state.listBlockIndex - 1, state.listItemOrdinal);
+      }
+      state.listItemOrdinal++;
     }
     if (isTopItem) lastTopItem = { ordered: !!token.ordered };
     else if (token.type !== 'list_item' && !token.listContinuation) lastTopItem = undefined;
@@ -9056,7 +9158,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.tableIndex++;
     } else {
       state.afterHeading = prevToken?.type === 'heading' || (!prevToken && state.afterHeading);
-      const paragraphXml = generateParagraph(token, state, options, bibEntries, citeprocEngine);
+      let paragraphXml = generateParagraph(token, state, options, bibEntries, citeprocEngine);
+      if (readParaId) paragraphXml = withParaId(paragraphXml, readParaId, state);
       // Track body paragraph index for indent override round-trip. Import
       // counts the paragraphs that show something, by countsForIndent as
       // here; one whose only image couldn't be read has no run, so it
@@ -9105,6 +9208,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     const listGoesOn = !!token.listContinuation && (nextToken?.type === 'list_item'
       ? nextLevel > token.listContinuation.level || openListOrdered[nextLevel - 1] === !!nextToken.ordered
       : !!nextToken?.listContinuation);
+    // Whether separators go after the token, empty paragraphs, at which
+    // import ends a list block, so that a list after them starts another
+    // there (see listBlockPlaces), as an item of another type after a quote
+    // in a list item does,
+    let separated = false;
     if (token.type === 'blockquote' && token.alertLast && token.blockquoteGroupIndex !== undefined && !listGoesOn) {
       // Inter-blockquote gap: insert separators between consecutive blockquote
       // groups when the source markdown had blank lines between them.
@@ -9119,8 +9227,15 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       for (let bi = 0; bi < blankCount; bi++) {
         body += separatorParagraph;
       }
+      separated = interGap > 0 || blankCount > 0;
     }
     prevToken = token;
+    // A paragraph or quote in an item after them goes on in no block, as
+    // import starts none there, so the item after it starts one
+    listPrevToken = separated || token.listContinuation && !listPrevToken ? undefined : token;
+    // where the next block's first top-level item starts none, as it
+    // follows none in the block
+    if (separated) lastTopItem = undefined;
   }
 
   // Register only the actually-cited keys so makeBibliography() outputs
@@ -9602,6 +9717,10 @@ export async function convertMdToDocx(
     bodyParagraphIndex: 0,
     listIndentOverrides: new Map(),
     listBlockIndex: 0,
+    listItemOrdinal: 0,
+    listBlankLines: new Map(),
+    listItemsRead: [],
+    listByStyle: templateStyles ? await styleListMeta(ensureManuscriptStyles(templateStyles), templateNumbering) : undefined,
     embedDirectiveMap: new Map(),
     embedDirectives,
   };
@@ -10044,99 +10163,110 @@ export async function convertMdToDocx(
   zip.file('docProps/core.xml', corePropsXml(frontmatter.author));
   zip.file('docProps/app.xml', appPropsXml());
 
-  const customProps: CustomPropEntry[] = [];
-  if (frontmatter.csl) {
-    customProps.push(...zoteroCustomProps(frontmatter));
-  }
-  customProps.push(...defaultCslProps(defaultCsl));
-  customProps.push(...commentIdMappingProps(state.commentIdMap));
-  customProps.push(...footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
-  customProps.push(...footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));
-  customProps.push(...codeBlockLanguageProps(state.codeBlockLanguages));
-  customProps.push(...noteCodeBlockProps(state.noteCodeBlockStarts));
-  customProps.push(...codeBlockStylingProps(frontmatter));
-  customProps.push(...pipeTableMaxLineWidthProps(frontmatter));
-  customProps.push(...gridTableMaxLineWidthProps(frontmatter));
-  customProps.push(...lineSpacingProps(frontmatter));
-  customProps.push(...paragraphIndentProps(frontmatter));
-  customProps.push(...bibliographyHangingIndentProps(frontmatter));
-  customProps.push(...indentOverrideProps(state.indentOverrides));
-  customProps.push(...listIndentOverrideProps(state.listIndentOverrides));
-  customProps.push(...blockquoteGapProps(state.blockquoteGaps));
-  customProps.push(...blockquotePreContentBlankLineProps(state.blockquotePreContentBlankLines));
-  customProps.push(...blockquotePostContentBlankLineProps(state.blockquotePostContentBlankLines));
-  customProps.push(...blockquoteAlertMarkerStyleProps(state.blockquoteAlertMarkerInlineByGroup));
-  customProps.push(...blockquoteListLevelProps(state.blockquotePlaces, state.blockquoteIdentities));
-  // Word shows the label's paragraph of an alert whose marker is one of its
-  // own, and with the label hidden, has none
-  if (!effectiveCalloutLabels) customProps.push(...blockquoteAlertMarkerAloneProps(blockquoteSpacing.alertAlone));
-  if (explicitCalloutLabels !== undefined) {
-    customProps.push({ name: 'MANUSCRIPT_CALLOUT_LABELS', value: String(explicitCalloutLabels) });
-  }
-  customProps.push(...imageFormatProps(state.imageFormats));
-  customProps.push(...noteImageFormatProps(state.noteImageFormats));
-  customProps.push(...tableFormatProps(state.tableFormats));
-  if (state.tableIdentities.length > 0) customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_IDENTITIES_', JSON.stringify(state.tableIdentities)));
-  if (state.tableHtmlAround.size > 0) {
-    // The count of tables alike export wrote in all, which is known only now
-    for (const around of state.tableHtmlAround.values()) around[6] = String(state.tablesAlike.get(around[5] + '\n' + around[2] + '\n' + around[3]) ?? 0);
-    customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_HTML_AROUND_', JSON.stringify(Object.fromEntries(state.tableHtmlAround))));
-  }
-  customProps.push(...pipeTableAlignedProps(state.pipeTableAligned));
-  customProps.push(...gridSourceColWidthsProps(state.gridSourceColWidths));
-  customProps.push(...tableFontSizeProps(state.tableFontSizes));
-  customProps.push(...tableFontProps(state.tableFonts));
-  customProps.push(...tableColWidthsProps(state.tableColWidths));
-  const defaultColWidthsStr = fontOverrides?.tableColWidths
-    ? (typeof fontOverrides.tableColWidths === 'string' ? fontOverrides.tableColWidths : fontOverrides.tableColWidths.join(' '))
-    : undefined;
-  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGITS_', state.tableDigits));
-  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DECIMAL_MARKS_', state.tableDecimalMarks));
-  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGIT_GROUPINGS_', state.tableDigitGroupings));
-  if (frontmatter.tableColWidths) {
-    customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_COL_WIDTHS', value: defaultColWidthsStr! });
-  }
-  customProps.push(...embedDirectiveProps(state.embedDirectiveMap));
-  customProps.push(...landscapeTableProps(state.landscapeTables));
-  customProps.push(...portraitTableProps(state.portraitTables));
-  customProps.push(...portraitBreakProps(state.portraitBreakOrdinals));
-  customProps.push(...referencesBeforeSectionsProps(state.referencesBeforeSections));
-  customProps.push(...hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_BEFORE_SECTIONS_', state.hiddenBeforeSections));
-  customProps.push(...hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_AFTER_SECTIONS_', state.hiddenAfterSections));
-  if (state.templatePageSection !== undefined) {
-    customProps.push(...chunkCustomProps('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_', JSON.stringify([state.templatePageSection])));
-  }
-  customProps.push(...listIndentProps(state));
-  customProps.push(...consecutiveReplyProps(state));
-  customProps.push(...htmlCommentGapProps(state.htmlCommentGaps));
-  customProps.push(...htmlCommentAfterGapProps(state.htmlCommentAfterGaps));
-  if (Object.keys(state.sentinelGaps).length > 0) {
-    customProps.push(...chunkCustomProps('MANUSCRIPT_SENTINEL_GAPS_', JSON.stringify(state.sentinelGaps)));
-  }
-  if (frontmatter.tableFontSize !== undefined) {
-    customProps.push({ name: 'MANUSCRIPT_EXPLICIT_TABLE_FONT_SIZE', value: '1' });
-  }
-  if (frontmatter.tableBorders) {
-    customProps.push({ name: 'MANUSCRIPT_TABLE_BORDERS', value: frontmatter.tableBorders });
-  }
-  if (frontmatter.tableDigits !== undefined) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGITS', value: String(frontmatter.tableDigits) });
-  if (frontmatter.tableDecimalMark) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DECIMAL_MARK', value: frontmatter.tableDecimalMark });
-  if (frontmatter.tableDigitGrouping) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGIT_GROUPING', value: frontmatter.tableDigitGrouping });
-  if (frontmatter.styles && Object.keys(frontmatter.styles).length > 0) {
-    customProps.push(...chunkCustomProps('MANUSCRIPT_CUSTOM_STYLES_', JSON.stringify(frontmatter.styles)));
-  }
-  customProps.push(...frontmatterBlankLineProps(frontmatterBlankLines));
-  customProps.push(...frontmatterSettingsProps(frontmatter));
-  customProps.push(...frontmatterFieldOrderProps(fieldOrder));
-  customProps.push(...bibKeyOrderProps(bibEntries));
-  customProps.push(...bibDataProps(options?.bibtex));
-  customProps.push(...bibliographyPathProps(frontmatter));
-  // The template's properties its copied headers' and footers' fields show,
-  // after export's own, which keep their pids
-  const ownProps = new Set(customProps.map(p => p.name.toLowerCase()));
-  customProps.push(...(templateSections?.customProperties ?? []).filter(p => !ownProps.has(p.name.toLowerCase())));
+  // The custom properties, from the records export has. Where it reads its
+  // document back for the records of its lists (see listItemsRead), which
+  // only the finished document gives, it builds them again after, with
+  // those (see below), so it writes custom.xml in its place here even with
+  // none yet
+  const customPropsOf = (): CustomPropEntry[] => {
+    const customProps: CustomPropEntry[] = [];
+    if (frontmatter.csl) {
+      customProps.push(...zoteroCustomProps(frontmatter));
+    }
+    customProps.push(...defaultCslProps(defaultCsl));
+    customProps.push(...commentIdMappingProps(state.commentIdMap));
+    customProps.push(...footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
+    customProps.push(...footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));
+    customProps.push(...codeBlockLanguageProps(state.codeBlockLanguages));
+    customProps.push(...noteCodeBlockProps(state.noteCodeBlockStarts));
+    customProps.push(...codeBlockStylingProps(frontmatter));
+    customProps.push(...pipeTableMaxLineWidthProps(frontmatter));
+    customProps.push(...gridTableMaxLineWidthProps(frontmatter));
+    customProps.push(...lineSpacingProps(frontmatter));
+    customProps.push(...paragraphIndentProps(frontmatter));
+    customProps.push(...bibliographyHangingIndentProps(frontmatter));
+    customProps.push(...indentOverrideProps(state.indentOverrides));
+    customProps.push(...listIndentOverrideProps(state.listIndentOverrides));
+    customProps.push(...listBlankLineProps(state.listBlankLines));
+    customProps.push(...blockquoteGapProps(state.blockquoteGaps));
+    customProps.push(...blockquotePreContentBlankLineProps(state.blockquotePreContentBlankLines));
+    customProps.push(...blockquotePostContentBlankLineProps(state.blockquotePostContentBlankLines));
+    customProps.push(...blockquoteAlertMarkerStyleProps(state.blockquoteAlertMarkerInlineByGroup));
+    customProps.push(...blockquoteListLevelProps(state.blockquotePlaces, state.blockquoteIdentities));
+    // Word shows the label's paragraph of an alert whose marker is one of its
+    // own, and with the label hidden, has none
+    if (!effectiveCalloutLabels) customProps.push(...blockquoteAlertMarkerAloneProps(blockquoteSpacing.alertAlone));
+    if (explicitCalloutLabels !== undefined) {
+      customProps.push({ name: 'MANUSCRIPT_CALLOUT_LABELS', value: String(explicitCalloutLabels) });
+    }
+    customProps.push(...imageFormatProps(state.imageFormats));
+    customProps.push(...noteImageFormatProps(state.noteImageFormats));
+    customProps.push(...tableFormatProps(state.tableFormats));
+    if (state.tableIdentities.length > 0) customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_IDENTITIES_', JSON.stringify(state.tableIdentities)));
+    if (state.tableHtmlAround.size > 0) {
+      // The count of tables alike export wrote in all, which is known only now
+      for (const around of state.tableHtmlAround.values()) around[6] = String(state.tablesAlike.get(around[5] + '\n' + around[2] + '\n' + around[3]) ?? 0);
+      customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_HTML_AROUND_', JSON.stringify(Object.fromEntries(state.tableHtmlAround))));
+    }
+    customProps.push(...pipeTableAlignedProps(state.pipeTableAligned));
+    customProps.push(...gridSourceColWidthsProps(state.gridSourceColWidths));
+    customProps.push(...tableFontSizeProps(state.tableFontSizes));
+    customProps.push(...tableFontProps(state.tableFonts));
+    customProps.push(...tableColWidthsProps(state.tableColWidths));
+    const defaultColWidthsStr = fontOverrides?.tableColWidths
+      ? (typeof fontOverrides.tableColWidths === 'string' ? fontOverrides.tableColWidths : fontOverrides.tableColWidths.join(' '))
+      : undefined;
+    customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGITS_', state.tableDigits));
+    customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DECIMAL_MARKS_', state.tableDecimalMarks));
+    customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGIT_GROUPINGS_', state.tableDigitGroupings));
+    if (frontmatter.tableColWidths) {
+      customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_COL_WIDTHS', value: defaultColWidthsStr! });
+    }
+    customProps.push(...embedDirectiveProps(state.embedDirectiveMap));
+    customProps.push(...landscapeTableProps(state.landscapeTables));
+    customProps.push(...portraitTableProps(state.portraitTables));
+    customProps.push(...portraitBreakProps(state.portraitBreakOrdinals));
+    customProps.push(...referencesBeforeSectionsProps(state.referencesBeforeSections));
+    customProps.push(...hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_BEFORE_SECTIONS_', state.hiddenBeforeSections));
+    customProps.push(...hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_AFTER_SECTIONS_', state.hiddenAfterSections));
+    if (state.templatePageSection !== undefined) {
+      customProps.push(...chunkCustomProps('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_', JSON.stringify([state.templatePageSection])));
+    }
+    customProps.push(...listIndentProps(state));
+    customProps.push(...consecutiveReplyProps(state));
+    customProps.push(...htmlCommentGapProps(state.htmlCommentGaps));
+    customProps.push(...htmlCommentAfterGapProps(state.htmlCommentAfterGaps));
+    if (Object.keys(state.sentinelGaps).length > 0) {
+      customProps.push(...chunkCustomProps('MANUSCRIPT_SENTINEL_GAPS_', JSON.stringify(state.sentinelGaps)));
+    }
+    if (frontmatter.tableFontSize !== undefined) {
+      customProps.push({ name: 'MANUSCRIPT_EXPLICIT_TABLE_FONT_SIZE', value: '1' });
+    }
+    if (frontmatter.tableBorders) {
+      customProps.push({ name: 'MANUSCRIPT_TABLE_BORDERS', value: frontmatter.tableBorders });
+    }
+    if (frontmatter.tableDigits !== undefined) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGITS', value: String(frontmatter.tableDigits) });
+    if (frontmatter.tableDecimalMark) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DECIMAL_MARK', value: frontmatter.tableDecimalMark });
+    if (frontmatter.tableDigitGrouping) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGIT_GROUPING', value: frontmatter.tableDigitGrouping });
+    if (frontmatter.styles && Object.keys(frontmatter.styles).length > 0) {
+      customProps.push(...chunkCustomProps('MANUSCRIPT_CUSTOM_STYLES_', JSON.stringify(frontmatter.styles)));
+    }
+    customProps.push(...frontmatterBlankLineProps(frontmatterBlankLines));
+    customProps.push(...frontmatterSettingsProps(frontmatter));
+    customProps.push(...frontmatterFieldOrderProps(fieldOrder));
+    customProps.push(...bibKeyOrderProps(bibEntries));
+    customProps.push(...bibDataProps(options?.bibtex));
+    customProps.push(...bibliographyPathProps(frontmatter));
+    // The template's properties its copied headers' and footers' fields show,
+    // after export's own, which keep their pids
+    const ownProps = new Set(customProps.map(p => p.name.toLowerCase()));
+    customProps.push(...(templateSections?.customProperties ?? []).filter(p => !ownProps.has(p.name.toLowerCase())));
+    return customProps;
+  };
+  const customProps = customPropsOf();
+  const readsBack = state.listItemsRead.length > 0;
   const hasCustomProps = customProps.length > 0;
-  if (hasCustomProps) {
+  if (hasCustomProps || readsBack) {
     zip.file('docProps/custom.xml', customPropsXml(customProps));
   }
 
@@ -10154,22 +10284,27 @@ export async function convertMdToDocx(
   }
   const templateCopy = templateSections && addTemplateSectionParts(zip, templateSections, state.nextImageDocPrId, extensionTypes, numberingFromTemplate);
 
-  zip.file('[Content_Types].xml', contentTypesXml({
-    hasList: hasNumbering,
-    hasComments: state.hasComments,
-    hasTheme,
-    hasCustomProps,
-    hasFootnotes: hasNotes,
-    hasEndnotes: hasNotes,
-    hasCommentsExtended,
-    hasCommentsIds,
-    hasCommentsExtensible,
-    hasPeople,
-    imageExtensions: state.imageExtensions.size > 0 ? state.imageExtensions : undefined,
-    templateDefaults: templateCopy?.defaults,
-    templateOverrides: templateCopy?.overrides,
-  }));
-  zip.file('_rels/.rels', relsXml(hasCustomProps));
+  // The parts that say whether the package has custom properties, which
+  // the read-back below can change
+  const writePackageParts = (withCustomProps: boolean) => {
+    zip.file('[Content_Types].xml', contentTypesXml({
+      hasList: hasNumbering,
+      hasComments: state.hasComments,
+      hasTheme,
+      hasCustomProps: withCustomProps,
+      hasFootnotes: hasNotes,
+      hasEndnotes: hasNotes,
+      hasCommentsExtended,
+      hasCommentsIds,
+      hasCommentsExtensible,
+      hasPeople,
+      imageExtensions: state.imageExtensions.size > 0 ? state.imageExtensions : undefined,
+      templateDefaults: templateCopy?.defaults,
+      templateOverrides: templateCopy?.overrides,
+    }));
+    zip.file('_rels/.rels', relsXml(withCustomProps));
+  };
+  writePackageParts(hasCustomProps);
   zip.file('word/_rels/document.xml.rels', documentRelsXml({
     relationships: state.relationships,
     hasList: hasNumbering,
@@ -10192,7 +10327,35 @@ export async function convertMdToDocx(
     }
   }
 
-  await removeCharactersXmlCantHold(zip, state.warnings);
+  const removed = await removeCharactersXmlCantHold(zip);
+  // The list blocks import reads where a template's styles number
+  // paragraphs, from the finished document, as convertDocx reads it (see
+  // listPlacesOf), and the records of the lists by them. The custom
+  // properties, with them, go in custom.xml again, in its place, as one
+  // write of them all gives it, or it goes where there are none, and the
+  // parts that say whether there are any are written again where that
+  // changes
+  if (readsBack) {
+    recordListItemsRead(state, state.listItemsRead, await listPlacesOf(zip, new Set(state.listItemsRead.map(item => item.paraId))));
+    const finalProps = customPropsOf();
+    const rewritten: string[] = [];
+    if (finalProps.length > 0) {
+      zip.file('docProps/custom.xml', customPropsXml(finalProps));
+      rewritten.push('docProps/custom.xml');
+    } else {
+      zip.remove('docProps/custom.xml');
+    }
+    if (finalProps.length > 0 !== hasCustomProps) {
+      writePackageParts(finalProps.length > 0);
+      rewritten.push('[Content_Types].xml', '_rels/.rels');
+    }
+    // Their characters XML can't hold were counted above, as the records of
+    // the lists add none
+    await removeCharactersXmlCantHold(zip, rewritten);
+  }
+  if (removed > 0) {
+    state.warnings.push('Removed ' + removed + ' character' + (removed === 1 ? '' : 's') + ' a Word document can\'t hold, such as control characters');
+  }
 
   // Remove directory entries — Word marks files with explicit folder entries as modified on open.
   // Cannot use zip.remove() as it also removes children; instead delete from the files map directly.
