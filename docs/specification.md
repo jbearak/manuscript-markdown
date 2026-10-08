@@ -122,6 +122,8 @@ title: [Main Title, Subtitle]
 
 Valid font style values: `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, `center`, `normal`, or hyphenated combinations (e.g., `bold-italic`, `bold-center`, `bold-smallcaps`). `smallcaps` and `allcaps` are mutually exclusive. `normal` means no bold, no italic, no underline — useful for headings, which default to bold. `normal` may only appear alone (not in hyphenated combinations). Hyphenated combinations are order-independent.
 
+On import, `header-font-style` and `title-font-style` give the font style each heading and title style shows in Word, including what a style inherits from the style it's based on, or else from the document defaults, where it doesn't set bold, italic, underline, caps or alignment itself. A style that turns on small caps and inherits all caps, or the reverse, reads as `allcaps`. Export also writes each title's font style on its runs and its centering on its paragraph, which Word shows over the Title style's, so `title-font-style` gives each title what it sets itself first: a toggle all its runs set alike, and the alignment of its paragraph. On export with a template, a heading or title style keeps its own explicit off, such as `<w:i w:val="0"/>` or a `<w:jc>` that doesn't center, for what its font style leaves out.
+
 ### Font Customization Example
 
 ```yaml

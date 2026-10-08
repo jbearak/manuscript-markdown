@@ -74,7 +74,9 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 // 4. rPr element ordering: color before shd, color before sz/szCs.
 // 5. Redundant style properties: do not emit w:sz/w:szCs on a derived style
 //    when the value matches the base style (e.g. Heading4 sz=22 from Normal).
-//    Do not emit w:before="0" (it's the default and Word strips it).
+//    Do not emit w:before="0" (it's the default and Word strips it), nor an
+//    empty <w:rPr> or <w:pPr>, as a heading style with nothing to change
+//    has, which Word strips too.
 // 6. Sequential rId numbering: all relationship IDs must be sequential with no
 //    gaps. Gaps trigger Word to renumber all rIds on open.
 // 7. vt:lpwstr encoding: only escape &, <, > in custom property text values.
@@ -5174,8 +5176,10 @@ export function applyFontOverridesToTemplate(
       const pPrMatch = /(<w:pPr\b[^>]*>)([\s\S]*?)(<\/w:pPr>)/.exec(innerContent);
       if (pPrMatch) {
         let pPrContent = pPrMatch[2];
-        // Remove any existing w:jc element, then insert before outlineLvl (schema order: spacing → ind → jc → outlineLvl)
-        pPrContent = pPrContent.replace(/<w:jc\b[^>]*(?:\/>|><\/w:jc>)/g, '');
+        // Remove any existing w:jc element, then insert before outlineLvl (schema order: spacing → ind → jc → outlineLvl).
+        // A font style that isn't centered keeps one that doesn't center,
+        // which may undo the centering of the style's base
+        pPrContent = pPrContent.replace(/<w:jc\b[^>]*(?:\/>|><\/w:jc>)/g, jc => !wantsCenter && !/\bw:val="center"/.test(jc) ? jc : '');
         if (wantsCenter) {
           const outlineLvlIdx = pPrContent.indexOf('<w:outlineLvl');
           if (outlineLvlIdx !== -1) {
@@ -5184,7 +5188,9 @@ export function applyFontOverridesToTemplate(
             pPrContent = pPrContent + '<w:jc w:val="center"/>';
           }
         }
-        innerContent = innerContent.slice(0, pPrMatch.index) + pPrMatch[1] + pPrContent + pPrMatch[3] + innerContent.slice(pPrMatch.index + pPrMatch[0].length);
+        // A pPr that held only the w:jc goes with it (dirty-flag invariant #5)
+        const newPPr = pPrContent.trim() ? pPrMatch[1] + pPrContent + pPrMatch[3] : '';
+        innerContent = innerContent.slice(0, pPrMatch.index) + newPPr + innerContent.slice(pPrMatch.index + pPrMatch[0].length);
       } else if (wantsCenter) {
         // No pPr block — insert one at the start
         innerContent = '<w:pPr><w:jc w:val="center"/></w:pPr>' + innerContent;
@@ -5231,25 +5237,33 @@ export function applyFontOverridesToTemplate(
 
       // Apply font-style overrides (bold, italic, underline) for headings and title
       if (fontStyleOverride !== undefined) {
-        // Remove existing b, i, u, smallCaps, caps elements (all toggle forms: self-closing, with attributes, open+close)
-        rPrContent = rPrContent.replace(/<w:b\b[^>]*(?:\/>|><\/w:b>)/g, '');
-        rPrContent = rPrContent.replace(/<w:i\b[^>]*(?:\/>|><\/w:i>)/g, '');
-        rPrContent = rPrContent.replace(/<w:u\b[^>]*(?:\/>|><\/w:u>)/g, '');
-        rPrContent = rPrContent.replace(/<w:smallCaps\b[^>]*(?:\/>|><\/w:smallCaps>)/g, '');
-        rPrContent = rPrContent.replace(/<w:caps\b[^>]*(?:\/>|><\/w:caps>)/g, '');
-        // Add new style elements at the start
-        let styleEls = '';
-        if (fontStyleOverride !== 'normal') {
-          if (fontStyleOverride.includes('bold')) styleEls += '<w:b/>';
-          if (fontStyleOverride.includes('italic')) styleEls += '<w:i/>';
-          if (fontStyleOverride.includes('underline')) styleEls += '<w:u w:val="single"/>';
-          if (fontStyleOverride.includes('smallcaps')) styleEls += '<w:smallCaps/>';
-          else if (fontStyleOverride.includes('allcaps')) styleEls += '<w:caps/>';
+        // Remove existing b, i, u, smallCaps, caps elements (all toggle forms: self-closing, with attributes, open+close),
+        // noting one that turns off what the font style leaves out, which may
+        // undo what the style's base turns on, to write again in order
+        const on: Record<string, string> = { 'w:b': '<w:b/>', 'w:i': '<w:i/>', 'w:u': '<w:u w:val="single"/>', 'w:smallCaps': '<w:smallCaps/>', 'w:caps': '<w:caps/>' };
+        const wanted = (tag: string) => tag === 'w:b' ? fontStyleOverride.includes('bold')
+          : tag === 'w:i' ? fontStyleOverride.includes('italic')
+          : tag === 'w:u' ? fontStyleOverride.includes('underline')
+          : tag === 'w:smallCaps' ? fontStyleOverride.includes('smallcaps')
+          : fontStyleOverride.includes('allcaps') && !fontStyleOverride.includes('smallcaps');
+        const turnsOff = (tag: string, element: string) => {
+          const val = /\bw:val="([^"]*)"/.exec(element)?.[1];
+          return tag === 'w:u' ? val === 'none' : val === '0' || val === 'false' || val === 'off';
+        };
+        const ownOff = new Map<string, string>();
+        for (const tag of Object.keys(on)) {
+          rPrContent = rPrContent.replace(new RegExp('<' + tag + '\\b[^>]*(?:/>|></' + tag + '>)', 'g'), element => {
+            if (!wanted(tag) && turnsOff(tag, element)) ownOff.set(tag, element);
+            return '';
+          });
         }
-        rPrContent = styleEls + rPrContent;
+        // Add new style elements at the start
+        rPrContent = Object.keys(on).map(tag => wanted(tag) ? on[tag] : ownOff.get(tag) ?? '').join('') + rPrContent;
       }
 
-      const newRPr = rPrMatch[1] + rPrContent + rPrMatch[3];
+      // An rPr that held only what the style override removed goes with it
+      // (dirty-flag invariant #5)
+      const newRPr = rPrContent.trim() ? rPrMatch[1] + rPrContent + rPrMatch[3] : '';
       const matchStart = rPrSearchStart + rPrMatch.index;
       const matchEnd = matchStart + rPrMatch[0].length;
       innerContent = innerContent.slice(0, matchStart) + newRPr + innerContent.slice(matchEnd);
@@ -5266,7 +5280,7 @@ export function applyFontOverridesToTemplate(
       if (rFontsEl !== undefined) rPrContent += rFontsEl;
       if (szEl !== undefined) rPrContent += szEl;
       if (szCsEl !== undefined) rPrContent += szCsEl;
-      innerContent = innerContent + '<w:rPr>' + rPrContent + '</w:rPr>';
+      if (rPrContent) innerContent = innerContent + '<w:rPr>' + rPrContent + '</w:rPr>';
     }
 
     xml = xml.slice(0, styleMatch.index) + openTag + innerContent + closeTag + xml.slice(styleMatch.index + styleMatch[0].length);
@@ -5593,7 +5607,9 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     } else {
       styleStr = '<w:b/>';
     }
-    return '<w:rPr>' + styleStr + font + sz + '</w:rPr>\n';
+    // Heading 4, normal, in the body font and size, changes nothing
+    const rPrInner = styleStr + font + sz;
+    return rPrInner ? '<w:rPr>' + rPrInner + '</w:rPr>\n' : '';
   }
 
   /** Return '<w:jc w:val="center"/>' if the heading style includes center, else ''. */

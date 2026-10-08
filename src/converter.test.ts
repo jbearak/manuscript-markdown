@@ -11333,7 +11333,9 @@ describe('Hyphens, symbols and carriage returns', () => {
 });
 
 describe('Table alignment', () => {
-  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  // A centered Normal centers the headings and title based on it, which the
+  // frontmatter then says
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
   const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
 
   test.each([

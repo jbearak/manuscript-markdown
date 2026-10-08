@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { XMLParser } from 'fast-xml-parser';
+import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
 import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
@@ -1564,6 +1564,7 @@ export type ContentItem =
       headingLevel?: number;   // 1–6 if heading, undefined otherwise
       listMeta?: ListMeta;     // present if list item
       isTitle?: boolean;       // true if Word "Title" paragraph style
+      titleXml?: string;       // a title paragraph's XML, for what it sets itself (see titleOwnProperties)
       blockquoteLevel?: number; // 1+ if Quote/IntenseQuote paragraph style
       listContinuation?: ListContinuation; // parent list context for continuation paragraphs/blocks
       alertType?: GfmAlertType; // present for GitHub alert styles
@@ -1968,6 +1969,9 @@ const parserOptions = {
     maxExpandedLength: 1000000,
   },
 };
+
+/** XML of what the parser read, as a title paragraph's (see ContentItem's titleXml) */
+const xmlBuilder = new XMLBuilder({ ignoreAttributes: false, attributeNamePrefix: '@_', preserveOrder: true, suppressEmptyNode: true });
 
 function escapeHtmlAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -6902,7 +6906,10 @@ export async function extractDocumentContent(
             const paraItem: ContentItem = { type: 'para' };
             if (headingLevel) paraItem.headingLevel = headingLevel;
             if (listMeta) paraItem.listMeta = listMeta;
-            if (isTitle) paraItem.isTitle = true;
+            if (isTitle) {
+              paraItem.isTitle = true;
+              paraItem.titleXml = xmlBuilder.build([node]) as string;
+            }
             if (blockquoteLevel) paraItem.blockquoteLevel = blockquoteLevel;
             if (blockquoteIndentUnitTwips) paraItem.blockquoteIndentUnitTwips = blockquoteIndentUnitTwips;
             if (blockquoteStyle) paraItem.blockquoteStyle = blockquoteStyle;
@@ -14839,9 +14846,11 @@ export function generateBibTeX(
 /**
  * Extract consecutive Title-styled paragraphs from the beginning of the document.
  * Returns the plain text of each title paragraph. Removes the extracted items
- * (para markers and their text runs) from the content array in place.
+ * (para markers and their text runs) from the content array in place, and
+ * adds each title paragraph's XML to `paragraphs`, for the title font style
+ * (see titleOwnProperties).
  */
-export function extractTitleLines(content: ContentItem[]): string[] {
+export function extractTitleLines(content: ContentItem[], paragraphs: string[] = []): string[] {
   const titles: string[] = [];
   let i = 0;
 
@@ -14853,6 +14862,7 @@ export function extractTitleLines(content: ContentItem[]): string[] {
       continue;
     }
     if (item.type !== 'para' || !item.isTitle) break;
+    paragraphs.push(item.titleXml ?? '');
 
     // Collect text runs following this title para marker
     const startIdx = i;
@@ -14895,8 +14905,15 @@ async function allNamed<T extends Record<string, PromiseLike<unknown>>>(promises
 
 // Main conversion
 
+/** The toggle properties of a heading or title font style */
+const FONT_STYLE_TOGGLES = ['w:b', 'w:i', 'w:u', 'w:smallCaps', 'w:caps'];
+
+/** Properties without a tracked change's record of what they were before
+ *  (w:rPrChange, w:pPrChange), which Word doesn't show */
+const withoutFormatChanges = (xml: string) => xml.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, '');
+
 /** Extract heading/title font properties from word/styles.xml for round-trip. */
-function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTableFontSize?: boolean; builtInIds?: Map<string, string> }): Partial<Frontmatter> {
+function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTableFontSize?: boolean; builtInIds?: Map<string, string>; titleParagraphs?: string[] }): Partial<Frontmatter> {
   const result: Partial<Frontmatter> = {};
   // The document's ID of each built-in style it gives another, by the ID
   // this reads it by (see StyleLayouts.builtInIds)
@@ -14916,7 +14933,8 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
    *  matches a style's ID whatever its case, as `heading1`, but not of
    *  another type, which a paragraph doesn't take, as a character style
    *  `Normal`. With `anyType`, as for a custom style, which can be a
-   *  character style, the style of the ID itself is of any type. */
+   *  character style, the style of the ID itself is of any type. As Word
+   *  shows it, without a tracked change's record (see withoutFormatChanges) */
   function styleBlock(id: string, anyType = false): string | null {
     const styleId = documentIds.get(id) ?? id;
     let caseless: string | null = null;
@@ -14935,23 +14953,27 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
       const tag = block.slice(0, tagEnd - idx);
       // A style without a type is a paragraph style
       const paragraph = (/\sw:type\s*=\s*"([^"]*)"/.exec(tag)?.[1] ?? 'paragraph') === 'paragraph';
-      if (block.includes('w:styleId="' + styleId + '"') && (paragraph || anyType)) return block;
-      caseless ??= paragraph && /\sw:styleId\s*=\s*"([^"]*)"/.exec(tag)?.[1].toLowerCase() === styleId.toLowerCase() ? block : null;
+      if (block.includes('w:styleId="' + styleId + '"') && (paragraph || anyType)) return withoutFormatChanges(block);
+      caseless ??= paragraph && /\sw:styleId\s*=\s*"([^"]*)"/.exec(tag)?.[1].toLowerCase() === styleId.toLowerCase() ? withoutFormatChanges(block) : null;
       searchFrom = idx + block.length;
     }
   }
 
-  // Helper: find a style block by styleId and extract rPr content, of a
-  // paragraph style but with `anyType` (see styleBlock)
-  function getStyleRPr(id: string, anyType = false): string | null {
-    const block = styleBlock(id, anyType);
-    if (block === null) return null;
+  // Helper: a style block's style-level rPr, or '' for none
+  function blockRPr(block: string): string {
     // Skip past pPr to find style-level rPr
     const pPrEnd = block.indexOf('</w:pPr>');
     const rPrStart = block.indexOf('<w:rPr>', pPrEnd !== -1 ? pPrEnd : 0);
     const rPrEnd = block.indexOf('</w:rPr>', rPrStart !== -1 ? rPrStart : 0);
-    if (rPrStart !== -1 && rPrEnd !== -1) return block.substring(rPrStart, rPrEnd + '</w:rPr>'.length);
-    return null;
+    return rPrStart !== -1 && rPrEnd !== -1 ? block.substring(rPrStart, rPrEnd + '</w:rPr>'.length) : '';
+  }
+
+  // Helper: find a style block by styleId and extract rPr content, of a
+  // paragraph style but with `anyType` (see styleBlock): '' for a style with
+  // none, as export writes a heading's that sets nothing, and null for no style
+  function getStyleRPr(id: string, anyType = false): string | null {
+    const block = styleBlock(id, anyType);
+    return block === null ? null : blockRPr(block);
   }
 
   function extractAttr(rpr: string, prefix: string): string | null {
@@ -15002,15 +15024,90 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return parts.length > 0 ? parts.join('-') : 'normal';
   }
 
+  /** Extract pPr content from a style block. */
+  function blockPPr(block: string): string | null {
+    const pPrStart = block.indexOf('<w:pPr');
+    const pPrEnd = block.indexOf('</w:pPr>');
+    return pPrStart !== -1 && pPrEnd !== -1 ? block.substring(pPrStart, pPrEnd + '</w:pPr>'.length) : null;
+  }
+
   /** Extract pPr content from a style block, of a paragraph style but with
    *  `anyType` (see styleBlock). */
   function getStylePPr(id: string, anyType = false): string | null {
     const block = styleBlock(id, anyType);
-    if (block === null) return null;
-    const pPrStart = block.indexOf('<w:pPr');
-    const pPrEnd = block.indexOf('</w:pPr>');
-    if (pPrStart !== -1 && pPrEnd !== -1) return block.substring(pPrStart, pPrEnd + '</w:pPr>'.length);
-    return null;
+    return block === null ? null : blockPPr(block);
+  }
+
+  // The document defaults' run and paragraph properties (w:docDefaults), as
+  // Word shows them
+  const docDefaults = withoutFormatChanges(/<w:docDefaults\b[\s\S]*?<\/w:docDefaults>/.exec(stylesXml)?.[0] ?? '');
+  const defaultRPr = /<w:rPrDefault>\s*<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(docDefaults)?.[1] ?? '';
+  const defaultPPr = /<w:pPrDefault>\s*<w:pPr>([\s\S]*?)<\/w:pPr>/.exec(docDefaults)?.[1] ?? '';
+
+  /**
+   * The font style a style shows (see extractStyle). A style that doesn't set
+   * bold, italic, underline, caps or alignment has what the style it's based
+   * on (w:basedOn) shows, so each comes from the nearest style in that chain
+   * that sets it, and else from the document defaults: an empty rPr means
+   * inherit, not normal. A style without a w:basedOn has no base, not the
+   * default paragraph style (ECMA-376 Part 1 §17.7.4.3).
+   *
+   * Bold, italic and the caps are toggle properties (§17.7.3), which toggle
+   * between the levels of the style hierarchy, such as a paragraph style and
+   * a character style, but not along a basedOn chain, which is one level
+   * whose nearest value is its value. Word goes further and sets a toggle
+   * property to a paragraph style's value rather than toggle it, and takes
+   * the document defaults' where a level has none ([MS-OI29500], its notes on
+   * Part 1 §17.7.8 and §17.7.3).
+   *
+   * The standard has caps and small caps never on together (§17.3.2.5,
+   * §17.3.2.33) and says nothing of which shows where both are. Where a
+   * style and its base turn both on, the caps win, as a font style holds
+   * only one.
+   */
+  function inheritedStyle(styleId: string, own: { rPr: string; pPr: string } = { rPr: '', pPr: '' }): string {
+    const chain: string[] = [];
+    const seen = new Set<string>();
+    for (let id: string | undefined = styleId; id !== undefined && !seen.has(id);) {
+      seen.add(id);
+      const block = styleBlock(id);
+      if (block === null) break;
+      chain.push(block);
+      id = /<w:basedOn\s+w:val\s*=\s*"([^"]*)"/.exec(block)?.[1];
+    }
+    // The nearest element, a paragraph's own first, self-closing, as
+    // <w:b></w:b> means what <w:b/> does
+    const nearest = (ownProperties: string, properties: (block: string) => string, defaults: string, tag: string) => {
+      const element = new RegExp('<' + tag + '\\b[^>]*>');
+      const found = element.exec(ownProperties) ?? chain.map(block => element.exec(properties(block))).find(m => m !== null) ?? element.exec(defaults);
+      return found ? found[0].replace(/\s*\/?>$/, '/>') : '';
+    };
+    const rpr = FONT_STYLE_TOGGLES.map(tag => nearest(own.rPr, blockRPr, defaultRPr, tag)).join('');
+    const style = extractStyle(rpr, nearest(own.pPr, block => blockPPr(block) ?? '', defaultPPr, 'w:jc'));
+    return style.replace('smallcaps-allcaps', 'allcaps');
+  }
+
+  /**
+   * What a title paragraph sets itself, which Word shows over its style: the
+   * centering in its pPr, and each toggle that all its runs set alike. Export
+   * writes a title's font style so (see generateDocumentXml in md-to-docx.ts),
+   * on and off, as the Title style's may differ.
+   */
+  function titleOwnProperties(paragraph: string): { rPr: string; pPr: string } {
+    // As Word shows it
+    const live = withoutFormatChanges(paragraph);
+    const pPr = live.match(/<w:pPr\b[^>]*>([\s\S]*?)<\/w:pPr>/)?.[1]?.replace(/<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>/, '') ?? '';
+    const runs = [...live.matchAll(/<w:r(?:\s[^>/]*)?>([\s\S]*?)<\/w:r>/g)].map(m => m[1]).filter(run => /<w:t\b/.test(run));
+    const rPr = FONT_STYLE_TOGGLES.map(tag => {
+      const element = new RegExp('<' + tag + '\\b[^>]*>');
+      const on = runs.map(run => {
+        const found = element.exec(/<w:rPr\b[^>]*>([\s\S]*?)<\/w:rPr>/.exec(run)?.[1] ?? '')?.[0];
+        return found === undefined ? undefined : extractStyle(found.replace(/\s*\/?>$/, '/>')) !== 'normal';
+      });
+      if (on.length === 0 || on.some(value => value === undefined || value !== on[0])) return '';
+      return on[0] ? '<' + tag + '/>' : tag === 'w:u' ? '<w:u w:val="none"/>' : '<' + tag + ' w:val="0"/>';
+    }).join('');
+    return { rPr, pPr };
   }
 
   // Extract Normal (body) font for comparison
@@ -15034,10 +15131,10 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   for (const id of ids) {
     const rpr = getStyleRPr(id);
-    if (rpr) {
+    if (rpr !== null) {
       fonts.push(extractFont(rpr));
       sizes.push(extractSizeHp(rpr));
-      styles.push(extractStyle(rpr, getStylePPr(id)));
+      styles.push(inheritedStyle(id));
     } else {
       fonts.push(undefined);
       sizes.push(undefined);
@@ -15075,13 +15172,14 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   // Title extraction
   const titleRpr = getStyleRPr('Title');
-  if (titleRpr) {
+  if (titleRpr !== null) {
     const tFont = extractFont(titleRpr);
     if (tFont && tFont !== bodyFont) result.titleFont = [tFont];
     const tSizeHp = extractSizeHp(titleRpr);
     if (tSizeHp !== undefined && tSizeHp !== 56) result.titleFontSize = [tSizeHp / 2];
-    const tStyle = extractStyle(titleRpr, getStylePPr('Title'));
-    if (tStyle !== 'normal') result.titleFontStyle = [tStyle];
+    // Each title's, or else the style's
+    const tStyles = opts?.titleParagraphs?.length ? opts.titleParagraphs.map(paragraph => inheritedStyle('Title', titleOwnProperties(paragraph))) : [inheritedStyle('Title')];
+    if (tStyles.some(style => style !== 'normal')) result.titleFontStyle = trimTrailing(tStyles);
   }
 
   // TableParagraph extraction
@@ -15611,7 +15709,9 @@ export async function convertDocx(
   }
 
   // Extract consecutive Title-styled paragraphs from the beginning of the document
-  const titleLines = extractTitleLines(docContent);
+  // and the XML of each, for its font style
+  const titleParagraphs: string[] = [];
+  const titleLines = extractTitleLines(docContent, titleParagraphs);
 
   let markdown = buildMarkdown(docContent, comments, {
     tableIndent: options?.tableIndent,
@@ -15709,7 +15809,7 @@ export async function convertDocx(
   // Extract heading/title font overrides from styles.xml for round-trip
   const stylesStr = await readZipText(zip, 'word/styles.xml');
   if (stylesStr !== undefined) {
-    const fontFields = extractFontOverridesFromStyles(stylesStr, { explicitTableFontSize, builtInIds: styleLayouts.builtInIds });
+    const fontFields = extractFontOverridesFromStyles(stylesStr, { explicitTableFontSize, builtInIds: styleLayouts.builtInIds, titleParagraphs });
     Object.assign(fm, fontFields);
   }
   // Restore custom styles from custom property (primary source)
