@@ -200,6 +200,117 @@ describe('Font customization unit tests', () => {
       expect(result).toContain('<w:sz w:val="28"/>');
       expect(result).toContain('<w:szCs w:val="28"/>');
     });
+
+    // A tracked change's record of what a style was (w:rPrChange,
+    // w:pPrChange), which Word doesn't show, goes as it was, last in its
+    // container, as the schema has it
+    it.each([
+      ['properties to change', '<w:outlineLvl w:val="0"/>', '<w:b/><w:sz w:val="32"/><w:szCs w:val="32"/>',
+        '<w:jc w:val="center"/><w:outlineLvl w:val="0"/>', '<w:sz w:val="40"/><w:szCs w:val="40"/>'],
+      // What's written goes before the record
+      ['no properties to change', '', '<w:b/>', '<w:jc w:val="center"/>', '<w:sz w:val="40"/><w:szCs w:val="40"/>'],
+    ])('changes a heading\'s own properties and leaves the records of its tracked changes as they were, with %s', async (_name, pPr, rPr, ownPPr, ownSize) => {
+      const JSZip = (await import('jszip')).default;
+      const { convertDocx } = await import('./converter');
+      const pPrChange = '<w:pPrChange w:id="1" w:author="A"><w:pPr><w:jc w:val="left"/><w:outlineLvl w:val="0"/></w:pPr></w:pPrChange>';
+      const rPrChange = '<w:rPrChange w:id="2" w:author="A"><w:rPr><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:rPrChange>';
+      const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n')).docx);
+      const styles = await zip.file('word/styles.xml')!.async('string');
+      const heading1 = /(<w:style\b[^>]*w:styleId="Heading1"[^>]*>)[\s\S]*?(<\/w:style>)/;
+      expect(styles).toMatch(heading1);
+      zip.file('word/styles.xml', styles.replace(heading1, (_match, open: string, close: string) => open + '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>' +
+        '<w:pPr>' + pPr + pPrChange + '</w:pPr><w:rPr>' + rPr + rPrChange + '</w:rPr>' + close));
+      const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+      const md = '---\nheader-font: Georgia\nheader-font-size: 20\nheader-font-style: bold-center\n---\n\n# One\n';
+      const heading1Of = async (docx: Uint8Array) => extractStyleBlock(await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string'), 'Heading1')!;
+      const docx = (await convertMdToDocx(md, { templateDocx })).docx;
+      const block = await heading1Of(docx);
+      // What the style is now changes
+      expect(block).toContain('<w:pPr>' + ownPPr + pPrChange + '</w:pPr>');
+      expect(block).toContain(ownSize + rPrChange + '</w:rPr>');
+      expect(block).toContain('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>');
+      const { markdown } = await convertDocx(docx);
+      const { headerFont, headerFontSize, headerFontStyle } = parseFrontmatter(md).metadata;
+      expect(parseFrontmatter(markdown).metadata).toMatchObject({ headerFont, headerFontSize, headerFontStyle });
+      expect(await heading1Of((await convertMdToDocx(markdown, { templateDocx: docx })).docx)).toBe(block);
+    });
+
+    // Import reads a style as it is now too, so a font style a tracked
+    // change's record holds, which Word doesn't show, doesn't come back to be
+    // applied again. A heading's rPr or pPr that's left with only its record
+    // stays, as the record needs it
+    it.each([
+      ['an rPr left with only its record', '<w:outlineLvl w:val="0"/>', '<w:b/>', '<w:outlineLvl w:val="0"/>', ''],
+      ['a pPr left with only its record', '<w:jc w:val="center"/>', '<w:sz w:val="32"/><w:szCs w:val="32"/>', '', '<w:sz w:val="32"/><w:szCs w:val="32"/>'],
+    ])('a heading whose tracked changes\' records hold another font style reads back as export gave it, with %s', async (_name, pPr, rPr, ownPPr, ownRPr) => {
+      const JSZip = (await import('jszip')).default;
+      const { convertDocx } = await import('./converter');
+      const pPrChange = '<w:pPrChange w:id="1" w:author="A"><w:pPr><w:jc w:val="center"/><w:outlineLvl w:val="0"/></w:pPr></w:pPrChange>';
+      const rPrChange = '<w:rPrChange w:id="2" w:author="A"><w:rPr><w:b/><w:i/><w:u w:val="single"/></w:rPr></w:rPrChange>';
+      const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n')).docx);
+      const styles = await zip.file('word/styles.xml')!.async('string');
+      const heading1 = /(<w:style\b[^>]*w:styleId="Heading1"[^>]*>)[\s\S]*?(<\/w:style>)/;
+      expect(styles).toMatch(heading1);
+      zip.file('word/styles.xml', styles.replace(heading1, (_match, open: string, close: string) => open + '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>' +
+        '<w:pPr>' + pPr + pPrChange + '</w:pPr><w:rPr>' + rPr + rPrChange + '</w:rPr>' + close));
+      const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+      const md = '---\nheader-font-style: normal\n---\n\n# One\n';
+      const heading1Of = async (docx: Uint8Array) => extractStyleBlock(await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string'), 'Heading1')!;
+      const docx = (await convertMdToDocx(md, { templateDocx })).docx;
+      const block = await heading1Of(docx);
+      expect(block).toContain('<w:pPr>' + ownPPr + pPrChange + '</w:pPr><w:rPr>' + ownRPr + rPrChange + '</w:rPr>');
+      const { markdown } = await convertDocx(docx);
+      expect(parseFrontmatter(markdown).metadata.headerFontStyle).toEqual(parseFrontmatter(md).metadata.headerFontStyle);
+      expect(await heading1Of((await convertMdToDocx(markdown, { templateDocx: docx })).docx)).toBe(block);
+    });
+
+    // Export reads and changes a template's Normal, document defaults,
+    // Bibliography and alert styles as they are now, as Word shows them, so
+    // with tracked changes' records of what they were it writes what it
+    // writes without them, and the records as they were
+    it.each([
+      ['the hanging indent', ''],
+      ['no hanging indent', 'bibliography-hanging-indent: false\n'],
+    ])('exports with a template\'s records of tracked changes of its styles as without them, and keeps the records, with %s', async (_name, fields) => {
+      const JSZip = (await import('jszip')).default;
+      const records = [
+        '<w:pPrChange w:id="11" w:author="A"><w:pPr><w:spacing w:after="999" w:line="999" w:lineRule="auto"/></w:pPr></w:pPrChange>',
+        '<w:rPrChange w:id="12" w:author="A"><w:rPr><w:rFonts w:ascii="Recorded" w:hAnsi="Recorded"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:rPrChange>',
+        '<w:pPrChange w:id="13" w:author="A"><w:pPr><w:spacing w:after="999"/></w:pPr></w:pPrChange>',
+        '<w:pPrChange w:id="14" w:author="A"><w:pPr><w:ind w:left="1" w:hanging="1"/></w:pPr></w:pPrChange>',
+        '<w:pPrChange w:id="15" w:author="A"><w:pPr><w:pBdr><w:left w:val="single" w:sz="24" w:space="4" w:color="123456"/></w:pBdr></w:pPr></w:pPrChange>',
+      ];
+      const withoutRecords = (xml: string) => records.reduce((text, record) => text.split(record).join(''), xml);
+      const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n')).docx);
+      let styles = await zip.file('word/styles.xml')!.async('string');
+      const restyle = (id: string, inner: string) => {
+        const style = new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>)[\\s\\S]*?(</w:style>)');
+        expect(styles).toMatch(style);
+        styles = styles.replace(style, (_match, open: string, close: string) => open + inner + close);
+      };
+      restyle('Normal', '<w:name w:val="Normal"/><w:qFormat/><w:pPr>' + records[0] + '</w:pPr><w:rPr>' + records[1] + '</w:rPr>');
+      restyle('Bibliography', '<w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/><w:pPr>' + records[3] + '</w:pPr>');
+      restyle('GitHubNote', '<w:name w:val="GitHub Note"/><w:basedOn w:val="Normal"/><w:pPr>' + records[4] + '</w:pPr>');
+      expect(styles).toMatch(/<w:pPrDefault><w:pPr>[\s\S]*?<\/w:pPr><\/w:pPrDefault>/);
+      styles = styles.replace(/<w:pPrDefault><w:pPr>[\s\S]*?<\/w:pPr><\/w:pPrDefault>/, () => '<w:pPrDefault><w:pPr>' + records[2] + '</w:pPr></w:pPrDefault>');
+      const md = '---\nline-spacing: double\n' + fields + 'styles:\n  epigraph:\n    font-style: bold\n---\n\n# One\n\n> [!NOTE]\n> Noted.\n\n| h |\n|---|\n| c |\n\n<!-- style: epigraph -->\n\nStyled\n\n<!-- /style -->\n';
+      const exported = async (template: string) => {
+        zip.file('word/styles.xml', template);
+        const docx = (await convertMdToDocx(md, { templateDocx: await zip.generateAsync({ type: 'uint8array' }) })).docx;
+        const out = await JSZip.loadAsync(docx);
+        // Each export gives its paragraphs IDs of their own
+        return Promise.all(['word/styles.xml', 'word/document.xml'].map(async path =>
+          (await out.file(path)!.async('string')).replace(/ (?:w14:paraId|w14:textId|w:rsid\w*)="[^"]*"/g, '')));
+      };
+      const [withRecords, document] = await exported(styles);
+      // Each as it was, last in its container
+      for (const record of records) expect(withRecords).toContain(record + (record.startsWith('<w:pPrChange') ? '</w:pPr>' : '</w:rPr>'));
+      // A pPr or rPr that holds only its record stays for it, where without
+      // the record it may go
+      const asWithout = (xml: string) => withoutRecords(xml).replace(/<w:([pr])Pr><\/w:\1Pr>/g, '');
+      const [without, withoutDocument] = await exported(withoutRecords(styles));
+      expect([asWithout(withRecords), document]).toEqual([asWithout(without), withoutDocument]);
+    });
   });
 
   // ---------------------------------------------------------------

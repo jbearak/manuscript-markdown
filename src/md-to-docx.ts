@@ -5000,11 +5000,34 @@ function templateStyleRegex(id: string, ids: Map<string, string>, flags = ''): R
   return new RegExp('(<w:style\\b[^>]*\\bw:styleId="' + styleId + '"[^>]*(?<!/)>)([\\s\\S]*?)(</w:style>)', flags);
 }
 
+/**
+ * Styles XML with each tracked change's record of what a style's or the
+ * document defaults' formatting was (w:rPrChange, w:pPrChange), which Word
+ * doesn't show, set aside as an empty element of its name and number, and
+ * `restore`, which puts the records back in XML changed since. What reads
+ * or changes a style as it is now, as Word shows it, then leaves the
+ * records as they were.
+ */
+function setRecordsAside(xml: string): { xml: string; restore: (changed: string) => string } {
+  const records: string[] = [];
+  const aside = xml.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, (record, tag: string) =>
+    '<w:' + tag + ' record="' + (records.push(record) - 1) + '"/>');
+  return { xml: aside, restore: changed => changed.replace(/<w:(?:rPrChange|pPrChange) record="(\d+)"\/>/g, (_match, index: string) => records[Number(index)]) };
+}
+
+/** A pPr's or rPr's own properties, and a record set aside in it (see
+ *  setRecordsAside), which the schema puts after them, wherever what's
+ *  added went */
+function splitRecord(content: string, tag: 'pPrChange' | 'rPrChange'): [string, string] {
+  const record = new RegExp('<w:' + tag + ' record="\\d+"/>').exec(content)?.[0];
+  return record === undefined ? [content, ''] : [content.replace(record, ''), record];
+}
+
 /** Extract the Normal style's font size (in half-points) from styles XML. */
 function extractNormalStyleSizeHp(stylesXml: string, ids = templateStyleIds(stylesXml)): number | undefined {
   const normalMatch = templateStyleRegex('Normal', ids).exec(stylesXml);
   if (!normalMatch) return undefined;
-  const szMatch = /<w:sz\s+w:val="(\d+)"/.exec(normalMatch[0]);
+  const szMatch = /<w:sz\s+w:val="(\d+)"/.exec(setRecordsAside(normalMatch[0]).xml);
   return szMatch ? parseInt(szMatch[1], 10) : undefined;
 }
 
@@ -5059,7 +5082,10 @@ export function applyFontOverridesToTemplate(
     if (!styleMatch) continue; // style not in template — skip silently
 
     const openTag = styleMatch[1];
-    let innerContent = styleMatch[2];
+    // What the style is now changes, and the records of its tracked changes
+    // go as they were
+    const records = setRecordsAside(styleMatch[2]);
+    let innerContent = records.xml;
     const closeTag = styleMatch[3];
 
     const isCodeStyle = CODE_STYLE_IDS.has(styleId);
@@ -5132,8 +5158,11 @@ export function applyFontOverridesToTemplate(
             pPrContent = pPrContent + '<w:jc w:val="center"/>';
           }
         }
-        // A pPr that held only the w:jc goes with it (dirty-flag invariant #5)
-        const newPPr = pPrContent.trim() ? pPrMatch[1] + pPrContent + pPrMatch[3] : '';
+        // A pPr that held only the w:jc goes with it (dirty-flag invariant #5),
+        // but not one that holds a tracked change's record, which needs it,
+        // last, after a w:jc added at the end
+        const [ownPPr, pPrRecord] = splitRecord(pPrContent, 'pPrChange');
+        const newPPr = ownPPr.trim() || pPrRecord ? pPrMatch[1] + ownPPr + pPrRecord + pPrMatch[3] : '';
         innerContent = innerContent.slice(0, pPrMatch.index) + newPPr + innerContent.slice(pPrMatch.index + pPrMatch[0].length);
       } else if (wantsCenter) {
         // No pPr block — insert one at the start
@@ -5150,7 +5179,8 @@ export function applyFontOverridesToTemplate(
 
     if (rPrMatch) {
       // Modify existing <w:rPr> content
-      let rPrContent = rPrMatch[2];
+      const [ownRPr, rPrRecord] = splitRecord(rPrMatch[2], 'rPrChange');
+      let rPrContent = ownRPr;
 
       if (rFontsEl !== undefined) {
         // Replace existing w:rFonts or insert at start of rPr content
@@ -5206,8 +5236,9 @@ export function applyFontOverridesToTemplate(
       }
 
       // An rPr that held only what the style override removed goes with it
-      // (dirty-flag invariant #5)
-      const newRPr = rPrContent.trim() ? rPrMatch[1] + rPrContent + rPrMatch[3] : '';
+      // (dirty-flag invariant #5), but not one that holds a tracked change's
+      // record, which needs it
+      const newRPr = rPrContent.trim() || rPrRecord ? rPrMatch[1] + rPrContent + rPrRecord + rPrMatch[3] : '';
       const matchStart = rPrSearchStart + rPrMatch.index;
       const matchEnd = matchStart + rPrMatch[0].length;
       innerContent = innerContent.slice(0, matchStart) + newRPr + innerContent.slice(matchEnd);
@@ -5227,6 +5258,7 @@ export function applyFontOverridesToTemplate(
       if (rPrContent) innerContent = innerContent + '<w:rPr>' + rPrContent + '</w:rPr>';
     }
 
+    innerContent = records.restore(innerContent);
     xml = xml.slice(0, styleMatch.index) + openTag + innerContent + closeTag + xml.slice(styleMatch.index + styleMatch[0].length);
   }
 
@@ -5236,7 +5268,7 @@ export function applyFontOverridesToTemplate(
     const normalMatch = xml.match(templateStyleRegex('Normal', ids));
     let bodyFontStr = '';
     if (normalMatch) {
-      const rFontsMatch = normalMatch[0].match(/<w:rFonts\s+[^>]*w:ascii="([^"]+)"[^>]*>/);
+      const rFontsMatch = setRecordsAside(normalMatch[0]).xml.match(/<w:rFonts\s+[^>]*w:ascii="([^"]+)"[^>]*>/);
       if (rFontsMatch) {
         bodyFontStr = '<w:rFonts w:ascii="' + escapeXml(rFontsMatch[1]) + '" w:hAnsi="' + escapeXml(rFontsMatch[1]) + '"/>';
       }
@@ -5274,7 +5306,11 @@ const ALERT_STYLE_ID_TO_TYPE: Record<string, GfmAlertType> = {
  * Patch template styles.xml to update Normal style line spacing and indent-mode after.
  * Also injects or patches Bibliography style for bibliographyHangingIndent.
  */
-function applyLineSpacingToTemplate(xml: string, lineSpacingFm: string | number | undefined, indentMode: boolean, bibliographyHangingIndent: boolean | undefined): string {
+function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | number | undefined, indentMode: boolean, bibliographyHangingIndent: boolean | undefined): string {
+  // What the styles are now changes, and the records of their tracked
+  // changes go as they were
+  const records = setRecordsAside(stylesXml);
+  let xml = records.xml;
   const lsTwips = resolveLineSpacingTwips(lineSpacingFm);
   const afterVal = indentMode ? '0' : '200';
   // The template's IDs for the built-in styles, which its styles are found by
@@ -5358,7 +5394,7 @@ function applyLineSpacingToTemplate(xml: string, lineSpacingFm: string | number 
             const pos = spacingEnd.index + spacingEnd[0].length;
             pPrContent = pPrContent.slice(0, pos) + indEl + pPrContent.slice(pos);
           } else {
-            const insertBefore = /<w:jc\b|<w:outlineLvl\b/.exec(pPrContent);
+            const insertBefore = /<w:jc\b|<w:outlineLvl\b|<w:pPrChange\b/.exec(pPrContent);
             pPrContent = insertBefore
               ? pPrContent.slice(0, insertBefore.index) + indEl + pPrContent.slice(insertBefore.index)
               : pPrContent + indEl;
@@ -5373,7 +5409,7 @@ function applyLineSpacingToTemplate(xml: string, lineSpacingFm: string | number 
     }
   }
 
-  return xml;
+  return records.restore(xml);
 }
 
 const LIST_CONTINUATION_STYLE_XML =
@@ -5390,7 +5426,10 @@ function ensureListContinuationStyle(xml: string): string {
 
 export function applyAlertColorsToTemplate(stylesXml: string, scheme: ColorScheme): string {
   const colors = alertColorsByScheme(scheme);
-  let xml = stylesXml;
+  // What the styles are now changes, and the records of their tracked
+  // changes go as they were
+  const records = setRecordsAside(stylesXml);
+  let xml = records.xml;
 
   for (const [styleId, alertType] of Object.entries(ALERT_STYLE_ID_TO_TYPE)) {
     const styleRegex = new RegExp(
@@ -5412,7 +5451,7 @@ export function applyAlertColorsToTemplate(stylesXml: string, scheme: ColorSchem
     xml = xml.slice(0, styleMatch.index) + openTag + innerContent + closeTag + xml.slice(styleMatch.index + styleMatch[0].length);
   }
 
-  return xml;
+  return records.restore(xml);
 }
 
 /** Convert a user-defined style name to a Word style ID: 'my-heading' → 'MsCustomMyHeading'. */
