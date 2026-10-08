@@ -1590,7 +1590,11 @@ export type ContentItem =
   // body's m:oMathPara of its own
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean }
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting }
-  | { type: 'html_comment'; text: string; commentIds: Set<string> }
+  // otherLineEnds: its hidden runs held a line end that isn't a line break
+  // of Word's (see isLineBreak), as a line feed in their text, which reads
+  // as Word shows it, a space, or a page or column break (see
+  // breakCommentLines)
+  | { type: 'html_comment'; text: string; commentIds: Set<string>; otherLineEnds?: true }
   // href and link: as text's, of a w:hyperlink around the picture or its
   // docPr's a:hlinkClick
   | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string; href?: string; link?: number }
@@ -2575,6 +2579,14 @@ function withCharactersAsText(runChildren: XmlNode[]): XmlNode[] {
       return character !== undefined ? { 'w:t': [{ '#text': character }] } : child;
     })
     : runChildren;
+}
+
+/** Whether a run's w:br or w:cr is a line break, which import reads in a
+ *  paragraph's text, not a page or column break, which it leaves out */
+function isLineBreak(node: XmlNode): boolean {
+  if (node['w:cr'] !== undefined) return true;
+  const type = getAttr(node, 'type');
+  return node['w:br'] !== undefined && (!type || type === 'textWrapping');
 }
 
 function getAttr(node: XmlNode | undefined, attr: string): string {
@@ -3710,7 +3722,7 @@ function commentParagraphRuns(nodes: XmlNode[]): string {
         text += RUN_CHARACTERS[key];
       } else if (key === 'w:sym') {
         text += symbolCharacter(node) ?? '';
-      } else if (key === 'w:cr' || (key === 'w:br' && [undefined, '', 'textWrapping'].includes(node[':@']?.['@_w:type']))) {
+      } else if ((key === 'w:cr' || key === 'w:br') && isLineBreak(node)) {
         text += COMMENT_LINE_BREAK;
       } else if (!['w:del', 'w:moveFrom', 'w:pPr', 'w:rPr', 'w:p'].includes(key) && key !== ':@' && Array.isArray(node[key])) {
         text += commentParagraphRuns(node[key]);
@@ -4669,17 +4681,371 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
   }
   // Text from w:t/w:delText, with breaks, so multiline payloads survive
   let runText = '';
+  // Whether it held a line end that isn't a line break of Word's: one of
+  // the text's own, or a page or column break
+  let otherLineEnds = false;
   for (const child of runChildren) {
-    if (child['w:t'] !== undefined) {
-      runText += nodeText(asXmlNodes(child['w:t']));
-    } else if (child['w:delText'] !== undefined) {
-      runText += nodeText(asXmlNodes(child['w:delText']));
+    const text = child['w:t'] ?? child['w:delText'];
+    if (text !== undefined) {
+      const read = nodeText(asXmlNodes(text));
+      otherLineEnds ||= /[\n\r]/.test(read);
+      runText += read;
     } else if (child['w:br'] !== undefined || child['w:cr'] !== undefined) {
+      otherLineEnds ||= !isLineBreak(child);
       runText += '\n';
     }
   }
-  readHiddenText(runText, target, activeComments, revision, link);
+  readHiddenText(runText, target, activeComments, revision, link, otherLineEnds);
   return [];
+}
+
+/** A plain line break, a \ and a line end: the Markdown before it, and the
+ *  Markdown it ends (see breakBeforeComment) */
+interface TrailingBreak { before: string; after: string }
+
+/** The line break `piece`, Markdown written after `before`, which makes
+ *  `after`, ends with, where it ends with one: a \ and a line end after an
+ *  even run of other backslashes, which are text. A run that goes on before
+ *  the piece is of text's, which is escaped, so even. Read from the piece,
+ *  as reading the end of all the Markdown would take time in its length */
+function trailingBreakOf(before: string, piece: string, after: string): TrailingBreak | undefined {
+  if (!piece.endsWith('\\\n')) return undefined;
+  let backslashes = 1;
+  while (piece[piece.length - 2 - backslashes] === '\\') backslashes++;
+  return backslashes % 2 === 1 ? { before: before + piece.slice(0, -2), after } : undefined;
+}
+
+/** `out` and then `comment`, a hidden comment's Markdown, with the line
+ *  break `out` ends with (`trailing`, where `out` is the Markdown that break
+ *  ends) as <br> where the comment would start the next line and an HTML
+ *  block there, as the line is written after a \ and a line end: one
+ *  starts at a line's <!--, which would end the paragraph before it and
+ *  leave the \ there as text. Not where its hidden run starts with spaces
+ *  or tabs, which withoutHiddenCommentSpace leaves at a line's start, and
+ *  which go there as references (see keepParagraphWhitespace), after which
+ *  none starts, but for the indent of a comment over lines, which starts
+ *  one. The comments on the rest of the line (`rest`, see lineAfterBreak)
+ *  go after the <br> too, those before the first thing it shows without
+ *  the whitespace their hidden runs hold outside them, as that indent,
+ *  which Word hides, and which withoutHiddenCommentSpace left as a line's
+ *  start's, but the paragraph would show after the <br>, and the index of
+ *  the last of them is returned with the Markdown, or -1. Only where export
+ *  reads that line after a <br>, in a heading as a heading's (`opts`), as
+ *  the paragraph or heading it was, with each comment whole and no text of
+ *  the hidden runs outside them, as the x of <!-- a -->x<!-- b -->, which a
+ *  block that starts and ends with a comment hides, but a paragraph shows.
+ *  A comment with a blank line in it stays in its block, which keeps it
+ *  hidden, as does one with a line that would start a block, and one in a
+ *  heading over lines. A list item's or quote's prefixes on the lines after
+ *  change none of that, as its paragraph reads as one does alone. A
+ *  table's cell keeps the break, which it writes as its cells take one,
+ *  and which starts no block there, but the comments at its line's start
+ *  go without the whitespace outside them too, which the cell would show
+ *  after the break, as a pipe table's <br> or a grid table's line holds
+ *  it. The break is kept apart from `out`, as reading the end of `out`
+ *  would take time in its length for each comment */
+function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, opts: InlineRangeOpts | undefined, comment: string, rest: () => { line: string; raw: string; payloads: string[]; last: number }): [string, number] {
+  if (!trailing || trailing.after !== out) return [out + comment, -1];
+  const { line, raw, payloads, last } = rest();
+  if (opts?.cell) return [out + payloads[0], last];
+  if (indentAsReferences(raw)) return [out + comment, -1];
+  return readsCommentsInline((opts?.heading ? '# ' : '') + 'x<br>' + line, payloads, false, opts?.heading) && !/\S/.test(outsideComments(payloads.join('')))
+    ? [trailing.before + '<br>' + payloads[0], last] : [out + comment, -1];
+}
+
+/** Whether the line `raw` after a line break, as lineAfterBreak reads it,
+ *  starts with spaces or tabs, which go as references, after which no HTML
+ *  block starts (see lineStartsAfterBreaks) */
+function indentAsReferences(raw: string): boolean {
+  return /^[ \t]/.test(raw) && lineStartsAfterBreaks('x\\\n' + raw).includes(3);
+}
+
+/** The rest of the line after a line break that the hidden comment at
+ *  segment[i], before `end`, starts, as export would read it after a <br>:
+ *  the Markdown of its hidden comments (`payloads`), the first `first`, with
+ *  the text of the other runs as an x for each word, which escaped text
+ *  reads as, up to the line's end. The comments before the first thing the
+ *  line shows, which withoutHiddenCommentSpace left as a line's start's, go
+ *  without the whitespace outside them (see breakBeforeComment), and `last`
+ *  is the index of the last of them. Those after it are as that left them,
+ *  as it left them after text. The line with them all as it left them, as
+ *  it's written after a \ and a line end, is `raw`. Each item is read
+ *  once, for the one break before it */
+function lineAfterBreak(segment: ContentItem[], i: number, end: number, first: string): { line: string; raw: string; payloads: string[]; last: number } {
+  const payloads: string[] = [];
+  let line = '';
+  let raw = '';
+  let last = i;
+  // Whether the line shows something before the item
+  let shown = false;
+  for (let k = i; k < end; k++) {
+    const item = segment[k];
+    if (item.type === 'html_comment') {
+      const markdown = k === i ? first : markdownComment(item.text, segment[k + 1]?.type === 'html_comment');
+      const payload = shown ? markdown : withoutSpaceOutsideComments(markdown);
+      if (!shown) last = k;
+      payloads.push(payload);
+      line += payload;
+      raw += markdown;
+    } else if (item.type === 'text') {
+      const lineEnd = item.text.indexOf('\n');
+      const text = lineEnd === -1 ? item.text : item.text.slice(0, lineEnd);
+      line += text.replace(/\S+/g, 'x');
+      raw += text.replace(/\S+/g, 'x');
+      shown ||= /[^ \t]/.test(text);
+      if (lineEnd !== -1) break;
+    } else if (item.type === 'math' && item.display) {
+      break;
+    } else {
+      line += 'x';
+      raw += 'x';
+      shown ||= showsInline(item);
+    }
+  }
+  return { line, raw, payloads, last };
+}
+
+/** Whether `item`, neither text nor a hidden comment, shows something on
+ *  its line, as an image, a citation, an equation or a note's mark does */
+function showsInline(item: ContentItem): boolean {
+  return item.type === 'image' ? item.markdown === undefined : item.type === 'citation' || item.type === 'math' || item.type === 'footnote_ref';
+}
+
+/** An HTML block a hidden comment at the start of its paragraph began, while
+ *  it's `open`, which runs to the end of the line with its first -->, after
+ *  which a paragraph starts, at `from` in the Markdown, and `closed` once
+ *  that --> is written. A line break in it stays as it is, as the block
+ *  keeps the line's text */
+interface HtmlBlock { open: boolean; closed: boolean; from: number }
+
+/** Whether a hidden comment after `out`, the Markdown before it, begins an
+ *  HTML block, as one after up to three spaces or tabs at the start of its
+ *  paragraph, which starts at `from`, does, but not in a heading or a
+ *  table's cell, which hold only inline Markdown */
+function beginsHtmlBlock(out: string, from: number, opts: InlineRangeOpts | undefined): boolean {
+  return !opts?.heading && !opts?.cell && out.length - from <= 3 && /^[ \t]*$/.test(out.slice(from));
+}
+
+/** Notes `piece`, Markdown written last, which makes the Markdown `length`
+ *  long, where `block` is open: where the line with the block's first -->
+ *  ends in it, the block does, and the paragraph after it starts. Read from
+ *  the pieces, as reading the Markdown would take time in its length. One a
+ *  renderer doesn't note, as a tracked change's, leaves the block open */
+function noteHtmlBlock(block: HtmlBlock, piece: string, length: number): void {
+  if (!block.open) return;
+  let at = 0;
+  if (!block.closed) {
+    const close = piece.indexOf('-->');
+    if (close === -1) return;
+    block.closed = true;
+    at = close + 3;
+  }
+  const end = piece.indexOf('\n', at);
+  if (end === -1) return;
+  block.open = false;
+  block.from = length - piece.length + end + 1;
+}
+
+/** `content` with each Word line break outside a hidden comment's
+ *  comments, which readHiddenText reads into its text up to the next
+ *  payload, as a line break of its own: in the comment's text, Markdown
+ *  read a line end as a space, or, before another comment, as the start of
+ *  an HTML block, which ended the paragraph. As a break, a \ and a line
+ *  end, or <br> before a comment that would start the next line (see
+ *  breakBeforeComment), it stays one, though one that shows. Only where
+ *  what's outside the comments is whitespace, in a paragraph's text that
+ *  something shown starts, and something goes after, as a break at its end
+ *  would show where the hidden one didn't; not in a code block's lines,
+ *  whose text is as Word has it. Nor where a break would go before hidden
+ *  comments that breakBeforeComment doesn't move after a <br>, as one with
+ *  a blank line in it, whose HTML block would leave the \ before it as
+ *  text: there the comment's text keeps its line ends, which start that
+ *  block, as before. Nor after a line that starts an HTML block, which
+ *  would take a \ as text: one a comment that starts the paragraph begins,
+ *  as an alert's label, which goes, doesn't count as shown, or one after a
+ *  line end a comment's text keeps, or after a line break of Word's before
+ *  comments breakBeforeComment doesn't move */
+function breakCommentLines(content: ContentItem[]): ContentItem[] {
+  const shows = (item: ContentItem) => item.type === 'text' ? /[^ \t\n]/.test(item.text.replace(/\\\n/g, ''))
+    : item.type === 'image' ? item.markdown === undefined
+    : item.type === 'citation' || item.type === 'math' || item.type === 'footnote_ref';
+  const pieces = content.map(item => item.type === 'html_comment' ? commentLinePieces(item) : undefined);
+  // Whether each comment's breaks hold, as far as what comes after it goes,
+  // read from the end, so that each break's line, which goes on to the next
+  // line end, reads the comments after it as they'll be (see lineHolds);
+  // and whether something goes after each in its paragraph, read from the
+  // end too, as reading on from each would take time in the square of its
+  // items
+  const holds = new Uint8Array(content.length);
+  // Whether each item is in a heading's paragraph, which reads a line
+  // break's line as a heading's
+  const inHeading = new Uint8Array(content.length);
+  let heading = false;
+  content.forEach((item, i) => {
+    if (isMarkdownBlockEdge(item)) heading = item.type === 'para' && !!item.headingLevel;
+    if (heading) inHeading[i] = 1;
+  });
+  let after = false;
+  for (let i = content.length - 1; i >= 0; i--) {
+    const item = content[i];
+    const own = pieces[i];
+    if (Array.isArray(own) && after) {
+      holds[i] = own.every((piece, k) => !isBreakPiece(piece) || lineHolds(content, i + 1, own, k + 1, pieces, holds, !!inHeading[i])) ? 1 : 0;
+    }
+    if (isMarkdownBlockEdge(item)) after = false;
+    else if (shows(item) || item.type === 'html_comment' || item.type === 'image') after = true;
+  }
+  // Each paragraph's line, from its start, which is open where something
+  // shown starts it, and blocked where an HTML block may run on it, which
+  // keeps the rest of the paragraph as it is
+  let state: 'start' | 'open' | 'blocked' = 'start';
+  // The characters of an alert's label left at its paragraph's start
+  let labelLeft = 0;
+  let out: ContentItem[] | undefined;
+  for (let i = 0; i < content.length; i++) {
+    const item = content[i];
+    if (isMarkdownBlockEdge(item)) {
+      state = item.type === 'para' && item.isCodeBlock ? 'blocked' : 'start';
+      labelLeft = item.type === 'para' && item.alertType ? alertLabelLength(content, i + 1, item.alertType) : 0;
+    }
+    const own = pieces[i];
+    // A comment over lines whose line, or one of whose lines, would start a
+    // block, as a heading, ends the paragraph's text there
+    if (state === 'open' && item.type === 'html_comment' && !linesReadInline(item.text, !!inHeading[i])) state = 'blocked';
+    if (state === 'open' && Array.isArray(own) && holds[i]) {
+      out ??= content.slice(0, i);
+      pushAll(out, own);
+      continue;
+    }
+    out?.push(item);
+    if (item.type === 'html_comment') {
+      if (state === 'start' || own !== undefined) state = 'blocked';
+    } else if (labelLeft > 0 && item.type === 'text') {
+      // What of the label goes, with the line break after it, which the
+      // text after starts a line after
+      const text = item.text.slice(labelLeft);
+      labelLeft = Math.max(0, labelLeft - item.text.length);
+      if (state !== 'blocked' && shows({ ...item, text })) state = 'open';
+    } else if (state !== 'blocked' && shows(item)) {
+      state = 'open';
+    }
+    if (item.type !== 'text' && !isMarkdownBlockEdge(item)) labelLeft = 0;
+    // A line break of Word's right before comments, which go after a <br>
+    // or start a block
+    if (state === 'open' && item.type === 'text' && trailingBreakOf('', item.text, '') && content[i + 1]?.type === 'html_comment'
+        && !lineHolds(content, i + 1, [], 0, pieces, holds, !!inHeading[i])) {
+      state = 'blocked';
+    }
+  }
+  return out ?? content;
+}
+
+/** Whether the comments over lines in a hidden comment's `text` read as
+ *  comments in a paragraph's text, or a heading's (`heading`), as
+ *  commentLinePieces finds them */
+function linesReadInline(text: string, heading: boolean): boolean {
+  for (let open = text.indexOf('<!--'); open !== -1; open = text.indexOf('<!--', open + 4)) {
+    const empty = /^-?>/.exec(text.slice(open + 4, open + 6));
+    const close = text.indexOf('-->', open + 4);
+    const end = empty ? open + 4 + empty[0].length : close === -1 ? text.length : close + 3;
+    const comment = text.slice(open, end);
+    if (comment.includes('\n') && !readsCommentsInline((heading ? '# ' : '') + 'x' + comment, [comment], false, heading)) return false;
+    open = end - 4;
+  }
+  return true;
+}
+
+/** The length of the text of an alert's label, of type `alertType`, with
+ *  the line break after it, that the text items from content[from] start
+ *  with, as stripAlertLeadPrefix takes it off the paragraph's Markdown,
+ *  read together, as Word may split it, as ※ and Note, to their first line
+ *  end, as no label goes on past it */
+function alertLabelLength(content: ContentItem[], from: number, alertType: GfmAlertType): number {
+  let text = '';
+  for (let k = from; content[k]?.type === 'text' && !text.includes('\n') && text.length < 256; k++) text += (content[k] as { text: string }).text;
+  return text.length - stripAlertLeadPrefix(text, alertType).length;
+}
+
+/** Whether `piece` is a line break commentLinePieces made */
+function isBreakPiece(piece: ContentItem): boolean {
+  return piece.type === 'text' && piece.text === '\\\n';
+}
+
+/** Whether a line break holds before the pieces of its comment's run in
+ *  `first` from `at`, up to its next, then content from `from`: where comments
+ *  start the line after it, whether breakBeforeComment moves them after a
+ *  <br>, reading the line to its end, as it does, or keeps the break before
+ *  their indent, which goes as references. A comment after them
+ *  whose text has a line end outside its comments ends the line, at its
+ *  first break, where its breaks hold (`holds`, see breakCommentLines), and
+ *  where they don't, the break doesn't either, as the line end its text
+ *  keeps would start another, which only that comment's own break reads,
+ *  so each item is read for one break */
+function lineHolds(content: ContentItem[], from: number, first: ContentItem[], at: number, pieces: Array<ContentItem[] | null | undefined>, holds: Uint8Array, heading: boolean): boolean {
+  const line: ContentItem[] = [];
+  const take = (items: ContentItem[], k = 0) => {
+    for (; k < items.length; k++) {
+      if (isBreakPiece(items[k])) return true;
+      line.push(items[k]);
+    }
+    return false;
+  };
+  let ended = take(first, at);
+  for (let m = from; !ended && m < content.length && !isMarkdownBlockEdge(content[m]); m++) {
+    const item = content[m];
+    const own = pieces[m];
+    if (own === null || own && !holds[m]) return false;
+    if (own) ended = take(own);
+    else {
+      line.push(item);
+      ended = item.type === 'text' && item.text.includes('\n');
+    }
+  }
+  if (line[0]?.type !== 'html_comment') return true;
+  const comment = markdownComment(line[0].text, line[1]?.type === 'html_comment');
+  let read: ReturnType<typeof lineAfterBreak> | undefined;
+  const [markdown] = breakBeforeComment('\\\n', { before: '', after: '\\\n' }, heading ? { heading } : undefined, comment, () => read = lineAfterBreak(line, 0, line.length, comment));
+  // Or where it keeps the break before a line whose indent goes as
+  // references, after which the comments start no block
+  return markdown !== '\\\n' + comment || !!read && indentAsReferences(read.raw);
+}
+
+/** A hidden comment's text as its comments and the line breaks outside
+ *  them (see breakCommentLines), where there is one and the rest is
+ *  whitespace, or null where there is one but the rest isn't. The
+ *  whitespace before its first comment on the same line goes with it, as
+ *  the payload's indent did. The rest, which Word hid, and a paragraph
+ *  would show, goes, as breakBeforeComment drops the whitespace outside the
+ *  comments it moves (see withoutSpaceOutsideComments), and at a line's
+ *  start Markdown drops it */
+function commentLinePieces(item: Extract<ContentItem, { type: 'html_comment' }>): ContentItem[] | null | undefined {
+  const { text } = item;
+  const pieces: ContentItem[] = [];
+  let lead = '';
+  let broken = false;
+  let other = false;
+  let pos = 0;
+  while (pos < text.length) {
+    const open = text.indexOf('<!--', pos);
+    const outside = text.slice(pos, open === -1 ? text.length : open);
+    other ||= /[^ \t\n]/.test(outside);
+    const lines = outside.split('\n');
+    if (pos === 0 && lines.length === 1) lead = outside;
+    else {
+      for (let k = 1; k < lines.length; k++) pieces.push({ type: 'text', text: '\\\n', commentIds: new Set(item.commentIds), formatting: DEFAULT_FORMATTING });
+      broken ||= lines.length > 1;
+    }
+    if (open === -1) break;
+    // Its end, as afterComment reads it: its first -->, or the > or -> of
+    // an empty one, <!--> or <!--->, or the end of the text
+    const empty = /^-?>/.exec(text.slice(open + 4, open + 6));
+    const close = text.indexOf('-->', open + 4);
+    const end = empty ? open + 4 + empty[0].length : close === -1 ? text.length : close + 3;
+    pieces.push({ type: 'html_comment', text: lead + text.slice(open, end), commentIds: new Set(item.commentIds) });
+    lead = '';
+    pos = end;
+  }
+  return !broken ? undefined : other || item.otherLineEnds ? null : pieces;
 }
 
 /** A hidden comment as inline Markdown reads one: one with no end, which
@@ -4757,7 +5123,7 @@ function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[
  * Markdown, up to a closing ZWSP, which the image keeps once it has it. Word
  * can split one between runs, or join several in one.
  */
-function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, link?: { href: string; link: number }): void {
+function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, link?: { href: string; link: number }, otherLineEnds = false): void {
   // The start of one Word split off before it showed which it is
   const pending = pendingHiddenText.get(target);
   pendingHiddenText.delete(target);
@@ -4804,6 +5170,7 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
     // With a ZWSP it starts with, which is the comment's own, before which
     // Word split its run
     lastItem.text += rest;
+    if (otherLineEnds) lastItem.otherLineEnds = true;
     const end = afterComment(lastItem.text, lastItem.text.lastIndexOf('<!--') + 4);
     rest = end === -1 ? '' : lastItem.text.slice(end);
     if (end !== -1) lastItem.text = lastItem.text.slice(0, end);
@@ -4816,7 +5183,7 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
     const payload = rest.replace(/^\u200B+/, '');
     if (payload.trimStart().startsWith('<!--')) {
       const end = afterComment(payload, payload.indexOf('<!--') + 4);
-      target.push({ type: 'html_comment', text: end === -1 ? payload : payload.slice(0, end), commentIds: new Set(activeComments) });
+      target.push({ type: 'html_comment', text: end === -1 ? payload : payload.slice(0, end), commentIds: new Set(activeComments), ...(otherLineEnds ? { otherLineEnds: true as const } : {}) });
       rest = end === -1 ? '' : payload.slice(end);
     } else if (rest.startsWith('\u200B') && /^(?:!\[|<img\b)/i.test(rest.slice(1))) {
       const end = rest.indexOf('\u200B', 1);
@@ -5297,8 +5664,7 @@ function parseNoteBody(
             }
           }
         } else if (key === 'w:br') {
-          const brType = getAttr(node, 'type');
-          if (!brType || brType === 'textWrapping') {
+          if (isLineBreak(node)) {
             target.push({
               type: 'text',
               text: '\\\n',
@@ -6470,8 +6836,7 @@ export async function extractDocumentContent(
         } else if (key === 'w:br') {
           // Line break within a run (Shift+Enter in Word).
           // Only emit for default/textWrapping breaks; skip page/column breaks.
-          const brType = getAttr(node, 'type');
-          if (!brType || brType === 'textWrapping') {
+          if (isLineBreak(node)) {
             if (!inBibliographyField && !inCitationField) {
               target.push({
                 type: 'text',
@@ -8745,6 +9110,16 @@ function renderInlineRange(
   // Where the Markdown ends with an inline equation's closing $, which text
   // after it mustn't run into (textNextToMath)
   let mathEnd = -1;
+  // The plain line break the Markdown ends with, where it ends with one
+  // (see breakBeforeComment)
+  let trailingBreak: TrailingBreak | undefined;
+  // The index of the last hidden comment before the first thing a line
+  // breakBeforeComment moved after a <br> shows, which go without the
+  // whitespace outside them
+  let inlineThrough = -1;
+  // The HTML block a comment at the paragraph's start began, while the
+  // Markdown is in it (see beginsHtmlBlock)
+  const htmlBlock: HtmlBlock = { open: false, closed: false, from: 0 };
   let i = startIndex;
 
   // Determine if we should use ID-based syntax for this inline segment only
@@ -8852,7 +9227,16 @@ function renderInlineRange(
 
     // html_comment: emit the raw <!-- ... --> syntax directly
     if (item.type === 'html_comment') {
-      out += markdownComment(item.text, segment[i + 1]?.type === 'html_comment', opts?.cell);
+      const comment = markdownComment(item.text, segment[i + 1]?.type === 'html_comment', opts?.cell);
+      if (!htmlBlock.open && beginsHtmlBlock(out, htmlBlock.from, opts)) Object.assign(htmlBlock, { open: true, closed: false });
+      if (htmlBlock.open) {
+        out += comment;
+        noteHtmlBlock(htmlBlock, comment, out.length);
+      } else {
+        let last: number;
+        [out, last] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(comment) : comment, () => lineAfterBreak(segment, i, segmentEnd, comment));
+        inlineThrough = Math.max(inlineThrough, last);
+      }
       if (item.commentIds.size > 0) {
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
@@ -8974,7 +9358,13 @@ function renderInlineRange(
     // break, a highlight, an underline or a strikethrough, as ==\\\n==
     // (see showsOnBreak), and a link's brackets.
     if (item.text === '\\\n' && !showsOnBreak(item.formatting)) {
-      [out, lastSpan] = appendRevised(out, lineBreakRun(item), item, lastSpan);
+      const before = out;
+      const text = lineBreakRun(item);
+      [out, lastSpan] = appendRevised(out, text, item, lastSpan);
+      if (!item.revision) {
+        trailingBreak = trailingBreakOf(before, text, out);
+        noteHtmlBlock(htmlBlock, text, out.length);
+      }
       i++;
       continue;
     }
@@ -8982,7 +9372,10 @@ function renderInlineRange(
     // Bold or italic text with equations in it keeps one run of emphasis
     const group = emphasisGroup(segment, i, segmentEnd, NO_COMMENTS);
     if (group) {
+      const before = out;
       out += group.text;
+      trailingBreak = trailingBreakOf(before, group.text, out);
+      noteHtmlBlock(htmlBlock, group.text, out.length);
       i = group.end;
       continue;
     }
@@ -9005,7 +9398,13 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i), item, lastSpan);
+      const text = escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i);
+      const before = out;
+      [out, lastSpan] = appendRevised(out, text, item, lastSpan);
+      if (!item.revision) {
+        trailingBreak = trailingBreakOf(before, text, out);
+        noteHtmlBlock(htmlBlock, text, out.length);
+      }
     }
     i++;
   }
@@ -9031,6 +9430,21 @@ function renderInlineRangeWithIds(
   // Where the Markdown ends with an inline equation's closing $, which text
   // after it mustn't run into (textNextToMath)
   let mathEnd = -1;
+  // The plain line break the Markdown ends with, where it ends with one
+  // (see breakBeforeComment)
+  let trailingBreak: TrailingBreak | undefined;
+  // The index of the last hidden comment before the first thing a line
+  // breakBeforeComment moved after a <br> shows, which go without the
+  // whitespace outside them
+  let inlineThrough = -1;
+  // The HTML block a comment at the paragraph's start began, while the
+  // Markdown is in it (see beginsHtmlBlock)
+  const htmlBlock: HtmlBlock = { open: false, closed: false, from: 0 };
+  // Whether the Markdown may hold only ID syntax's range starts. It holds
+  // more for good once it holds anything else, so it's read until then and
+  // not each time a comment comes after, which would take time in its length
+  // for each comment
+  let rangeStartsOnly = true;
   let i = startIndex;
   let lastSpan: RevisionSpan | undefined;
   // A comment that spans paragraphs stays open from the one before
@@ -9171,8 +9585,18 @@ function renderInlineRangeWithIds(
       // Without the indent export put in its hidden run, where ID syntax
       // starts the paragraph, which it makes one rather than an HTML block
       // whose indent that was, so the indent would be text Word shows
-      const text = /^(?:\{#[^}\s]+\})+$/.test(out) ? item.text.replace(/^[ \t]+/, '') : item.text;
-      out += markdownComment(text, segment[i + 1]?.type === 'html_comment', opts?.cell);
+      rangeStartsOnly = rangeStartsOnly && /^(?:\{#[^}\s]+\})*$/.test(out);
+      const text = rangeStartsOnly && out !== '' ? item.text.replace(/^[ \t]+/, '') : item.text;
+      const comment = markdownComment(text, segment[i + 1]?.type === 'html_comment', opts?.cell);
+      if (!htmlBlock.open && beginsHtmlBlock(out, htmlBlock.from, opts)) Object.assign(htmlBlock, { open: true, closed: false });
+      if (htmlBlock.open) {
+        out += comment;
+        noteHtmlBlock(htmlBlock, comment, out.length);
+      } else {
+        let last: number;
+        [out, last] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(comment) : comment, () => lineAfterBreak(segment, i, segmentEnd, comment));
+        inlineThrough = Math.max(inlineThrough, last);
+      }
       i++;
       continue;
     }
@@ -9199,7 +9623,13 @@ function renderInlineRangeWithIds(
     // break, a highlight, an underline or a strikethrough, as ==\\\n==
     // (see showsOnBreak), and a link's brackets.
     if (item.text === '\\\n' && !showsOnBreak(item.formatting)) {
-      [out, lastSpan] = appendRevised(out, lineBreakRun(item), item, lastSpan);
+      const before = out;
+      const text = lineBreakRun(item);
+      [out, lastSpan] = appendRevised(out, text, item, lastSpan);
+      if (!item.revision) {
+        trailingBreak = trailingBreakOf(before, text, out);
+        noteHtmlBlock(htmlBlock, text, out.length);
+      }
       i++;
       continue;
     }
@@ -9208,7 +9638,10 @@ function renderInlineRangeWithIds(
     // the comments the text is in
     const group = emphasisGroup(segment, i, segmentEnd, currentIds);
     if (group) {
+      const before = out;
       out += group.text;
+      trailingBreak = trailingBreakOf(before, group.text, out);
+      noteHtmlBlock(htmlBlock, group.text, out.length);
       i = group.end;
       continue;
     }
@@ -9231,7 +9664,13 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i), item, lastSpan);
+      const text = escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i);
+      const before = out;
+      [out, lastSpan] = appendRevised(out, text, item, lastSpan);
+      if (!item.revision) {
+        trailingBreak = trailingBreakOf(before, text, out);
+        noteHtmlBlock(htmlBlock, text, out.length);
+      }
     }
     i++;
   }
@@ -9782,14 +10221,16 @@ function escapeRegExp(value: string): string {
 // is checked first (most common roundtrip case) so we don't rely on the
 // more permissive regexes for the happy path. With `inline`, of an alert
 // whose text export wrote on its marker's line, no space after the line
-// break is export's, so the text keeps the whitespace it starts with.
+// break is export's, so the text keeps the whitespace it starts with. The
+// line break is a <br> where a comment starts the next line (see
+// breakBeforeComment).
 function stripAlertLeadPrefix(text: string, alertType: GfmAlertType, inline = false): string {
   // 1. Standard [!TYPE] marker (e.g. from a re-imported markdown)
   const marker = parseGfmAlertMarker(text.trimStart());
   if (marker?.type === alertType) {
     // Up to the line break and the space export writes after it: the
     // body's own whitespace stays
-    return text.replace(/^\s*\[![A-Za-z]+\](?:[ \t]+|\\?\n ?|$)/, '');
+    return text.replace(/^\s*\[![A-Za-z]+\](?:[ \t]+|\\?\n ?|<br>|$)/, '');
   }
   const title = gfmAlertTitle(alertType);
   const glyphAlternation = Object.keys(ALERT_GLYPH_TO_TYPE).map(escapeRegExp).join('|');
@@ -9799,13 +10240,13 @@ function stripAlertLeadPrefix(text: string, alertType: GfmAlertType, inline = fa
   //    most common roundtrip format — check it before the bold-wrapped
   //    and colon-suffixed variants.
   const exactPlain = new RegExp(
-    '^\\s*(?:' + glyphAlternation + ') ' + escapeRegExp(title) + (inline ? '(?:\\\\?\\n| )' : '(?:\\\\?\\n ?| )')
+    '^\\s*(?:' + glyphAlternation + ') ' + escapeRegExp(title) + (inline ? '(?:\\\\?\\n|<br>| )' : '(?:\\\\?\\n ?|<br>| )')
   );
   if (exactPlain.test(text)) return text.replace(exactPlain, '');
 
   // 3. Bold-wrapped: **GLYPH Title** or __GLYPH Title__
   const titleCore = '(?:' + glyphAlternation + ')\\s*' + escapeRegExp(title);
-  const boldWrapped = text.match(inline ? /^\s*(\*\*|__)(.+?)\1[ \t]?(?:\\?\n)?/ : /^\s*(\*\*|__)(.+?)\1[ \t]?(?:\\?\n ?)?/);
+  const boldWrapped = text.match(inline ? /^\s*(\*\*|__)(.+?)\1[ \t]?(?:\\?\n|<br>)?/ : /^\s*(\*\*|__)(.+?)\1[ \t]?(?:\\?\n ?|<br>)?/);
   if (boldWrapped) {
     const inner = boldWrapped[2].trim();
     if (new RegExp('^' + titleCore + '\\s*[:：-]?$').test(inner)) {
@@ -9814,11 +10255,11 @@ function stripAlertLeadPrefix(text: string, alertType: GfmAlertType, inline = fa
   }
 
   // 4. Glyph + title with optional colon/dash separator
-  const withGlyph = new RegExp('^\\s*(?:' + glyphAlternation + ')\\s*' + escapeRegExp(title) + '(?:\\s*[:：-]\\s*|\\s+|\\\\?\\n\\s*|$)');
+  const withGlyph = new RegExp('^\\s*(?:' + glyphAlternation + ')\\s*' + escapeRegExp(title) + '(?:\\s*[:：-]\\s*|\\s+|\\\\?\\n\\s*|<br>|$)');
   if (withGlyph.test(text)) return text.replace(withGlyph, '');
 
   // 5. Bare title with required colon/dash (e.g. "Note:" without glyph)
-  const titleOnly = new RegExp('^\\s*' + escapeRegExp(title) + '\\s*[:：-]\\s*(?:\\\\?\\n\\s*)?');
+  const titleOnly = new RegExp('^\\s*' + escapeRegExp(title) + '\\s*[:：-]\\s*(?:\\\\?\\n\\s*|<br>)?');
   if (titleOnly.test(text)) return text.replace(titleOnly, '');
 
   return text;
@@ -11791,7 +12232,7 @@ function withoutHiddenCommentSpace(content: ContentItem[]): ContentItem[] {
       if (item.type === 'text') {
         const line = item.text.lastIndexOf('\n');
         shown = /[^ \t\n]/.test(item.text.slice(line + 1)) || shown && line === -1;
-      } else if (item.type === 'image' ? item.markdown === undefined : item.type === 'citation' || item.type === 'math' || item.type === 'footnote_ref') {
+      } else if (showsInline(item)) {
         shown = true;
       }
       i++;
@@ -12175,9 +12616,9 @@ export function buildMarkdown(
   let listWordLevels: number[] = [];
   // paragraphLinePrefix is declared further down
   // A quote paragraph's own lines take its prefix in the main loop below
-  const joinedContent = joinTrackedParagraphBreaks(content, marks, (para, opening) => (
+  const joinedContent = breakCommentLines(joinTrackedParagraphBreaks(content, marks, (para, opening) => (
     opening && prefixesQuoteLines(opening) ? '' : paragraphLinePrefix(para)
-  ));
+  )));
   const mergedContent = mergeConsecutiveRuns(withoutHiddenCommentSpace(options?.calloutLabels === false ? joinedContent
     : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup)));
 
@@ -12271,9 +12712,9 @@ export function buildMarkdown(
   // Whether each of a note's code blocks goes as its paragraphs, before
   // what reads code paragraphs apart from text
   const noteCodeDemoted = new Map(noteEntries.map(entry => [entry, demoteNoteCodeBlocks(entry.body)]));
-  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(withoutHiddenCommentSpace(joinTrackedParagraphBreaks(entry.body, marks)))]));
+  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(withoutHiddenCommentSpace(breakCommentLines(joinTrackedParagraphBreaks(entry.body, marks))))]));
   collectCommentMetadata(mergedContent);
-  for (const entry of noteEntries) collectCommentMetadata(entry.body);
+  for (const entry of noteEntries) collectCommentMetadata(noteBodies.get(entry)!);
   // A comment in a table cell whose body has more than one line takes ID
   // syntax, which puts the body after the table, as a cell has one line
   const bodyHasLines = (c: Comment) => c.text.includes('\n') || (!!c.replies?.length
@@ -12415,7 +12856,7 @@ export function buildMarkdown(
     }
   }
   detectGlobalOverlaps(mergedContent);
-  for (const entry of noteEntries) detectGlobalOverlaps(entry.body);
+  for (const entry of noteEntries) detectGlobalOverlaps(noteBodies.get(entry)!);
   // Over an HTML comment, a range takes ID syntax, as {#1}<!-- a -->{/1},
   // where the paragraph that holds it, as written, reads back as one
   // paragraph with its comments inline, each as its hidden run holds it,
@@ -12435,7 +12876,7 @@ export function buildMarkdown(
   const rangeStarts = new Map<string, ContentItem>();
   const rangeEnds = new Map<string, ContentItem>();
   const commentParagraphs: ContentItem[][] = [];
-  for (const items of [mergedContent, ...noteEntries.map(entry => entry.body)]) {
+  for (const items of [mergedContent, ...noteEntries.map(entry => noteBodies.get(entry)!)]) {
     let paragraph: ContentItem[] = [];
     for (const item of [...items, undefined]) {
       if (!item || item.type === 'para' || item.type === 'table') {
