@@ -10,6 +10,7 @@ import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
 import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
+import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
@@ -498,9 +499,11 @@ const COMMENT_OR_AUTOLINK_AT = /<(?:[!?]|[A-Za-z][A-Za-z\d+.-]{1,31}:[!-;=?-\uFF
  * covers. A closer's search goes on from where its last one ended, so the
  * pass is linear, but for math and tags, whose search is the parser's.
  * Text that's inline, as a grid table cell's, which export reads as one
- * paragraph's text whatever its lines start with, has no HTML block.
+ * paragraph's text whatever its lines start with, has no HTML block. Where
+ * `tags` is given, it gets the start and end of each element's start or
+ * end tag the pass reads.
  */
-function lineStartsAfterBreaks(text: string, inline = false): number[] {
+function lineStartsAfterBreaks(text: string, inline = false, tags?: Array<[number, number]>): number[] {
   const starts: number[] = [];
   // Each closer's offset from its last search, -1 for none
   const closers = new Map<string, number>();
@@ -550,7 +553,9 @@ function lineStartsAfterBreaks(text: string, inline = false): number[] {
       i = math?.kind === 'math' ? math.end : i + 1;
     } else if (c === '<' && /[A-Za-z/!?]/.test(text[i + 1] ?? '')) {
       HTML_TAG_AT.lastIndex = i;
-      i = HTML_TAG_AT.test(text) ? HTML_TAG_AT.lastIndex : i + 1;
+      const end = HTML_TAG_AT.test(text) ? HTML_TAG_AT.lastIndex : -1;
+      if (end !== -1 && /[A-Za-z/]/.test(text[i + 1])) tags?.push([i, end]);
+      i = end === -1 ? i + 1 : end;
     } else if (c === '[') {
       // A citation, as export reads one, whose text it keeps as it is.
       // One with a [ before its ] would start with a key, which the
@@ -1131,8 +1136,9 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
   const inner = text.slice(open + 1, close);
   // A line break, which export would read as a backslash and a line's end,
   // and where a line in it that starts a block, as <table> or #, would read
-  // as one
-  if (inner.includes('\n')) return undefined;
+  // as one, or raw HTML's line end (see RAW_LINE_END), in a tag export
+  // would read as a prefix's text
+  if (/[\n\r]/.test(inner)) return undefined;
   let offset = open + 1;
   const raw: Array<[number, number]> = [];
   const locators = new Map<string, string>();
@@ -1209,7 +1215,13 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     // comment's range with ==} goes in ID syntax)
     if ((c === '+' || c === '-') && next === c && text[i + 2] === '}') escaped.add(i + 1);
     if (c === '\\') {
-      if (next !== '\n' && (next === undefined || ASCII_PUNCTUATION_RE.test(next))) escaped.add(i);
+      // Not before a line feed, as a line break's, but before raw HTML's
+      // line end (see RAW_LINE_END), which is a line end where the text
+      // isn't raw, as a block's that reads as no block, where the backslash
+      // before it would make it a line break, or a reference in an escaped
+      // block (see markedFormatting), which it would escape. In a tag or a
+      // block Markdown keeps raw, it stays the HTML's, unescaped (below).
+      if (next !== '\n' && (next === undefined || next === RAW_LINE_END || ASCII_PUNCTUATION_RE.test(next))) escaped.add(i);
     } else if (c === '*' || c === '`') {
       escaped.add(i);
     } else if (c === '_') {
@@ -1399,6 +1411,13 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     const tag = HTML_TAG_AT.exec(text)?.[0];
     const name = tag && /^<\/?([A-Za-z][A-Za-z\d-]*)/.exec(tag)?.[1];
     if (!tag || !name || MARKDOWN_HTML_SENSITIVE_TAGS.has(name.toLowerCase())) continue;
+    // One a line break of Word's is in, which Markdown would read in the
+    // tag, as a \ in its attribute and a line end, is text. Raw HTML's line
+    // ends, a tag's or a block's, are never one here (see RAW_LINE_END).
+    if (tag.includes('\\\n')) {
+      escaped.add(i);
+      continue;
+    }
     for (let k = i + 1; k < i + tag.length; k++) {
       escaped.delete(k);
       inTag.add(k);
@@ -2609,24 +2628,83 @@ function readLineEnds(nodes: XmlNode[]): void {
 // inside another, which then leaves them as they are
 const LINE_FEEDS_READ = new WeakSet<ContentItem>();
 
+// The character style export gives a run of raw HTML, an HTML block or tag
+// Markdown keeps as it is, that holds a line's end, which it writes as
+// Word's line break, as Word shows a line feed in its text as a space
+const RAW_HTML_STYLE = 'manuscripthtml';
+
+// The text import wrote for runs in export's style for raw HTML, whose line
+// breaks can be the HTML's line ends (see readParagraphLineFeeds)
+const RAW_HTML_TEXT = new WeakSet<ContentItem>();
+
+// Raw HTML's line end, in a tag or an HTML block, in the text items import
+// writes, from when readParagraphLineFeeds reads it to when
+// renderInlineRange writes it as a line end. A line's end in that text has
+// one of three sources, each written its own way: a line break of Word's
+// is a backslash and a line feed, as Markdown writes one; a line feed in
+// Word's text is a space, as Word shows it; and raw HTML's is this, a
+// carriage return, which Word's text holds none of by then (see
+// readCarriageReturns), and which that leaves as it is in a paragraph
+// inside another, as in a text box. So no pass in between takes one for
+// another: a backslash before raw HTML's line end, as in <span title="a\
+// and a line end, is the HTML's, not a line break's, and the line ends of a
+// tag or block, which Markdown keeps raw, are no line's start.
+const RAW_LINE_END = '\r';
+
+/** Markdown renderInlineRange wrote, with raw HTML's line ends as line
+ *  ends (see RAW_LINE_END) */
+const withRawLineEnds = (markdown: string): string => markdown.replace(/\r/g, '\n');
+
+/** Mark the text import wrote for a run, from `start` in `target`, as raw
+ *  HTML's, where the run is in export's style for it. Its w:cr is a w:br by
+ *  then (see withCharactersAsText), so it is the same line end. */
+function markRawHtmlText(runChildren: XmlNode[], target: ContentItem[], start: number): void {
+  const rPr = runChildren.find(child => child['w:rPr'] !== undefined);
+  const rStyle = rPr && asXmlNodes(rPr['w:rPr']).find(child => child['w:rStyle'] !== undefined);
+  if (rStyle === undefined || getAttr(rStyle, 'val').toLowerCase() !== RAW_HTML_STYLE) return;
+  for (let k = start; k < target.length; k++) {
+    if (target[k].type === 'text') RAW_HTML_TEXT.add(target[k]);
+  }
+}
+
+/** Whether an item is a line break of Word's in a run of raw HTML */
+const isRawHtmlBreak = (item: ContentItem): boolean => item.type === 'text' && item.text === '\\\n' && RAW_HTML_TEXT.has(item);
+
 /**
- * The line feeds of Word's text in what import wrote for a paragraph, from
- * `start` in `target`: the space Word shows, as LibreOffice reads it after
- * Word (tdf#108806), since Word writes a line's end as w:br or w:cr, never
- * in its text. Not where that is an HTML block of its own, as export writes
- * one, and the paragraph can be one (`block`), where import writes the text
- * as it is (see markedFormatting), on the lines Markdown keeps it raw by,
- * or, with a comment's point after it, escaped, with its line feeds as
- * references (see htmlBlockText).
- * Read from what import wrote, it leaves out what writes nothing, as an
- * empty run, and what import leaves out, as a note's mark and the space
- * after it.
+ * The line ends of what import wrote for a paragraph, from `start` in
+ * `target`, read from that, so what writes nothing, as an empty run or a
+ * content control around runs, and what import leaves out, as a note's
+ * mark and the space after it, count for nothing. A line feed in Word's
+ * text is the space Word shows, as LibreOffice reads it after Word
+ * (tdf#108806), since Word writes a line's end as w:br or w:cr, never in
+ * its text. A line break in raw HTML's runs (see markRawHtmlText) is the
+ * line break Word shows.
+ *
+ * Not where the text, with those line breaks as line feeds, is an HTML
+ * block of its own, as export writes one, and the paragraph can be one
+ * (`block`), where import writes the text as it is (see markedFormatting),
+ * on the lines Markdown keeps it raw by: export wrote them as line feeds in
+ * its text before it wrote them as line breaks. Or, with a comment's point
+ * after it, escaped, with its line feeds as references, where it has no
+ * line breaks of raw HTML's, which stay the ones Word shows (see
+ * htmlBlockText). Nor where raw HTML's runs
+ * are tags, whole, that import writes raw, with nothing it writes apart from
+ * text starting inside one, as formatting, a link, a tracked change or a
+ * comment, where Word edits made them something else. Their line breaks
+ * are raw HTML's line ends again (see RAW_LINE_END), or in a heading
+ * (`oneLine`), whose line Markdown ends at a line feed, spaces, the
+ * whitespace they are in a tag or between tags.
  */
-function readParagraphLineFeeds(target: ContentItem[], start: number, block: boolean): void {
+function readParagraphLineFeeds(target: ContentItem[], start: number, block: boolean, oneLine: boolean): void {
   const items = target.slice(start);
   readCarriageReturns(items);
   const text = block ? htmlBlockText(items) : undefined;
   if (text !== undefined) {
+    // Its line ends, the line breaks of raw HTML's runs and line feeds in
+    // Word's text both, are the block's (see RAW_LINE_END)
+    for (const item of items) {
+      if (item.type === 'text') item.text = isRawHtmlBreak(item) ? RAW_LINE_END : item.text.replace(/\n/g, RAW_LINE_END);
+    }
     // A line feed at the end of its text ends its last line, as the
     // paragraph's end does, where import writes it as it is: not before a
     // comment's point, where it's a reference too
@@ -2643,6 +2721,7 @@ function readParagraphLineFeeds(target: ContentItem[], start: number, block: boo
       if (item.type === 'citation') item.text = item.text.replace(/\n/g, ' ');
     }
     readTextLineFeeds(own, block);
+    readRawHtmlTags(own, oneLine);
   }
   for (const item of target.slice(start)) LINE_FEEDS_READ.add(item);
 }
@@ -2653,12 +2732,15 @@ function readParagraphLineFeeds(target: ContentItem[], start: number, block: boo
  *  line feed, as in one w:t, not two. Not where a tracked change or a
  *  comment holds one and not the other, which accepting or rejecting, or
  *  the comment's range, keeps apart, so where a deletion holds the carriage
- *  return, the line feed stays when it's accepted. */
+ *  return, the line feed stays when it's accepted. Not the items of a
+ *  paragraph in this one, as in a text box, whose line ends that paragraph
+ *  read, and whose carriage returns are raw HTML's line ends (see
+ *  RAW_LINE_END). */
 function readCarriageReturns(items: ContentItem[]): void {
   items.forEach((item, k) => {
-    if (item.type !== 'text' && item.type !== 'citation' && item.type !== 'html_comment') return;
+    if (item.type !== 'text' && item.type !== 'citation' && item.type !== 'html_comment' || LINE_FEEDS_READ.has(item)) return;
     const next = items[k + 1];
-    if (item.type === 'text' && item.text.endsWith('\r') && next?.type === 'text' && next.text.startsWith('\n')
+    if (item.type === 'text' && item.text.endsWith('\r') && next?.type === 'text' && !LINE_FEEDS_READ.has(next) && next.text.startsWith('\n')
       && revisionsEqual(item.revision, next.revision) && commentSetsEqual(item.commentIds, next.commentIds)) next.text = next.text.slice(1);
     item.text = item.text.replace(/\r\n?/g, '\n');
   });
@@ -2726,14 +2808,14 @@ function writtenTogether(a: ContentItem, b: ContentItem): boolean {
 
 /**
  * The line feeds of a paragraph's text items, shown or deleted, as spaces,
- * but in a tag import writes raw, where its paragraph can hold lines
- * (`lines`), as export writes a tag in Markdown over lines, as
- * <a href="a\n  b">: an element's start or end, but not one import writes
- * as text, as export would read it as formatting or the like (see
- * escapeSensitiveHtmlLikeTags), nor one in code, where a line end would be
- * one in text, which Markdown reads as a space. A tag is read in the text of
- * the items import writes together, as one Word's runs split, or a tab in
- * it. Not a hidden HTML comment's, whose line ends are its own.
+ * but in a tag import writes raw (see importWritesRaw), where its paragraph
+ * can hold lines (`lines`), as export wrote a tag in Markdown over lines, as
+ * <a href="a\n  b">, before it wrote raw HTML's line ends as Word's line
+ * breaks: not one in code, where a line end would be one in text, which
+ * Markdown reads as a space. A tag is read in the text of the items import
+ * writes together, as one Word's runs split, or a tab in it. Not a hidden
+ * HTML comment's, whose line ends are its own. A raw HTML line break of
+ * Word's ends the items, which readRawHtmlTags reads.
  */
 function readTextLineFeeds(items: ContentItem[], lines: boolean): void {
   for (let i = 0; i < items.length; i++) {
@@ -2758,42 +2840,120 @@ function readTextLineFeeds(items: ContentItem[], lines: boolean): void {
     const kept = new Set<number>();
     if (lines && !formatting?.code) {
       for (const tag of text.matchAll(ELEMENT_TAG_IN_WORD_TEXT)) {
-        const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(tag[0]);
-        if (!name || MARKDOWN_HTML_SENSITIVE_TAGS.has(name[1].toLowerCase())) continue;
+        if (!importWritesRaw(tag[0])) continue;
         for (let k = tag[0].indexOf('\n'); k !== -1; k = tag[0].indexOf('\n', k + 1)) kept.add(tag.index + k);
       }
     }
     let at = 0;
     for (const item of group) {
       const from = at;
-      item.text = item.text.replace(/\n/g, (lineFeed: string, offset: number) => kept.has(from + offset) ? lineFeed : ' ');
+      item.text = item.text.replace(/\n/g, (_lineFeed: string, offset: number) => kept.has(from + offset) ? RAW_LINE_END : ' ');
       at += item.text.length;
     }
   }
 }
 
 /** The text of a paragraph's `items` where it's an HTML block of its own,
- *  as markdown-it reads it, with its line feeds: plain text, in no
- *  formatting, link, tracked change or comment, nor a line break of Word's,
- *  which import writes apart from it. A comment's point can come after it,
- *  where import writes the text escaped, as the comment would go in the
- *  block, with its line feeds as references (see markedFormatting), which
- *  are no line's end, and which Markdown shows as Word does, as spaces. */
+ *  as markdown-it reads it, with its line feeds and raw HTML's line breaks
+ *  as line feeds: plain text, in no formatting, link, tracked change or
+ *  comment, nor another line break of Word's, which import writes apart
+ *  from it. A comment's point can come after it, where import writes the
+ *  text escaped, as the comment would go in the block, with its line feeds
+ *  as references (see markedFormatting), which are no line's end, and
+ *  which Markdown shows as Word does, as spaces. Not raw HTML's line breaks
+ *  there, which Word shows as line breaks, which import writes then. */
 function htmlBlockText(items: ContentItem[]): string | undefined {
   let text = '';
   // The runs before a comment's points, which write no text
   let end = items.length;
   for (let last = items[end - 1]; isBareRun(last) && last.text === '' && !last.revision; last = items[end - 1]) end--;
+  const point = items.slice(end).some(item => item.type === 'text' && item.commentIds.size > 0);
   for (const item of items.slice(0, end)) {
-    if (item.type !== 'text' || item.text === '\\\n' || hasFormatting(item.formatting) || item.href !== undefined
-      || item.revision || item.commentIds.size > 0) return undefined;
-    text += item.text;
+    if (item.type !== 'text' || (item.text === '\\\n' && (point || !isRawHtmlBreak(item))) || hasFormatting(item.formatting)
+      || item.href !== undefined || item.revision || item.commentIds.size > 0) return undefined;
+    text += isRawHtmlBreak(item) ? '\n' : item.text;
   }
   if (!text.includes('\n')) return undefined;
   const blocks = htmlBlocksIn(text);
   // Its lines as markdown-it counts them, which a line feed ends, so one at
   // the end starts none
   return blocks.length === 1 && blocks[0].start === 0 && blocks[0].end === text.replace(/\n$/, '').split('\n').length ? text : undefined;
+}
+
+/** Whether import writes an element's start or end tag raw: not one it
+ *  writes as text, as export would read it as formatting or the like (see
+ *  escapeSensitiveHtmlLikeTags), as one with attributes, which export keeps
+ *  as text, as <b class="k">. Nor is any other tag, a processing
+ *  instruction, declaration or comment, whose < it escapes (see
+ *  escapeMarkdownChars). A line end in a tag it writes as text would be one
+ *  in text, which Markdown reads as a space, so it stays the line break
+ *  Word shows. */
+function importWritesRaw(tag: string): boolean {
+  const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(tag);
+  return !!name && !MARKDOWN_HTML_SENSITIVE_TAGS.has(name[1].toLowerCase());
+}
+
+/** The start and end of each tag of `text` where it's all elements' start
+ *  and end tags, one after another, as markdown-it reads each, that import
+ *  writes raw (see importWritesRaw), and undefined where it's anything
+ *  else. Read a tag at a time, each from the last one's end, so no
+ *  character is read twice, where one pattern for all of them would try
+ *  each way to split them, as for processing instructions, which Markdown
+ *  reads up to any ?> and so can take in the next. */
+function rawElementTags(text: string): Array<[number, number]> | undefined {
+  const tags: Array<[number, number]> = [];
+  for (let at = 0; at < text.length; at = ELEMENT_TAG_AT.lastIndex) {
+    ELEMENT_TAG_AT.lastIndex = at;
+    const tag = ELEMENT_TAG_AT.exec(text);
+    if (!tag || !importWritesRaw(tag[0])) return undefined;
+    tags.push([at, ELEMENT_TAG_AT.lastIndex]);
+  }
+  return tags;
+}
+
+/** The line breaks of tags, whole, in a paragraph's `items`, that import
+ *  writes raw (see readParagraphLineFeeds) */
+function readRawHtmlTags(items: ContentItem[], oneLine: boolean): void {
+  for (let i = 0; i < items.length; i++) {
+    if (!RAW_HTML_TEXT.has(items[i])) continue;
+    let end = i + 1;
+    while (end < items.length && RAW_HTML_TEXT.has(items[end])) end++;
+    const segment = items.slice(i, end) as Array<Extract<ContentItem, { type: 'text' }>>;
+    i = end - 1;
+    const texts = segment.map(item => isRawHtmlBreak(item) ? '\n' : item.text);
+    const text = texts.join('');
+    const tags = text.includes('\n') ? rawElementTags(text) : undefined;
+    if (!tags) continue;
+    // Where import writes something between items, which in a tag would
+    // split it, and leave its line end in text: formatting, a link, a
+    // change or a comment's range starting or ending. A content control or
+    // smart tag around runs, which it writes nothing for, splits nothing,
+    // nor does whitespace whose formatting writes no delimiters, as a line
+    // break in bold alone, which goes by the formatting around it, as in
+    // readTextLineFeeds.
+    const splits: number[] = [];
+    let at = 0;
+    let formatting: RunFormatting | undefined;
+    segment.forEach((item, k) => {
+      const before = segment[k - 1];
+      const bare = writesNoDelimiters(item.text, item.formatting);
+      if (before && (!bare && formatting && !formattingEquals(item.formatting, formatting) || item.href !== before.href || item.link !== before.link
+        || !revisionsEqual(item.revision, before.revision) || !commentSetsEqual(item.commentIds, before.commentIds))) splits.push(at);
+      if (!bare) formatting = item.formatting;
+      at += texts[k].length;
+    });
+    // Each tag, with the first split not before its end, as both go from
+    // the left, which a search of the splits for each would take time in
+    // the square of the tags for
+    let split = 0;
+    if (tags.some(([start, end]) => {
+      while (split < splits.length && splits[split] <= start) split++;
+      return split < splits.length && splits[split] < end;
+    })) continue;
+    for (const item of segment) {
+      if (isRawHtmlBreak(item)) item.text = oneLine ? ' ' : RAW_LINE_END;
+    }
+  }
 }
 
 /**
@@ -3084,12 +3244,13 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   const escaped = edges[1] + core + edges[3];
   // A paragraph that is an HTML block, as export writes one, reads as it is,
   // escapes and all, so it takes none, as in <div>https://e.com</div>,
-  // unless a line break of Word's would read as a backslash in it. Up to
-  // three spaces can come before it, which buildMarkdown writes as they are.
+  // unless a line break of Word's would read as a backslash in it, as its
+  // own line ends, raw HTML's (see RAW_LINE_END), don't. Up to three spaces
+  // can come before it, which buildMarkdown writes as they are.
   // The run is escaped here, and buildMarkdown writes it as it is only where
   // it's all of its paragraph and export reads that as written, after its
   // line's prefix, as its text (see checkedHtmlBlock)
-  const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && after?.first === '' && isHtmlBlock(result.replace(/^ {1,3}(?=<)/, ''));
+  const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && after?.first === '' && isHtmlBlock(withRawLineEnds(result).replace(/^ {1,3}(?=<)/, ''));
   // An = as a reference, without the backslash of an escaped =, not one of
   // an escaped backslash's
   const written = (text: string) => wrapFormatting(references ? text.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;') : text, fmt, highlightOuter);
@@ -3098,8 +3259,10 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // aren't in a block (above), are references, which keep them in Word,
   // where Markdown would read a line's start as syntax, as a heading's #
   // or a list's marker, and export a line end in a paragraph as a space.
-  // No backslash comes before one, which a line break's would be.
-  htmlBlockRun = { raw: written(result), escaped: written(escaped.replace(/\n/g, '&#10;')) };
+  // No backslash comes before one, which a line break's would be, but an
+  // escaped one (see escapeMarkdownChars). Its raw text is Markdown as
+  // buildMarkdown writes it, with its line ends.
+  htmlBlockRun = { raw: withRawLineEnds(written(result)), escaped: written(escaped.replace(/[\r\n]/g, '&#10;')) };
   return htmlBlockRun.escaped;
 }
 
@@ -5223,7 +5386,7 @@ function parseNoteBody(
             }
           }
           // A note's paragraph reads no heading's or title's style
-          readParagraphLineFeeds(target, lenBeforeContent, !inTableCell && !isCodeBlock);
+          readParagraphLineFeeds(target, lenBeforeContent, !inTableCell && !isCodeBlock, false);
           if (!inTableCell && !isCodeBlock && walkedContent) {
             startRangesAtMark(target, lenBeforeContent, commentStartTargetIndex, activeComments);
           }
@@ -5265,7 +5428,9 @@ function parseNoteBody(
             noterefNumber.hidden = true;
           }
           fieldShows.run(runChildren, walked);
+          const runStart = target.length;
           walkNoteBody(walked, runFormatting, target, inTableCell, currentRevision);
+          markRawHtmlText(runChildren, target, runStart);
         } else if (Array.isArray(node[key])) {
           walkNoteBody(node[key], currentFormatting, target, inTableCell, currentRevision);
         }
@@ -6299,7 +6464,9 @@ export async function extractDocumentContent(
             noterefNumber.hidden = true;
           }
           fieldShows.run(runChildren, walked);
+          const runStart = target.length;
           walk(walked, runFormatting, target, inTableCell, currentRevision);
+          markRawHtmlText(runChildren, target, runStart);
         } else if (key === 'w:br') {
           // Line break within a run (Shift+Enter in Word).
           // Only emit for default/textWrapping breaks; skip page/column breaks.
@@ -6572,7 +6739,7 @@ export async function extractDocumentContent(
             target.push(paraItem);
           }
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
-          readParagraphLineFeeds(target, targetLenBeforePara + (needsPara ? 1 : 0), !inTableCell && !headingLevel && !isTitle && !isCodeBlock);
+          readParagraphLineFeeds(target, targetLenBeforePara + (needsPara ? 1 : 0), !inTableCell && !headingLevel && !isTitle && !isCodeBlock, !!headingLevel || isTitle);
           const hasText = target.length > targetLenBeforePara + (needsPara ? 1 : 0);
           if (hasText && !inTableCell && !isCodeBlock && !inBibliographyField) {
             startRangesAtMark(target, targetLenBeforePara, commentStartTargetIndex, activeComments);
@@ -8842,7 +9009,7 @@ function renderInlineRange(
     }
     i++;
   }
-  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell, !opts?.heading && isInParagraphMath(segment[i])), nextIndex: i, deferredComments: [] };
+  return { text: withRawLineEnds(resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell, !opts?.heading && isInParagraphMath(segment[i]))), nextIndex: i, deferredComments: [] };
 }
 
 /** Render inline content using ID-based comment syntax ({#id}...{/id}).
@@ -9091,7 +9258,7 @@ function renderInlineRangeWithIds(
     return a.remappedId.localeCompare(b.remappedId);
   });
 
-  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell, !opts?.heading && isInParagraphMath(segment[i])), nextIndex: i, deferredComments: deferred.map(d => d.body) };
+  return { text: withRawLineEnds(resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell, !opts?.heading && isInParagraphMath(segment[i]))), nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
 /**
@@ -9246,10 +9413,19 @@ function mathCellRun(item: ContentItem): ContentItem {
   };
 }
 
+/** A table cell's paragraph with raw HTML's line ends (see RAW_LINE_END),
+ *  each an item of its own in a cell, whose line feeds in Word's text are
+ *  spaces (see readRawHtmlTags and readTextLineFeeds), as line breaks:
+ *  HTML's cell writes the HTML as text, which would make them spaces, so
+ *  they're the line breaks Word shows. */
+function rawLineEndsAsBreaks(para: ContentItem[]): ContentItem[] {
+  return para.map(item => item.type === 'text' && item.text === RAW_LINE_END ? { ...item, text: '\\\n' } : item);
+}
+
 /** Whether every cell of a table takes HTML (see renderHtmlCellParagraph) */
 function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
   return table.rows.every(row => row.cells.every(cell =>
-    cell.paragraphs.every(para => renderHtmlCellParagraph(para) !== undefined)));
+    cell.paragraphs.every(para => renderHtmlCellParagraph(rawLineEndsAsBreaks(para)) !== undefined)));
 }
 
 /** Where the last `opener` is in the text of `html`, past its tags,
@@ -9295,11 +9471,12 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       const paragraphs: string[] = [];
       for (const para of cell.paragraphs) {
         // Export makes a header cell bold, as for a pipe table
+        const runs = rawLineEndsAsBreaks(para);
         const items = mergeConsecutiveRuns(withoutHiddenCommentSpace(row.isHeader
-          ? para.map(item => item.type === 'text' && item.formatting?.bold
+          ? runs.map(item => item.type === 'text' && item.formatting?.bold
             ? { ...item, formatting: { ...item.formatting, bold: false } }
             : item)
-          : para), false);
+          : runs), false);
         const html = renderHtmlCellParagraph(items);
         if (html !== undefined) {
           paragraphs.push(html);
@@ -9719,7 +9896,10 @@ function tryRenderGridTable(
         // grid table cells treat bare newlines as hard breaks, so the
         // backslash is redundant. A line in an equation or a comment, whose
         // line end is its own, stays as it is, with a backslash it ends in,
-        // as lineStartsAfterBreaks finds the breaks, as Markdown reads them.
+        // as lineStartsAfterBreaks finds the breaks, as Markdown reads them:
+        // not a line end in a tag, which is raw HTML's, no line break, so its
+        // backslash is the HTML's (see readRawHtmlTags). A tag a line break
+        // of Word's is in is text, its < escaped (see escapeMarkdownChars).
         // A line starts no HTML block in a cell, so the spaces before a
         // comment that starts one after a break are the padding's, as before
         // text, unless they're references
@@ -13752,7 +13932,7 @@ export function buildMarkdown(
     const ownComments = items.map((entry, k) => entry.type === 'text' ? entry.text
       : entry.type === 'html_comment' ? markdownComment(entry.text, items[k + 1]?.type === 'html_comment') : '').join('').trim();
     if (amongOwnComments && solid[0]?.type === 'html_comment' && solid[solid.length - 1].type === 'html_comment'
-      && items.every(entry => entry.type !== 'text' || !entry.text.includes('\n'))
+      && items.every(entry => entry.type !== 'text' || !/[\n\r]/.test(entry.text))
       && /^[ \t]*(?:\{#[^}\s]+\})*<!--/.test(textOut) && /-->(?:\{\/[^}\s]+\}|\{>>(?:(?!<<\})[\s\S])*<<\})*[ \t]*$/.test(textOut)
       && (/^<!--[\s\S]*?-->\s*$/.test(ownComments) || /^[ \t]*\{#/.test(textOut) && /^<!---?>$/.test(ownComments))) {
       // In ID syntax, {#1}<!-- c -->{/1}, the comments are a paragraph, not
@@ -13852,11 +14032,37 @@ export function buildMarkdown(
         return text.replace(/\n(?=([\s\S]))/g, (_m, next: string) =>
           '\n' + (next === '\n' ? quoteLinePrefix.trimEnd() : quoteLinePrefix));
       }
+      if (!listLinePrefix || !text.includes('\n')) return text;
       // A paragraph's lines stay in it without, and a comment's body would
       // take the indent as its text. A blank line too, which a <pre> can
       // hold, and which ends the item's block at the margin
-      return listLinePrefix && /^ {0,3}</.test(text) && text.includes('\n') && startsHtmlBlock(text)
-        ? text.replace(/\n(?=[\s\S])/g, '\n' + listLinePrefix) : text;
+      if (/^ {0,3}</.test(text) && startsHtmlBlock(text)) return text.replace(/\n(?=[\s\S])/g, '\n' + listLinePrefix);
+      // But a tag's line ends, as raw HTML's (see readRawHtmlTags), do,
+      // since Markdown leaves the indent out of the tag, and with it the
+      // tag's own whitespace after them that import wrote. A tag as Markdown
+      // reads one: not in a comment's body, which export keeps as it is, nor
+      // after a \ that escapes its <, as one after \\ doesn't. Nor one in a
+      // CriticMarkup span's payload, whose line ends export keeps as they
+      // are, with the indent after them (see preprocessCriticMarkup).
+      const tags: Array<[number, number]> = [];
+      lineStartsAfterBreaks(text, false, tags);
+      const payloads = tags.length > 0 ? criticPayloadRanges(text) : [];
+      let payload = 0;
+      let indented = '';
+      let last = 0;
+      // The next line end, found from the tag at hand only where the last
+      // one found is before it, so each search covers text no other did
+      let lineEnd = text.indexOf('\n');
+      for (const [start, end] of tags) {
+        if (lineEnd !== -1 && lineEnd < start) lineEnd = text.indexOf('\n', start);
+        for (; lineEnd !== -1 && lineEnd < end; lineEnd = text.indexOf('\n', lineEnd + 1)) {
+          while (payload < payloads.length && payloads[payload][1] <= lineEnd) payload++;
+          const kept = payload < payloads.length && payloads[payload][0] <= lineEnd;
+          indented += text.slice(last, lineEnd + 1) + (kept ? '' : listLinePrefix);
+          last = lineEnd + 1;
+        }
+      }
+      return indented + text.slice(last);
     };
     textOut = prefixLines(textOut);
     listHtmlBlockOpen = !!listLinePrefix && startsHtmlBlock(textOut) && !HTML_BLOCK_ENDS_AT_MARKER.test(textOut.trimStart());

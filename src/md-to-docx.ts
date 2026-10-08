@@ -192,6 +192,7 @@ export interface MdRun {
   escapedBracket?: true;    // text that starts with \[, whose [ is text and not a task's box or an alert's marker
   taskBoxLength?: number;   // of the task's box that starts the text and the whitespace after it the source holds as it is (see task_box_whitespace)
   alertMarkerLength?: number; // of the alert's marker that starts the text and the whitespace after it the source holds as it is (see alert_marker_whitespace)
+  rawHtml?: true;           // raw HTML Markdown keeps as it is, an HTML block or tag, whose line ends export writes as Word's line breaks (see RAW_HTML_STYLE_ID)
   // CriticMarkup specific
   newText?: string;         // for substitutions: {~~old~>new~~}
   innerRuns?: MdRun[];      // parsed inner formatting for critic_add/del/highlight
@@ -887,7 +888,9 @@ export function blocksAsRead(markdown: string): Array<Pick<MdToken, 'type' | 'le
   const format = (run: MdRun) => JSON.stringify({ ...run, text: '' }, (_key, value: unknown) => value instanceof Map || value instanceof Set ? [...value] : value);
   return parseMd(markdown).map(({ type, level, taskChecked, alertType, runs }) => ({
     type, level, taskChecked, alertType,
-    runs: runs.reduce<MdRun[]>((joined, run) => {
+    // Raw HTML shows in Word as other text does, but for a line end in it
+    // (see holdsRawHtmlLineEnd)
+    runs: runs.map(run => run.rawHtml && !holdsRawHtmlLineEnd(run) ? { ...run, rawHtml: undefined } : run).reduce<MdRun[]>((joined, run) => {
       const last = joined[joined.length - 1];
       if (last?.type === 'text' && run.type === 'text' && format(last) === format(run)) joined[joined.length - 1] = { ...last, text: last.text + run.text };
       // A break as Word has it, from a <br> or a \ alike
@@ -1215,6 +1218,7 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
     href: run.href,
     // Where a link starts, though the one before goes to the same place
     ...(run.linkStart ? { linkStart: true } : {}),
+    ...(run.rawHtml ? { rawHtml: true } : {}),
     ...overrides,
   };
 }
@@ -3389,7 +3393,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         } else if (kind === 'raw') {
           result.push({
             type: 'paragraph',
-            runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
+            runs: [{ type: 'text', text: htmlContent.replace(/\n$/, ''), rawHtml: true }]
           });
         } else if (kind === 'image') {
           const srcMatch = htmlContent.match(/src\s*=\s*["']([^"']+)["']/);
@@ -3414,7 +3418,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             // Preserve malformed <img> tags as literal text
             result.push({
               type: 'paragraph',
-              runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
+              runs: [{ type: 'text', text: htmlContent.replace(/\n$/, ''), rawHtml: true }]
             });
           }
         } else if (kind === 'breaks') {
@@ -3523,7 +3527,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             if (allTables.length > 0) warnings?.push('HTML table whose rows are all in comments exported as text (not supported). Move the comments outside the table for round-trip fidelity.');
             result.push({
               type: 'paragraph',
-              runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
+              runs: [{ type: 'text', text: htmlContent.replace(/\n$/, ''), rawHtml: true }]
             });
           }
         }
@@ -3707,7 +3711,8 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             type: 'text',
             text: html,
             ...formatStack,
-            href: currentHref
+            href: currentHref,
+            rawHtml: true,
           });
         } else if (/^<br\s*\/?>$/i.test(html)) {
           // A line break, as import writes one Markdown's \ can't hold: at
@@ -3732,7 +3737,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             });
           } else {
             // Preserve malformed <img> tags as literal text
-            runs.push({ type: 'text', text: html, ...formatStack });
+            runs.push({ type: 'text', text: html, ...formatStack, rawHtml: true });
           }
         } else if (!applyFormatTag(html)) {
           // Preserve unsupported inline HTML-like fragments as literal text
@@ -3741,7 +3746,8 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             type: 'text',
             text: html,
             ...formatStack,
-            href: currentHref
+            href: currentHref,
+            rawHtml: true,
           });
         }
         break;
@@ -5418,9 +5424,34 @@ const LIST_CONTINUATION_STYLE_XML =
   + '<w:semiHidden/><w:unhideWhenUsed/>\n'
   + '</w:style>\n';
 
-function ensureListContinuationStyle(xml: string): string {
-  if (/<w:style\b[^>]*\bw:styleId\s*=\s*(["'])ManuscriptListContinuation\1/.test(xml)) return xml;
-  return xml.replace('</w:styles>', LIST_CONTINUATION_STYLE_XML + '</w:styles>');
+// The character style of a run of raw HTML that holds a line's end, which
+// export writes as Word's line break, as Word shows a line feed in its text
+// as a space and saves it so. Import reads the break in such a run as the
+// HTML's line end again (see readParagraphLineFeeds in converter.ts).
+const RAW_HTML_STYLE_ID = 'ManuscriptHtml';
+
+const RAW_HTML_STYLE_XML =
+  '<w:style w:type="character" w:customStyle="1" w:styleId="' + RAW_HTML_STYLE_ID + '">\n'
+  + '<w:name w:val="Manuscript HTML"/>\n'
+  + '<w:semiHidden/><w:unhideWhenUsed/>\n'
+  + '</w:style>\n';
+
+/** Whether a run is raw HTML that holds a line's end, which export writes
+ *  as Word's line break in the raw HTML style */
+const holdsRawHtmlLineEnd = (run: MdRun): boolean => !!run.rawHtml && run.text.includes('\n');
+
+/** A run's text as `tag` elements, with each line end of its raw HTML as
+ *  Word's line break */
+function rawHtmlTextElements(run: MdRun, tag: 'w:t' | 'w:delText'): string {
+  return run.text.split('\n').map(line => line ? textElements(line, tag) : '').join('<w:br/>');
+}
+
+/** A template's styles with export's own, where it lacks them */
+function ensureManuscriptStyles(xml: string): string {
+  for (const [id, style] of [['ManuscriptListContinuation', LIST_CONTINUATION_STYLE_XML], [RAW_HTML_STYLE_ID, RAW_HTML_STYLE_XML]]) {
+    if (!new RegExp('<w:style\\b[^>]*\\bw:styleId\\s*=\\s*(["\'])' + id + '\\1').test(xml)) xml = xml.replace('</w:styles>', style + '</w:styles>');
+  }
+  return xml;
 }
 
 export function applyAlertColorsToTemplate(stylesXml: string, scheme: ColorScheme): string {
@@ -5756,6 +5787,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     (quoteRpr ? quoteRpr : '') +
     '</w:style>\n' +
     LIST_CONTINUATION_STYLE_XML +
+    RAW_HTML_STYLE_XML +
     githubAlertStyle('GitHubNote', 'GitHub Note', alertColors.note) +
     githubAlertStyle('GitHubTip', 'GitHub Tip', alertColors.tip) +
     githubAlertStyle('GitHubImportant', 'GitHub Important', alertColors.important) +
@@ -6714,6 +6746,7 @@ export function generateRPr(run: MdRun, extraRPr?: string): string {
   const parts: string[] = [];
 
   if (run.code) parts.push('<w:rStyle w:val="CodeChar"/>');
+  else if (holdsRawHtmlLineEnd(run)) parts.push('<w:rStyle w:val="' + RAW_HTML_STYLE_ID + '"/>');
   if (run.bold) parts.push('<w:b/>');
   if (run.italic) parts.push('<w:i/>');
   if (run.strikethrough) parts.push('<w:strike/>');
@@ -7002,7 +7035,7 @@ function generateDeletedCriticContent(
     }
     if (run.type !== 'text' || !run.text) continue;
     const rPr = generateRPr(run, extraRPr);
-    emit('<w:r>' + (rPr ? rPr : '') + delText(run.text) + '</w:r>', run);
+    emit('<w:r>' + (rPr ? rPr : '') + (holdsRawHtmlLineEnd(run) ? rawHtmlTextElements(run, 'w:delText') : delText(run.text)) + '</w:r>', run);
   }
   close();
   return xml;
@@ -7144,6 +7177,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const inner = generateRuns(inputRuns.slice(ri, end).map(withoutLink), state, options, bibEntries, citeprocEngine);
       xml += '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + inner + '</w:hyperlink>';
       ri = end - 1;
+    } else if (run.type === 'text' && holdsRawHtmlLineEnd(run)) {
+      xml += '<w:r>' + generateRPr(run, state.tableRunRPrExtra || undefined) + rawHtmlTextElements(run, 'w:t') + '</w:r>';
     } else if (run.type === 'text') {
       const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
       xml += generateRun(run.text, rPr);
@@ -9874,11 +9909,11 @@ export async function convertMdToDocx(
     mutated = applyLineSpacingToTemplate(mutated, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
     mutated = applyAlertColorsToTemplate(mutated, effectiveColors);
     // The styles export adds to the template's are based on its Normal
-    zip.file('word/styles.xml', withTemplateStyleIds(ensureListContinuationStyle(mutated), templateIds));
+    zip.file('word/styles.xml', withTemplateStyleIds(ensureManuscriptStyles(mutated), templateIds));
   } else if (templateParts?.has('word/styles.xml')) {
     let decoded = asUtf8(decodeXml(templateParts.get('word/styles.xml')!));
     decoded = applyLineSpacingToTemplate(decoded, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
-    zip.file('word/styles.xml', withTemplateStyleIds(ensureListContinuationStyle(applyAlertColorsToTemplate(decoded, effectiveColors)), templateIds));
+    zip.file('word/styles.xml', withTemplateStyleIds(ensureManuscriptStyles(applyAlertColorsToTemplate(decoded, effectiveColors)), templateIds));
   } else {
     zip.file('word/styles.xml', stylesXml(fontOverrides, codeBlockConfig, effectiveColors, frontmatter.styles, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent));
   }
