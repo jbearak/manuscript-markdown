@@ -5909,6 +5909,28 @@ describe('Built-in styles Word names in another language', () => {
     expect(md).not.toContain('font-size: 24');
   });
 
+  test.each([
+    ['Normal', 'Body'],
+    ['Heading1', 'Body'],
+    ['Title', 'Body'],
+    ['TableParagraph', 'Body'],
+    ['CodeBlock', 'Body'],
+  ])('reads no font from a character style whose ID is %s', async (id, heading) => {
+    // A paragraph takes no character style, but import read its font as
+    // the built-in paragraph style's, where no paragraph style had the ID
+    const md = await withStyles(heading, '<w:style w:type="paragraph" w:default="1" w:styleId="Body"><w:name w:val="Body"/>' + font('Georgia', 22) + '</w:style>'
+      + '<w:style w:type="character" w:styleId="' + id + '"><w:name w:val="' + id + ' Char"/>' + font('Impact', 48) + '</w:style>');
+    expect(md).not.toContain('Impact');
+    expect(md).not.toContain(': 24');
+  });
+
+  test('reads the font of a custom style that\'s a character style', async () => {
+    // Which the lookup of a style by its own ID still takes, of any type
+    const md = await withStyles('Body', '<w:style w:type="paragraph" w:default="1" w:styleId="Body"><w:name w:val="Body"/>' + font('Georgia', 22) + '</w:style>'
+      + '<w:style w:type="character" w:customStyle="1" w:styleId="Shout"><w:name w:val="Custom: shout"/>' + font('Impact', 48) + '</w:style>');
+    expect(md).toMatch(/\n  shout:\n(?:    .*\n)*    font: Impact\n/);
+  });
+
   test('reads the paragraph styles named Normal and heading 1 as those, where character styles have their English IDs', async () => {
     // A character style with the built-in style's ID kept import from
     // reading the paragraph style by its name, so it read the character

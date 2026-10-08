@@ -13577,11 +13577,13 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return start.exec(stylesXml)?.index ?? -1;
   }
 
-  /** The w:style element of the style `id`, or of the document's ID for
-   *  it, or else of a paragraph style whose ID differs only in case, as Word
+  /** The w:style element of the paragraph style `id`, or of the document's
+   *  ID for it, or else of one whose ID differs only in case, as Word
    *  matches a style's ID whatever its case, as `heading1`, but not of
-   *  another type, which a paragraph doesn't take */
-  function styleBlock(id: string): string | null {
+   *  another type, which a paragraph doesn't take, as a character style
+   *  `Normal`. With `anyType`, as for a custom style, which can be a
+   *  character style, the style of the ID itself is of any type. */
+  function styleBlock(id: string, anyType = false): string | null {
     const styleId = documentIds.get(id) ?? id;
     let caseless: string | null = null;
     let searchFrom = 0;
@@ -13596,18 +13598,19 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
       const closeTag = empty ? tagEnd : stylesXml.indexOf('</w:style>', tagEnd);
       if (closeTag === -1) return caseless;
       const block = stylesXml.substring(idx, empty ? tagEnd : closeTag + '</w:style>'.length);
-      if (block.includes('w:styleId="' + styleId + '"')) return block;
       const tag = block.slice(0, tagEnd - idx);
       // A style without a type is a paragraph style
-      caseless ??= /\sw:styleId\s*=\s*"([^"]*)"/.exec(tag)?.[1].toLowerCase() === styleId.toLowerCase()
-        && (/\sw:type\s*=\s*"([^"]*)"/.exec(tag)?.[1] ?? 'paragraph') === 'paragraph' ? block : null;
+      const paragraph = (/\sw:type\s*=\s*"([^"]*)"/.exec(tag)?.[1] ?? 'paragraph') === 'paragraph';
+      if (block.includes('w:styleId="' + styleId + '"') && (paragraph || anyType)) return block;
+      caseless ??= paragraph && /\sw:styleId\s*=\s*"([^"]*)"/.exec(tag)?.[1].toLowerCase() === styleId.toLowerCase() ? block : null;
       searchFrom = idx + block.length;
     }
   }
 
-  // Helper: find a style block by styleId and extract rPr content
-  function getStyleRPr(id: string): string | null {
-    const block = styleBlock(id);
+  // Helper: find a style block by styleId and extract rPr content, of a
+  // paragraph style but with `anyType` (see styleBlock)
+  function getStyleRPr(id: string, anyType = false): string | null {
+    const block = styleBlock(id, anyType);
     if (block === null) return null;
     // Skip past pPr to find style-level rPr
     const pPrEnd = block.indexOf('</w:pPr>');
@@ -13665,9 +13668,10 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return parts.length > 0 ? parts.join('-') : 'normal';
   }
 
-  /** Extract pPr content from a style block. */
-  function getStylePPr(id: string): string | null {
-    const block = styleBlock(id);
+  /** Extract pPr content from a style block, of a paragraph style but with
+   *  `anyType` (see styleBlock). */
+  function getStylePPr(id: string, anyType = false): string | null {
+    const block = styleBlock(id, anyType);
     if (block === null) return null;
     const pPrStart = block.indexOf('<w:pPr');
     const pPrEnd = block.indexOf('</w:pPr>');
@@ -13792,16 +13796,17 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     const csStyleIdMatch = block.match(/w:styleId="([^"]+)"/);
     const csStyleId = csStyleIdMatch ? csStyleIdMatch[1] : '';
     const def: CustomStyleDef = {};
-    const csRpr = getStyleRPr(csStyleId);
+    // A custom style can be a character style
+    const csRpr = getStyleRPr(csStyleId, true);
     if (csRpr) {
       const f = extractFont(csRpr);
       if (f && f !== bodyFont) def.font = f;
       const s = extractSizeHp(csRpr);
       if (s !== undefined) def.fontSize = s / 2;
-      const st = extractStyle(csRpr, getStylePPr(csStyleId));
+      const st = extractStyle(csRpr, getStylePPr(csStyleId, true));
       if (st !== 'normal') def.fontStyle = st;
     }
-    const csPpr = getStylePPr(csStyleId);
+    const csPpr = getStylePPr(csStyleId, true);
     if (csPpr) {
       const beforeMatch = csPpr.match(/w:before="(\d+)"/);
       if (beforeMatch) def.spacingBefore = parseInt(beforeMatch[1], 10) / 20;
