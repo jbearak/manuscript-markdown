@@ -444,6 +444,19 @@ describe('BibTeX field whitespace', () => {
     expect(field('note', '{original-date: 1850\n    PMID:  123\n}')).toBe('original-date: 1850\nPMID: 123');
   });
 
+  it('reads a note\'s blank lines in linear time', () => {
+    // Its trim of line ends at its edges read the rest of a run of them
+    // again from each one in it
+    const started = performance.now();
+    expect(field('note', '{a' + '\n'.repeat(40000) + 'b}')).toBe('a' + '\n'.repeat(40000) + 'b');
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it('drops a note\'s blank lines at its edges, but not between its lines', () => {
+    expect(field('note', '{\n \n\ta\n\n \n b \n\n}')).toBe('a\n\n\nb');
+    expect(field('note', '{ \n\n }')).toBe('');
+  });
+
   it.each([
     ['url', '{https://example.org/a\n    b}', 'https://example.org/a\n    b'],
     ['doi', '{ 10.1234/abc }', ' 10.1234/abc '],
