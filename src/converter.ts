@@ -3537,6 +3537,24 @@ async function extractBreakOrdinals(data: Uint8Array | JSZip, prefix: string): P
   }
 }
 
+/** A count for each of some sections, by the ordinal of the break that
+ *  ends each, from a custom property export writes as an object */
+async function extractSectionCounts(data: Uint8Array | JSZip, prefix: string): Promise<Map<number, number> | null> {
+  const json = await extractChunkedCustomProp(data, prefix);
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const result = new Map<number, number>();
+    for (const [ordinal, count] of Object.entries(parsed)) {
+      if (/^\d+$/.test(ordinal) && typeof count === 'number' && Number.isInteger(count) && count > 0) result.set(Number(ordinal), count);
+    }
+    return result.size > 0 ? result : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Extract custom style definitions from MANUSCRIPT_CUSTOM_STYLES_ custom property. */
 export async function extractCustomStyles(data: Uint8Array | JSZip): Promise<Record<string, CustomStyleDef> | null> {
   const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_CUSTOM_STYLES');
@@ -5128,6 +5146,10 @@ export async function extractDocumentContent(
     portraitBreakOrdinals?: Set<number>;
     /** The sections, by the ordinal of the break that ends each, a references marker before their opening fence starts */
     referencesBeforeSections?: Set<number>;
+    /** The hidden paragraphs before a section's opening fence it starts with, by the ordinal of the break that ends it */
+    hiddenBeforeSections?: Map<number, number>;
+    /** The hidden paragraphs after a section's closing fence it ends with, by the ordinal of the break that ends it */
+    hiddenAfterSections?: Map<number, number>;
     /** The last section, by the number of breaks before it, where its landscape page is the template's, which no fence set */
     templatePageSections?: Set<number>;
     customStyles?: Record<string, CustomStyleDef>;
@@ -5203,6 +5225,8 @@ export async function extractDocumentContent(
   let afterSectionBreak = false; // the last paragraph ended a section
   const portraitBreakOrdinals = options?.portraitBreakOrdinals;
   const referencesBeforeSections = options?.referencesBeforeSections;
+  const hiddenBeforeSections = options?.hiddenBeforeSections;
+  const hiddenAfterSections = options?.hiddenAfterSections;
   const templatePageSections = options?.templatePageSections;
   // The tracked mark before the empty carrier that ended the section before,
   // which Markdown drops, unless this section's fence puts its opener there
@@ -5215,20 +5239,60 @@ export async function extractDocumentContent(
   // joinTrackedParagraphBreaks), on an empty paragraph. A references marker
   // export wrote at the start of the section, as it had nothing to list,
   // goes between that mark and the opener, where it came before the
-  // opener, as a custom property says.
+  // opener, as a custom property says. So do the hidden paragraphs,
+  // comments alone, export wrote there, as another says, and the closer
+  // goes before those it wrote at the end, as a third says.
   const endSection = (target: ContentItem[], fence: 'landscape' | 'portrait' | undefined, ordinal = sectionBreakOrdinal - 1): void => {
     const markBefore = markBeforeSection;
     markBeforeSection = undefined;
     if (fence) {
-      const marker = target[sectionStartIndex]?.type === 'para' ? sectionStartIndex + 1 : sectionStartIndex;
-      const at = referencesBeforeSections?.has(ordinal) && target[marker]?.type === 'bibliography_marker' ? marker + 1 : sectionStartIndex;
+      // Past the marker and the hidden paragraphs, each its para item, but
+      // at the document's start, and its comments, which nothing in its
+      // paragraph follows
+      let at = sectionStartIndex;
+      let references = !!referencesBeforeSections?.has(ordinal);
+      let hidden = hiddenBeforeSections?.get(ordinal) ?? 0;
+      for (;;) {
+        const item = target[at]?.type === 'para' ? at + 1 : at;
+        let next = item;
+        while (hidden > 0 && target[next]?.type === 'html_comment') next++;
+        if (references && target[item]?.type === 'bibliography_marker') {
+          references = false;
+          at = item + 1;
+        } else if (next > item && (!target[next] || isStructuralBoundaryItem(target[next]))) {
+          hidden--;
+          at = next;
+        } else {
+          break;
+        }
+      }
       const first = target[at];
       const opener: ContentItem = { type: fence === 'landscape' ? 'landscape_open' : 'portrait_open' };
       target.splice(at, 0,
         ...(first && !isStructuralBoundaryItem(first) && !(first.type === 'math' && first.display) && first.type !== 'html_comment'
           ? [opener, { type: 'para' } as ContentItem] : [opener]));
       if (markBefore) target.splice(sectionStartIndex, 0, { type: 'para', breakRevision: markBefore });
-      target.push({ type: fence === 'landscape' ? 'landscape_close' : 'portrait_close' });
+      // Back past the hidden paragraphs at the end, each its para item and
+      // its comments
+      let end = target.length;
+      for (let hiddenAfter = hiddenAfterSections?.get(ordinal) ?? 0; hiddenAfter > 0; hiddenAfter--) {
+        let start = end;
+        while (target[start - 1]?.type === 'html_comment') start--;
+        if (start === end || target[start - 1]?.type !== 'para') break;
+        end = start - 1;
+      }
+      const closer: ContentItem = { type: fence === 'landscape' ? 'landscape_close' : 'portrait_close' };
+      // The first one's para item can hold the tracked mark of the paragraph
+      // before it, which stays before the closer, on an empty paragraph, as
+      // the break that ends that paragraph (see joinTrackedParagraphBreaks),
+      // as it does where the section's break comes before the comments
+      const firstHidden = target[end];
+      if (end < target.length && firstHidden.type === 'para' && firstHidden.breakRevision) {
+        const { breakRevision, ...rest } = firstHidden;
+        target.splice(end, 1, { type: 'para', breakRevision }, closer, rest);
+      } else {
+        target.splice(end, 0, closer);
+      }
     }
     sectionStartIndex = target.length;
   };
@@ -12968,6 +13032,8 @@ export async function convertDocx(
     portraitTableMapping,
     portraitBreaks,
     referencesBeforeSections,
+    hiddenBeforeSections,
+    hiddenAfterSections,
     templatePageSections,
     explicitTableFontSize,
     storedFieldOrder,
@@ -13031,6 +13097,8 @@ export async function convertDocx(
     portraitTableMapping: extractPortraitTableMapping(zip),
     portraitBreaks: extractPortraitBreakOrdinals(zip),
     referencesBeforeSections: extractBreakOrdinals(zip, 'MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_'),
+    hiddenBeforeSections: extractSectionCounts(zip, 'MANUSCRIPT_HIDDEN_BEFORE_SECTIONS_'),
+    hiddenAfterSections: extractSectionCounts(zip, 'MANUSCRIPT_HIDDEN_AFTER_SECTIONS_'),
     templatePageSections: extractBreakOrdinals(zip, 'MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_'),
     explicitTableFontSize: extractExplicitTableFontSize(zip),
     storedFieldOrder: extractFrontmatterFieldOrder(zip),
@@ -13110,7 +13178,7 @@ export async function convertDocx(
   const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
 
-  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, numberingStyles, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, templatePageSections: templatePageSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, numberingStyles, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, hiddenBeforeSections: hiddenBeforeSections ?? undefined, hiddenAfterSections: hiddenAfterSections ?? undefined, templatePageSections: templatePageSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);
