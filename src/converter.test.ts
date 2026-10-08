@@ -2571,6 +2571,20 @@ describe('Loose lists', () => {
   });
 
   test.each([
+    ['between items', '- a\n\n\n- b\n', '- a\n\n- b\n'],
+    ['between numbered items', '1. a\n\n\n2. b\n', '1. a\n\n2. b\n'],
+    ['between two of three items', '- a\n- b\n\n\n\n- c\n', '- a\n- b\n\n- c\n'],
+    ['between a sublist\'s items', '- a\n  - b\n\n\n  - c\n', '- a\n  - b\n\n  - c\n'],
+    ['after a paragraph in the item before', '- a\n\n  b\n\n\n- c\n', '- a\n\n  b\n\n- c\n'],
+  ])('keeps a list loose with more than one blank line %s, as one', async (_name, md, expected) => {
+    // Markdown reads them as one, which makes the list loose, but the list
+    // came back tight
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
     ['spaces', ' ', '- a\n\n- b\n'],
     ['a tab', '\t', '- a\n\n- b\n'],
     ['a no-break space', ' ', '- a\n- b\n'],
