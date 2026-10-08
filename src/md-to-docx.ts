@@ -1003,16 +1003,18 @@ function createMarkdownIt(): MarkdownIt {
   // A text token that starts with an escaped [, or one written as an
   // entity, as &#91;, as import writes Word's
   // text that reads as a task's box or an alert's marker, keeps that in its
-  // meta, which text_join leaves on the last token of the run it joins
+  // meta, which text_join leaves on the last token of the run it joins, and
+  // so does one that starts with an escaped {, which is no image's size
   md.core.ruler.before('text_join', 'escaped_bracket', state => {
     for (const block of state.tokens) {
       const children = block.type === 'inline' ? block.children ?? [] : [];
       const isText = (token: Token | undefined) => token?.type === 'text' || token?.type === 'text_special';
       for (let i = 0; i < children.length; i++) {
-        if (children[i].type !== 'text_special' || children[i].content !== '[' || isText(children[i - 1])) continue;
+        const escaped = children[i].content === '[' ? 'escapedBracket' : children[i].content === '{' ? 'escapedBrace' : undefined;
+        if (children[i].type !== 'text_special' || !escaped || isText(children[i - 1])) continue;
         let last = i;
         while (isText(children[last + 1])) last++;
-        children[last].meta = { ...children[last].meta, escapedBracket: true };
+        children[last].meta = { ...children[last].meta, [escaped]: true };
         i = last;
       }
     }
@@ -3653,9 +3655,10 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         let width: number | undefined;
         let height: number | undefined;
         let attrs: string | undefined;
-        // Look ahead for {width=N height=N} attribute syntax
+        // Look ahead for {width=N height=N} attribute syntax, but not an
+        // escaped {, or one written as a reference, which is text
         const nextToken = tokens[ti + 1];
-        if (nextToken?.type === 'text' && nextToken.content) {
+        if (nextToken?.type === 'text' && nextToken.content && !nextToken.meta?.escapedBrace) {
           const attrMatch = nextToken.content.match(/^\{([^}]+)\}/);
           if (attrMatch) {
             attrs = attrMatch[1];

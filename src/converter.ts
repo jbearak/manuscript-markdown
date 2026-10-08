@@ -6291,6 +6291,20 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
 }
 
+/** `markdown`, the Markdown of the text at `index`, with a { it starts with
+ *  escaped after an image with no size, as ![a](a.png), which export reads
+ *  {x} after as its size. An <img> with none, which export reads no size
+ *  after, takes it too, as the escape reads as the { there. */
+function escapeBraceAfterImage(markdown: string, segment: ContentItem[], index: number): string {
+  if (!readsMarkdown || markdown[0] !== '{') return markdown;
+  let k = index - 1;
+  while (k >= 0 && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k--;
+  const image = segment[k];
+  if (image?.type !== 'image') return markdown;
+  const own = image.markdown !== undefined ? unembeddedImageMarkdown(image.markdown) : undefined;
+  return (own !== undefined ? !own.endsWith('}') : image.widthPx <= 0 && image.heightPx <= 0) ? '\\' + markdown : markdown;
+}
+
 /** `markdown`, the Markdown of an item, with a }, = or {color} it starts
  *  with escaped after a highlight's closing == at the end of the Markdown
  *  `before` it, which would read them as its own: ==a==} as CriticMarkup's
@@ -8052,7 +8066,7 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i), item, lastSpan);
     }
     i++;
   }
@@ -8278,7 +8292,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i), item, lastSpan);
     }
     i++;
   }
