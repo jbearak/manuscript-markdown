@@ -8719,10 +8719,12 @@ export async function convertMdToDocx(
   // Parse frontmatter for CSL style and other metadata
   const { metadata: frontmatter, body, fieldOrder } = parseFrontmatter(markdown);
   // Count blank lines between frontmatter closing --- and body content.
-  // parseFrontmatter strips one \n; remaining leading \n's = blank lines.
+  // parseFrontmatter strips the closing line's end; the line ends left at
+  // the body's start are the blank lines, with any line end markdown-it
+  // reads, \r\n or a \r alone as well as \n
   const hadFrontmatter = body !== markdown;
   const frontmatterBlankLines = hadFrontmatter
-    ? (body.match(/^\n*/) || [''])[0].length
+    ? (body.match(/^(?:\r\n?|\n)*/)?.[0] ?? '').replace(/\r\n?/g, '\n').length
     : -1; // -1 means no frontmatter present
   const fontOverrides = resolveFontOverrides(frontmatter);
   const isInsetMode = frontmatter.codeBackgroundColor === 'none' || frontmatter.codeBackgroundColor === 'transparent';

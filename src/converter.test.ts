@@ -16335,6 +16335,22 @@ describe('Frontmatter settings round-trip', () => {
       zip.file('word/document.xml', xml.replace(/w:val="IntenseQuote"/g, 'w:val="Quote"'));
     })).toBe('blockquote-style: IntenseQuote');
   });
+
+  test.each([
+    ['one blank line', '\r\n', 'Body'],
+    ['two blank lines', '\r\n\r\n', 'Body'],
+    ['none', '', 'Body'],
+    ['one blank line, before a section', '\r\n', '<!-- landscape -->\r\nWide.\r\n<!-- /landscape -->'],
+    ['one blank line, ended by a \\r alone', '\r', 'Body'],
+  ])('keeps %s after frontmatter with Windows line ends', async (_name, blank, body) => {
+    // Export counted the \n alone at the body's start, which a \r before
+    // each kept from it, and found none
+    const md = '---\r\ntitle: T\r\n---\r\n' + blank + body + '\r\n';
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    const lf = md.replace(/\r\n?/g, '\n');
+    expect(markdown).toBe(lf);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(lf);
+  });
 });
 
 describe('Links in a tracked change', () => {
