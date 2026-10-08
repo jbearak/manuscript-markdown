@@ -54,7 +54,8 @@
 import type JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { XML_ENTITIES, xmlBuilder, xmlParser } from './xml-parser';
-import { ORDERED_OPTIONS, childrenOf, nameOf, type XmlNode } from './scoped-xml';
+import { EXPORT_CONTEXT, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, ORDERED_OPTIONS, WORD_UNDERSTOOD_NAMESPACES, WORDPROCESSINGML, attributeNamed, buildOrdered, childrenOf, contextIn, isElement, isNamed, isProcessedWrapper, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, type Context, type XmlNode } from './scoped-xml';
+import { pushAll } from './arrays';
 
 interface Relationship {
   id: string;
@@ -486,22 +487,193 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
   return result;
 }
 
-/** sectPr's children after pgNumType, which pgNumType goes before, in CT_SectPr's order (ECMA-376) */
-const AFTER_PG_NUM_TYPE = /<w:(?:cols|formProt|vAlign|noEndnote|titlePg|textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)(?=[\s/>])/;
-/** sectPr's children after titlePg, which titlePg goes before */
-const AFTER_TITLE_PG = /<w:(?:textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)\b/;
+/**
+ * A place among a sectPr's children that a property can go: before the
+ * child at `index` of the children of the container that `at` leads to, a
+ * path of child indexes from the sectPr's through wrappers whose content
+ * Word reads as their parent's, and through markup compatibility's
+ * alternatives and their choices and fallbacks; or, `fallback`, in a
+ * fallback of their own of the alternatives at `at`, which have none.
+ */
+interface Slot { at: number[]; index: number; fallback: boolean }
+const slotKey = (slot: Slot) => slot.at.join('/') + (slot.fallback ? '+' : ':' + slot.index);
 
-/** A sectPr with `element` among its own children, before the first that
- *  `before` finds, or after them, and before a tracked change to them */
-function withChild(sectPr: string, element: string, before: RegExp): string {
-  const open = /^<w:sectPr\b[^>]*?(\/?)>/.exec(sectPr);
-  if (!open || !element) return sectPr;
-  const xml = open[1] ? open[0].slice(0, -2) + '>' + '</w:sectPr>' : sectPr;
-  const start = open[1] ? open[0].length - 1 : open[0].length;
-  const change = xml.indexOf('<w:sectPrChange', start);
-  const own = xml.slice(start, change < 0 ? xml.lastIndexOf('</w:sectPr>') : change);
-  const at = start + (before.exec(own)?.index ?? own.length);
-  return xml.slice(0, at) + element + xml.slice(at);
+const isAlternatives = (node: XmlNode, context: Context) => isNamed(node, context.scope, MARKUP_COMPATIBILITY, 'AlternateContent');
+const isWrapper = (node: XmlNode, context: Context) => isProcessedWrapper(node, context.scope, context.compatibility);
+/** A choice's or fallback's namespaces its Requires names, as they're bound
+ *  there, none for a fallback, or none if it's neither */
+function requiredBy(branch: XmlNode, context: Context): string[] | undefined {
+  if (isNamed(branch, context.scope, MARKUP_COMPATIBILITY, 'Fallback')) return [];
+  if (!isNamed(branch, context.scope, MARKUP_COMPATIBILITY, 'Choice')) return undefined;
+  const inner = scopeIn(branch, context.scope);
+  // A choice that requires nothing is none (ECMA-376 Part 3 §10.2.1)
+  const prefixes = (attributeNamed(branch, context.scope, undefined, 'Requires') ?? '').split(/\s+/).filter(Boolean);
+  return prefixes.length === 0 ? undefined : prefixes.map(prefix => inner.get(prefix) ?? 'unbound:' + prefix);
+}
+
+/** The namespaces the choices among a sectPr's children, `nodes`, in a
+ *  context, require, at any depth of alternatives and wrappers */
+function requiredIn(nodes: XmlNode[], context: Context, required = new Set<string>()): Set<string> {
+  for (const node of nodes.filter(isElement)) {
+    if (!isAlternatives(node, context) && !isWrapper(node, context)) continue;
+    const inner = contextIn(node, context);
+    for (const branch of isAlternatives(node, context) ? childrenOf(node).filter(isElement) : [node]) {
+      if (branch !== node) for (const namespace of requiredBy(branch, inner) ?? []) required.add(namespace);
+      requiredIn(childrenOf(branch), branch === node ? inner : contextIn(branch, inner), required);
+    }
+  }
+  return required;
+}
+
+/** What a consumer reads of a sectPr's children, `nodes`, in a context, that
+ *  understands the namespaces `understood`: each property's place in
+ *  CT_SectPr's order (see sectPrRank), -1 for one it doesn't have, and each
+ *  slot it sees, in order. Of markup compatibility's alternatives it reads
+ *  the first choice whose Requires it understands, or else the fallback, or
+ *  else nothing, where a fallback of their own would be */
+type Reading = Array<{ rank: number } | { slot: Slot }>;
+function readingOf(nodes: XmlNode[], context: Context, understood: ReadonlySet<string>, at: number[]): Reading {
+  const reading: Reading = [];
+  nodes.forEach((node, i) => {
+    reading.push({ slot: { at, index: i, fallback: false } });
+    if (!isElement(node)) return;
+    if (isAlternatives(node, context)) {
+      const inner = contextIn(node, context), branches = childrenOf(node);
+      const chosen = branches.findIndex(branch => isElement(branch) && (requiredBy(branch, inner) ?? ['']).every(namespace => understood.has(namespace)));
+      if (chosen === -1) reading.push({ slot: { at: [...at, i], index: -1, fallback: true } });
+      else pushAll(reading, readingOf(childrenOf(branches[chosen]), contextIn(branches[chosen], inner), understood, [...at, i, chosen]));
+    } else if (isWrapper(node, context)) {
+      pushAll(reading, readingOf(childrenOf(node), contextIn(node, context), understood, [...at, i]));
+    } else {
+      reading.push({ rank: sectPrRank(sectPrPropertyOf(node, context.scope)) });
+    }
+  });
+  reading.push({ slot: { at, index: nodes.length, fallback: false } });
+  return reading;
+}
+
+/** The slots in a reading where a property whose place in CT_SectPr's order
+ *  is `rank` is in its place: after every property CT_SectPr puts before it
+ *  or with it, and before every one it puts after it; or, where the
+ *  properties are out of that order, before the first it puts after it */
+function placesIn(reading: Reading, rank: number): Set<string> {
+  const ranks = reading.map(entry => 'rank' in entry ? entry.rank : -1);
+  const places = new Set<string>();
+  reading.forEach((entry, p) => {
+    if ('slot' in entry && ranks.slice(0, p).every(other => other <= rank) && ranks.slice(p + 1).every(other => other === -1 || other > rank)) places.add(slotKey(entry.slot));
+  });
+  if (places.size > 0) return places;
+  const first = ranks.findIndex(other => other > rank);
+  const end = first === -1 ? reading.length : first;
+  let start = end - 1;
+  while (start >= 0 && ranks[start] === -1) start--;
+  for (let p = start + 1; p < end; p++) {
+    const entry = reading[p];
+    if ('slot' in entry) places.add(slotKey(entry.slot));
+  }
+  return places;
+}
+
+/** The sets of a set's members, up to six of them, or else none and the
+ *  members Word understands */
+function readersOf(required: Set<string>): Array<Set<string>> {
+  const members = [...required];
+  if (members.length > 6) return [new Set(), new Set(members.filter(namespace => WORD_UNDERSTOOD_NAMESPACES.has(namespace)))];
+  return Array.from({ length: 2 ** members.length }, (_, n) => new Set(members.filter((__, i) => n & (1 << i))));
+}
+
+/**
+ * A sectPr's children, `nodes`, in a context, with `added`, section
+ * properties read in export's document (see EXPORT_CONTEXT), whose place
+ * in CT_SectPr's order is `rank`, where every consumer reads them in that
+ * place, once: one that understands any of the namespaces their choices
+ * require, whichever alternatives it reads, and Word too. A slot that every
+ * consumer sees, among the sectPr's own children, is first, and else slots
+ * in choices, fallbacks or wrappers, each that only consumers that read it
+ * there see, and, where alternatives that hold properties on both sides of
+ * that place have no fallback, one of their own, which a consumer that
+ * understands none of their choices reads. Of slots alike, the last is
+ * first, before the first property CT_SectPr puts after them. Where no
+ * set of slots gives every consumer one, they go where Word reads them in
+ * their place. Never within a tracked change's old properties,
+ * w:sectPrChange, last. Each goes moved into its place (see moved).
+ */
+function placed(nodes: XmlNode[], context: Context, added: XmlNode[], rank: number): XmlNode[] {
+  const required = requiredIn(nodes, context);
+  const readers = readersOf(required);
+  const readings = readers.map(understood => readingOf(nodes, context, understood, []));
+  const places = readings.map(reading => placesIn(reading, rank));
+  // Each slot with the consumers that see it, and where the first of them does
+  const slots = new Map<string, { slot: Slot; readers: Set<number>; position: number }>();
+  readings.forEach((reading, r) => reading.forEach((entry, position) => {
+    if (!('slot' in entry)) return;
+    const key = slotKey(entry.slot);
+    const known = slots.get(key);
+    if (known) known.readers.add(r);
+    else slots.set(key, { slot: entry.slot, readers: new Set([r]), position });
+  }));
+  const candidates = [...slots.entries()].filter(([key, { readers: seen }]) => [...seen].every(r => places[r].has(key))).map(([, value]) => value)
+    .sort((a, b) => b.readers.size - a.readers.size || a.slot.at.length - b.slot.at.length || Number(a.slot.fallback) - Number(b.slot.fallback) || b.position - a.position);
+  const cover = (remaining: ReadonlySet<number>): Slot[] | undefined => {
+    if (remaining.size === 0) return [];
+    const reader = [...remaining].reduce((least, r) => Math.min(least, r), Infinity);
+    for (const candidate of candidates) {
+      if (!candidate.readers.has(reader) || [...candidate.readers].some(r => !remaining.has(r))) continue;
+      const rest = cover(new Set([...remaining].filter(r => !candidate.readers.has(r))));
+      if (rest) return [candidate.slot, ...rest];
+    }
+    return undefined;
+  };
+  let chosen = cover(new Set(readers.keys()));
+  if (!chosen) {
+    const word = readers.findIndex(understood => [...required].every(namespace => understood.has(namespace) === WORD_UNDERSTOOD_NAMESPACES.has(namespace)));
+    const best = [...slots.values()].filter(({ slot }) => places[word].has(slotKey(slot)) && slots.get(slotKey(slot))!.readers.has(word))
+      .sort((a, b) => a.slot.at.length - b.slot.at.length || Number(a.slot.fallback) - Number(b.slot.fallback) || b.position - a.position)[0];
+    chosen = best ? [best.slot] : [];
+  }
+  return withAdded(nodes, context, [], chosen, added);
+}
+
+const startsWith = (path: number[], prefix: number[]) => prefix.every((index, i) => path[i] === index);
+const samePath = (a: number[], b: number[]) => a.length === b.length && startsWith(a, b);
+
+/** Children, `nodes`, of the container `at` leads to, in a context, with
+ *  `added` in each of the slots given there, and in containers in them */
+function withAdded(nodes: XmlNode[], context: Context, at: number[], slots: Slot[], added: XmlNode[]): XmlNode[] {
+  const placedIn = (where: Context) => added.map(node => moved(node, EXPORT_CONTEXT, where));
+  const result: XmlNode[] = [];
+  nodes.forEach((node, i) => {
+    if (slots.some(slot => !slot.fallback && samePath(slot.at, at) && slot.index === i)) pushAll(result, placedIn(context));
+    const path = [...at, i];
+    if (!isElement(node) || !slots.some(slot => startsWith(slot.at, path))) {
+      result.push(node);
+      return;
+    }
+    const inner = contextIn(node, context);
+    if (!isAlternatives(node, context)) {
+      result.push({ ...node, [nameOf(node)]: withAdded(childrenOf(node), inner, path, slots, added) });
+      return;
+    }
+    const branches = childrenOf(node).map((branch, j) => slots.some(slot => startsWith(slot.at, [...path, j]))
+      ? { ...branch, [nameOf(branch)]: withAdded(childrenOf(branch), contextIn(branch, inner), [...path, j], slots, added) } : branch);
+    // A fallback of their own, under the prefix their name has
+    const name = nameOf(node), prefix = name.slice(0, name.indexOf(':') + 1);
+    const fallback = slots.some(slot => slot.fallback && samePath(slot.at, path)) ? [{ [prefix + 'Fallback']: placedIn(inner) }] : [];
+    result.push({ ...node, [name]: [...branches, ...fallback] });
+  });
+  if (slots.some(slot => !slot.fallback && samePath(slot.at, at) && slot.index === nodes.length)) pushAll(result, placedIn(context));
+  return result;
+}
+
+/** A sectPr export writes, in its document, with `element`, one or more
+ *  section properties of the name `property`, among its own children in
+ *  CT_SectPr's order (see placed). Elements and attributes are known by
+ *  their namespaces, whatever their prefixes. */
+function withChild(sectPr: string, element: string, property: string): string {
+  const parsed = element ? parseOrdered(sectPr)?.find(isElement) : undefined;
+  const added = parsed && parseOrdered(element)?.filter(isElement);
+  if (!parsed || !added || !isNamed(parsed, EXPORT_NAMESPACES, WORDPROCESSINGML, 'sectPr')) return sectPr;
+  return buildOrdered([{ ...parsed, [nameOf(parsed)]: placed(childrenOf(parsed), contextIn(parsed, EXPORT_CONTEXT), added, sectPrRank(property)) }]);
 }
 
 /**
@@ -511,10 +683,10 @@ function withChild(sectPr: string, element: string, before: RegExp): string {
  * after the first take its headers and footers and count its pages on.
  */
 export function withTemplateSection(sectPr: string, sections: TemplateSections, first: boolean): string {
-  sectPr = withChild(sectPr, first ? sections.pgNumType.first : sections.pgNumType.others, AFTER_PG_NUM_TYPE);
+  sectPr = withChild(sectPr, first ? sections.pgNumType.first : sections.pgNumType.others, 'pgNumType');
   if (!first) return sectPr;
-  sectPr = withChild(sectPr, sections.references, /^/);
-  return sections.titlePg ? withChild(sectPr, '<w:titlePg/>', AFTER_TITLE_PG) : sectPr;
+  sectPr = withChild(sectPr, sections.references, 'headerReference');
+  return sections.titlePg ? withChild(sectPr, '<w:titlePg/>', 'titlePg') : sectPr;
 }
 
 /**
