@@ -160,6 +160,7 @@ export interface MdToken {
   customStyleOpen?: string;   // sentinel: start of custom style block (style name)
   customStyleClose?: true;    // sentinel: end of custom style block
   indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override from <!-- indent --> / <!-- no-indent -->
+  listDirective?: 'indent' | 'no-indent'; // a list item right after a directive that comes right after an item, which ends that item's list (see listItemIndentOverrideProps)
   embedIdx?: number;          // index into embed directives array, for round-trip recovery
 }
 
@@ -2885,6 +2886,17 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
       }
       result.splice(i, 1);
     } else if (target < result.length && result[target].type === 'list_item') {
+      // Right after a list, which it ends in Markdown, where Word may have
+      // one list, as two of bullets make. The blank line before it goes
+      // before the item, as import writes it before the directive. Of
+      // directives in a row, the last one, closest to the item, holds, which
+      // this scan from the end gave the item first
+      const before = result[i - 1];
+      if (target === i + 1 && before && (before.type === 'list_item' || before.listContinuation)) {
+        result[target].listDirective = result[target].indentOverride ?? override;
+        const line = result[i].sourceRange?.[0];
+        if (line !== undefined && line > 0 && /^[ \t]*\r?$/.test(sourceLines[line - 1] ?? 'x')) result[target].blankLineBefore = true;
+      }
       // Apply to all consecutive list items in this list block
       let prevTopOrdered: boolean | undefined;
       for (let j = target; j < result.length && result[j].type === 'list_item'; j++) {
@@ -4094,6 +4106,14 @@ const DROPPED_LIST_BLOCK_TYPES = new Set([
   'fence', 'code_block', 'blockquote_open', 'table_open', 'hr',
 ]);
 
+/** Whether a list item drops `text`, a comment alone in an HTML block in
+ *  the item after its text, as a directive, which the item can't hold.
+ *  Import asks it before it writes a list's indent directive in an item
+ *  (see writesListDirective there) */
+export function itemDropsComment(text: string): boolean {
+  return directiveRest(text) !== undefined;
+}
+
 function droppedListBlockWarning(kind: string): string {
   return kind + ' inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.';
 }
@@ -4196,7 +4216,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           if (fate === 'skipped') continue;
           const first = !foundFirstParagraph && childSegments.length === 0 && blocks.length === 1;
           const directive = !first && blocks.length === 1 && blocks[0].runs.length === 1 && blocks[0].runs[0].type === 'html_comment'
-            && directiveRest(blocks[0].runs[0].text) !== undefined;
+            && itemDropsComment(blocks[0].runs[0].text);
           if (fate === 'dropped' || directive) {
             warnings?.push(droppedListBlockWarning('HTML block'));
           } else if (first) {
@@ -4695,6 +4715,7 @@ export interface DocxGenState {
   indentOverrides: Map<number, 'indent' | 'no-indent'>; // body paragraph index → override
   bodyParagraphIndex: number;      // counter for body paragraphs (for indent override tracking)
   listIndentOverrides: Map<number, 'indent' | 'no-indent'>; // list block index → override
+  listItemIndentOverrides: Map<number, Map<number, 'indent' | 'no-indent'>>; // list block index → the place in it of an item after a directive → override
   listBlockIndex: number;          // counter for list blocks (consecutive groups of list_items)
   listItemOrdinal: number;         // the place of the next list item in its list block
   listBlankLines: Map<number, number[]>; // list block index → the places in it of items with a blank line before them
@@ -6677,6 +6698,18 @@ function listIndentOverrideProps(overrides: Map<number, 'indent' | 'no-indent'>)
   }
   return chunkCustomProps('MANUSCRIPT_LIST_INDENT_OVERRIDES_', JSON.stringify(mapping));
 }
+/** The directives before list items that start a Markdown list in a list
+ *  block, by the block and the item's place in it, counting the items at
+ *  every level. A directive right after a list ends it, but export writes
+ *  nothing for one, and the list after it of the same type goes on in
+ *  Word's, as bullets do, so the block's own override, at its start, can't
+ *  hold it */
+function listItemIndentOverrideProps(overrides: Map<number, Map<number, 'indent' | 'no-indent'>>): CustomPropEntry[] {
+  if (overrides.size === 0) return [];
+  const mapping: Record<string, Record<string, string>> = {};
+  for (const [block, places] of overrides) mapping[String(block)] = Object.fromEntries(places);
+  return chunkCustomProps('MANUSCRIPT_LIST_ITEM_INDENT_OVERRIDES_', JSON.stringify(mapping));
+}
 /** Records a blank line before the item at `place` in list block `block`,
  *  in the block's places as they are, as a long loose list has one before
  *  each item */
@@ -6688,12 +6721,14 @@ export function recordListBlankLine(blankLines: Map<number, number[]>, block: nu
 
 /** A list item export reads the list block and place of from its document:
  *  its paragraph's w14:paraId, whether a blank line before it makes its
- *  list loose, and its indent directive */
-interface ListItemRead { paraId: string; blankLine: boolean; indentOverride?: 'indent' | 'no-indent' }
+ *  list loose, its indent directive, and the one right before it, after an
+ *  item (see MdToken.listDirective) */
+interface ListItemRead { paraId: string; blankLine: boolean; indentOverride?: 'indent' | 'no-indent'; listDirective?: 'indent' | 'no-indent' }
 
 /** The records of `items` in their list blocks and places, `places`, as
  *  import reads them: an item's blank line where it isn't its block's first,
- *  and its directive where it is. An item import reads in no block, which
+ *  and its directive where it is, or the one right before it where it
+ *  isn't (see listItemIndentOverrideProps). An item import reads in no block, which
  *  isn't one Word shows, has none */
 function recordListItemsRead(state: DocxGenState, items: ListItemRead[], places: Map<string, [number, number]>): void {
   for (const item of items) {
@@ -6702,6 +6737,11 @@ function recordListItemsRead(state: DocxGenState, items: ListItemRead[], places:
     const [block, place] = at;
     if (place > 0 && item.blankLine) recordListBlankLine(state.listBlankLines, block, place);
     if (place === 0 && item.indentOverride) state.listIndentOverrides.set(block, item.indentOverride);
+    else if (place > 0 && item.listDirective) {
+      const directives = state.listItemIndentOverrides.get(block) ?? new Map<number, 'indent' | 'no-indent'>();
+      directives.set(place, item.listDirective);
+      state.listItemIndentOverrides.set(block, directives);
+    }
   }
 }
 
@@ -9303,6 +9343,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       }
       state.listBlockIndex++;
       state.listItemOrdinal = 0;
+    } else if (token.type === 'list_item' && token.listDirective && !state.listByStyle) {
+      const block = state.listBlockIndex - 1;
+      const places = state.listItemIndentOverrides.get(block) ?? new Map<number, 'indent' | 'no-indent'>();
+      places.set(state.listItemOrdinal, token.listDirective);
+      state.listItemIndentOverrides.set(block, places);
     }
     let readParaId: string | undefined;
     if (token.type === 'list_item') {
@@ -9322,14 +9367,15 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       // apart, as lists of two types, or of numbers, which Word starts over,
       // but not two of bullets. A sublist's first item comes right after its
       // parent item instead, and there the blank line makes the parent's
-      // list loose
+      // list loose. An item after a directive keeps the blank line before
+      // the directive, which import writes back before it
       const level = token.level ?? 1;
-      const besideList = !!token.listStart && prevToken?.type === 'list_item' && (prevToken.level ?? 1) >= level
+      const besideList = !!token.listStart && !token.listDirective && prevToken?.type === 'list_item' && (prevToken.level ?? 1) >= level
         && (level === 1 || !token.ordered && besideOrdered === false);
       const blankLine = !!token.blankLineBefore && !!prevToken && prevToken.type !== 'blockquote' && !besideList;
       if (state.listByStyle) {
         readParaId = generateParaId(state);
-        state.listItemsRead.push({ paraId: readParaId, blankLine, ...(token.indentOverride ? { indentOverride: token.indentOverride } : {}) });
+        state.listItemsRead.push({ paraId: readParaId, blankLine, ...(token.indentOverride ? { indentOverride: token.indentOverride } : {}), ...(token.listDirective ? { listDirective: token.listDirective } : {}) });
       } else if (blankLine && state.listItemOrdinal > 0) {
         recordListBlankLine(state.listBlankLines, state.listBlockIndex - 1, state.listItemOrdinal);
       }
@@ -9937,6 +9983,7 @@ export async function convertMdToDocx(
     indentOverrides: new Map(),
     bodyParagraphIndex: 0,
     listIndentOverrides: new Map(),
+    listItemIndentOverrides: new Map(),
     listBlockIndex: 0,
     listItemOrdinal: 0,
     listBlankLines: new Map(),
@@ -10408,6 +10455,7 @@ export async function convertMdToDocx(
     customProps.push(...bibliographyHangingIndentProps(frontmatter));
     customProps.push(...indentOverrideProps(state.indentOverrides));
     customProps.push(...listIndentOverrideProps(state.listIndentOverrides));
+    customProps.push(...listItemIndentOverrideProps(state.listItemIndentOverrides));
     customProps.push(...listBlankLineProps(state.listBlankLines));
     customProps.push(...blockquoteGapProps(state.blockquoteGaps));
     customProps.push(...blockquotePreContentBlankLineProps(state.blockquotePreContentBlankLines));

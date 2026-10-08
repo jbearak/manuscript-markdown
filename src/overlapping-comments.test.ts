@@ -753,10 +753,10 @@ describe('Overlapping comments: where the bodies go', () => {
   });
 
   test('keep two lists apart in a paragraph of their own', async () => {
-    // As an empty paragraph, which ends the first list; import keeps them
-    // apart with a comment, so the second keeps its numbering and override
+    // As an empty paragraph, which ends the first list; the override before
+    // the second keeps them apart, so it keeps its numbering
     const back = await imported('1. ' + seen + '\n\n' + bodies + '\n\n<!-- no-indent -->\n1. Next');
-    expect(back).toBe('1. ' + seen + '\n' + bodies + '\n\n<!-- -->\n\n<!-- no-indent -->\n1. Next');
+    expect(back).toBe('1. ' + seen + '\n' + bodies + '\n\n<!-- no-indent -->\n1. Next');
     expect(await imported(back)).toBe(back);
   });
 

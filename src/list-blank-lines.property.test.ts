@@ -80,12 +80,13 @@ function markdownOf(blocks: Block[], numbered = false): { md: string; firsts: Se
     });
     return lines;
   };
-  const md = blocks.map((block, k) => block.kind === 'para' ? 'p' + n++
+  const md = blocks.map(block => block.kind === 'para' ? 'p' + n++
     : block.kind === 'heading' ? '# h' + n++
       : block.kind === 'quote' ? '> q' + n++
-        // Not after a list, which Word would show as one with the list
-        // before it, as export writes nothing for the directive between them
-        : (block.directive && blocks[k - 1]?.kind !== 'list' ? '<!-- ' + block.directive + ' -->\n' : '') + runLines(block.runs, '', true).join('\n')).join('\n\n') + '\n';
+        // After a list too, which Word shows as one with the list before it
+        // where they're of the same type, as export writes nothing for the
+        // directive between them
+        : (block.directive ? '<!-- ' + block.directive + ' -->\n' : '') + runLines(block.runs, '', true).join('\n')).join('\n\n') + '\n';
   return { md, firsts, items };
 }
 

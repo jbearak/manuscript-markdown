@@ -14,7 +14,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, showsAsText, startsHtmlBlock, withoutSpaceOutsideComments } from './md-to-docx';
+import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, showsAsText, startsHtmlBlock, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -4582,6 +4582,30 @@ export async function extractListIndentOverrides(data: Uint8Array | JSZip): Prom
     for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
       const idx = parseInt(k, 10);
       if (!isNaN(idx) && (v === 'indent' || v === 'no-indent')) map.set(idx, v as string);
+    }
+    return map.size > 0 ? map : null;
+  } catch { return null; }
+}
+
+/** The directives export recorded before list items that start a Markdown
+ *  list in a list block, by the block and the item's place in it (see
+ *  listItemIndentOverrideProps there) */
+export async function extractListItemIndentOverrides(data: Uint8Array | JSZip): Promise<Map<number, Map<number, 'indent' | 'no-indent'>> | null> {
+  const mappingJson = await extractChunkedCustomProp(data, 'MANUSCRIPT_LIST_ITEM_INDENT_OVERRIDES');
+  if (!mappingJson) return null;
+  try {
+    const obj = JSON.parse(mappingJson);
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+    const map = new Map<number, Map<number, 'indent' | 'no-indent'>>();
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      const block = parseInt(k, 10);
+      if (isNaN(block) || !v || typeof v !== 'object' || Array.isArray(v)) continue;
+      const places = new Map<number, 'indent' | 'no-indent'>();
+      for (const [p, override] of Object.entries(v as Record<string, unknown>)) {
+        const place = parseInt(p, 10);
+        if (place > 0 && (override === 'indent' || override === 'no-indent')) places.set(place, override);
+      }
+      if (places.size > 0) map.set(block, places);
     }
     return map.size > 0 ? map : null;
   } catch { return null; }
@@ -11170,6 +11194,17 @@ function isStructuralBoundaryItem(item: ContentItem): boolean {
     || item.type === 'custom_style_close';
 }
 
+/** Whether buildMarkdown writes a list's indent directive before `item`:
+ *  the first item of a list block with an override, but not a quote, a
+ *  heading or code Word numbered, which take none. Before a nested item,
+ *  the directive goes in the item above it, indented as the nested one, as
+ *  an HTML block there, which it writes only where export's list item
+ *  keeps one, which it doesn't a directive (see itemDropsComment) */
+function writesListDirective(item: ParaItem): boolean {
+  return !!item.indentOverride && !!item.listMeta && !!item.listBlockStart && !item.headingLevel && !item.blockquoteLevel && !item.isCodeBlock
+    && (item.listMeta.level === 0 || !itemDropsComment('<!-- ' + item.indentOverride + ' -->'));
+}
+
 /** Each list item in content, with the index of its list block and its
  *  place in the block, counting the items at every level, as export counts
  *  them (see listBlockIndex there). A block ends at anything but an item or
@@ -13751,14 +13786,15 @@ export function buildMarkdown(
         ? nextOrderedNumber(item.listMeta, orderedListCounters, listTypeByLevel, lastListLevel)
         : undefined;
       // Markdown carries a top-level list on across blank lines, so where
-      // Word starts one over, a comment keeps the two apart, but for a fence
-      // right before the item, which does
+      // Word starts one over, a comment keeps the two apart, or the indent
+      // directive written before the item (see listBlockStart), but for a
+      // fence right before the item, which does
       const carriesOn = item.listMeta?.level === 0 && topOrderedNext !== undefined && listContentEnd !== undefined
         && output.slice(listContentEnd).every(part => !part.trim()) && !afterSentinel;
       if (orderedItem && carriesOn && (orderedItem.restarts || (orderedItem.isNew && orderedItem.number !== topOrderedNext))) {
         while (output.length > 0 && !output[output.length - 1].trim()) output.pop();
         if (output.length > 0) output[output.length - 1] = output[output.length - 1].replace(/\n+$/, '');
-        output.push('\n\n<!-- -->\n\n');
+        output.push(writesListDirective(item) ? '\n\n' : '\n\n<!-- -->\n\n');
         endListContext();
       } else if (orderedItem?.restarts && item.listMeta!.level > 0 && listContentEnd !== undefined
           && output.slice(listContentEnd).every(part => !part.trim())) {
@@ -13808,7 +13844,7 @@ export function buildMarkdown(
       if (item.indentOverride && !item.headingLevel && !item.blockquoteLevel && !item.isCodeBlock) {
         if (item.listMeta) {
           // Emit sentinel only before the first item of a list block
-          if (item.listBlockStart) {
+          if (writesListDirective(item)) {
             // Indent the sentinel as the item so it doesn't break an
             // enclosing list as a top-level HTML block (CommonMark §4.6).
             const useTab = options?.listIndent === 'tab';
@@ -15640,6 +15676,7 @@ export async function convertDocx(
     storedDefaultCsl,
     storedIndentOverrides,
     storedListIndentOverrides,
+    storedListItemIndentOverrides,
     storedListBlankLines,
     embedDirectiveMapping,
     defaultTableDigits,
@@ -15697,6 +15734,7 @@ export async function convertDocx(
     storedDefaultCsl: extractDefaultCsl(zip),
     storedIndentOverrides: extractIndentOverrides(zip),
     storedListIndentOverrides: extractListIndentOverrides(zip),
+    storedListItemIndentOverrides: extractListItemIndentOverrides(zip),
     storedListBlankLines: extractListBlankLines(zip),
     embedDirectiveMapping: extractEmbedDirectiveMapping(zip),
     defaultTableDigits: extractDefaultTableDigits(zip),
@@ -15819,13 +15857,16 @@ export async function convertDocx(
 
   // Post-process: apply per-list-block indent overrides from custom properties.
   // A list block is a run of items, as listBlockPlaces counts them.
-  if (storedListIndentOverrides) {
-    // The override of each block's first item goes to all its items
+  if (storedListIndentOverrides || storedListItemIndentOverrides) {
+    // The override of each block's first item goes to all its items, up to
+    // one a directive went before in the block, which starts a Markdown
+    // list, and whose override goes to the rest
     let blockOverride: 'indent' | 'no-indent' | undefined;
     for (const [item, block, place] of listBlockPlaces(docContent)) {
-      if (place === 0) {
+      const directive = place > 0 ? storedListItemIndentOverrides?.get(block)?.get(place) : undefined;
+      if (place === 0 || directive) {
         item.listBlockStart = true;
-        const override = storedListIndentOverrides.get(block);
+        const override = directive ?? storedListIndentOverrides?.get(block);
         if (override) item.indentOverride = override as 'indent' | 'no-indent';
         blockOverride = item.indentOverride;
       } else if (blockOverride) {
