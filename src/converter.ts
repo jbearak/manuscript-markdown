@@ -1425,7 +1425,9 @@ export type ContentItem =
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean }
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting }
   | { type: 'html_comment'; text: string; commentIds: Set<string> }
-  | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string }
+  // href and link: as text's, of a w:hyperlink around the picture or its
+  // docPr's a:hlinkClick
+  | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string; href?: string; link?: number }
   | { type: 'landscape_open' }
   | { type: 'landscape_close' }
   | { type: 'portrait_open' }
@@ -4023,7 +4025,7 @@ async function extractNotes(
  * Other hidden text, such as legacy metadata or the pieces of a split
  * \u200B-prefixed sentinel, stays hidden.
  */
-function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefined, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo): XmlNode[] {
+function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefined, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, link?: { href: string; link: number }): XmlNode[] {
   if (!rPrChildren || !isToggleOn(rPrChildren, 'w:vanish')) return runChildren;
   const fieldChildren = runChildren.filter((c) => c['w:fldChar'] !== undefined || c['w:instrText'] !== undefined);
   if (fieldChildren.length > 0) return fieldChildren;
@@ -4038,7 +4040,7 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
       runText += '\n';
     }
   }
-  readHiddenText(runText, target, activeComments, revision);
+  readHiddenText(runText, target, activeComments, revision, link);
   return [];
 }
 
@@ -4117,7 +4119,7 @@ function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[
  * Markdown, up to a closing ZWSP, which the image keeps once it has it. Word
  * can split one between runs, or join several in one.
  */
-function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo): void {
+function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, link?: { href: string; link: number }): void {
   // The start of one Word split off before it showed which it is
   const pending = pendingHiddenText.get(target);
   pendingHiddenText.delete(target);
@@ -4182,7 +4184,7 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
       const end = rest.indexOf('\u200B', 1);
       target.push({
         type: 'image', rId: '', src: '', alt: '', widthPx: 0, heightPx: 0, commentIds: new Set(activeComments),
-        markdown: end === -1 ? rest.slice(1) : rest.slice(1, end + 1), ...(revision ? { revision } : {}),
+        markdown: end === -1 ? rest.slice(1) : rest.slice(1, end + 1), ...(revision ? { revision } : {}), ...link,
       });
       rest = end === -1 ? '' : rest.slice(end + 1);
     } else {
@@ -4202,8 +4204,14 @@ const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number 
 /** The Markdown of an image export couldn't embed, without its closing ZWSP */
 /** An image's Markdown: its own, as an embed wrote it, an <img> tag where
  *  it came from one, or else ![alt](src) with its size, as export reads it
- *  there (see syntaxText) */
+ *  there (see syntaxText), in a link of its own where it's a link's */
 function imageMarkdown(item: ContentItem & { type: 'image' }, imageFormatMapping?: Map<string, string>): string {
+  const image = pictureMarkdown(item, imageFormatMapping);
+  return item.href ? markdownLink(image, item.href) : image;
+}
+
+/** An image's Markdown as imageMarkdown writes it, without its link */
+function pictureMarkdown(item: ContentItem & { type: 'image' }, imageFormatMapping?: Map<string, string>): string {
   if (item.markdown !== undefined) return syntaxText(unembeddedImageMarkdown(item.markdown));
   if (imageFormatMapping?.get(item.rId) === 'html') {
     return syntaxText('<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"'
@@ -4455,7 +4463,8 @@ function parseNoteBody(
           // As in extractDocumentContent, from the notes' relationships
           const { relationships, folder, files } = context.images;
           target.push(...drawingImages(asXmlNodes(node[key]), relationships, folder, files,
-            { commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) }));
+            { commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...(currentHref ? { href: currentHref, link: currentLink } : {}) },
+            { relationships: context.relationshipMap, next: () => ++linkCount }));
 
         // --- Basic text elements (always handled) ---
         } else if (key === 'w:t' || key === 'w:delText') {
@@ -4590,7 +4599,7 @@ function parseNoteBody(
               break;
             }
           }
-          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision);
+          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision, currentHref ? { href: currentHref, link: currentLink } : undefined);
           // A hidden mark is still the note's, which Word's space or tab
           // after it follows
           if (walked !== runChildren && !skippedSelfRef && runChildren.some(child => child[selfRefTag] !== undefined)) passMark(target);
@@ -4967,11 +4976,14 @@ function imageFilename(files: ImageFiles, filename: string, mediaPath: string): 
 /**
  * The images of a w:drawing, its <wp:inline>s and <wp:anchor>s, whose
  * pictures' relationships are in `relationships`, with `extra` on each
- * item. `files` collects the file each needs.
+ * item. `files` collects the file each needs. A picture outside a
+ * w:hyperlink whose docPr clicks to one of the `hyperlinks`' relationships
+ * links there, as a link of its own, numbered by `hyperlinks.next`.
  */
 function drawingImages(
   drawing: XmlNode[], relationships: Map<string, string>, imageFolder: string, files: ImageFiles,
-  extra: { commentIds: Set<string>; revision?: RevisionInfo },
+  extra: { commentIds: Set<string>; revision?: RevisionInfo; href?: string; link?: number },
+  hyperlinks?: { relationships: Map<string, string>; next: () => number },
 ): ContentItem[] {
   const images: ContentItem[] = [];
   for (const child of drawing) {
@@ -4979,7 +4991,7 @@ function drawingImages(
     if (!inlineOrAnchor) continue;
     const elements = asXmlNodes(inlineOrAnchor);
     // Extract extent, docPr, and blip from the inline/anchor element
-    let cx = 0, cy = 0, alt = '', docPrName = '', blipRId = '';
+    let cx = 0, cy = 0, alt = '', docPrName = '', blipRId = '', clickRId = '';
     for (const el of elements) {
       if (el['wp:extent'] !== undefined) {
         cx = parseInt(getAttr(el, 'cx') || '0', 10);
@@ -4987,6 +4999,8 @@ function drawingImages(
       } else if (el['wp:docPr'] !== undefined) {
         alt = getAttr(el, 'descr') || '';
         docPrName = getAttr(el, 'name') || '';
+        const click = asXmlNodes(el['wp:docPr']).find(child => child['a:hlinkClick'] !== undefined);
+        if (click) clickRId = click[':@']?.['@_r:id'] ?? getAttr(click, 'id');
       } else if (el['a:graphic'] !== undefined) {
         // Dig into a:graphic > a:graphicData > pic:pic > pic:blipFill > a:blip
         const graphicData = findAllDeep([el], 'a:graphicData');
@@ -5012,7 +5026,11 @@ function drawingImages(
     const src = imageFolder ? imageFolder.replace(/\/$/, '') + '/' + outputFilename : outputFilename;
     const widthPx = cx > 0 ? emuToPixels(cx) : 0;
     const heightPx = cy > 0 ? emuToPixels(cy) : 0;
-    images.push({ type: 'image', rId: blipRId, src, alt, widthPx, heightPx, ...extra, commentIds: new Set(extra.commentIds) });
+    const clickHref = !extra.href && clickRId ? hyperlinks?.relationships.get(clickRId) : undefined;
+    images.push({
+      type: 'image', rId: blipRId, src, alt, widthPx, heightPx, ...extra, commentIds: new Set(extra.commentIds),
+      ...(clickHref ? { href: clickHref, link: hyperlinks!.next() } : {}),
+    });
     if (!files.filenames.has(outputFilename)) {
       files.filenames.set(outputFilename, mediaZipPath(mediaPath));
       files.entries.push({ rId: blipRId, mediaPath, outputFilename });
@@ -5569,7 +5587,7 @@ export async function extractDocumentContent(
             }
           }
 
-          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision);
+          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision, currentHref ? { href: currentHref, link: currentLink } : undefined);
           fieldShows.run(runChildren, walked);
           walk(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (key === 'w:br') {
@@ -5954,7 +5972,8 @@ export async function extractDocumentContent(
           }
         } else if (key === 'w:drawing') {
           target.push(...drawingImages(asXmlNodes(node[key]), imageRelMap, imageFolder, imageFiles,
-            { commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) }));
+            { commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...(currentHref ? { href: currentHref, link: currentLink } : {}) },
+            { relationships: relationshipMap, next: () => ++linkCount }));
         } else if (Array.isArray(node[key])) {
           walk(node[key], currentFormatting, target, inTableCell, currentRevision);
         }
@@ -6250,8 +6269,8 @@ function bareLinkReadsBack(before: string, address: string, closer: string, foll
 }
 
 /** `markdown`, the Markdown of the text at `index`, with a ! at its end
- *  escaped where a link comes next in its comments, which the ! would make
- *  an image of, as in ![text](url). A note's [^1] or a citation's [@key]
+ *  escaped where a link, or a picture in one, comes next in its comments,
+ *  which the ! would make an image of, as in ![text](url). A note's [^1] or a citation's [@key]
  *  isn't one, and stays one after a !. Spans of a tracked change keep apart
  *  at a ! before a link (canJoinSpans), so only text in none, or on a side
  *  of a substitution (`side`), which has none of its own, runs into one.
@@ -6266,7 +6285,7 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   // A tracked change's delimiters come between them, but for one of part of
   // a link of several runs, which go inside its text, after its [. In an
   // HTML table's cell, a link is its tag, which a ! makes nothing of.
-  if (!readsMarkdown || k >= end || item.type !== 'text' || next.type !== 'text' || next.href === undefined
+  if (!readsMarkdown || k >= end || item.type !== 'text' || next.type !== 'text' && next.type !== 'image' || next.href === undefined
     || !side && (item.revision || next.revision && !partlyRevisedLinkAt(segment, k, end, next.commentIds))
     || !commentSetsEqual(item.commentIds, next.commentIds)) return markdown;
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
@@ -7420,6 +7439,8 @@ function indexedText(item: ContentItem): string {
   // a citation's key across, as in $<!-- x$ -->, though not emphasis, nor
   // a link's text (see TextIndex.linkClosers)
   if (item.type === 'html_comment') return item.text;
+  // A linked image's link, as a link's below, with the image as its text
+  if (item.type === 'image' && item.href) return '[\uFFFC](' + formatHrefForMarkdown(item.href) + ')';
   if (item.type !== 'text') return '\uFFFC';
   // A link's text in its brackets, whose ] closes a citation before it
   // and whose URL's $ closes math, even where it's written as its URL
@@ -7589,10 +7610,11 @@ const startsBlock = (item: ContentItem | undefined): boolean =>
   item?.type === 'text' && startsBlockLine(wrapWithFormatting(item.text, item.formatting));
 
 /**
- * A Word hyperlink's runs from `start`, its text and line breaks, all in the
- * comments `commentIds`, as one Markdown link around them, but not the next
- * hyperlink's, though it goes to the same place, so [a **b** c](u)
- * and a link with a line break in it stay one link. A revision of the whole
+ * A Word hyperlink's runs from `start`, its text, line breaks and pictures,
+ * all in the comments `commentIds`, as one Markdown link around them, but
+ * not the next hyperlink's, though it goes to the same place, so
+ * [a **b** c](u), a link with a line break in it and [a ![b](b.png) c](u)
+ * stay one link. A revision of the whole
  * link goes around it, from `item`'s, and one of part of it inside it, as
  * a deletion at its end does where its insertion comes after the link,
  * which Word keeps out of the hyperlink, and each run's of one of all of it
@@ -7601,25 +7623,26 @@ const startsBlock = (item: ContentItem | undefined): boolean =>
  * the runs around the link too. Undefined where the link is one run.
  */
 function linkGroup(
-  segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>,
+  segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>, imageFormatMapping?: Map<string, string>,
 ): { text: string; end: number; item: InlineRevisionItem; join: { join: SpanJoin; literal: Set<string> } } | undefined {
   const first = segment[start];
-  if (first.type !== 'text' || !first.href || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
-  const inLink = (i: number): ContentItem & { type: 'text' } | undefined => {
+  if ((first.type !== 'text' && first.type !== 'image') || !first.href || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
+  const inLink = (i: number): ContentItem & { type: 'text' | 'image' } | undefined => {
     const item = segment[i];
-    return i < end && item.type === 'text' && item.href === first.href && item.link === first.link
+    return i < end && (item.type === 'text' || item.type === 'image') && item.href === first.href && item.link === first.link
       && commentSetsEqual(item.commentIds, commentIds) ? item : undefined;
   };
-  const items: Array<ContentItem & { type: 'text' }> = [];
+  const items: Array<ContentItem & { type: 'text' | 'image' }> = [];
   for (let next = first; next; next = inLink(start + items.length)!) {
     items.push(next);
+    if (next.type === 'image') continue;
     if (next.text === '\\\n') {
       // A line of the link that would start a block, which Markdown reads
       // before the link, starts a link of its own after the break, which
       // ends this one, so the line starts with its ](url)
       let line = '';
-      for (let i = start + items.length, item = inLink(i); item && item.text !== '\\\n'; item = inLink(++i)) {
-        line += wrapWithFormatting(item.text, item.formatting);
+      for (let i = start + items.length, item = inLink(i); item && !(item.type === 'text' && item.text === '\\\n'); item = inLink(++i)) {
+        line += item.type === 'image' ? pictureMarkdown(item, imageFormatMapping) : wrapWithFormatting(item.text, item.formatting);
       }
       if (startsBlockLine(line)) break;
     }
@@ -7636,8 +7659,12 @@ function linkGroup(
   // `after` it as the rest of the text before the link's ](url), as a link
   // of one run does. A line break goes in the formatting Word shows on it
   // (see showsOnBreak), as outside a link.
-  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' && !showsOnBreak(items[k].formatting) ? lineBreakText()
-    : markedFormatting(items[k].text, items[k].formatting, false, after.linkTo(href));
+  const itemText = (k: number, after: RunsAfter): string => {
+    const item = items[k];
+    if (item.type === 'image') return pictureMarkdown(item, imageFormatMapping);
+    return item.text === '\\\n' && !showsOnBreak(item.formatting) ? lineBreakText()
+      : markedFormatting(item.text, item.formatting, false, after.linkTo(href));
+  };
   // A revision of the whole link goes around it, but where its span would
   // end at its closer in the link's code, and a substitution with nothing
   // on its other side can't hold the link either, as one whose old side
@@ -7653,6 +7680,8 @@ function linkGroup(
       return { text: link, end: start + items.length, item: first, join: combinedSpanJoin(items) };
     }
   }
+  // A substitution's sides are text (see side)
+  const sideItem = (j: number) => items[j] as ContentItem & { type: 'text' };
   let text = '';
   let span: RevisionSpan | undefined;
   // Where the deletions end that a substitution was tried from, which the
@@ -7666,7 +7695,8 @@ function linkGroup(
     // of its sides, each whole, as renderSubstitutionRun writes one
     const revision = item.revision;
     if (revision?.type === 'deletion' && k >= triedUntil) {
-      const side = (j: number, type: RevisionInfo['type']) => j < items.length && items[j].revision?.type === type
+      // Not a picture, which no substitution holds, as outside a link
+      const side = (j: number, type: RevisionInfo['type']) => j < items.length && items[j].type === 'text' && items[j].revision?.type === type
         && items[j].revision!.author === revision.author && items[j].revision!.date === revision.date;
       let additions = k;
       while (side(additions, 'deletion')) additions++;
@@ -7724,10 +7754,10 @@ function linkGroup(
           while (run > 0 && starts[run] > at) run--;
           retry = k + run + 1;
         } else if (resolvedRun !== -1 && (resolvedRun === 0
-            || !items[k + resolvedRun - 1].formatting.strikethrough && items[k + resolvedRun - 1].text !== '')) {
+            || !sideItem(k + resolvedRun - 1).formatting.strikethrough && sideItem(k + resolvedRun - 1).text !== '')) {
           retry = k + resolvedRun + 1;
         } else {
-          while (retry < additions && !items[retry - 1].formatting.strikethrough && !items[retry - 1].text.includes('~')) retry++;
+          while (retry < additions && !sideItem(retry - 1).formatting.strikethrough && !sideItem(retry - 1).text.includes('~')) retry++;
         }
         triedUntil = retry;
       }
@@ -7854,8 +7884,15 @@ function renderInlineRange(
       continue;
     }
 
-    // An image in a comment's range goes in its anchor, below
+    // An image in a comment's range goes in its anchor, below. One in a
+    // link goes with the rest of the link's runs, as they do
     if (item.type === 'image' && item.commentIds.size === 0) {
+      const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS, renderOpts?.imageFormatMapping);
+      if (link) {
+        [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
+        i = link.end;
+        continue;
+      }
       [out, lastSpan] = appendRevised(out, imageMarkdown(item, renderOpts?.imageFormatMapping), item, lastSpan);
       i++;
       continue;
@@ -7905,6 +7942,12 @@ function renderInlineRange(
           break;
         }
         if (seg.type === 'image') {
+          const link = linkGroup(segment, j, segmentEnd, commentSet, renderOpts?.imageFormatMapping);
+          if (link) {
+            [anchorText, anchorSpan] = appendRevised(anchorText, link.text, link.item, anchorSpan, link.join);
+            j = link.end;
+            continue;
+          }
           [anchorText, anchorSpan] = appendRevised(anchorText, imageMarkdown(seg, renderOpts?.imageFormatMapping), seg, anchorSpan);
           j++;
           continue;
@@ -7915,7 +7958,7 @@ function renderInlineRange(
           j++;
           continue;
         }
-        const link = linkGroup(segment, j, segmentEnd, commentSet);
+        const link = linkGroup(segment, j, segmentEnd, commentSet, renderOpts?.imageFormatMapping);
         if (link) {
           [anchorText, anchorSpan] = appendRevised(anchorText, link.text, link.item, anchorSpan, link.join);
           j = link.end;
@@ -7965,7 +8008,7 @@ function renderInlineRange(
       continue;
     }
 
-    const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS);
+    const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS, renderOpts?.imageFormatMapping);
     if (link) {
       [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
       i = link.end;
@@ -8155,6 +8198,13 @@ function renderInlineRangeWithIds(
     if (item.type === 'image') {
       const currentIds = item.commentIds;
       enterComments(currentIds);
+      // With the rest of its link, as the link's text goes
+      const link = linkGroup(segment, i, segmentEnd, currentIds, imageFormatMapping);
+      if (link) {
+        [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
+        i = link.end;
+        continue;
+      }
       const imgText = imageMarkdown(item, imageFormatMapping);
       [out, lastSpan] = appendRevised(out, imgText, item, lastSpan);
       i++;
@@ -8183,7 +8233,7 @@ function renderInlineRangeWithIds(
 
     enterComments(currentIds);
 
-    const link = linkGroup(segment, i, segmentEnd, currentIds);
+    const link = linkGroup(segment, i, segmentEnd, currentIds, imageFormatMapping);
     if (link) {
       [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
       i = link.end;

@@ -735,6 +735,8 @@ Image paths can contain spaces: `![alt text](my figures/some image.png)`. Angle 
 
 Manuscript Markdown supports two syntaxes for images with optional dimension attributes.
 
+An image can be a link's text, or part of it, as in `[![alt text](image.png)](https://example.com)`. In Word it's a linked picture.
+
 ### Attribute Syntax
 
 ```markdown

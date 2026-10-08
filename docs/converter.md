@@ -141,6 +141,7 @@ An image it can't embed (a URL or data URI, an unsupported format, or a file it 
 - **Alt text**: Preserved exactly through `<wp:docPr descr="...">`.
 - **Syntax format**: The original Markdown syntax (attribute syntax or HTML `<img>`) is restored on re-import via the `MANUSCRIPT_IMAGE_FORMATS` metadata.
 - **Deduplication**: Multiple references to the same image file produce a single `word/media/` entry in the DOCX.
+- **Links**: An image in a link, alone as in `[![alt](a.png)](https://example.com)` or with text as in `[see ![alt](a.png) here](https://example.com)`, exports inside the link's `<w:hyperlink>`, and its `<wp:docPr>` holds an `<a:hlinkClick>` to the same place, as Word writes a linked picture. Import reads the link from either.
 
 ## Citation Key Formats
 
