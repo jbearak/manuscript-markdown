@@ -4963,7 +4963,8 @@ export function applyFontOverridesToTemplate(
   overrides: FontOverrides,
   customStyles?: Record<string, import('./frontmatter').CustomStyleDef>
 ): string {
-  let xml = new TextDecoder('utf-8').decode(stylesXmlBytes);
+  // In the encoding they declare, as UTF-16, and as export writes them
+  let xml = asUtf8(decodeXml(stylesXmlBytes));
   // The template's IDs for the built-in styles, which its styles are found by
   const ids = templateStyleIds(xml);
 
@@ -9299,9 +9300,7 @@ export async function convertMdToDocx(
   // generation so generateTable() compares per-table sizes against the correct
   // document-level default (not the hardcoded DEFAULT_BODY_HP fallback).
   if (fontOverrides.tableSizeFromDefault && templateParts?.has('word/styles.xml')) {
-    const templateBodyHp = extractNormalStyleSizeHp(
-      new TextDecoder('utf-8').decode(templateParts.get('word/styles.xml')!)
-    );
+    const templateBodyHp = extractNormalStyleSizeHp(decodeXml(templateParts.get('word/styles.xml')!));
     if (templateBodyHp !== undefined) {
       fontOverrides.tableSizeHp = Math.max(1, templateBodyHp - 4);
     }
@@ -9778,7 +9777,7 @@ export async function convertMdToDocx(
     // The styles export adds to the template's are based on its Normal
     zip.file('word/styles.xml', withTemplateStyleIds(ensureListContinuationStyle(mutated), templateIds));
   } else if (templateParts?.has('word/styles.xml')) {
-    let decoded = new TextDecoder('utf-8').decode(templateParts.get('word/styles.xml')!);
+    let decoded = asUtf8(decodeXml(templateParts.get('word/styles.xml')!));
     decoded = applyLineSpacingToTemplate(decoded, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
     zip.file('word/styles.xml', withTemplateStyleIds(ensureListContinuationStyle(applyAlertColorsToTemplate(decoded, effectiveColors)), templateIds));
   } else {
