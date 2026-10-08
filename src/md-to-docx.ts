@@ -7932,7 +7932,8 @@ function withQuoteCommentBodiesMerged(tokens: MdToken[]): MdToken[] {
 export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let pPr = '';
 
-  // Apply custom style when inside a <!-- style: X --> block (only for plain paragraphs)
+  // Apply custom style when inside a <!-- style: X --> block (to plain
+  // paragraphs here, and to list items in their case below)
   if (token.type === 'paragraph' && state.activeCustomStyle) {
     const styleDef = state.customStyles?.[state.activeCustomStyle];
     const twips = state.firstLineIndentTwips || 720;
@@ -8023,6 +8024,10 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
         const number = token.ordered ? (previous !== undefined ? previous + 1 : token.startNumber ?? 1) : undefined;
         state.listItemNumbers = [...(state.listItemNumbers ?? []).slice(0, ilvl), number];
       }
+      // In a style block, the item takes the block's style, as a paragraph
+      // does, under its numbering, which import reads back as an item in
+      // the block
+      if (state.activeCustomStyle) pPr = pPr.replace('<w:pPr>', () => '<w:pPr><w:pStyle w:val="' + customStyleId(state.activeCustomStyle!) + '"/>');
       break;
     case 'blockquote': {
       const bqStyleOpt = options?.blockquoteStyle ?? 'GitHub';
@@ -8854,9 +8859,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
 
   let prevToken: MdToken | undefined;
   // The token before this one as import counts list blocks: a style fence
-  // writes no paragraph, and a list's paragraphs get no custom style, so
-  // import finds no boundary at one, and the lists on either side of it are
-  // one block there (see listBlockPlaces)
+  // writes no paragraph, so import finds no boundary at one, and the lists
+  // on either side of it are one block there (see listBlockPlaces)
   let listPrevToken: MdToken | undefined;
   // The document's start, before a title, starts a section as a close does,
   // so a section that opens the document needs no break before it, which

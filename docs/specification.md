@@ -391,7 +391,7 @@ The mind is not a vessel to be filled, but a fire to be kindled.
 <!-- /style -->
 ```
 
-All paragraphs between the opening and closing directives receive the named style. Nested style directives are not supported — opening a new style implicitly closes the previous one (with a warning).
+All paragraphs between the opening and closing directives receive the named style. So do list items, under their numbering, and import writes them back in the block. A paragraph or quote in a list item keeps the style export gives it there, and comes back in the block with its item. Nested style directives are not supported — opening a new style implicitly closes the previous one (with a warning).
 
 #### Round-Trip
 
