@@ -658,10 +658,48 @@ export function citationEndInText(text: string, start: number): number {
   return citationEnd({ src: text, md: citationTextMd, env: {} }, start);
 }
 
-/** The URLs and email addresses linkify finds in text, as export reads it */
-export function linkifyMatches(text: string): Array<{ schema: string; index: number; lastIndex: number }> {
+// linkify-it searches what's left of a text after each link it finds from
+// its start, for a scheme and for an email address, and each search can run
+// to the end, so text of many links took time quadratic in its length, as a
+// paragraph of email addresses on export, or a highlight's URLs before an
+// address on import. No link or address holds a space or a control
+// character, linkify's \p{Z} and \p{Cc}, and linkify reads one beside a link
+// as it reads the start or end of its text. So text goes to it in pieces of
+// about LINKIFY_PIECE characters, each cut before one of those, which find
+// the same links. That holds while fuzzyLink is off, as createMarkdownIt
+// sets it: its check for a host reads on past the link it finds.
+const LINKIFY_PIECE = 256;
+let linkifySeparatorRe: RegExp | undefined;
+type Linkify = MarkdownIt['linkify'];
+type LinkifyMatch = NonNullable<ReturnType<Linkify['match']>>[number];
+
+/** The links `linkify` finds in text, as its own match finds them, from
+ *  pieces of it about `pieceLength` long */
+function linkifyInPieces(linkify: Linkify, text: string, pieceLength: number): LinkifyMatch[] | null {
+  // Its own, which createMarkdownIt puts this in place of
+  const matchWhole: Linkify['match'] = Object.getPrototypeOf(linkify).match;
+  if (text.length <= pieceLength) return matchWhole.call(linkify, text);
+  // The separators linkify's own patterns use, which its typing leaves out
+  linkifySeparatorRe ??= new RegExp('(?:' + (linkify.re as unknown as Record<string, string>).src_ZCc + ')', 'g');
+  const links: LinkifyMatch[] = [];
+  for (let start = 0; start < text.length;) {
+    linkifySeparatorRe.lastIndex = start + pieceLength;
+    const end = linkifySeparatorRe.exec(text)?.index ?? text.length;
+    for (const link of matchWhole.call(linkify, text.slice(start, end)) ?? []) {
+      link.index += start;
+      link.lastIndex += start;
+      links.push(link);
+    }
+    start = end;
+  }
+  return links.length > 0 ? links : null;
+}
+
+/** The URLs and email addresses linkify finds in text, as export reads it,
+ *  from pieces of it about `pieceLength` long */
+export function linkifyMatches(text: string, pieceLength = LINKIFY_PIECE): LinkifyMatch[] {
   citationTextMd ??= createMarkdownIt();
-  return citationTextMd.linkify.match(text) ?? [];
+  return linkifyInPieces(citationTextMd.linkify, text, pieceLength) ?? [];
 }
 
 // Where a URL's host ends at the latest, after the // after its colon: its
@@ -986,6 +1024,8 @@ function createMarkdownIt(): MarkdownIt {
   // Word can't open a protocol-relative //example.com.
   md.linkify.set({ fuzzyLink: false });
   md.linkify.add('//', null);
+  // Its linkify rule's search, in pieces (see LINKIFY_PIECE)
+  md.linkify.match = text => linkifyInPieces(md.linkify, text, LINKIFY_PIECE);
   md.use(imagePathsWithSpaces);
   md.use(codeSpansOfSpaces);
   md.use(criticBreaksEndLinks);

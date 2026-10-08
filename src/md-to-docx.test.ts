@@ -6034,6 +6034,42 @@ describe('Comments a paragraph reads inline', () => {
   }, 60000);
 });
 
+describe('Links linkify finds in long text', () => {
+  // linkify-it searched what was left of a text after each link it found
+  // from its start, for an email address and for a scheme, so text of many
+  // links took time quadratic in its length. It gets the text in pieces.
+  it('finds in pieces the links it finds in all of the text', async () => {
+    const { linkifyMatches } = await import('./md-to-docx');
+    const part = fc.constantFrom('https://a.com', 'http://e.co/x', 'ftp://f.org', 'mailto:a@b.cd', 'x@y.com', '//e.com', 'www.e.com',
+      ' ', '\t', '\n', ' ', '　', ' ', '\x7f', '(', ')', '[', ']', '.', ',', ';', '!', '?', '"', '\'', '<', '>', '-', '_',
+      ':', '/', '\\', '@', '=', '｜', 'é', 'a', '1', ':80', '.com');
+    const links = (text: string, pieceLength: number) => linkifyMatches(text, pieceLength).map(link => [link.schema, link.index, link.lastIndex]);
+    fc.assert(fc.property(fc.array(part, { maxLength: 60 }).map(parts => parts.join('')), fc.integer({ min: 1, max: 40 }), (text, pieceLength) => {
+      expect(links(text, pieceLength)).toEqual(links(text, Infinity));
+    }), { numRuns: 2000 });
+  });
+
+  it('reads a paragraph of many email addresses in linear time', () => {
+    // Export's linkify rule found each address after a search to the end of
+    // the paragraph. Four times the addresses took about eleven times as long.
+    const read = (n: number) => () => parseMd('a@b.com '.repeat(n) + 'x\n');
+    expect(read(5)()[0].runs.filter(run => run.href === 'mailto:a@b.com')).toHaveLength(5);
+    const time = (work: () => unknown) => {
+      const start = performance.now();
+      work();
+      return performance.now() - start;
+    };
+    // The fastest of five runs of each, by turns
+    let small = Infinity;
+    let large = Infinity;
+    for (let k = 0; k < 5; k++) {
+      large = Math.min(large, time(read(8000)));
+      small = Math.min(small, time(read(2000)));
+    }
+    expect(large / small).toBeLessThan(8);
+  }, 60000);
+});
+
 describe('Character references in HTML', () => {
   // A table's body cell's text in Word, and in the preview, as markdown-it
   // writes a Markdown table

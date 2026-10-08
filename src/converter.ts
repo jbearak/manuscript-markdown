@@ -1284,14 +1284,14 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     // resolveEmphasis writes as a reference there, so it ends the text
     // linkify reads, as an escape does, as in x@y.com&#61;==a==
     if (after?.first === '=' && /(?:^|[^\\])(?:\\\\)*=$/.test(markdown)) {
-      colons.push(...colonsIn(markdown.slice(0, -1) + '\\=').filter(colon => colon < markdown.length - 1));
+      pushAll(colons, colonsIn(markdown.slice(0, -1) + '\\=').filter(colon => colon < markdown.length - 1));
     }
     // A URL whose host goes on in the runs after, as https:// before struck
     // e.com, where the delimiters between, as ~~, don't end it, in any way
     // they may be written
     const scheme = markdown.lastIndexOf('://');
     if (after && scheme !== -1 && !/[\s/]/.test(markdown.slice(scheme + 3))) {
-      for (const host of after.hostAfter(HOST_LOOKAHEAD)) colons.push(...colonsIn(markdown + host).filter(colon => colon < markdown.length));
+      for (const host of after.hostAfter(HOST_LOOKAHEAD)) pushAll(colons, colonsIn(markdown + host).filter(colon => colon < markdown.length));
     }
     for (const colon of colons) {
       const at = from.get(colon);

@@ -6266,6 +6266,33 @@ describe('Bare links', () => {
   ])('leaves a ! alone before what no link starts: %s', async (md) => {
     expect(await roundTrip(md)).toBe(md + '\n');
   });
+
+  test.each([
+    ['URLs in a highlight before an email address', (n: number) => '==' + 'https\\://e.com '.repeat(n) + 'x\\@y.com&#61;==\n'],
+    ['email addresses', (n: number) => 'a\\@b.com '.repeat(n) + 'x\n'],
+  ])('escapes many %s in a run in linear time', async (_name, make) => {
+    // Import finds the links linkify would make of a run's text, and
+    // linkify-it searched what was left of it after each link from its
+    // start, for an email address and a scheme, so four times the links
+    // took about fourteen times as long
+    const [small, large] = [(await convertMdToDocx(make(3000))).docx, (await convertMdToDocx(make(12000))).docx];
+    let markdown = '';
+    const time = async (docx: Uint8Array) => {
+      const start = performance.now();
+      markdown = (await convertDocx(docx)).markdown;
+      return performance.now() - start;
+    };
+    // The fastest of three runs of each, by turns
+    let smallTime = Infinity;
+    let largeTime = Infinity;
+    for (let k = 0; k < 3; k++) {
+      smallTime = Math.min(smallTime, await time(small));
+      largeTime = Math.min(largeTime, await time(large));
+    }
+    // Compared whole, as a diff of it would be long
+    expect(markdown === make(12000)).toBe(true);
+    expect(largeTime / smallTime).toBeLessThan(8);
+  }, 120000);
 });
 
 describe('w:br line break handling', () => {
