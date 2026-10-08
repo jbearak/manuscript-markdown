@@ -3509,6 +3509,56 @@ describe('Sentinel gap round-trip', () => {
     expect(markdown).toBe(md);
   });
 
+  test.each([
+    ['a landscape section', 'Text\n\n<!-- landscape -->\n\nWide\n\n<!-- /landscape -->\n'],
+    ['a portrait section', 'Text\n\n<!-- portrait -->\n\nTall\n\n<!-- /portrait -->\n'],
+    ['a style block', '<!-- style: quote -->\nQuoted.\n<!-- /style -->\n'],
+  ])('keeps the line ends between the closing fence of %s and a references marker after it', async (_name, before) => {
+    // The marker's empty paragraph wrote the fence's line ends, as export
+    // kept them, and the marker a blank line on top
+    for (const gap of ['\n', '\n\n', '\n\n\n']) {
+      const md = before + gap.slice(1) + '<!-- references -->\n\nAfter.\n';
+      let markdown = md;
+      for (let i = 0; i < 2; i++) markdown = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+      expect(markdown).toBe(md);
+    }
+  });
+
+  test('keeps the line ends between the opening fence of a landscape section and a references marker at its start', async () => {
+    for (const gap of ['\n', '\n\n', '\n\n\n']) {
+      const md = 'Text\n\n<!-- landscape -->\n' + gap.slice(1) + '<!-- references -->\n\nWide\n\n<!-- /landscape -->\n';
+      let markdown = md;
+      for (let i = 0; i < 2; i++) markdown = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+      expect(markdown).toBe(md);
+    }
+  });
+
+  test('keeps the line end between a comment of its own and a references marker after it', async () => {
+    const md = 'Text.\n\n<!-- c -->\n<!-- references -->\n\nAfter.\n';
+    let markdown = md;
+    for (let i = 0; i < 2; i++) markdown = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(markdown).toBe(md);
+  });
+
+  test.each([
+    ['the closing fence of a landscape section', 'Text\n\n<!-- landscape -->\n\nWide\n\n<!-- /landscape -->\n'],
+    ['the closing fence of a style block', '<!-- style: quote -->\nQuoted.\n<!-- /style -->\n'],
+    ['a comment of its own', 'Text.\n\n<!-- c -->\n'],
+  ])('leaves out a references marker that ends the body on the line after %s', async (_name, before) => {
+    // As after a blank line, where export puts the bibliography without
+    // one. Word deleted the paragraph after it.
+    for (const gap of ['\n', '\n\n']) {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(before + gap.slice(1) + '<!-- references -->\n\nAfter.\n')).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const edited = xml.replace(/<w:p[ >](?:(?!<\/w:p>).)*After\.(?:(?!<\/w:p>).)*<\/w:p>/, '');
+      expect(edited).not.toBe(xml);
+      zip.file('word/document.xml', edited);
+      const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+      expect(markdown).toBe(before);
+      expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+    }
+  });
+
   test('keeps a section after a paragraph of whitespace on a line of its own', async () => {
     const md = '&nbsp;\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n';
     const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;

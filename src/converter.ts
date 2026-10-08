@@ -11119,7 +11119,8 @@ export function buildMarkdown(
   const sentinelGaps = options?.sentinelGaps;
   let sentinelLoIdx = 0, sentinelLcIdx = 0, sentinelPoIdx = 0, sentinelPcIdx = 0;
   let sentinelCsoIdx = 0, sentinelCscIdx = 0;
-  function ensureTrailingNewlines(desired: number): void {
+  // The line ends the output ends with, over its parts
+  function trailingNewlines(): number {
     let existing = 0;
     for (let outputIndex = output.length - 1; outputIndex >= 0; outputIndex--) {
       const value = output[outputIndex];
@@ -11130,6 +11131,10 @@ export function buildMarkdown(
       }
       if (charIndex >= 0) break;
     }
+    return existing;
+  }
+  function ensureTrailingNewlines(desired: number): void {
+    const existing = trailingNewlines();
     if (existing < desired) output.push('\n'.repeat(desired - existing));
   }
 
@@ -11798,9 +11803,10 @@ export function buildMarkdown(
     }
 
     if (item.type === 'bibliography_marker') {
-      if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
-        output.push('\n\n');
-      }
+      // After the line ends its empty paragraph wrote, as the after-gap of
+      // a fence or a comment of its own before it, which export kept, as a
+      // line end alone, or else a blank line
+      if (output.length > 0 && trailingNewlines() === 0) output.push('\n\n');
       output.push('<!-- references -->');
       endListContext();
       lastAlertParagraphKey = undefined;
@@ -12264,11 +12270,12 @@ export function buildMarkdown(
   // puts the bibliography without one, at the end of the document, which in
   // Markdown only the notes' definitions follow, so as not to add a marker
   // that wasn't in the original: a block of its own, after a blank line, as
-  // import writes it, not one in the block of a line before it, as the HTML
-  // around a table is, which a comment that the marker ends can go on in
-  // past a blank line.
+  // import writes it, or on the line after a fence or a comment of its own,
+  // as it writes it there, not one in the block of a line before it, as the
+  // HTML around a table is, which a comment that the marker ends can go on
+  // in past a blank line.
   const body = output.join('');
-  const endingMarker = /(?:^|\n\n+)<!--\s*references\s*-->\s*$/.exec(body);
+  const endingMarker = /(?:^|\n+)<!--\s*references\s*-->\s*$/.exec(body);
   if (endingMarker) {
     const line = body.slice(0, endingMarker.index + endingMarker[0].indexOf('<!--')).split('\n').length - 1;
     if (!htmlBlocksIn(body).some(block => block.start < line && line < block.end)) output.splice(0, output.length, body.slice(0, endingMarker.index));
