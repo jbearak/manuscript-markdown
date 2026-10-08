@@ -31,7 +31,7 @@ export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, type TemplateSections } from './template-sections';
-import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, buildOrdered, childrenOf, contextIn, effectiveSectPr, isElement, moved, nameOf, parseOrdered, sectPrPropertyOf } from './scoped-xml';
+import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, WORDPROCESSINGML, attributeNamed, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, type Context, type Scope, type XmlNode } from './scoped-xml';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -4762,35 +4762,43 @@ function pageContentWidthPx(state: DocxGenState): number {
   return Math.max(1, (pageWidthTwips - left - right) / 15);
 }
 
-/** A sectPr's own properties, before its last child, w:sectPrChange, a
- *  tracked change's old properties, which hold a w:sectPr of their own */
-function ownSectPrXml(sectPrXml: string): string {
-  const change = sectPrXml.indexOf('<w:sectPrChange');
-  return change === -1 ? sectPrXml : sectPrXml.slice(0, change);
+/** An element, as a sectPr's child, with the scope it's in */
+type InScope = { node: XmlNode; scope: Scope };
+
+/** An element's attribute in WordprocessingML's namespace, whatever its prefix */
+const wAttributeOf = ({ node, scope }: InScope, local: string) => attributeNamed(node, scope, WORDPROCESSINGML, local);
+
+/** A sectPr's own section property, by its local name, as Word reads it
+ *  (see resolvedSectPr), with the scope it's in: its child, not an
+ *  extension's that Word ignores, or a tracked change's old one, which its
+ *  w:sectPrChange holds, or none */
+function sectPrPropertyIn(sectPrXml: string | undefined, property: string): InScope | undefined {
+  const sectPr = sectPrXml ? resolvedSectPr(sectPrXml) : undefined;
+  return sectPr && elementsIn(sectPr, EXPORT_NAMESPACES).find(child => sectPrPropertyOf(child.node, child.scope) === property);
 }
 
+/** A measure given in twips, as a number alone */
+const digitsOf = (value: string | undefined) => value !== undefined && /^\d+$/.test(value) ? parseInt(value, 10) : undefined;
+
 /** Parse w:pgSz from a sectPr XML string, defaulting to US Letter portrait.
- *  Its own page, not a tracked change's old one. */
+ *  Its own page (see sectPrPropertyIn). */
 export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
-  if (!sectPrXml) return { w: DEFAULT_PAGE_W, h: DEFAULT_PAGE_H };
-  const m = ownSectPrXml(sectPrXml).match(/<w:pgSz\b([^/>]*)\/?>/);
-  if (!m) return { w: DEFAULT_PAGE_W, h: DEFAULT_PAGE_H };
-  const wMatch = m[1].match(/w:w="(\d+)"/);
-  const hMatch = m[1].match(/w:h="(\d+)"/);
-  const w = wMatch ? parseInt(wMatch[1], 10) : DEFAULT_PAGE_W;
-  const h = hMatch ? parseInt(hMatch[1], 10) : DEFAULT_PAGE_H;
+  const pgSz = sectPrPropertyIn(sectPrXml, 'pgSz');
+  if (!pgSz) return { w: DEFAULT_PAGE_W, h: DEFAULT_PAGE_H };
+  const w = digitsOf(wAttributeOf(pgSz, 'w')) ?? DEFAULT_PAGE_W;
+  const h = digitsOf(wAttributeOf(pgSz, 'h')) ?? DEFAULT_PAGE_H;
   // Normalize to portrait (smaller value = width)
   return w <= h ? { w, h } : { w: h, h: w };
 }
 
 /** Whether a sectPr's page is landscape, as import reads it: turned, or
- *  wider than it's tall. Its own page, not a tracked change's old one */
+ *  wider than it's tall. Its own page (see sectPrPropertyIn) */
 function isLandscapeSectPr(sectPrXml: string): boolean {
-  const m = ownSectPrXml(sectPrXml).match(/<w:pgSz\b([^/>]*)\/?>/);
-  if (!m) return false;
-  const w = parseInt(m[1].match(/w:w="(\d+)"/)?.[1] ?? '0', 10);
-  const h = parseInt(m[1].match(/w:h="(\d+)"/)?.[1] ?? '0', 10);
-  return /w:orient="landscape"/.test(m[1]) || w > 0 && h > 0 && w > h;
+  const pgSz = sectPrPropertyIn(sectPrXml, 'pgSz');
+  if (!pgSz) return false;
+  const w = digitsOf(wAttributeOf(pgSz, 'w')) ?? 0;
+  const h = digitsOf(wAttributeOf(pgSz, 'h')) ?? 0;
+  return wAttributeOf(pgSz, 'orient') === 'landscape' || w > 0 && h > 0 && w > h;
 }
 
 /** The attributes of a sectPr's margins, w:pgMar, as Word reads them (see
@@ -4811,6 +4819,19 @@ function parseTemplateMargins(sectPrXml: string | undefined): string {
   const built = buildOrdered([{ [nameOf(margins)]: [], ':@': margins[':@'] }]);
   return built.slice(('<' + nameOf(margins)).length, -'/>'.length).trim();
 }
+
+/** A sectPr, parsed, as Word reads it in export's document (see
+ *  effectiveSectPr): under export's prefixes, with each of markup
+ *  compatibility's alternatives and wrappers in it in place of what Word
+ *  reads of them, as Word writes it on save, so that each property is one,
+ *  its own child, in its place. None where it isn't a sectPr. */
+function resolvedSectPr(sectPrXml: string): XmlNode | undefined {
+  const sectPr = parseOrdered(sectPrXml)?.find(isElement);
+  return sectPr && isNamed(sectPr, EXPORT_NAMESPACES, WORDPROCESSINGML, 'sectPr') ? effectiveSectPr(sectPr, EXPORT_CONTEXT) : undefined;
+}
+
+/** Whether CT_SectPr puts a section property after another */
+const isAfter = (property: string, other: string) => sectPrRank(property) > sectPrRank(other);
 
 /** Build a portrait sectPr XML element for section breaks. */
 function portraitSectPrXml(pgSz: PageSize, margins: string, rsid?: string): string {
@@ -4844,33 +4865,44 @@ function withTemplateSectPrs(body: string, closingSectPr: string, sections?: Tem
   return { body, closingSectPr: withTemplate(closingSectPr) };
 }
 
-// A sectPr's page size, written as an empty element or with a closing tag
-const PG_SZ_RE = /<w:pgSz\b[^>]*?(?:\/>|>[\s\S]*?<\/w:pgSz>)/;
-// The first of a sectPr's children CT_SectPr puts after w:pgSz
-const AFTER_PG_SZ_RE = /<w:(?:pgMar|paperSrc|pgBorders|lnNumType|pgNumType|cols|formProt|vAlign|noEndnote|titlePg|textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)\b/;
-
 /** Build the final body-level sectPr of a section a fence ends: the
- *  template's, if any, with its page turned to the fence's orientation, in
- *  place of its w:pgSz, or where CT_SectPr puts one, as its other
- *  properties stay, or else one of its own. Not in a tracked change's old
- *  properties, w:sectPrChange, last, which hold a w:sectPr of their own. A
- *  template's with no properties, an empty element, gets a closing tag for
- *  the page to go before. */
+ *  template's, as Word reads it (see resolvedSectPr), with its page turned
+ *  to the fence's orientation, in place of its own w:pgSz, or where
+ *  CT_SectPr puts one, as its other properties stay, or else one of its
+ *  own. Not an extension's page that Word ignores, nor one in a tracked
+ *  change's old properties, w:sectPrChange, last, which hold a w:sectPr of
+ *  their own. */
 function fencedBodySectPrXml(landscape: boolean, pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
   const fencePgSz = landscape ? '<w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' : '<w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>';
-  if (templateSectPr) {
-    templateSectPr = templateSectPr.replace(/^(<w:sectPr\b[^>]*?)\/>$/, (_, open: string) => open + '></w:sectPr>');
-    const change = templateSectPr.indexOf('<w:sectPrChange');
-    const own = change === -1 ? templateSectPr.slice(0, templateSectPr.lastIndexOf('</w:sectPr>')) : templateSectPr.slice(0, change);
-    const page = PG_SZ_RE.exec(own);
-    if (page) return own.slice(0, page.index) + fencePgSz + templateSectPr.slice(page.index + page[0].length);
-    const after = own.search(AFTER_PG_SZ_RE);
-    const at = after === -1 ? own.length : after;
-    return templateSectPr.slice(0, at) + fencePgSz + templateSectPr.slice(at);
+  const sectPr = templateSectPr ? resolvedSectPr(templateSectPr) : undefined;
+  if (sectPr) {
+    const scope = scopeIn(sectPr, EXPORT_NAMESPACES);
+    const property = (child: XmlNode) => sectPrPropertyOf(child, scope);
+    const children = childrenOf(sectPr), turned = parseOrdered(fencePgSz)![0];
+    const page = children.findIndex(child => property(child) === 'pgSz');
+    const after = children.findIndex(child => isAfter(property(child), 'pgSz'));
+    const at = after === -1 ? children.length : after;
+    const withPage = page !== -1 ? children.map((child, i) => i === page ? turned : child) : [...children.slice(0, at), turned, ...children.slice(at)];
+    return buildOrdered([{ ...sectPr, [nameOf(sectPr)]: withPage }]);
   }
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '>' + fencePgSz +
     '<w:pgMar ' + margins + '/>' +
     '<w:cols w:space="720"/></w:sectPr>';
+}
+
+// A section's break that starts it on a new page
+const NEXT_PAGE: XmlNode = parseOrdered('<w:type w:val="nextPage"/>')![0];
+
+/** A sectPr whose section starts on a new page: its w:type, and that of
+ *  each of markup compatibility's alternatives in it, and of each wrapper
+ *  whose content Word reads, whichever Word reads, nextPage, or none, which
+ *  is a new page already. Not an extension's that Word ignores, nor a
+ *  tracked change's old properties, which keep theirs (see mapProperties). */
+function nextPageSectPrXml(sectPrXml: string): string {
+  const sectPr = parseOrdered(sectPrXml)?.find(isElement);
+  if (!sectPr) return sectPrXml;
+  const nextPage = (node: XmlNode, context: Context) => [sectPrPropertyOf(node, context.scope) === 'type' ? NEXT_PAGE : node];
+  return buildOrdered([{ ...sectPr, [nameOf(sectPr)]: mapProperties(childrenOf(sectPr), contextIn(sectPr, EXPORT_CONTEXT), nextPage) }]);
 }
 
 /** Build the final body-level sectPr (no <w:type>, direct child of <w:body>). */
@@ -10398,8 +10430,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     if (hiddenTail) state.hiddenAfterSections = new Map([[state.sectionBreakOrdinal - 1, hiddenXml.length]]);
     const landscape = lastBreak === landscapeBreak;
     if (landscape || isLandscapeSectPr(closingSectPr)) closingSectPr = fencedBodySectPrXml(landscape, pgSz, margins, state.templateSectPr, state.rsid);
-    const own = ownSectPrXml(closingSectPr);
-    closingSectPr = own.replace(/<w:type\b[^>]*?(?:\/>|>[\s\S]*?<\/w:type>)/, () => '<w:type w:val="nextPage"/>') + closingSectPr.slice(own.length);
+    closingSectPr = nextPageSectPrXml(closingSectPr);
   } else if (state.sectionBreakOrdinal > 0 && state.templateSectPr && isLandscapeSectPr(closingSectPr)) {
     // Import reads the last section's orientation from these properties, so
     // where they're a template's landscape page, which no fence set, a custom
