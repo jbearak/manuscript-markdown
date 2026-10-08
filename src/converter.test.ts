@@ -1313,7 +1313,8 @@ describe('Ordered list numbering', () => {
   test.each([
     ['a list after a paragraph', '1. a\n2. b\n\nPara.\n\n1. c\n2. d', undefined],
     ['a list after another delimiter', '1. a\n2. b\n\n1) c\n2) d', '1. a\n2. b\n\n<!-- -->\n\n1. c\n2. d'],
-    ['a list after an indent sentinel', '1. a\n2. b\n\n<!-- no-indent -->\n1. c', '1. a\n2. b\n\n<!-- -->\n\n<!-- no-indent -->\n1. c'],
+    // Which keeps the lists apart itself
+    ['a list after an indent sentinel', '1. a\n2. b\n\n<!-- no-indent -->\n1. c', undefined],
     ['a numbered list after a bulleted one with a sentinel', '- b\n\n<!-- no-indent -->\n1. c', undefined],
     ['nested lists', '1. a\n   1. x\n   2. y\n2. b\n   1. z', undefined],
     ['a list that starts at 3', '1. a\n\nP.\n\n3. c', undefined],
@@ -2652,6 +2653,88 @@ describe('Loose lists', () => {
   });
 
   test.each([
+    ['bullets', '- a\n\n<!-- indent -->\n- b\n'],
+    ['bullets, with no-indent', '- a\n\n<!-- no-indent -->\n- b\n'],
+    ['bullets, with no blank line before it', '- a\n<!-- indent -->\n- b\n'],
+    ['bullets, after one before the first', '<!-- indent -->\n- a\n\n<!-- no-indent -->\n- b\n'],
+    ['bullets, before a loose list', '- a\n\n<!-- indent -->\n- b\n\n- c\n'],
+    ['bullets, with sublists', '- a\n  - x\n\n<!-- indent -->\n- b\n  - y\n'],
+    ['bullets, after a paragraph in an item', '- a\n\n  p\n\n<!-- indent -->\n- b\n'],
+    ['bullets, and before a third', '- a\n\n<!-- indent -->\n- b\n\n<!-- no-indent -->\n- c\n'],
+    ['task items', '- [ ] a\n\n<!-- indent -->\n- [x] b\n'],
+    ['numbers', '1. a\n\n<!-- indent -->\n1. b\n'],
+    ['numbers that go on', '1. a\n\n<!-- no-indent -->\n2. b\n'],
+  ])('keeps an indent directive between two lists of %s', async (_name, md) => {
+    // Word has one list of the bullets, as export writes nothing for the
+    // directive, so it was lost. Word starts numbers over, and import wrote
+    // a comment before the directive, which keeps the lists apart itself
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test.each([
+    ['indent', 'no-indent'],
+    ['no-indent', 'indent'],
+  ])('keeps the last of the indent directives %s and %s between two lists of bullets', async (first, last) => {
+    // The record took the first, which the scan from the end reached last,
+    // and import wrote it, though the item had the last's setting
+    const md = '- a\n\n<!-- ' + first + ' -->\n<!-- ' + last + ' -->\n- b\n';
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe('- a\n\n<!-- ' + last + ' -->\n- b\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps two numbered lists apart where Word gives the second\'s first item, after an indent directive, the Quote style', async () => {
+    // Which takes no directive, so with neither the directive nor the
+    // comment between them, the lists were one, which the next export
+    // numbered on
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a\n\n<!-- no-indent -->\n1. b\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const item = /<w:p\b[^>]*><w:pPr>(?=(?:(?!<\/w:p>).)*?<w:t>b<\/w:t>)/s.exec(xml)![0];
+    zip.file('word/document.xml', xml.replace(item, () => item + '<w:pStyle w:val="Quote"/>'));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toEndWith('1. a\n\n<!-- -->\n\n1. b\n');
+  });
+
+  test.each([
+    ['after a blank line', '- a\n\n<!-- indent -->\n- [x] b\n', '- a\n\n  1. [x] b\n'],
+    ['before more', '- a\n<!-- indent -->\n- [x] b\n- [ ] c\n', '- a\n  1. [x] b\n  2. [ ] c\n'],
+  ])('writes no indent directive before a task item that a template numbers in a sublist, %s', async (_name, md, expected) => {
+    // Word numbers the item at the second level, under the item before, so
+    // import wrote the directive in that item, as an HTML block, which
+    // export drops, with a warning, so the next trip lost it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    zip.file('word/styles.xml', styles.replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/,
+      (match: string) => match + '<w:numPr><w:ilvl w:val="1"/><w:numId w:val="2"/></w:numPr>'));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown).toBe(expected);
+    const again = await convertMdToDocx(markdown, { templateDocx });
+    expect(again.warnings).toEqual([]);
+    expect((await convertDocx(again.docx)).markdown).toBe(expected);
+  });
+
+  test('keeps the blank line before an indent directive before a task item that a template numbers', async () => {
+    // Which import reads in the list before it, so a blank line before one
+    // that starts a list isn't recorded, but one before the directive is,
+    // and import writes it there
+    const templateDocx = await normalNumbered();
+    const md = '- [ ] a\n\n<!-- indent -->\n- [ ] b\n\n# H\n\n- x\n\n- y\n';
+    const expected = '1. [ ] a\n\n<!-- indent -->\n2. [ ] b\n\n# H\n\n- x\n\n- y\n';
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown, { templateDocx })).docx)).markdown).toBe(expected);
+  });
+
+  test('moves a blank line after an indent directive between two lists of bullets before it', async () => {
+    // Which reads the same, as neither makes either list loose
+    const md = '- a\n\n<!-- indent -->\n- b\n';
+    expect(await roundTrip('- a\n<!-- indent -->\n\n- b\n')).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
     ['a sublist of the other type after a quote in an item', '- a\n  - b\n\n    > q\n\n  1. c\n  2. d\n\ntext\n\n- x\n\n- y\n'],
     ['an item after a sublist of the other type after a quote in an item', '- a\n  - b\n\n    > q\n\n  1. c\n- d\n  - e\n\n    - f\n  - g\n'],
   ])('keeps the blank lines of the lists after %s where they were', async (_name, md) => {
@@ -2749,7 +2832,9 @@ describe('Loose lists', () => {
     ['of an abstract numbering of its own, before more', 'own', tasksAfterNumbers, '1. a\n\n<!-- -->\n\n1. [ ] b\n2. [ ] c\n\n3. [ ] d\n\n# H\n\n- x\n\n- y\n'],
     ['that goes on with the numbers, before more', 'on', tasksAfterNumbers, '1. a\n2. [ ] b\n3. [ ] c\n\n4. [ ] d\n\n# H\n\n- x\n\n- y\n'],
     ['with a start override, after a blank line', 'restart', '1. a\n\n- [ ] b\n\n# H\n\n- x\n\n- y\n', '1. a\n\n<!-- -->\n\n1. [ ] b\n\n# H\n\n- x\n\n- y\n'],
-    ['with a start override, after an indent directive', 'restart', '1. a\n\n<!-- indent -->\n- [ ] b\n- [ ] c\n\n# H\n\n- x\n\n- y\n', '1. a\n\n<!-- -->\n\n<!-- indent -->\n1. [ ] b\n2. [ ] c\n\n# H\n\n- x\n\n- y\n'],
+    // Which keeps the lists apart, with no <!-- --> (see listItemIndentOverrideProps)
+    ['with a start override, after an indent directive', 'restart', '1. a\n\n<!-- indent -->\n- [ ] b\n- [ ] c\n\n# H\n\n- x\n\n- y\n', '1. a\n\n<!-- indent -->\n1. [ ] b\n2. [ ] c\n\n# H\n\n- x\n\n- y\n'],
+    ['with a start override, before an indent directive before more', 'restart', '1. a\n- [ ] b\n\n<!-- indent -->\n- [ ] c\n\n# H\n\n- x\n\n- y\n', '1. a\n\n<!-- -->\n\n1. [ ] b\n\n<!-- indent -->\n2. [ ] c\n\n# H\n\n- x\n\n- y\n'],
     ['with a start override, in a sublist', 'restart', '1. a\n   - [ ] b\n   - [ ] c\n\n2. d\n\n# H\n\n- x\n\n- y\n', '1. a\n\n<!-- -->\n\n1. [ ] b\n2. [ ] c\n\n3. d\n\n# H\n\n- x\n\n- y\n'],
   ] as const)('keeps the records of the lists after a task item after numbers that a template numbers by an instance %s', async (_name, kind, md, expected) => {
     // Where Word starts the style's numbering over at the task item, which
