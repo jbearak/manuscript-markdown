@@ -430,6 +430,28 @@ describe('a template\'s headers and footers', () => {
     expect((await textOf(await JSZip.loadAsync(docx), 'word/settings.xml'))!).toContain('<w:evenAndOddHeaders/>');
   });
 
+  it('keep the last section\'s attribute values as XML reads them, white space as a space and a reference to a character as that character', async () => {
+    // A reference, read as text, was written back with its & escaped, so
+    // a tab, a line feed or a character written as one became the text of
+    // the reference, and mc:ProcessContent's two names one
+    const templateDocx = await editTemplate(await headerTemplate(), 'word/document.xml', xml => {
+      const last = xml.lastIndexOf('<w:sectPr');
+      return xml.slice(0, last) + xml.slice(last)
+        .replace('<w:sectPr ', () => '<w:sectPr xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:e="urn:example:e" mc:Ignorable="e" mc:ProcessContent="e:x&#9;e:y" e:lit="a\tb\r\nc" e:ref="a&#9;b&#xA;c&#xD;d&#x2019;e&amp;#9;" ')
+        .replace(/<w:pgMar\b/, () => '<w:pgMar e:ref="p&#10;q"');
+    });
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    const xml = (await textOf(await JSZip.loadAsync(docx), 'word/document.xml'))!;
+    const last = xml.slice(xml.lastIndexOf('<w:sectPr'));
+    expect(last).toContain(' mc:ProcessContent="e:x&#9;e:y" e:lit="a b c" e:ref="a&#9;b&#xA;c&#xD;d\u2019e&amp;#9;"');
+    expect(last).toContain(' e:ref="p&#xA;q"');
+    const md1 = (await convertDocx(docx)).markdown;
+    const docx2 = (await convertMdToDocx(md1, { templateDocx })).docx;
+    expect((await convertDocx(docx2)).markdown).toBe(md1);
+    expect((await textOf(await JSZip.loadAsync(docx2), 'word/document.xml'))!.slice(-last.length)).toBe(last);
+  });
+
   it('come from parts in UTF-16, which go as they came', async () => {
     let templateDocx = await headerTemplate();
     const asUtf16 = (xml: string) => utf16(xml.replace('encoding="UTF-8"', 'encoding="UTF-16"'));
