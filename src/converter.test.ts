@@ -5011,6 +5011,127 @@ describe('A heading whose text ends in #', () => {
   });
 });
 
+describe('Built-in styles Word names in another language', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  /** styles.xml with a default paragraph style and each of `styles`, an
+   *  ID, the style's name and its pPr */
+  const stylesXml = (styles: Array<[string, string, string?]>) => '<?xml version="1.0"?>'
+    + '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+    + '<w:style w:type="paragraph" w:default="1" w:styleId="Standard"><w:name w:val="Normal"/></w:style>'
+    + styles.map(([id, name, pPr]) => '<w:style w:type="paragraph" w:styleId="' + id + '"><w:name w:val="' + name + '"/>'
+      + '<w:basedOn w:val="Standard"/>' + (pPr ? '<w:pPr>' + pPr + '</w:pPr>' : '') + '</w:style>').join('')
+    + '</w:styles>';
+  const paragraph = (style: string, text: string) => '<w:p><w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>'
+    + '<w:r><w:t xml:space="preserve">' + text + '</w:t></w:r></w:p>';
+  const importDocx = async (body: string, styles: Array<[string, string, string?]>) =>
+    (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(body), { 'word/styles.xml': stylesXml(styles) }))).markdown;
+
+  test.each([
+    ['German', 'berschrift1', 'berschrift2'],
+    ['French', 'Titre1', 'Titre2'],
+    ['Spanish', 'Ttulo1', 'Ttulo2'],
+  ])('imports headings whose styles Word named in %s as headings', async (_language, first, second) => {
+    const md = await importDocx(paragraph(first, 'Alpha') + paragraph(second, 'Beta') + '<w:p><w:r><w:t>Text.</w:t></w:r></w:p>',
+      [[first, 'heading 1', '<w:outlineLvl w:val="0"/>'], [second, 'heading 2', '<w:outlineLvl w:val="1"/>']]);
+    expect(strip(md)).toBe('# Alpha\n\n## Beta\n\nText.\n');
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe('# Alpha\n\n## Beta\n\nText.\n');
+  });
+
+  test('imports a title whose style Word named in German as the title', async () => {
+    const md = await importDocx(paragraph('Titel', 'My Title') + '<w:p><w:r><w:t>Text.</w:t></w:r></w:p>', [['Titel', 'Title']]);
+    expect(md).toContain('title: My Title\n');
+    expect(strip(md)).toBe('Text.\n');
+  });
+
+  test.each([
+    ['Zitat', 'Quote'],
+    ['IntensivesZitat', 'Intense Quote'],
+  ])('imports a quote whose style Word named %s as a quote', async (id, name) => {
+    const md = await importDocx(paragraph(id, 'Quoted.') + '<w:p><w:r><w:t>After.</w:t></w:r></w:p>', [[id, name]]);
+    expect(strip(md)).toBe('> Quoted.\n\nAfter.\n');
+  });
+
+  test('reads the alignment of a table\'s cells from their style, which Word named in German', async () => {
+    // The style's layout is under the ID the document gives it
+    const cell = (style: string, text: string) => '<w:tc>' + paragraph(style, text) + '</w:tc>';
+    const md = await importDocx('<w:tbl><w:tblPr><w:tblLook w:firstRow="1"/></w:tblPr><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr>' + cell('berschrift1', 'A') + cell('Standard', 'B') + '</w:tr>'
+      + '<w:tr>' + cell('berschrift1', 'x') + cell('Standard', 'y') + '</w:tr></w:tbl>',
+      [['berschrift1', 'heading 1', '<w:jc w:val="center"/>']]);
+    expect(strip(md)).toBe('| A | B |\n| :---: | --- |\n| x | y |\n');
+  });
+
+  /** A table whose style aligns its cells right, of two rows of two cells
+   *  in `style`, under styles.xml's `defaultStyle` and `styles` */
+  const rightTable = async (style: string, defaultStyle: string, styles: string) => {
+    const cell = (text: string) => '<w:tc>' + paragraph(style, text) + '</w:tc>';
+    const md = (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(
+      '<w:tbl><w:tblPr><w:tblStyle w:val="Right"/><w:tblLook w:firstRow="1"/></w:tblPr><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr>' + cell('A') + cell('B') + '</w:tr><w:tr>' + cell('x') + cell('y') + '</w:tr></w:tbl>'), {
+      'word/styles.xml': '<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        + '<w:style w:type="paragraph" w:default="1" w:styleId="' + defaultStyle + '">' + styles
+        + '<w:style w:type="table" w:styleId="Right"><w:name w:val="Right"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style>'
+        + '</w:styles>',
+    }))).markdown;
+    return strip(md).split('\n')[1];
+  };
+
+  test('reads a table\'s cells in the default paragraph style, which Word named in German, as the default', async () => {
+    // Word gives a paragraph in the default style the table style's layout
+    // over the paragraph style's
+    expect(await rightTable('Zitat', 'Zitat', '<w:name w:val="Quote"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>'))
+      .toBe('| ---: | ---: |');
+  });
+
+  test('reads a table\'s cells in a built-in style\'s ID that styles.xml has no style of, where Word named the style in German, as the default', async () => {
+    // Word reads a style styles.xml doesn't have as the default
+    expect(await rightTable('Heading1', 'Standard', '<w:name w:val="Normal"/></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="berschrift1"><w:name w:val="heading 1"/><w:basedOn w:val="Standard"/>'
+      + '<w:pPr><w:jc w:val="center"/></w:pPr></w:style>'))
+      .toBe('| ---: | ---: |');
+  });
+
+  test('keeps a style with a built-in style\'s name as it is where another style has the built-in style\'s ID', async () => {
+    const md = await importDocx(paragraph('berschrift1', 'Alpha') + paragraph('Heading1', 'Beta'),
+      [['berschrift1', 'heading 1'], ['Heading1', 'My heading']]);
+    expect(strip(md)).toBe('Alpha\n\n# Beta\n');
+  });
+
+  test('counts a heading whose style Word named in German, which numbers it, with the items of its list', async () => {
+    // The heading's style numbers it in the list the item is in
+    const numPr = '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>';
+    const md = (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(paragraph('berschrift1', 'Intro')
+      + '<w:p><w:pPr>' + numPr + '</w:pPr><w:r><w:t>Item</w:t></w:r></w:p>'), {
+      'word/styles.xml': stylesXml([['berschrift1', 'heading 1', numPr]]),
+      'word/numbering.xml': '<?xml version="1.0"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        + '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum>'
+        + '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>',
+    }))).markdown;
+    expect(strip(md)).toBe('# Intro\n\n2. Item\n');
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe('# Intro\n\n2. Item\n');
+  });
+
+  test('reads the fonts of the body, headings and title from their styles, which Word named in German, as from those Word named in English', async () => {
+    const font = (name: string, size: number) => '<w:rPr><w:rFonts w:ascii="' + name + '" w:hAnsi="' + name + '"/><w:sz w:val="' + size + '"/></w:rPr>';
+    const frontmatter = async ([normal, heading, title]: string[]) => {
+      const style = (id: string, name: string, rPr: string, isDefault = false) => '<w:style w:type="paragraph"' + (isDefault ? ' w:default="1"' : '')
+        + ' w:styleId="' + id + '"><w:name w:val="' + name + '"/>' + rPr + '</w:style>';
+      const md = (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(paragraph(title, 'My Title') + paragraph(heading, 'Alpha')
+        + '<w:p><w:r><w:t>Text.</w:t></w:r></w:p>'), {
+        'word/styles.xml': '<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+          + style(normal, 'Normal', font('Georgia', 24), true) + style(heading, 'heading 1', font('Arial', 36))
+          + style(title, 'Title', font('Verdana', 60)) + '</w:styles>',
+      }))).markdown;
+      return md.slice(0, md.indexOf('\n---\n') + 5);
+    };
+    const english = await frontmatter(['Normal', 'Heading1', 'Title']);
+    expect(english).toContain('font: Georgia\n');
+    expect(english).toContain('header-font: [Arial, Georgia]\n');
+    expect(english).toContain('title-font: Verdana\n');
+    expect(await frontmatter(['Standard', 'berschrift1', 'Titel'])).toBe(english);
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // Property tests for converter integration (Task 4.3)
