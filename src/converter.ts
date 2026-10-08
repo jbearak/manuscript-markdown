@@ -8996,7 +8996,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     let end = k;
     while (end < pieces.length && !('lineBreak' in pieces[end]) && !(pieces[end] as TextPiece).br) end++;
     const line = pieces.slice(k, end) as TextPiece[];
-    const characters = htmlLineCharacters(line.map(piece => piece.text).join(''));
+    const characters = htmlLineCharacters(line.map(piece => piece.text).join(''), end === pieces.length);
     let at = 0;
     for (const piece of line) {
       const html = characters.slice(at, at += piece.text.length).join('');
@@ -9074,17 +9074,21 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
  *  space after another, or at the start of a line, is a reference, as is a
  *  tab or no-break space. So a line of spaces alone is all references, as
  *  an empty one keeps its place in a cell too (see
- *  keepParagraphEdgeWhitespace). The > and < of the {>>, <<} and ~> of
+ *  keepParagraphEdgeWhitespace). HTML drops a space at the end of a <p>
+ *  too, as export does past its tags and comments, so one at the end of a
+ *  line that `endsParagraph` is a reference. The > and < of the {>>, <<} and ~> of
  *  CriticMarkup, which export reads as text there, as no tag starts with
  *  them, stay as they are, so the editor and navigation read a comment or a
  *  substitution's sides there as they do the rest of its CriticMarkup. */
-function htmlLineCharacters(line: string): string[] {
+function htmlLineCharacters(line: string, endsParagraph = false): string[] {
   const lead = /^[ \t\u00a0]*/.exec(line)![0].length;
-  return line.split('').map((c, i) => c === '&' ? '&amp;'
+  const characters = line.split('').map((c, i) => c === '&' ? '&amp;'
     : c === '<' ? (line.startsWith('<}', i + 1) || line[i - 1] === '<' && line[i + 1] === '}' ? c : '&lt;')
       : c === '>' ? (line[i - 1] === '~' || line[i - 1] === '{' && line[i + 1] === '>' || line.startsWith('{>', i - 2) ? c : '&gt;')
         : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
           : c === ' ' && (i < lead || line[i - 1] === ' ') ? '&#32;' : c);
+  if (endsParagraph && characters[characters.length - 1] === ' ') characters[characters.length - 1] = '&#32;';
+  return characters;
 }
 
 /** An equation in an HTML table's cell as a run of its Markdown, which the
