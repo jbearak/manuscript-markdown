@@ -16606,6 +16606,180 @@ describe('Track changes (CriticMarkup)', () => {
       expect(result.markdown).toContain('{--removed cell--}');
     });
   });
+
+  describe('Table rows', () => {
+    const attrs = ' w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"';
+    // With its paragraph's mark tracked, as Word tracks the mark of each
+    // cell's last paragraph in a row it inserts or deletes
+    const cell = (text: string, kind?: 'ins' | 'del', runsTracked = true) => '<w:tc><w:p>'
+      + (kind ? '<w:pPr><w:rPr><w:' + kind + attrs + '/></w:rPr></w:pPr>' : '')
+      + (kind && runsTracked
+        ? '<w:' + kind + attrs + '><w:r><w:' + (kind === 'del' ? 'delText' : 't') + '>' + text + '</w:' + (kind === 'del' ? 'delText' : 't') + '></w:r></w:' + kind + '>'
+        : '<w:r><w:t>' + text + '</w:t></w:r>')
+      + '</w:p></w:tc>';
+    const row = (texts: string[], kind?: 'ins' | 'del', runsTracked = true) => '<w:tr>'
+      + (kind ? '<w:trPr><w:' + kind + attrs + '/></w:trPr>' : '')
+      + texts.map(text => cell(text, kind, runsTracked)).join('') + '</w:tr>';
+    const table = (...rows: string[]) => '<w:tbl><w:tblPr><w:tblLook w:firstRow="1"/></w:tblPr>'
+      + '<w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>' + rows.join('') + '</w:tbl>';
+    /** Each row's tracked change in a DOCX's first table, by its element */
+    const rowChanges = async (docx: Uint8Array) => {
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      return [...xml.matchAll(/<w:tr>([\s\S]*?)<\/w:tr>/g)]
+        .map(([, tr]) => /^<w:trPr>(?:(?!<\/w:trPr>)[\s\S])*?<w:(ins|del) /.exec(tr)?.[1] ?? '');
+    };
+
+    test('keeps the rows Word tracks as inserted and deleted', async () => {
+      // Each cell's text came back in a change, but the row with none, so
+      // accepting the deletion, or rejecting the insertion, left it empty
+      const docx = await buildSyntheticDocx(wrapDocumentXml(table(row(['a', 'b']), row(['c', 'd'], 'ins'), row(['e', 'f'], 'del'))));
+      const markdown = (await convertDocx(docx)).markdown;
+      expect(markdown).toBe('| a | b |\n| --- | --- |\n| {++c++} | {++d++} |\n| {--e--} | {--f--} |\n');
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect(await rowChanges(again)).toEqual(['', 'ins', 'del']);
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    });
+
+    test('keeps a row Word tracks as inserted whose runs it doesn\'t', async () => {
+      const docx = await buildSyntheticDocx(wrapDocumentXml(table(row(['a', 'b']), row(['c', 'd'], 'ins', false))));
+      const markdown = (await convertDocx(docx)).markdown;
+      expect(markdown).toBe('| a | b |\n| --- | --- |\n| {++c++} | {++d++} |\n');
+      expect(await rowChanges((await convertMdToDocx(markdown)).docx)).toEqual(['', 'ins']);
+    });
+
+    test.each([
+      ['all inserted', '| {++c++} | {++d++} |', 'ins'],
+      ['all deleted', '| {--c--} | {--d--} |', 'del'],
+      ['inserted, with an empty cell', '| {++c++} |  |', 'ins'],
+      ['inserted over spans, with a comment', '| {++c++} {++e++}{>>note<<} | {++d++} |', 'ins'],
+      ['inserted with text outside', '| {++c++} x | {++d++} |', ''],
+      ['inserted and deleted', '| {++c++} | {--d--} |', ''],
+      ['substituted', '| {~~c~>e~~} | d |', ''],
+      ['empty', '|  |  |', ''],
+      ['inserted, in a comment\'s anchor', '| {=={++c++}==}{>>note<<} | {++d++} |', 'ins'],
+      ['an empty insertion', '| {++++} |  |', ''],
+      ['an insertion of spaces', '| {++ ++} |  |', ''],
+      ['an insertion of a comment alone', '| {++{>>note<<}++} |  |', ''],
+      ['a deletion of an empty equation', '| {--$ $--} |  |', ''],
+      ['a deletion of an equation', '| {--$x$--} |  |', 'del'],
+      ['a deletion of an empty fraction, whose bar shows', '| {--$\\frac{}{}$--} |  |', 'del'],
+      ['a deletion of an insertion, which it deletes as its text', '| {--{++c++}--} |  |', 'del'],
+      ['a deletion of a substitution', '| {--{~~a~>b~~}--} |  |', 'del'],
+      ['a deletion of an empty insertion', '| {--{++++}--} |  |', ''],
+      ['an insertion holding a deletion, which Word shows as deleted', '| {++a {--c--}++} |  |', ''],
+      ['a deletion of an equation of empty delimiters', '| {--$\\left.\\right.$--} |  |', ''],
+      ['a deletion of an equation of empty parentheses, which show', '| {--$\\left(\\right)$--} |  |', 'del'],
+    ])('tracks a row whose cells\' text is %s as a row Word inserts or deletes where it all is', async (_name, line, change) => {
+      // A comment's anchor hid the change in it, a row with nothing that
+      // shows in the change was tracked, which rejecting deleted, and an
+      // insertion's deletion was taken for inserted text
+      const docx = (await convertMdToDocx('| a | b |\n|---|---|\n' + line + '\n')).docx;
+      expect(await rowChanges(docx)).toEqual(['', change]);
+    });
+
+    test('keeps a row it doesn\'t track, whose insertion holds a deletion', async () => {
+      // The row was tracked as inserted, but its text came back as
+      // {++a ++}{--c--}, which the next export didn't track
+      const docx = (await convertMdToDocx('| a | b |\n|---|---|\n| {++a {--c--}++} | |\n')).docx;
+      expect(await rowChanges(docx)).toEqual(['', '']);
+      const markdown = (await convertDocx(docx)).markdown;
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect(await rowChanges(again)).toEqual(['', '']);
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    });
+
+    test('keeps a row it tracks as deleted, whose deletion holds an insertion', async () => {
+      // The row wasn't tracked, but its text came back as {--c--}, which the
+      // next export tracked as a deleted row
+      const docx = (await convertMdToDocx('| a | b |\n|---|---|\n| {--{++c++}--} | |\n')).docx;
+      expect(await rowChanges(docx)).toEqual(['', 'del']);
+      const markdown = (await convertDocx(docx)).markdown;
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect(await rowChanges(again)).toEqual(['', 'del']);
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    });
+
+    test('keeps a row it tracks as inserted, with a comment on its text', async () => {
+      // Import wrote the comment around the change, which the next export
+      // took for text outside it
+      const docx = (await convertMdToDocx('| a | b |\n|---|---|\n| {++{==c==}{>>note<<}++} | {++d++} |\n')).docx;
+      expect(await rowChanges(docx)).toEqual(['', 'ins']);
+      const markdown = (await convertDocx(docx)).markdown;
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect(await rowChanges(again)).toEqual(['', 'ins']);
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    });
+
+    const insertedRow = (cells: string) => '<w:tr><w:trPr><w:ins' + attrs + '/></w:trPr>' + cells + '</w:tr>';
+    const paragraph = (text: string) => '<w:p><w:r><w:t>' + text + '</w:t></w:r></w:p>';
+    test.each([
+      ['a merged cell', '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr>' + paragraph('a') + '</w:tc></w:tr>'
+        + insertedRow('<w:tc>' + paragraph('c') + '</w:tc><w:tc>' + paragraph('d') + '</w:tc>')],
+      ['a cell of paragraphs', row(['a', 'b']) + insertedRow('<w:tc>' + paragraph('c') + paragraph('e') + '</w:tc><w:tc>' + paragraph('d') + '</w:tc>')],
+    ])('keeps the text of a row Word tracks as inserted in a table with %s, which only HTML holds', async (_name, rows) => {
+      // Its cells' CriticMarkup, which export reads as text in HTML, as {++c++}
+      const docx = await buildSyntheticDocx(wrapDocumentXml('<w:tbl><w:tblPr><w:tblLook w:firstRow="1"/></w:tblPr>'
+        + '<w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>' + rows + '</w:tbl>'));
+      const markdown = (await convertDocx(docx)).markdown;
+      expect(markdown).toStartWith('<table>');
+      expect(markdown).toContain('<p>c</p>');
+      expect(markdown).not.toContain('{++');
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    });
+
+    test('keeps the text of a row Word tracks as inserted in a table with a cell of paragraphs, and its paragraphs\' tracked marks', async () => {
+      // Word tracks the mark of each paragraph of a row it inserts, which
+      // an HTML cell holds between its paragraphs, as for a row it doesn't
+      const marked = (text: string) => '<w:p><w:pPr><w:rPr><w:ins' + attrs + '/></w:rPr></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p>';
+      const docx = await buildSyntheticDocx(wrapDocumentXml(table(row(['a', 'b']),
+        insertedRow('<w:tc>' + marked('c') + marked('e') + '</w:tc><w:tc>' + marked('d') + '</w:tc>'))));
+      const markdown = (await convertDocx(docx)).markdown;
+      expect(markdown).toContain('<td>\n      <p>c{++</p>\n      <p>++}e</p>\n    </td>\n    <td>\n      <p>d</p>\n    </td>');
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect(await rowChanges(again)).toEqual(['', '']);
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    });
+
+    test('keeps the text of a row Word tracks as inserted in a table with a font a directive can\'t hold, which only HTML holds', async () => {
+      // Only its shape was checked, so its cells' text came in as {++c++}
+      const html = '<table data-font="A --> B">\n  <tr>\n    <th>\n      <p>a</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n      <p>c</p>\n    </td>\n  </tr>\n</table>\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(html)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      let rowAt = 0;
+      const tracked = xml.replace(/<w:tr>/g, tr => rowAt++ === 1 ? tr + '<w:trPr><w:ins' + attrs + '/></w:trPr>' : tr);
+      expect(tracked).not.toBe(xml);
+      zip.file('word/document.xml', tracked);
+      const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+      expect(markdown).toContain('<table data-font="A --&gt; B">');
+      expect(markdown).toContain('<p>c</p>');
+      expect(markdown).not.toContain('{++');
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    });
+
+    // Minimal 1x1 white PNG
+    const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQABNl7BcQAAAABJRU5ErkJggg==', 'base64');
+    test.each([
+      ['with no file', 'missing.png', ''],
+      ['from a URL', 'https://example.com/a.png', ''],
+      ['of a format Word doesn\'t show', 'a.bmp', ''],
+      ['export embeds', 'a.png', 'del'],
+    ])('tracks a row whose cells\' text is a deleted image %s as a row Word deletes only where Word shows it', async (_name, src, change) => {
+      // Export hides an image it can't embed in the text, so accepting the
+      // deletion deleted a row that showed nothing
+      const { mkdtempSync, writeFileSync, rmSync } = require('fs');
+      const dir = mkdtempSync(join(require('os').tmpdir(), 'mms-row-image-'));
+      writeFileSync(join(dir, 'a.png'), PNG);
+      writeFileSync(join(dir, 'a.bmp'), PNG);
+      try {
+        const docx = (await convertMdToDocx('| a | b |\n|---|---|\n| {--![alt](' + src + ')--} |  |\n', { sourceDir: dir })).docx;
+        expect(await rowChanges(docx)).toEqual(['', change]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 describe('extractBibKeyOrder', () => {
