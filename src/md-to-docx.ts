@@ -30,7 +30,7 @@ import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
-import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
+import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -4648,12 +4648,16 @@ async function extractTemplateParts(templateDocx: Uint8Array): Promise<TemplateP
   const zip = await JSZip.loadAsync(templateDocx);
   const parts = new Map<string, Uint8Array>();
 
-  for (const path of ['word/styles.xml', 'word/theme/theme1.xml', 'word/numbering.xml', 'word/settings.xml']) {
+  for (const path of ['word/styles.xml', 'word/numbering.xml', 'word/settings.xml']) {
     const file = zip.file(path);
     if (file) {
       parts.set(path, await file.async('uint8array'));
     }
   }
+  // The theme the document's relationship names, whatever its part's name,
+  // as import reads it, which export writes as theme1.xml
+  const theme = zip.file(await relatedPartPath(zip, 'word/document.xml', 'theme') ?? 'word/theme/theme1.xml');
+  if (theme) parts.set('word/theme/theme1.xml', await theme.async('uint8array'));
 
   // The document-level <w:sectPr> (direct child of <w:body>), to preserve
   // template page layout (size, margins, orientation), and the headers and

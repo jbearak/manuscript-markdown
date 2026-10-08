@@ -3265,6 +3265,30 @@ describe('heading and title styles based on another style', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
+  // Export writes the theme as theme1.xml, from the part the template's
+  // relationship names, so with the document as its template, styles in
+  // theme fonts show what they did
+  it('export with the document as its template keeps a theme the document\'s relationship names, whatever its part\'s name', async () => {
+    const { convertDocx } = await import('./converter');
+    const theme = (font: string) => '<w:rFonts w:asciiTheme="' + font + '" w:hAnsiTheme="' + font + '"/>';
+    const zip = await JSZip.loadAsync(await withStyles(['minorFont', 'Georgia'], ['majorFont', 'Garamond'],
+      ['Normal', '<w:name w:val="Normal"/><w:rPr>' + theme('minorHAnsi') + '<w:sz w:val="22"/></w:rPr>'],
+      ['Quote', '<w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:rPr>' + theme('majorHAnsi') + '<w:i/></w:rPr>']));
+    zip.file('word/theme/custom.xml', await zip.file(themePath)!.async('string'));
+    zip.remove(themePath);
+    for (const part of ['word/_rels/document.xml.rels', '[Content_Types].xml']) {
+      zip.file(part, (await zip.file(part)!.async('string')).split('theme/theme1.xml').join('theme/custom.xml'));
+    }
+    const original = await zip.generateAsync({ type: 'uint8array' });
+    const { markdown } = await convertDocx(original);
+    // Export would give the quote the body's font in place of its own
+    expect(parseFrontmatter(markdown).metadata.font).toBeUndefined();
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    const exported = await (await JSZip.loadAsync(again)).file(themePath)!.async('string');
+    expect(['minorFont', 'majorFont'].map(font => new RegExp('<a:' + font + '><a:latin typeface="([^"]*)"').exec(exported)?.[1])).toEqual(['Georgia', 'Garamond']);
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
   // XML allows any number of references, as &apos; in a link's target
   it('a theme font reads by its typeface where the document\'s relationships hold many references', async () => {
     const { convertDocx } = await import('./converter');
