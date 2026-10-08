@@ -7523,6 +7523,42 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(await texts((await convertMdToDocx(md1)).docx)).toEqual(await texts(docx));
   });
 
+  /** The Markdown of a grid table whose cell holds a, a line break, `runs`
+   *  and b, and the Word document */
+  const gridCell = async (runs: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('+----+\n| h  |\n+====+\n| XX |\n+----+\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, () => r(t('a') + '<w:br/>') + runs + r(t('b')));
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    return { docx, md: (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '') };
+  };
+  test.each([
+    ['a space and a comment', r(t(' ')) + comment('<!-- c -->'), '&#32;<!-- c -->b'],
+    ['spaces and a comment', r(t('  ')) + comment('<!-- c -->'), '&#32;&#32;<!-- c -->b'],
+    ['a space, a comment and a space', r(t(' ')) + comment('<!-- c -->') + r(t(' ')), '&#32;<!-- c --> b'],
+    ['a space and two comments', r(t(' ')) + comment('<!-- c -->') + r(t(' ')) + comment('<!-- d -->'), '&#32;<!-- c --> <!-- d -->b'],
+    ['a comment', comment('<!-- c -->'), '<!-- c -->b'],
+    ['a tab and a comment', r('<w:tab/>') + comment('<!-- c -->'), '&#9;<!-- c -->b'],
+  ])('keeps %s after a line break in a grid table\'s cell', async (_name, runs, line) => {
+    // A comment starts no HTML block in a cell, as a paragraph's line can,
+    // so raw, the spaces before it were the cell's padding to export
+    const { docx, md } = await gridCell(runs);
+    expect(md).toContain('\n| ' + line + ' |\n');
+    const exported = (await convertMdToDocx(md)).docx;
+    expect(await texts(exported)).toEqual(await texts(docx));
+    expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
+  test('keeps a comment\'s hidden run that starts with a space after a line break in a grid table\'s cell as Markdown', async () => {
+    // Whose space is the text's, as at the cell's start, and shows after the
+    // next export, which then moved it into the padding
+    const { md } = await gridCell(comment(' <!-- c -->'));
+    expect(md).toContain('\n| &#32;<!-- c -->b |\n');
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
   // The rest of a comment's hidden run, which Word split from it, with no ZWSP
   const rest = (text: string) => r(t(text.replace(/</g, '&lt;').replace(/>/g, '&gt;')), '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>');
   test.each([

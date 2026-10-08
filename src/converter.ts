@@ -472,8 +472,10 @@ const COMMENT_OR_AUTOLINK_AT = /<(?:[!?]|[A-Za-z][A-Za-z\d+.-]{1,31}:[!-;=?-\uFF
  * bracket with a citation's key, up to the next ], takes the text it
  * covers. A closer's search goes on from where its last one ended, so the
  * pass is linear, but for math and tags, whose search is the parser's.
+ * Text that's inline, as a grid table cell's, which export reads as one
+ * paragraph's text whatever its lines start with, has no HTML block.
  */
-function lineStartsAfterBreaks(text: string): number[] {
+function lineStartsAfterBreaks(text: string, inline = false): number[] {
   const starts: number[] = [];
   // Each closer's offset from its last search, -1 for none
   const closers = new Map<string, number>();
@@ -538,7 +540,7 @@ function lineStartsAfterBreaks(text: string): number[] {
     }
   }
   // Not in an HTML block, which a paragraph can start, or a line in it
-  const html = text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions : [];
+  const html = !inline && text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions : [];
   return html.length > 0 ? starts.filter(start => !isInsideCodeRegion(start, html)) : starts;
 }
 
@@ -546,15 +548,16 @@ function lineStartsAfterBreaks(text: string): number[] {
  * A paragraph's text with the whitespace Markdown would lose written as
  * character references: at its edges (see keepParagraphEdgeWhitespace), and
  * the spaces and tabs at the start of a line after a line break, which
- * Markdown drops there, outside the text it keeps raw.
+ * Markdown drops there, outside the text it keeps raw. Text that's `inline`
+ * starts no HTML block on a line (see lineStartsAfterBreaks).
  */
-export function keepParagraphWhitespace(text: string, atStart: boolean, atEnd: boolean): string {
+export function keepParagraphWhitespace(text: string, atStart: boolean, atEnd: boolean, inline = false): string {
   const reference = (whitespace: string) => whitespace.replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
   if (text.includes('\\\n')) {
     let kept = '';
     let last = 0;
     const indent = /[ \t]+/y;
-    for (const start of lineStartsAfterBreaks(text)) {
+    for (const start of lineStartsAfterBreaks(text, inline)) {
       indent.lastIndex = start;
       const whitespace = indent.exec(text);
       if (!whitespace) continue;
@@ -9111,7 +9114,10 @@ function tryRenderGridTable(
         // grid table cells treat bare newlines as hard breaks, so the
         // backslash is redundant. A line of an equation or a comment, which
         // ends in no break's backslash, as an odd run of them, stays as it is.
-        const paraLines = keepParagraphWhitespace(r.text, true, true).split('\n');
+        // A line starts no HTML block in a cell, so the spaces before a
+        // comment that starts one after a break are the padding's, as before
+        // text, unless they're references
+        const paraLines = keepParagraphWhitespace(r.text, true, true, true).split('\n');
         pushAll(cellLines, paraLines.map((l, k) => k < paraLines.length - 1 && /(?<!\\)(?:\\\\)*\\$/.test(l) ? gridLineBeforeBreak(l.slice(0, -1)) : l));
         pushAll(cellDeferred, r.deferredComments);
       }
