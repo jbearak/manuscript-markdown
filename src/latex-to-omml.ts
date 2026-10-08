@@ -117,6 +117,9 @@ const MATH_ALPHABETS: Map<string, string> = new Map([
   ['\\mathtt', '<m:scr m:val="monospace"/><m:sty m:val="p"/>'],
 ]);
 
+/** Commands whose group is styled text: the math alphabets, \mathrm and \mathcal. */
+const STYLE_GROUP_COMMANDS = new Set([...MATH_ALPHABETS.keys(), '\\mathrm', '\\mathcal']);
+
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
@@ -176,6 +179,27 @@ function restyleAroundRevisions(omml: string, restyle: (omml: string) => string)
     last = revision.index + revision[0].length;
   }
   return result + restyled(omml.slice(last));
+}
+
+/**
+ * The text of `omml`'s runs, `text`, as one run shows it in Word, to style
+ * again (see styleGroup), and whether it needs xml:space="preserve". Where a
+ * run that has it, as \text{ } writes, leaves a space at an edge, Word keeps
+ * that space, so the one run keeps it too, without the source's spaces at
+ * either edge, up to the text, which Word drops. Otherwise it's `text`, the
+ * source's spaces, which a math style ignores, and Word drops, as they are.
+ */
+function styledText(omml: string, text: string): { text: string; preserve: boolean } {
+  const runs = [...omml.matchAll(/<m:t( xml:space="preserve")?>(?!\u200B)([^<]*)<\/m:t>/g)].map(m => ({ kept: m[1] !== undefined, text: unescapeXmlChars(m[2]) }));
+  for (const [list, edge] of [[runs, /^[ \t\r\n]+/], [[...runs].reverse(), /[ \t\r\n]+$/]] as const) {
+    // Up to the first text, past a kept space too
+    for (const run of list) {
+      if (!run.kept) run.text = run.text.replace(edge, '');
+      if (/[^ \t\r\n]/.test(run.text)) break;
+    }
+  }
+  const shown = runs.map(run => run.text).join('');
+  return /^[ \t\r\n]|[ \t\r\n]$/.test(shown) ? { text: shown, preserve: true } : { text, preserve: false };
 }
 
 function makeCalligraphicRun(text: string): string {
@@ -462,8 +486,18 @@ class Parser {
 
   private parseCommand(cmd: string): string {
     if (this.track && (cmd === CRITIC_INSERTION_COMMAND || cmd === CRITIC_DELETION_COMMAND)) {
+      const start = this.pos;
       const omml = this.parseGroup();
-      return omml && this.track(cmd === CRITIC_INSERTION_COMMAND ? 'w:ins' : 'w:del', omml);
+      const change = omml && this.track(cmd === CRITIC_INSERTION_COMMAND ? 'w:ins' : 'w:del', omml);
+      // Marked for keepWhitespaceChanges where the source is only whitespace,
+      // in groups or styled ones such as \mathbf{ }, or a control space,
+      // which the OMML alone can't tell from padding around a command that
+      // gives none, as \! does
+      const source = this.tokens.slice(start, this.pos);
+      const onlyWhitespace = source.some(token => token.type === 'text' || token.value === '\\ ') && source.every(token =>
+        token.type === 'lbrace' || token.type === 'rbrace' || (token.type === 'text' && /^[ \t\r\n]*$/.test(token.value)) ||
+        (token.type === 'command' && (STYLE_GROUP_COMMANDS.has(token.value) || token.value === '\\ ')));
+      return onlyWhitespace ? change.replace(/^<w:(?:ins|del)\b/, open => open + WHITESPACE_CHANGE_MARK) : change;
     }
 
     const escaped = this.mode === 'math' ? undefined : TEXT_ESCAPES.get(cmd);
@@ -1155,8 +1189,9 @@ class Parser {
   private styleGroup(style: (text: string) => string): string {
     return restyleAroundRevisions(this.parseGroupIn('styled'), omml => omml.split(HIDDEN_RUN_RE).map((part, i) => {
       if (i % 2 === 1) return part;
-      const text = this.extractText(part);
-      return text ? style(text) : '';
+      const { text, preserve } = styledText(part, this.extractText(part));
+      if (!text) return '';
+      return preserve ? style(text).replace(/<m:t>/g, '<m:t xml:space="preserve">') : style(text);
     }).join(''));
   }
 
@@ -1204,5 +1239,26 @@ export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownC
   if (!latex.trim()) {
     return '';
   }
-  return new Parser(tokenize(latex), onUnknownCommand, 'math', track).parseExpression(false);
+  return keepWhitespaceChanges(new Parser(tokenize(latex), onUnknownCommand, 'math', track).parseExpression(false));
+}
+
+/** The mark on the w:ins or w:del of a tracked change whose source is only
+ *  whitespace, as {++ ++} is (see keepWhitespaceChanges) */
+const WHITESPACE_CHANGE_MARK = ' mm:whitespace=""';
+
+/** A marked tracked change (see WHITESPACE_CHANGE_MARK), its runs styled or
+ *  not, and preserved already where \text{} writes them */
+const WHITESPACE_CHANGE_RE = /(<w:(ins|del)) mm:whitespace=""([^>]*>)((?:<m:r>(?:<m:rPr>(?:<m:\w+(?: [^>]*)?\/>)*<\/m:rPr>)?<m:t(?: xml:space="preserve")?>[ \t\r\n]+<\/m:t><\/m:r>)*)(?=<\/w:\2>)/g;
+
+/** `omml` with the runs of each tracked change whose source is only
+ *  whitespace given xml:space="preserve", which Word otherwise drops: the
+ *  whitespace is what it changes, so Word keeps it rather than leave the
+ *  change empty. The whitespace around a command, as in {++ \quad ++} or
+ *  {++ \! ++}, is the source's padding, which Word drops, as it does where the
+ *  change is accepted. This follows the parse, which can restyle the runs of
+ *  a change, as \mathbf{} does. A mark this leaves, on a change it doesn't
+ *  match, goes too, so that the change stays one Word can track in place. */
+function keepWhitespaceChanges(omml: string): string {
+  return omml.replace(WHITESPACE_CHANGE_RE, (_change, open: string, _element: string, rest: string, runs: string) =>
+    open + rest + runs.replace(/<m:t>/g, '<m:t xml:space="preserve">')).split(WHITESPACE_CHANGE_MARK).join('');
 }

@@ -64,6 +64,8 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 //
 // 1. xml:space="preserve": only emit on <w:t> when text starts/ends with a
 //    space. Word strips it from text that doesn't need it. Use wt() helper.
+//    The same goes for an equation's <m:t> (see keepWhitespaceChanges in
+//    latex-to-omml.ts).
 // 2. Zip directory entries: do not include explicit folder entries (word/,
 //    _rels/, etc.) in the zip. Word omits them and normalizes if present.
 //    Delete dir entries from zip.files before generateAsync().

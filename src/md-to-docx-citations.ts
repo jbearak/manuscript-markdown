@@ -1045,17 +1045,20 @@ function equationViewLatex(parts: CriticMathPart[], accepted: boolean): string {
 }
 
 /** The OMML of one view of an equation (see equationViewLatex). LaTeX that's
- *  only whitespace, as {++ ++} accepted is, is a run of it, where
- *  equationOmml gives nothing, as for an empty equation. */
+ *  only whitespace, as {++ ++} accepted is, is a run of it, where equationOmml
+ *  gives nothing, as for an empty equation. Word keeps it with
+ *  xml:space="preserve", which a space such as an em space doesn't need. */
 function equationViewOmml(latex: string, warnings?: string[]): string {
-  return latex && !latex.trim() ? '<m:r><m:t>' + latex + '</m:t></m:r>' : equationOmml(latex, warnings);
+  if (!latex || latex.trim()) return equationOmml(latex, warnings);
+  return '<m:r>' + (/^[ \t\r\n]+$/.test(latex) ? '<m:t xml:space="preserve">' : '<m:t>') + latex + '</m:t></m:r>';
 }
 
 /** `omml` with adjacent runs of the same properties joined, which Word shows
- *  the same way as one run. */
+ *  the same way as one run, and without empty runs, which Word shows as
+ *  nothing, as \text{} writes one where a change fills it. */
 function joinedRuns(omml: string): string {
   const pair = /<m:r>((?:<m:rPr>(?:(?!<\/m:rPr>)[\s\S])*<\/m:rPr>)?)<m:t>([^<]*)<\/m:t><\/m:r><m:r>\1<m:t>/g;
-  let joined = omml.replace(/ xml:space="preserve"/g, '');
+  let joined = omml.replace(/ xml:space="preserve"/g, '').replace(/<m:r>(?:<m:rPr>(?:(?!<\/m:rPr>)[\s\S])*<\/m:rPr>)?<m:t><\/m:t><\/m:r>/g, '');
   for (let previous = ''; joined !== previous;) {
     previous = joined;
     joined = joined.replace(pair, (_match, props: string, text: string) => '<m:r>' + props + '<m:t>' + text);
