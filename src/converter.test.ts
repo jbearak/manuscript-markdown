@@ -9679,6 +9679,10 @@ describe('HTML table cells', () => {
     ['two paragraphs and a line break', '      <p>a</p>\n      <p>b<br>c</p>'],
     ['two line breaks, apart from two paragraphs', '      <p>a<br><br>b</p>'],
     ['empty paragraphs', '      <p></p>\n      <p>a</p>\n      <p></p>\n      <p>b</p>\n      <p></p>'],
+    // Which import wrote as one, as the blank line of the body's
+    ['empty paragraphs in a row', '      <p>a</p>\n      <p></p>\n      <p></p>\n      <p>b</p>'],
+    ['empty paragraphs in a row at its start and end', '      <p></p>\n      <p></p>\n      <p>a</p>\n      <p></p>\n      <p></p>\n      <p></p>'],
+    ['empty paragraphs alone', '      <p></p>\n      <p></p>'],
     ['a line break at the end of a paragraph', '      <p>a<br></p>'],
     ['a space at the start of a line', '      <p>a<br>&#32;b</p>'],
     ['a link whose target has an apostrophe', '      <p><a href="https://e.com/O\'Brien">o</a></p>'],
