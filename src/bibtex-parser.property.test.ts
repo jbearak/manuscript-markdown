@@ -1,6 +1,6 @@
 import { describe, it } from 'bun:test';
 import * as fc from 'fast-check';
-import { parseBibtex, serializeBibtex, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, serializeBibtex, readBibtexFields, quotedValueEnds, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser Property Tests', () => {
   // A field's whitespace as BibTeX reads it: a run of it one space, and
@@ -158,4 +158,87 @@ describe('BibTeX Parser Property Tests', () => {
       }
     );
   }, { timeout: 10000 });
+});
+describe('BibTeX field reader parity', () => {
+  // The regex the field reader replaced, which read braces only so deep
+  const fieldRegex = /(\w+(?:-\w+)*)\s*=\s*(?:\{((?:[^{}]|\{(?:[^{}]|\{[^}]*\})*\})*)\}|"((?:\\.|[^"\\])*)"|(\w+))/g;
+  const byRegex = (body: string) => [...body.matchAll(fieldRegex)].map(([, name, braced, quoted, bare]) =>
+    ({ name, value: braced ?? quoted ?? bare, braced: braced !== undefined }));
+  // Its deepest braces, every one counted, as the regex counts them
+  const depth = (body: string) => {
+    let at = 0;
+    let most = 0;
+    for (const c of body) {
+      if (c === '{') most = Math.max(most, ++at);
+      else if (c === '}') at = Math.max(0, at - 1);
+    }
+    return most;
+  };
+
+  // Where it ended a quoted value otherwise than BibTeX: at a " in a group,
+  // which a " at any depth of braces may be, and at none after a backslash
+  // before a line end
+  const quotesAsBibtex = (body: string) => {
+    let at = 0;
+    for (const c of body) {
+      if (c === '{') at++;
+      else if (c === '}') at = Math.max(0, at - 1);
+      else if (c === '"' && at > 0) return false;
+    }
+    return !/\\[\n\r\u2028\u2029]/.test(body);
+  };
+
+  /**
+   * A body of fields, and anything else, reads as the regex read it, where
+   * its braces nest no deeper than the regex read them: three levels, with
+   * a field's own; and where the regex ended a quoted value where BibTeX
+   * does (quotesAsBibtex).
+   */
+  it('reads an entry body as the regex did, where its braces nest as deep as the regex read them', () => {
+    const atom = fc.constantFrom('title', 'year', 'a-b', 'x1', '-', ' = ', '=', ' ', '\n', ',', '{', '}', '{a}', '{a {b}}', '"', '\\"', '\\', '\\\\',
+      '\\\n', '\\{', '\\}', 'a b', '2020', '@', '%', '\u00A0', '\u2028');
+    fc.assert(
+      fc.property(fc.array(atom, { maxLength: 30 }).map(atoms => atoms.join('')), body => {
+        fc.pre(depth(body) <= 3 && quotesAsBibtex(body));
+        const read = readBibtexFields(body);
+        const expected = byRegex(body);
+        if (JSON.stringify(read) !== JSON.stringify(expected)) throw new Error(JSON.stringify(body) + ' read as ' + JSON.stringify(read) + ', not ' + JSON.stringify(expected));
+        return true;
+      }),
+      { numRuns: 5000 }
+    );
+  });
+
+  /**
+   * Where each " ends the quoted value it opens, read at once for the text,
+   * is where a scan from it ends it: at the next " outside the value's
+   * groups that no odd run of backslashes escapes, with a } at depth 0
+   * taking none off.
+   */
+  it('ends the value each " opens where a scan from it ends it', () => {
+    const scanFrom = (text: string, open: number) => {
+      let depth = 0;
+      let backslashes = 0;
+      for (let i = open + 1; i < text.length; i++) {
+        const c = text[i];
+        if (c === '"' && depth === 0 && backslashes % 2 === 0) return i;
+        if (c === '{') depth++;
+        else if (c === '}' && depth > 0) depth--;
+        backslashes = c === '\\' ? backslashes + 1 : 0;
+      }
+      return -1;
+    };
+    const atom = fc.constantFrom('"', '"', '{', '}', '\\', 'a', ' ', '{"}', '\\"', '}}', '{{');
+    fc.assert(
+      fc.property(fc.array(atom, { maxLength: 40 }).map(atoms => atoms.join('')), text => {
+        const ends = quotedValueEnds(text);
+        for (let i = 0; i < text.length; i++) {
+          const expected = text[i] === '"' ? scanFrom(text, i) : -1;
+          if (ends[i] !== expected) throw new Error(JSON.stringify(text) + ' ends the " at ' + i + ' at ' + ends[i] + ', not ' + expected);
+        }
+        return true;
+      }),
+      { numRuns: 5000 }
+    );
+  });
 });

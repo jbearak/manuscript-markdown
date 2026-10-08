@@ -326,10 +326,69 @@ function escapeBibtex(s: string): string {
   return escapeBibtexText(unescapeBibtexPunctuation(s));
 }
 
+/** Whether a backslash escapes the character at `index`: an odd run of
+ *  them right before it */
+function isEscapedAt(text: string, index: number): boolean {
+  let k = index - 1;
+  while (k >= 0 && text[k] === '\\') k--;
+  return (index - 1 - k) % 2 === 1;
+}
+
+/** For each " in `text`, the index of the " that ends a quoted field value
+ *  opened there, or -1 where none does, as BibTeX reads it: the next " outside
+ *  the value's groups, as a group keeps a " in it, as in "a {"} b", that no
+ *  odd run of backslashes escapes, as in "a \" b". Every brace counts, an
+ *  escaped one too, as BibTeX counts them, but a } with no { open in the value
+ *  takes none off. findEntryEnd, detectEntryEol and readBibtexFields all end a
+ *  quoted value here, so they read an entry's body the same way.
+ *
+ *  Every " is read as one that opens a value, in one pass from the left, as
+ *  readBibtexFields tries one at each it comes to where a value it tried
+ *  doesn't end, and reading on from each would read the rest of the text again
+ *  each time. With the brace height the count of {s less }s before a point, a
+ *  value's depth is its height less the lowest height since it opened, as a }
+ *  at depth 0 takes none off. So a " ends every value still open that opened
+ *  after the last point lower than it, and those are the last opened. -1
+ *  where no " is. */
+export function quotedValueEnds(text: string): Int32Array {
+  const ends = new Int32Array(text.length).fill(-1);
+  // The points before this one each lower than all after it, from the left,
+  // and their heights: the last is the last point lower than this one, once
+  // those no lower than it are gone
+  const lower: number[] = [];
+  const lowerHeights: number[] = [];
+  // The "s whose values haven't ended, from the left
+  const open: number[] = [];
+  let height = 0;
+  let backslashes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '{') height++;
+    else if (c === '}') height--;
+    while (lowerHeights.length > 0 && lowerHeights[lowerHeights.length - 1] >= height) {
+      lower.pop();
+      lowerHeights.pop();
+    }
+    if (c === '"') {
+      if (backslashes % 2 === 0) {
+        const below = lower.length > 0 ? lower[lower.length - 1] : -1;
+        while (open.length > 0 && open[open.length - 1] > below) ends[open.pop()!] = i;
+      }
+      open.push(i);
+    }
+    lower.push(i);
+    lowerHeights.push(height);
+    backslashes = c === '\\' ? backslashes + 1 : 0;
+  }
+  return ends;
+}
+
 /** Find the closing `}` of a BibTeX entry body, handling nested braces and
  *  quoted strings.  `startPos` is the position just after the `@type{key,`
  *  header (i.e. the first character of the field area).
- *  Returns the index of the closing `}`, or -1 if unmatched.
+ *  Returns the index of the closing `}`, or -1 if unmatched.  `quoteEnds`
+ *  gives where each quoted value in `input` ends (see quotedValueEnds), read
+ *  once for all the input's entries.
  *
  *  Note: unlike extractRawField's brace scanner, this does NOT skip `\{`/`\}`
  *  escapes — it counts them as real braces.  This is intentional: at the
@@ -337,7 +396,12 @@ function escapeBibtex(s: string): string {
  *  brace-delimited value, so the net depth change is zero and the result is
  *  the same.  extractRawField needs escape-awareness because it scans a
  *  single field value where `\{` must not alter depth. */
-function findEntryEnd(input: string, startPos: number, closer: '}' | ')' = '}'): number {
+function findEntryEnd(
+  input: string,
+  startPos: number,
+  closer: '}' | ')',
+  quoteEnds: () => Int32Array,
+): number {
   // Field values are always brace-delimited, whatever encloses the entry, so
   // brace depth is tracked on its own.  For a paren entry the two are genuinely
   // independent: a `(` or `)` inside `title = {Analysis (Part I}` is ordinary
@@ -346,35 +410,18 @@ function findEntryEnd(input: string, startPos: number, closer: '}' | ')' = '}'):
   let braceDepth = 0;
   // Only meaningful for a paren entry; a brace entry closes on braceDepth.
   let parenDepth = 1;
-  let inQuotes = false;
-  // Brace depth *within* the current quoted value.  BibTeX lets a `{`…`}` group
-  // protect a literal `"` inside a quoted string, so a quote only ends the
-  // string when it sits at depth 0 of that string.  This depth is kept apart
-  // because braces inside a quoted value do not change the entry's own
-  // nesting — `title = "a } brace"` must not close the entry.
-  let quoteDepth = 0;
   const atTopLevel = () => (closer === ')' ? parenDepth === 1 && braceDepth === 0 : braceDepth === 0);
 
   for (let j = startPos; j < input.length; j++) {
     const char = input[j];
 
-    if (char === '"' && (inQuotes ? quoteDepth === 0 : atTopLevel())) {
-      // Only toggle quote state at the entry's top level (field values live
-      // there).  Inside {…}-delimited values, " is a literal character.
-      let backslashCount = 0;
-      const backslash = '\\';
-      for (let k = j - 1; k >= 0 && input[k] === backslash; k--) {
-        backslashCount++;
-      }
-      if (backslashCount % 2 === 0) {
-        inQuotes = !inQuotes;
-        quoteDepth = 0;
-      }
-    } else if (inQuotes) {
-      // Track protective groups, but never let an unbalanced `}` in a quoted
-      // value drive the depth negative.
-      if (char === '{') quoteDepth++;
-      else if (char === '}' && quoteDepth > 0) quoteDepth--;
+    if (char === '"' && atTopLevel() && !isEscapedAt(input, j)) {
+      // A quoted value, only at the entry's top level (field values live
+      // there).  Inside {…}-delimited values, " is a literal character.  Its
+      // braces do not change the entry's own nesting — `title = "a }
+      // brace"` must not close the entry (see quotedValueEnds).
+      j = quoteEnds()[j];
+      if (j === -1) return -1;
     } else if (char === '{') {
       braceDepth++;
     } else if (char === '}') {
@@ -500,8 +547,7 @@ export function detectEntryEol(entryText: string): BibtexEol | null {
   // Field-value brace depth; 0 is the entry's own level.
   let braceDepth = 0;
   let started = false;
-  let inQuotes = false;
-  let quoteDepth = 0;
+  let quoteEnds: Int32Array | undefined;
 
   for (let i = 0; i < entryText.length; i++) {
     const ch = entryText[i];
@@ -513,17 +559,12 @@ export function detectEntryEol(entryText: string): BibtexEol | null {
       continue;
     }
 
-    if (ch === '"' && (inQuotes ? quoteDepth === 0 : braceDepth === 0)) {
-      let backslashCount = 0;
-      const backslash = '\\';
-      for (let k = i - 1; k >= 0 && entryText[k] === backslash; k--) backslashCount++;
-      if (backslashCount % 2 === 0) {
-        inQuotes = !inQuotes;
-        quoteDepth = 0;
-      }
-    } else if (inQuotes) {
-      if (ch === '{') quoteDepth++;
-      else if (ch === '}' && quoteDepth > 0) quoteDepth--;
+    if (ch === '"' && braceDepth === 0 && !isEscapedAt(entryText, i)) {
+      // A quoted value, whose line ends are its payload (see quotedValueEnds)
+      quoteEnds ??= quotedValueEnds(entryText);
+      const close = quoteEnds[i];
+      if (close === -1) return null;
+      i = close;
     } else if (ch === '{') {
       braceDepth++;
     } else if (ch === '}') {
@@ -687,6 +728,82 @@ function isAtLineStart(input: string, pos: number): boolean {
 /** Parse BibTeX input, returning both the structured entries and raw entry
  *  texts in a single pass over the entry boundaries.  parseBibtex delegates
  *  here; mergeBibtex uses both the parsed and raw maps directly. */
+// A field's name and the = after it, and a bare value, as a number
+const FIELD_NAME_AT = /\w+(?:-\w+)*/y;
+const FIELD_EQUALS_AT = /\s*=\s*/y;
+const BARE_VALUE_AT = /\w+/y;
+
+/**
+ * An entry body's fields, as `name = {value}`, `name = "value"` or
+ * `name = value`, from the left, each where the last ends, past what's
+ * between them, as commas, and anything else that isn't one. A braced value
+ * goes to the } that pairs with its {, however deep its groups nest, every
+ * brace counted, an escaped one too, as BibTeX counts them, and as
+ * findEntryEnd does, so the two read a body the same way. A quoted one goes
+ * to the " that ends it as findEntryEnd reads it (see quotedValueEnds), the
+ * next one outside its groups. Where a value doesn't end, there's no field at its name, and
+ * the search goes on after the name, into the value, as the regex this
+ * replaced searched. In one pass, with each { paired once: the regex read
+ * braces only three deep, with the field's, and a value long enough it gave
+ * up on, so the entry lost the rest of the field, or all its fields.
+ */
+export function readBibtexFields(body: string): Array<{ name: string; value: string; braced: boolean }> {
+  const fields: Array<{ name: string; value: string; braced: boolean }> = [];
+  // The } that pairs with each {, or -1
+  const closes = new Int32Array(body.length).fill(-1);
+  const opens: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === '{') opens.push(i);
+    else if (body[i] === '}' && opens.length > 0) closes[opens.pop()!] = i;
+  }
+  let quoteEnds: Int32Array | undefined;
+  let i = 0;
+  while (i < body.length) {
+    FIELD_NAME_AT.lastIndex = i;
+    const name = FIELD_NAME_AT.exec(body)?.[0];
+    if (!name) {
+      i++;
+      continue;
+    }
+    // A name read from further in it would end where it does, and have the
+    // same = and value after it, or none
+    const nameEnd = i + name.length;
+    FIELD_EQUALS_AT.lastIndex = nameEnd;
+    const equals = FIELD_EQUALS_AT.exec(body);
+    const start = nameEnd + (equals?.[0].length ?? 0);
+    let end = -1;
+    let value: string | undefined;
+    let braced = false;
+    if (!equals) {
+      // No field
+    } else if (body[start] === '{') {
+      end = closes[start];
+      if (end >= 0) {
+        value = body.slice(start + 1, end);
+        braced = true;
+      }
+    } else if (body[start] === '"') {
+      quoteEnds ??= quotedValueEnds(body);
+      end = quoteEnds[start];
+      if (end >= 0) value = body.slice(start + 1, end);
+    } else {
+      BARE_VALUE_AT.lastIndex = start;
+      const bare = BARE_VALUE_AT.exec(body);
+      if (bare) {
+        end = start + bare[0].length - 1;
+        value = bare[0];
+      }
+    }
+    if (value === undefined) {
+      i = nameEnd;
+      continue;
+    }
+    fields.push({ name, value, braced });
+    i = end + 1;
+  }
+  return fields;
+}
+
 export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   return scanBibtex(input);
 }
@@ -705,6 +822,9 @@ function scanBibtex(input: string): ScannedBibtex {
   // paren form would leave a paren `@comment`'s contents exposed as entries.
   const headerRe = /@(\w+)\s*([{(])/g;
   const keyRe = /\s*([^,\s]+)\s*,/y;
+  // Where each quoted value in the input ends, read once for all its entries
+  let quoteEnds: Int32Array | undefined;
+  const inputQuoteEnds = () => (quoteEnds ??= quotedValueEnds(input));
 
   let pos = 0;
   // After a construct we could not delimit, we no longer know whether we are
@@ -719,11 +839,6 @@ function scanBibtex(input: string): ScannedBibtex {
   // them — but marked untrusted, because a recovered `@book{...}` may really
   // be sitting inside another entry's field value.
   let synced = true;
-
-  // NOTE: This regex handles nested braces only up to a small fixed depth
-  // and backslash escapes within quoted strings (e.g. \").
-  // If we need arbitrary nesting, replace with a balanced-brace field parser.
-  const fieldRegex = /(\w+(?:-\w+)*)\s*=\s*(?:\{((?:[^{}]|\{(?:[^{}]|\{[^}]*\})*\})*)\}|"((?:\\.|[^"\\])*)"|(\w+))/g;
 
   while (pos < input.length) {
     headerRe.lastIndex = pos;
@@ -758,7 +873,7 @@ function scanBibtex(input: string): ScannedBibtex {
       // start of a quoted value, so count delimiters only.
       const close = lowerType === 'comment'
         ? findCommentEnd(input, afterBrace, closer)
-        : findEntryEnd(input, afterBrace, closer);
+        : findEntryEnd(input, afterBrace, closer, inputQuoteEnds);
       if (close === -1) {
         // Unterminated declaration — fall back to line-start recovery.
         pos = afterBrace;
@@ -778,7 +893,7 @@ function scanBibtex(input: string): ScannedBibtex {
       // `@type{` opened but the header has no citation key.  Consume its
       // balanced body rather than scanning into it — the `@book{...}` sitting
       // in a field of a malformed entry is that entry's data, not an entry.
-      const close = findEntryEnd(input, afterBrace, closer);
+      const close = findEntryEnd(input, afterBrace, closer, inputQuoteEnds);
       if (close === -1) {
         pos = afterBrace;
         requireLineStart = true;
@@ -794,7 +909,7 @@ function scanBibtex(input: string): ScannedBibtex {
     const key = keyMatch[1];
     const startPos = afterBrace + keyMatch[0].length;
 
-    const endPos = findEntryEnd(input, startPos, closer);
+    const endPos = findEntryEnd(input, startPos, closer, inputQuoteEnds);
     if (endPos === -1) {
       pos = startPos;
       requireLineStart = true;
@@ -821,14 +936,9 @@ function scanBibtex(input: string): ScannedBibtex {
       const fieldsStr = input.slice(startPos, endPos);
       const fields = new Map<string, string>();
 
-      fieldRegex.lastIndex = 0;
-      let fieldMatch;
-      while ((fieldMatch = fieldRegex.exec(fieldsStr)) !== null) {
-        const [, fieldName, braceValue, quoteValue, bareValue] = fieldMatch;
-        const lowerField = fieldName.toLowerCase();
-        const rawValue = braceValue ?? quoteValue ?? bareValue ?? '';
-        const value = decodeBibtexFieldValue(lowerField, rawValue, braceValue !== undefined);
-        fields.set(lowerField, value);
+      for (const field of readBibtexFields(fieldsStr)) {
+        const lowerField = field.name.toLowerCase();
+        fields.set(lowerField, decodeBibtexFieldValue(lowerField, field.value, field.braced));
       }
 
       parsed.set(key, {
