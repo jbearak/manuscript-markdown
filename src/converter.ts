@@ -22,6 +22,7 @@ import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
+import { decodeXml } from './template-sections';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -2393,10 +2394,17 @@ function decodeCharacterReferences(xml: string): string {
   });
 }
 
-async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
+/** A part's text, in the encoding its BOM or declaration names, as UTF-16,
+ *  which some tools write, or else UTF-8; or undefined for no such part */
+async function readZipText(zip: JSZip, path: string): Promise<string | undefined> {
   const file = zip.file(path);
-  if (!file) { return null; }
-  const xml = decodeCharacterReferences(await file.async('string'));
+  return file ? decodeXml(await file.async('uint8array')) : undefined;
+}
+
+async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
+  const text = await readZipText(zip, path);
+  if (text === undefined) { return null; }
+  const xml = decodeCharacterReferences(text);
   const parser = new XMLParser(parserOptions);
   parser.addEntity('#xD', '\r');
   const parsed: unknown = parser.parse(xml);
@@ -14517,9 +14525,8 @@ export async function convertDocx(
   // fields that weren't in the original. Without one, import writes comment
   // dates in the system timezone, and normalizeToUtcIso reads them back in it.
   // Extract heading/title font overrides from styles.xml for round-trip
-  const stylesFile = zip.file('word/styles.xml');
-  if (stylesFile) {
-    const stylesStr = await stylesFile.async('string');
+  const stylesStr = await readZipText(zip, 'word/styles.xml');
+  if (stylesStr !== undefined) {
     const fontFields = extractFontOverridesFromStyles(stylesStr, { explicitTableFontSize, builtInIds: styleLayouts.builtInIds });
     Object.assign(fm, fontFields);
   }

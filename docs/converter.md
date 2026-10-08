@@ -2,6 +2,8 @@
 
 The DOCX converter transforms Microsoft Word documents into Manuscript Markdown format, preserving formatting, comments, citations, and equations.
 
+Import reads each XML part of a `.docx` in the encoding its byte-order mark or XML declaration names, as UTF-16, which some tools write, and in UTF-8 where neither names one.
+
 ## Round-Trip Features
 
 The converter supports DOCX → Markdown → DOCX round-tripping. The following features are preserved in both directions:
