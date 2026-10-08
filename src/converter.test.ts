@@ -9221,6 +9221,8 @@ describe('HTML table cells', () => {
       '{~~[@smith2020, p. &lt;b&gt;3]~>[@jones2021]~~}', '{~~[@smith2020, p. <b>3]~>[@jones2021]~~}'],
     ['an image', [imageItem()], {},
       '![x&lt;b&gt;y &amp; z](media/a.png)', '![x<b>y & z](media/a.png)'],
+    ['an image whose alt text Markdown would read as syntax', [imageItem({ alt: 'x *y* `z` $w$' })], {},
+      '![x *y* `z` $w$](media/a.png)', '![x *y* `z` $w$](media/a.png)'],
     ['an image from an <img>', [imageItem()], { imageFormatMapping: new Map([['rId9', 'html']]) },
       '&lt;img src="media/a.png" alt="x&amp;lt;b&amp;gt;y &amp;amp; z"&gt;', '<img src="media/a.png" alt="x&lt;b&gt;y &amp; z">'],
     ['an image export couldn\'t embed', [imageItem({ markdown: '![x<b>y](missing.png)' })], {},

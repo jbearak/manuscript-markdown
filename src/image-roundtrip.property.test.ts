@@ -482,4 +482,90 @@ describe('image-roundtrip properties', () => {
       cleanup();
     }
   });
+
+  describe('An image\'s alt text in Word', () => {
+    const xmlAttr = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+      .replace(/[\t\n\r]/g, c => '&#' + c.charCodeAt(0) + ';');
+    const fromXmlAttr = (text: string) => text.replace(/&#x([\da-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(+code)).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+    const body = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+
+    /** The Markdown import writes for an image whose alt text Word has as
+     *  `alt`, the alt text export gives it back, and the Markdown of that */
+    async function altRoundTrip(alt: string) {
+      const { convertMdToDocx } = await import('./md-to-docx');
+      const { convertDocx } = await import('./converter');
+      const JSZip = (await import('jszip')).default;
+      const { dir, cleanup } = setupTempImage();
+      try {
+        const { docx } = await convertMdToDocx('![x](test.png){width=100 height=100}', { sourceDir: dir });
+        const zip = await JSZip.loadAsync(docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        zip.file('word/document.xml', xml.replace(/descr="[^"]*"/, 'descr="' + xmlAttr(alt) + '"'));
+        const first = body((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+        const second = await convertMdToDocx(first, { sourceDir: dir });
+        const exported = await (await JSZip.loadAsync(second.docx)).file('word/document.xml')!.async('string');
+        const descr = /descr="([^"]*)"/.exec(exported)?.[1];
+        return { first, alt: descr === undefined ? undefined : fromXmlAttr(descr), again: body((await convertDocx(second.docx)).markdown) };
+      } finally {
+        cleanup();
+      }
+    }
+
+    it.each([
+      'a [b] c', 'a [ b', 'a ] b', '[a](b)', '[x]{.mark}', '[@smith2020]', 'a [^1]',
+      '*b*', '_b_', '`x`', '~~s~~', '==h==', '{==a==}', '{++a++}', '{>>c<<}',
+      'a &amp; b', 'x $y$ z', '$x$', '<https://e.com>', 'a\\*b', 'line1\nline2',
+      '<b>x</b>', '<b title="*">x</b>', '<span class="_x_">y</span>', 'a <!-- c --> b', 'a\\<b',
+      'a\\\nb', 'a\\\\\nb', 'a\\\r\nb', '$a\nb$',
+    ])('keeps alt text %j as Word has it', async (alt) => {
+      const result = await altRoundTrip(alt);
+      expect(result.alt).toBe(alt);
+      expect(result.again).toBe(result.first);
+    });
+
+    /** The descr export writes for an image's Markdown */
+    async function exportedDescr(markdown: string) {
+      const { convertMdToDocx } = await import('./md-to-docx');
+      const JSZip = (await import('jszip')).default;
+      const { dir, cleanup } = setupTempImage();
+      try {
+        const { docx } = await convertMdToDocx(markdown, { sourceDir: dir });
+        const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+        return /descr="([^"]*)"/.exec(xml)?.[1];
+      } finally {
+        cleanup();
+      }
+    }
+
+    it.each([
+      ['a soft break as a space, as in a paragraph', '![A chart of sales by\nregion](test.png)', 'A chart of sales by region'],
+      ['a hard break as a line break', '![a\\\nb](test.png)', 'a&#xA;b'],
+      ['a line break and tab the Markdown writes as references, as references', '![a&#10;b&#9;c](test.png)', 'a&#xA;b&#x9;c'],
+      ['a line break in an <img> tag\'s alt text as a reference', '<img src="test.png" alt="a&#10;b">', 'a&#xA;b'],
+    ])('gives Word %s', async (_name, markdown, descr) => {
+      expect(await exportedDescr(markdown)).toBe(descr);
+    });
+
+    it('reads back alt text whose lines the Markdown wraps as one line', async () => {
+      const { convertMdToDocx } = await import('./md-to-docx');
+      const { convertDocx } = await import('./converter');
+      const { dir, cleanup } = setupTempImage();
+      try {
+        const first = body((await convertDocx((await convertMdToDocx('![A chart of sales by\nregion](test.png)', { sourceDir: dir })).docx)).markdown);
+        expect(first).toBe('![A chart of sales by region](test.png){width=1 height=1}\n');
+        expect(body((await convertDocx((await convertMdToDocx(first, { sourceDir: dir })).docx)).markdown)).toBe(first);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it.each([
+      'Figure 1: sales (2020).', 'snake_case', 'A & B', '$5 and $6', 'a = b', '# not a heading', 'a\\b', 'a > b',
+    ])('writes alt text %j that reads as it is with no escapes', async (alt) => {
+      const result = await altRoundTrip(alt);
+      expect(result.first).toBe('![' + alt + '](test.png){width=100 height=100}\n');
+      expect(result.alt).toBe(alt);
+    });
+  });
 });
