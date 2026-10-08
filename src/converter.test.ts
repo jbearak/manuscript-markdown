@@ -2766,6 +2766,242 @@ describe('Task list round-trip', () => {
   });
 });
 
+describe('Comments on an alert\'s label', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const C = '{>>@A (2024-01-15 10:30) | c<<}';
+
+  test.each([
+    ['an alert', '> [!NOTE]\n> {==text==}' + C + ' more\n'],
+    ['an alert whose text is on its marker\'s line', '> [!TIP] {==text==}' + C + ' more\n'],
+    ['an alert in a list item', '- a\n\n  > [!WARNING]\n  > {==text==}' + C + ' more\n'],
+    ['an alert whose text starts with formatting', '> [!NOTE]\n> {==**text**==}' + C + ' more\n'],
+    ['an alert with a comment that ends after its paragraph', '> [!NOTE]\n> {#1}text\n>\n> more{/1}\n> {#1>>@A (2024-01-15 10:30) | c<<}\n'],
+  ])('starts a comment Word put on the label and the text of %s after the label', async (_name, md) => {
+    // The range took in the label, which import kept as text before the
+    // comment, and export showed after the label it writes
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const label = /<w:r><w:rPr><w:b\/><w:color w:val="[0-9A-F]+"\/><\/w:rPr><w:t>[^<]+<\/w:t><\/w:r>/.exec(xml)![0];
+    const moved = xml.replace(/<w:commentRangeStart w:id="0"\/>/, '').replace(label, '<w:commentRangeStart w:id="0"/>' + label);
+    expect(moved).toMatch(/<w:commentRangeStart w:id="0"\/><w:r><w:rPr><w:b\/>/);
+    zip.file('word/document.xml', moved);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(md);
+    const again = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    // One label in Word
+    expect((await again.file('word/document.xml')!.async('string')).match(/<w:b\/><w:color w:val="[0-9A-F]+"\/><\/w:rPr><w:t>/g)).toHaveLength(1);
+  });
+
+  test('starts a comment Word put on the label and the text after the line break and space after the label, split from the text', async () => {
+    // Word's split runs, merged with the text, made the space the comment's
+    const md = '> [!NOTE]\n> {==text==}' + C + '\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const moved = xml.replace('<w:commentRangeStart w:id="0"/>', '')
+      .replace(/(<w:r><w:rPr><w:b\/>)/, '<w:commentRangeStart w:id="0"/>$1')
+      .replace('<w:r><w:br/></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>text</w:t></w:r>', '<w:r><w:br/><w:t xml:space="preserve"> te</w:t></w:r><w:r><w:t>xt</w:t></w:r>');
+    expect(moved).toContain('<w:t xml:space="preserve"> te</w:t>');
+    zip.file('word/document.xml', moved);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
+  /** md's export, with the range of comment 0 moved to start before the
+   *  alert's label and `edit` applied, read back */
+  const withLabelInRange = async (md: string, edit: (xml: string) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const label = /<w:r><w:rPr><w:b\/><w:color w:val="[0-9A-F]+"\/><\/w:rPr><w:t>[^<]+<\/w:t><\/w:r>/.exec(xml)![0];
+    const moved = edit(xml.replace(/<w:commentRangeStart w:id="0"\/>/, '').replace(label, '<w:commentRangeStart w:id="0"/>' + label));
+    zip.file('word/document.xml', moved);
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  test.each([
+    ['code line break', '<w:r><w:br/></w:r>', '<w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:br/></w:r>', '{==**※ Note**\\\n> &#32;text==}'],
+    ['linked space', '<w:r><w:t xml:space="preserve"> </w:t></w:r>', '<w:hyperlink r:id="LINK"><w:r><w:t xml:space="preserve"> </w:t></w:r></w:hyperlink>', '{==**※ Note**\\\n> [ ](https://e.com)text==}'],
+    ['highlighted space', '<w:r><w:t xml:space="preserve"> </w:t></w:r>', '<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t xml:space="preserve"> </w:t></w:r>', '{==**※ Note**\\\n> == ==text==}'],
+  ])('keeps the label as text, with the %s after it, where a comment Word put on the label and the text goes on in the text', async (_name, run, formatted, line) => {
+    // Taking the comment off the label and the separator, apart from the
+    // separator's formatting or link, lost those, where Word shows them
+    const md = '> [!NOTE]\n> {==text==}' + C + ' more\n\n[x](https://e.com)\n';
+    const markdown = await withLabelInRange(md, xml => {
+      expect(xml).toContain(run);
+      return xml.replace(run, formatted.replace('LINK', /<w:hyperlink r:id="(rId\d+)"/.exec(xml)![1]));
+    });
+    expect(markdown).toBe('> [!NOTE]\n> ' + line + C + ' more\n\n[x](https://e.com)\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps the label as text, where a comment Word put on it and the separator alone ends with one of no width after them', async () => {
+    // The empty item import writes for the comment of no width held the
+    // other, which seemed to go on in the text, so it lost all the text it
+    // had, and came back as {#1}{/1}
+    const md = '> [!NOTE]\n> {==text==}' + C + ' {==more==}{>>@B (2024-01-15 10:30) | d<<}\n';
+    const space = '<w:r><w:t xml:space="preserve"> </w:t></w:r>';
+    const markdown = await withLabelInRange(md, xml => {
+      expect(xml).toContain(space);
+      return xml.replace(/<w:commentRangeEnd w:id="0"\/>|<w:commentRange(?:Start|End) w:id="1"\/>/g, '')
+        .replace(space, space + '<w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="1"/><w:commentRangeEnd w:id="0"/>');
+    });
+    expect(markdown).toBe('> [!NOTE]\n> {#1}**※ Note**\\\n> &#32;{#2}{/1}{/2}text more\n> {#1>>@A (2024-01-15 10:30) | c<<}\n> {#2>>@B (2024-01-15 10:30) | d<<}\n');
+  });
+
+  test('keeps the label as text, where a comment of no width is between the line break and the space after it', async () => {
+    // The empty item import writes for it kept the comment on the label and
+    // the text, and took it off the line break and the space around it, which
+    // split its range in two
+    const md = '> [!NOTE]\n> {==text==}' + C + ' {==more==}{>>@B (2024-01-15 10:30) | d<<}\n';
+    const markdown = await withLabelInRange(md, xml => {
+      expect(xml).toContain('<w:r><w:br/></w:r>');
+      return xml.replace(/<w:commentRange(?:Start|End) w:id="1"\/>/g, '')
+        .replace('<w:r><w:br/></w:r>', '<w:r><w:br/></w:r><w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="1"/>');
+    });
+    expect(markdown).toBe('> [!NOTE]\n> {#1}**※ Note**\\\n> {#2}{/2} text{/1} more\n> {#1>>@A (2024-01-15 10:30) | c<<}\n> {#2>>@B (2024-01-15 10:30) | d<<}\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['line break', '<w:r><w:br/></w:r>', '> {#1}**※ Note**{#2}\\\n> {/2} text{/1} more'],
+    ['space', '<w:r><w:t xml:space="preserve"> </w:t></w:r>', '> {#1}**※ Note**\\\n> {#2} {/2}text{/1} more'],
+  ])('keeps a comment Word put on the %s after the label alone, where another is on the label and the text, on the label, which stays', async (_name, separator, line) => {
+    // Taking the separator off took the text of the comment on it, which
+    // came back as {#2}{/2}, with nothing for export to put it on
+    const md = '> [!NOTE]\n> {==text==}' + C + ' {==more==}{>>@B (2024-01-15 10:30) | d<<}\n';
+    const markdown = await withLabelInRange(md, xml => {
+      expect(xml).toContain(separator);
+      return xml.replace('<w:commentRangeStart w:id="1"/>', '').replace('<w:commentRangeEnd w:id="1"/>', '')
+        .replace(separator, '<w:commentRangeStart w:id="1"/>' + separator + '<w:commentRangeEnd w:id="1"/>');
+    });
+    expect(markdown).toBe('> [!NOTE]\n' + line + '\n> {#1>>@A (2024-01-15 10:30) | c<<}\n> {#2>>@B (2024-01-15 10:30) | d<<}\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a comment Word put on a linked label and the text after it on the label, which stays', async () => {
+    // The comment started after the label, which import doesn't take off
+    // where it's linked, and joined it to the text
+    const md = '> [!NOTE]\n> {==text==}' + C + ' more\n\n[x](https://e.com)\n';
+    const markdown = await withLabelInRange(md, xml => {
+      const id = /<w:hyperlink r:id="(rId\d+)"/.exec(xml)![1];
+      return xml.replace(/(<w:commentRangeStart w:id="0"\/>)(<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*<\/w:r>)/, '$1<w:hyperlink r:id="' + id + '">$2</w:hyperlink>');
+    });
+    expect(markdown).toContain('> {==[**※ Note**](https://e.com)\\\n');
+  });
+
+  test('starts a comment from a table\'s cell after the label of an alert after the table', async () => {
+    // Import writes the range in parts, one for the cell and one for the
+    // alert, which kept the label as text before the alert's text
+    const md = '| A |\n| --- |\n| {#1}a |\n\n> [!NOTE]\n> text{/1} more\n> ' + '{#1>>@A (2024-01-15 10:30) | c<<}' + '\n';
+    const markdown = strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+    expect(markdown).toContain('\n> [!NOTE]\n> {==text==}{>>@A (2024-01-15 10:30) | c<<} more\n');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    // One label in Word
+    expect(xml.match(/<w:b\/><w:color w:val="[0-9A-F]+"\/><\/w:rPr><w:t>/g)).toHaveLength(1);
+  });
+
+  const body = (id: number, text: string) => '{#' + id + '>>@A (2024-01-15 10:30) | ' + text + '<<}';
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+
+  test.each([
+    ['ends in the alert\'s text', '{#1}Before.\n\n> [!NOTE]\n> text{/1} more\n> ' + body(1, 'c') + '\n'],
+    ['ends with the alert\'s text', '{#1}Before.\n\n> [!NOTE]\n> text more{/1}\n> ' + body(1, 'c') + '\n'],
+    ['ends in the text on the marker\'s line', '{#1}Before.\n\n> [!TIP] text more{/1}\n> ' + body(1, 'c') + '\n'],
+    ['ends in a task item\'s text', '{#1}Before.\n\n- [ ] text{/1} more\n' + body(1, 'c') + '\n'],
+    ['ends with a task item\'s text', '{#1}Before.\n\n- [ ] text more{/1}\n' + body(1, 'c') + '\n'],
+    ['ends in the alert\'s text, past a thematic break', '{#1}Before.\n\n---\n\n> [!NOTE]\n> text{/1} more\n> ' + body(1, 'c') + '\n'],
+    ['ends in the alert\'s text, past an empty list item', '- {#1}a\n- \n\n> [!NOTE]\n> text{/1} more\n> ' + body(1, 'c') + '\n'],
+    ['ends in a task item\'s text, past a thematic break', '{#1}Before.\n\n---\n\n- [ ] text{/1} more\n' + body(1, 'c') + '\n'],
+    ['ends in the alert\'s text, past an empty table', '{#1}Before.\n\n| |\n| --- |\n| |\n\n> [!NOTE]\n> text{/1} more\n> ' + body(1, 'c') + '\n'],
+    ['ends in the alert\'s text, past a table of HTML comments alone', '{#1}Before.\n\n| {#1}<!-- a --> |\n| --- |\n| {#1}<!-- b --> |\n\n> [!NOTE]\n> text{/1} more\n> ' + body(1, 'c') + '\n'],
+  ])('keeps a comment from the paragraph before that %s', async (_name, md) => {
+    // The label lost the range open over it, which closed before it and
+    // opened again after, so the label stayed as text, and the range lost
+    // its end where its last item was the alert's text
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test.each([
+    ['an alert', '{#1}Before.\n\n> [!NOTE]\n> {#2}text{/1} more{/2}\n> ' + body(1, 'c') + '\n> ' + body(2, 'd') + '\n', /(<w:r><w:rPr><w:b\/>)/],
+    ['a task item', '{#1}Before.\n\n- [ ] {#2}text{/1} more{/2}\n' + body(1, 'c') + '\n' + body(2, 'd') + '\n', /(<w:r><w:t xml:space="preserve">☐ <\/w:t><\/w:r>)/],
+  ])('starts a comment Word put on the label of %s after it, where a comment from the paragraph before ends in its text', async (_name, md, label) => {
+    // Taking the line break and space off the text, after the range from
+    // before was found to end in it, lost the range's end
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const moved = xml.replace('<w:commentRangeStart w:id="1"/>', '').replace(label, '<w:commentRangeStart w:id="1"/>$1');
+    expect(moved).toMatch(/<w:commentRangeStart w:id="1"\/><w:r>(?:<w:rPr><w:b\/>|<w:t xml:space="preserve">☐)/);
+    zip.file('word/document.xml', moved);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  /** md's export, with the range of comment 1 moved to start before the
+   *  alert's label and `edit` applied, read back */
+  const withSecondOnLabel = async (md: string, edit: (xml: string) => string = xml => xml) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const moved = edit(xml.replace('<w:commentRangeStart w:id="1"/>', ''))
+      .replace(/(<w:r><w:rPr><w:b\/><w:color w:val="[0-9A-F]+"\/>)/, '<w:commentRangeStart w:id="1"/>$1');
+    expect(moved).toMatch(/<w:commentRangeStart w:id="1"\/><w:r><w:rPr><w:b\/><w:color /);
+    zip.file('word/document.xml', moved);
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  test('starts a comment Word put on the label after it, where a comment over a table and the paragraph after it goes on in the alert', async () => {
+    // Import writes the range from the table in a part for each paragraph,
+    // which starts before the label, so the label stayed, and the line
+    // break after it went, which ran the label into the text
+    const markdown = await withSecondOnLabel('| A |\n| --- |\n| {#1}a |\n\nBody.\n\n> [!NOTE]\n> {#2}text{/1} more{/2}\n> ' + body(1, 'c') + '\n> ' + body(2, 'd') + '\n');
+    expect(markdown).toContain('\n{#1}Body.{/1}\n\n> [!NOTE]\n> {#1}{#2}text{/1} more{/2}\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    // One label in Word
+    expect(xml.match(/<w:b\/><w:color w:val="[0-9A-F]+"\/><\/w:rPr><w:t>/g)).toHaveLength(1);
+  });
+
+  test('keeps the line break and space after the label with it, where a comment Word put on the label and the text starts before it', async () => {
+    // A range from a code block, which holds no markers, starts again at the
+    // label, which then stays, and the line break after it went, which ran
+    // the label into the text
+    const markdown = await withSecondOnLabel('```\ncode\n```\n\n> [!NOTE]\n> {#1}{#2}text{/1} more{/2}\n> ' + body(1, 'c') + '\n> ' + body(2, 'd') + '\n',
+      xml => {
+        const edited = xml.replace('<w:commentRangeStart w:id="0"/>', '').replace(/(<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>code<\/w:t>)/, '<w:commentRangeStart w:id="0"/>$1');
+        expect(edited).toMatch(/<w:commentRangeStart w:id="0"\/><w:r>(?:(?!<\/w:r>).)*>code</);
+        return edited;
+      });
+    expect(markdown).toBe('```\ncode\n```\n\n> [!NOTE]\n> {#1}**※ Note**\\\n> &#32;{#2}text{/1} more{/2}\n> ' + body(1, 'c') + '\n> ' + body(2, 'd') + '\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['', '{#1}{#2}text more{/1}{/2}', ['label', 'space'], '{#1}**※ Note**\\\n> {#2} text more{/1}{/2}'],
+    [', and one from a code block before the alert', '{#1}{#2}{#3}text{/1} more{/2}{/3}', ['code', 'label', 'space'], '{#1}{#2}**※ Note**\\\n> {#3} text{/1} more{/2}{/3}'],
+  ])('keeps the label as text, where a comment Word put on the label and the text is beside one that starts on the space after the label%s', async (name, line, starts, kept) => {
+    // The comment on the space lost it from its range, which started after
+    // it, where the label stayed, as where a comment from a code block
+    // before the alert started again on it
+    const before = name ? '```\ncode\n```\n\n' : '';
+    const bodies = starts.map((_start, k) => '> ' + body(k + 1, 'c' + k) + '\n').join('');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(before + '> [!NOTE]\n> ' + line + '\n' + bodies)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const runs: Record<string, RegExp> = {
+      code: /(<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>code<\/w:t>)/,
+      label: /(<w:r><w:rPr><w:b\/><w:color w:val="[0-9A-F]+"\/>)/,
+      space: /(<w:r><w:t xml:space="preserve"> <\/w:t><\/w:r>)/,
+    };
+    const moved = starts.reduce((edited, start, id) => {
+      const marker = '<w:commentRangeStart w:id="' + id + '"/>';
+      expect(edited).toMatch(runs[start]);
+      return edited.replace(marker, '').replace(runs[start], marker + '$1');
+    }, xml);
+    zip.file('word/document.xml', moved);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(before + '> [!NOTE]\n> ' + kept + '\n' + bodies);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
 describe('List indent round-trip', () => {
   test('does not infer an ordinary left-indented paragraph as a list continuation', async () => {
     const { docx } = await convertMdToDocx('- item\n\nBody');
