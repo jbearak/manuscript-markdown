@@ -15860,6 +15860,23 @@ describe('round-trip regression: a brace after an image', () => {
     expect(await toMarkdown(once)).toBe(once);
   });
 
+  test.each([
+    ['with text after', 'A [![a](missing.png)\\{x\\} b](https://e.com/) c', 'A [![a](missing.png)\\{x} b](https://e.com/) c'],
+    ['at its end', 'A [b ![a](missing.png)\\{x\\}](https://e.com/) c', 'A [b ![a](missing.png)\\{x}](https://e.com/) c'],
+    ['in a tracked change', 'A {++[![a](missing.png)\\{x\\} b](https://e.com/)++} c', 'A {++[![a](missing.png)\\{x} b](https://e.com/)++} c'],
+    ['with a tracked change in part of it', 'A [![a](missing.png)\\{x\\}{++y++}](https://e.com/) c', 'A [![a](missing.png)\\{x}{++y++}](https://e.com/) c'],
+  ])('keeps a brace after an image export can\'t embed in a link %s as text', async (_name, md, expected) => {
+    // Import wrote it as it is in the link's text, which the next export
+    // read as the image's size, so Word lost the {x}, though the image's
+    // hidden Markdown kept it
+    const once = (await toMarkdown(md)).replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    expect(once).toBe(expected + '\n');
+    type Runs = ReturnType<typeof parseMd>[number]['runs'];
+    const text = (runs: Runs): string => runs.map(run => run.type === 'text' ? run.text : text(run.innerRuns ?? [])).join('');
+    expect(text(parseMd(once)[0].runs)).toContain('{x}');
+    expect(await toMarkdown(once)).toBe(once);
+  });
+
   test('reads no size for an image from an escaped brace after it', () => {
     const runs = parseMd('A ![a](image.png)\\{width=50\\} b')[0].runs;
     expect(runs.find(run => run.type === 'image')).toMatchObject({ imageWidth: undefined, imageSource: '![a](image.png)' });
