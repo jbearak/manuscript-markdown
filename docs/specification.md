@@ -41,7 +41,7 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `bibliography` | Path to a `.bib` file for citation resolution. Aliases: `bib`, `bibtex`. The `.bib` extension is optional. Relative paths resolve from the `.md` file directory, then workspace root. `/`-prefixed paths resolve from workspace root, then as absolute OS paths. Falls back to `{basename}.bib` if not found. |
 | `font` | Body font family for non-code styles. No default (uses rendering application's default). |
 | `code-font` | Monospace font family for code styles. Default: Consolas. |
-| `font-size` | Body font size in points. Default: 11. |
+| `font-size` | Body font size in points. Default: 11. On import, the size Normal shows in Word, from the style it's based on or else the document defaults where Normal sets none, or Word's 10pt where nothing does; written only where it isn't 11pt. Code and tables that set no size take the body's in Word, so import gives `code-font-size` or `table-font-size` where that isn't the size export would set them to. Export scales the footnote and endnote styles by it too, except with a template whose Normal already shows that size, where they keep the template's, as no key gives the notes' size. |
 | `code-font-size` | Code font size in points. Default: 10. When `font-size` is specified without `code-font-size`, the code font size is automatically set to 1pt less than the body font size, preserving the default size difference. |
 | `table-font` | Table font family. Falls back to `font` if not set. |
 | `table-font-size` | Table font size in points. When `font-size` is specified without `table-font-size`, the table font size is automatically set to 2pt less than the body font size. |

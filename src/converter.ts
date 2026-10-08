@@ -15459,12 +15459,14 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return { rPr, pPr };
   }
 
-  // Extract Normal (body) font for comparison
+  // Extract Normal (body) font for comparison, and the size Normal shows,
+  // which may come from the document defaults (see inheritedSizeHp)
   const normalRpr = getStyleRPr('Normal');
   const bodyFont = normalRpr ? extractFont(normalRpr) : undefined;
-  const bodySizeHp = normalRpr ? extractSizeHp(normalRpr) : undefined;
+  const bodySizeHp = inheritedSizeHp('Normal');
 
-  // Emit body font/fontSize when they differ from Word defaults
+  // Emit body font/fontSize when they differ from Word defaults, the size
+  // where it differs from the 11pt export gives Normal without font-size
   if (bodyFont && bodyFont !== 'Calibri') result.font = bodyFont;
   if (bodySizeHp !== undefined && bodySizeHp !== 22) result.fontSize = bodySizeHp / 2;
 
@@ -15541,10 +15543,12 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   // TableParagraph extraction
   const tableRpr = getStyleRPr('TableParagraph');
-  if (tableRpr) {
+  if (tableRpr !== null) {
     const tblFont = extractFont(tableRpr);
     if (tblFont && tblFont !== bodyFont) result.tableFont = tblFont;
-    const tblSizeHp = extractSizeHp(tableRpr);
+    // The size it shows, which may be the body's, as export sizes tables
+    // from font-size where the frontmatter doesn't give theirs
+    const tblSizeHp = inheritedSizeHp('TableParagraph');
     if (tblSizeHp !== undefined) {
       const bsHp = bodySizeHp ?? 22;
       // Suppress table-font-size when it matches auto-shrink default (body - 4hp),
@@ -15560,10 +15564,10 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   // CodeBlock extraction: export sets its size a point under a body size the
   // frontmatter sets, or else to 10pt
   const codeRpr = getStyleRPr('CodeBlock');
-  if (codeRpr) {
+  if (codeRpr !== null) {
     const codeFont = extractFont(codeRpr);
     if (codeFont && codeFont !== 'Consolas') result.codeFont = codeFont;
-    const codeSizeHp = extractSizeHp(codeRpr);
+    const codeSizeHp = inheritedSizeHp('CodeBlock');
     const inferredHp = bodySizeHp !== undefined && bodySizeHp !== 22 ? Math.max(1, bodySizeHp - 2) : 20;
     if (codeSizeHp !== undefined && codeSizeHp !== inferredHp) result.codeFontSize = codeSizeHp / 2;
   }
@@ -15613,6 +15617,19 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   if (Object.keys(extractedCustomStyles).length > 0) result.styles = extractedCustomStyles;
 
   return result;
+}
+
+/** The size, in half-points, of Normal in styles XML as import reads it for
+ *  font-size (see extractFontOverridesFromStyles): its own, or else the
+ *  nearest along its w:basedOn, or else the document defaults', or else
+ *  Word's 10pt, without a tracked change's record of what one was; and 11pt,
+ *  the size export gives Normal, where there's no Normal. `templateIds` are a
+ *  template's IDs for the built-in styles it gives others (see
+ *  templateStyleIds in md-to-docx.ts). */
+export function bodySizeHpFromStyles(stylesXml: string, templateIds: Map<string, string>): number {
+  // Import finds a built-in style by the document's ID for it
+  const builtInIds = new Map([...templateIds].map(([builtInId, id]) => [id, builtInId]));
+  return (extractFontOverridesFromStyles(stylesXml, { builtInIds }).fontSize ?? 11) * 2;
 }
 
 /** The style most of the body's quote paragraphs are in, the first's on a

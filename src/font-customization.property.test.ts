@@ -1105,7 +1105,7 @@ describe("Property 7: Size and heading proportional scaling", () => {
   );
 
   it(
-    "Property 7e: CodeBlock has inferred code size (fontSize * 2 - 2, clamped to min 1)",
+    "Property 7e: CodeBlock has inferred code size (fontSize * 2 - 2, clamped to min 1), or none at the body's",
     () => {
       fc.assert(
         fc.property(fontSizeArb, (fontSize) => {
@@ -1123,7 +1123,10 @@ describe("Property 7: Size and heading proportional scaling", () => {
             throw new Error("CodeBlock style block not found");
           }
           const szVal = extractSzVal(block);
-          const expected = Math.max(1, Math.round(fontSize * 2) - 2);
+          const inferred = Math.max(1, Math.round(fontSize * 2) - 2);
+          // None at the body's size, which it takes from Normal (dirty-flag
+          // invariant #5)
+          const expected = inferred === Math.round(fontSize * 2) ? null : inferred;
           if (szVal !== expected) {
             throw new Error(
               "CodeBlock w:sz: expected " + expected + " but got " + szVal,

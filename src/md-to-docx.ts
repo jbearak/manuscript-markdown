@@ -13,7 +13,7 @@ import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, n
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import { paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
-import { imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlacesOf, styleListMeta, ZoteroBiblData, zoteroStyleFullId } from './converter';
+import { bodySizeHpFromStyles, imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlacesOf, styleListMeta, ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
@@ -5242,7 +5242,7 @@ function extractNormalStyleSizeHp(stylesXml: string, ids = templateStyleIds(styl
 /**
  * `stylesXml` without the w:sz or w:szCs of each of `styleIds` that its base
  * gives it already, which Word strips (dirty-flag invariant #5), as for a
- * Heading 4 at Normal's size. A style's base is the nearest along its
+ * Heading 4, or code, at Normal's size. A style's base is the nearest along its
  * w:basedOn that sets the size, or else the document defaults, or else
  * Word's 10pt, without a tracked change's record of what one was
  * (w:rPrChange), which Word doesn't show. Each style is found as import
@@ -5310,6 +5310,9 @@ export function applyFontOverridesToTemplate(
   let xml = asUtf8(decodeXml(stylesXmlBytes));
   // The template's IDs for the built-in styles, which its styles are found by
   const ids = templateStyleIds(xml);
+  // The size the template's Normal shows, before export gives it one, as
+  // import reads it
+  const templateNormalHp = bodySizeHpFromStyles(xml, ids);
 
   // Recompute auto-shrink from template's Normal style size when no explicit font-size
   if (overrides.tableSizeFromDefault) {
@@ -5333,6 +5336,8 @@ export function applyFontOverridesToTemplate(
           ? '<w:sz w:val="' + overrides.tableSizeHp + '"/><w:szCs w:val="' + overrides.tableSizeHp + '"/>'
           : '') +
         '</w:rPr>';
+      // Based on Normal by its English ID, which withTemplateStyleIds gives
+      // the template's ID for it, and withoutInheritedSizes reads it by
       const tableStyle = '<w:style w:type="paragraph" w:styleId="TableParagraph">' +
         '<w:name w:val="Table Paragraph"/>' +
         '<w:basedOn w:val="Normal"/>' +
@@ -5344,7 +5349,8 @@ export function applyFontOverridesToTemplate(
 
   // Collect all style IDs we want to modify
   const allTargetIds = new Set([...BODY_STYLE_IDS, ...CODE_STYLE_IDS, ...TABLE_STYLE_IDS]);
-  // The headings and title given a size, which goes where their base gives it
+  // The headings, title, code and tables given a size, which goes where their
+  // base gives it
   const sizedStyleIds: string[] = [];
 
   for (const styleId of allTargetIds) {
@@ -5387,6 +5393,10 @@ export function applyFontOverridesToTemplate(
       sizeHp = overrides.tableSizeHp;
     } else if (isTitle && overrides.titleSizesHp?.[0]) {
       sizeHp = overrides.titleSizesHp[0];
+    } else if ((styleId === 'FootnoteText' || styleId === 'EndnoteText') && overrides.bodySizeHp === templateNormalHp) {
+      // Frontmatter has no key for the notes' size, so where the body's is
+      // the template's already, they keep the template's
+      sizeHp = undefined;
     } else if (overrides.headingSizesHp && overrides.headingSizesHp.has(styleId)) {
       sizeHp = overrides.headingSizesHp.get(styleId);
     } else if (styleId === 'Normal') {
@@ -5400,7 +5410,7 @@ export function applyFontOverridesToTemplate(
 
     // Nothing to do for this style
     if (font === undefined && sizeHp === undefined && fontStyleOverride === undefined) continue;
-    if (sizeHp !== undefined && (isHeading || isTitle)) sizedStyleIds.push(styleId);
+    if (sizeHp !== undefined && (isHeading || isTitle || isCodeStyle || isTableStyle)) sizedStyleIds.push(styleId);
 
     // Build the replacement fragments
     const rFontsEl = font !== undefined
@@ -5838,8 +5848,8 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     ? szPair(overrides.bodySizeHp)
     : szPair(22);
   const normalRpr = '<w:rPr>' + bodyFontStr + normalSz + '</w:rPr>\n';
-  // A heading's or the title's size, but not one it takes from Normal anyway,
-  // which is redundant and Word strips — see dirty-flag invariant #5
+  // The size of a style based on Normal, but not one it takes from Normal
+  // anyway, which is redundant and Word strips — see dirty-flag invariant #5
   const sizeOverNormal = (hp: number | null | undefined) => hp && hp !== (overrides?.bodySizeHp || 22) ? szPair(hp) : '';
 
   // Heading helper: per-heading font/style/size overrides with defaults.
@@ -5891,16 +5901,18 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
   }
   const codeCharRpr = '<w:rPr>' + codeCharRprInner + '</w:rPr>\n';
 
-  // CodeBlock: code font + code size (default 20hp)
-  const codeBlockSz = overrides?.codeSizeHp
-    ? szPair(overrides.codeSizeHp)
-    : szPair(DEFAULT_CODE_BLOCK_HP);
+  // CodeBlock: code font + code size (default 20hp), but not Normal's
+  const codeBlockSz = sizeOverNormal(overrides?.codeSizeHp || DEFAULT_CODE_BLOCK_HP);
   let codeBlockRprInner = codeFontStr;
   if (codeFontColor) {
     codeBlockRprInner += '<w:color w:val="' + codeFontColor + '"/>';
   }
   codeBlockRprInner += codeBlockSz;
   const codeBlockRpr = '<w:rPr>' + codeBlockRprInner + '</w:rPr>\n';
+  const tableParagraphRprInner = (overrides?.tableFont
+    ? '<w:rFonts w:ascii="' + escapeXml(overrides.tableFont) + '" w:hAnsi="' + escapeXml(overrides.tableFont) + '"/>'
+    : bodyFontStr) + sizeOverNormal(overrides?.tableSizeHp);
+  const tableParagraphRpr = tableParagraphRprInner ? '<w:rPr>' + tableParagraphRprInner + '</w:rPr>\n' : '';
 
   // Title: title-specific font/size/style overrides, falling back to body font
   const titleFont = overrides?.titleFonts?.[0]
@@ -6099,17 +6111,13 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     '<w:name w:val="endnote reference"/>\n' +
     '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>\n' +
     '</w:style>\n' +
-    // TableParagraph: table-specific font/size style (only when overrides exist)
+    // TableParagraph: table-specific font/size style (only when overrides
+    // exist), without a size Normal gives it or an rPr left empty
     (overrides?.tableSizeHp || overrides?.tableFont
       ? '<w:style w:type="paragraph" w:customStyle="1" w:styleId="TableParagraph">\n' +
         '<w:name w:val="Table Paragraph"/>\n' +
         '<w:basedOn w:val="Normal"/>\n' +
-        '<w:rPr>' +
-        (overrides.tableFont
-          ? '<w:rFonts w:ascii="' + escapeXml(overrides.tableFont) + '" w:hAnsi="' + escapeXml(overrides.tableFont) + '"/>'
-          : bodyFontStr) +
-        (overrides.tableSizeHp ? szPair(overrides.tableSizeHp) : '') +
-        '</w:rPr>\n' +
+        tableParagraphRpr +
         '</w:style>\n'
       : '') +
     '<w:style w:type="character" w:styleId="CommentReference">\n' +
