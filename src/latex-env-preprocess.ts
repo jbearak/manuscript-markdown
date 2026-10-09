@@ -10,7 +10,8 @@
  * "inert zones" and skipped.
  */
 
-import { computeCodeRegions } from './code-regions';
+import { computeMarkdownRegions } from './code-regions';
+import { exportsLiterally } from './html-blocks';
 import { findMatchingClose } from './critic-markup';
 import { isEscapedAt } from './math-delimiters';
 
@@ -34,12 +35,25 @@ interface Zone { start: number; end: number }
 /**
  * Compute sorted, merged "inert zones" where bare environments should NOT
  * be recognized: code regions, HTML comments, CriticMarkup, existing $$ blocks.
+ * Not the HTML blocks export writes as text, which latexReplacements reads
+ * past the environments it finds.
  */
 export function computeInertZones(text: string): Zone[] {
+	return inertZonesAndLiteralHtml(text).zones;
+}
+
+/** The inert zones of `text`, and the HTML blocks export writes as text */
+function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Zone[] } {
 	const zones: Zone[] = [];
 
-	// 1. Code regions (fenced blocks + inline code spans)
-	for (const r of computeCodeRegions(text)) {
+	// 1. Code regions (fenced blocks + inline code spans), as export reads
+	// them, with HTML blocks, a fence's line in which opens no code block,
+	// and past whose edges no code span runs. And apart, the HTML blocks
+	// export writes as text, as a <pre> or a <div>, but not one it reads
+	// tables from, in which it reads an environment as display math (see
+	// markWrappedLatexBlocks in md-to-docx.ts)
+	const { codeRegions, literalHtmlRegions } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally });
+	for (const r of codeRegions) {
 		zones.push({ start: r.start, end: r.end });
 	}
 
@@ -128,7 +142,7 @@ export function computeInertZones(text: string): Zone[] {
 			merged.push({ start: z.start, end: z.end });
 		}
 	}
-	return merged;
+	return { zones: merged, literalHtml: literalHtmlRegions };
 }
 
 function overlapsAnyZone(start: number, end: number, zones: Zone[]): boolean {
@@ -194,7 +208,29 @@ function latexReplacements(text: string): Replacement[] {
 	// Fast path: no \begin{ means nothing to do
 	if (!text.includes('\\begin{')) return [];
 
-	const inertZones = computeInertZones(text);
+	const { zones: inertZones, literalHtml } = inertZonesAndLiteralHtml(text);
+	// The HTML blocks export writes as text, but one that starts in an
+	// environment found before, whose lines the wrap joins into one
+	// paragraph, as a line of <x> after a blank line, which the parse here
+	// read as a block over the environment's end. An environment that
+	// starts in one export writes as text stays unwrapped.
+	let literalAt = 0;
+	const inLiteralHtml = (offset: number): boolean => {
+		while (literalAt < literalHtml.length && literalHtml[literalAt].end <= offset) literalAt++;
+		const region = literalHtml[literalAt];
+		if (!region || region.start > offset) return false;
+		// The last environment found that starts at or before the block,
+		// which the block starts in where it starts before its end
+		let lo = 0;
+		let hi = replacements.length - 1;
+		while (lo <= hi) {
+			const mid = (lo + hi) >>> 1;
+			if (replacements[mid].start <= region.start) lo = mid + 1;
+			else hi = mid - 1;
+		}
+		const before = replacements[hi];
+		return !(before && region.start < before.end);
+	};
 
 	// Find bare \begin{env} at start of line (up to 3 spaces indent)
 	const beginRe = /^([ ]{0,3})\\begin\{([a-zA-Z*]+)\}/gm;
@@ -211,6 +247,7 @@ function latexReplacements(text: string): Replacement[] {
 		// Skip if this match falls inside an already-collected replacement
 		// (handles nested environments — only the outermost is wrapped)
 		if (replacements.length > 0 && blockStart < replacements[replacements.length - 1].end) continue;
+		if (inLiteralHtml(blockStart)) continue;
 
 		// Find matching \end{envName}
 		const endMarker = '\\end{' + envName + '}';

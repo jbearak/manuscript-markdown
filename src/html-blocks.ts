@@ -76,6 +76,19 @@ export function htmlBlockKind(content: string): HtmlBlockKind {
 }
 
 /**
+ * Whether export writes an HTML block of `content` as it is, as text, a
+ * comment, an image or line breaks (see htmlBlockKind), and so reads no
+ * Markdown in it, as a citation, a LaTeX environment, a table or a directive:
+ * every block but one it reads tables from, whose numbers it formats, and
+ * a LaTeX environment around which it reads as display math (see
+ * markWrappedLatexBlocks in md-to-docx.ts), and a grid table's placeholder.
+ */
+export function exportsLiterally(content: string): boolean {
+  const kind = htmlBlockKind(content);
+  return kind !== 'tables' && kind !== 'grid';
+}
+
+/**
  * What a list item makes of its HTML block `tokens[j]`, among the item's
  * tokens, where export reads it as one or more tables, `holdsTables` (see
  * extractListItems in md-to-docx.ts):

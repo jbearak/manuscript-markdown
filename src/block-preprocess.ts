@@ -6,7 +6,7 @@
 // Markdown each line it writes comes from, so that the scan can say where a
 // block it finds is.
 
-import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
+import { computeMarkdownRegions, isInsideCodeRegion, type MarkdownRegions } from './code-regions';
 import { preprocessGridTablesWithSourceMap } from './grid-table-preprocess';
 import { wrapBareLatexEnvironmentsWithLines } from './latex-env-preprocess';
 
@@ -45,12 +45,23 @@ const LAZY_LINE_RE = /^ {0,3}>[^\n]*\n(?! {0,3}>)[^\S\n]*\S/m;
  * line in one that starts with a > or a fence is its text, which neither
  * starts a quote nor opens a code block that runs on past it. Nor before
  * one, which markdown-it ends a quote at, as it reads none of these lazily.
+ * The blocks are read as export reads them, with each quote ended before
+ * such a line (see exportQuotes in code-regions.ts), as the blank lines put
+ * in end a list a quote is in, after which a fence in its item goes on. So
+ * a line after a quote's that starts a block there, as an indented code
+ * block or a <span> line, starts it only once the quote ends before it,
+ * where markdown-it reads the Markdown as written as going on the quote's
+ * paragraph, and the blank line goes before it. One that starts a block in
+ * the Markdown as written too, as a fence, ends the quote already.
  */
 function deLazifyBlockquotesWithLines(markdown: string): { output: string; lines: number[] } {
   const lines = markdown.split('\n');
   // Nothing to end: the blocks are read only where a line could be lazy
   if (!LAZY_LINE_RE.test(markdown)) return { output: markdown, lines: lines.map((_line, index) => index) };
-  const { codeRegions, htmlRegions } = computeMarkdownRegions(markdown, { inlineCode: false, html: 'all' });
+  const { codeRegions, htmlRegions } = computeMarkdownRegions(markdown, { inlineCode: false, html: 'all', exportQuotes: true });
+  // The blocks of the Markdown as written, found at the first block that
+  // starts right after a quote's line
+  let written: MarkdownRegions | undefined;
   const out: string[] = [];
   const sourceLines: number[] = [];
   // A line of the Markdown, or a blank line inserted before it, as from it
@@ -59,7 +70,14 @@ function deLazifyBlockquotesWithLines(markdown: string): { output: string; lines
   let lineStart = 0;
 
   for (const [index, line] of lines.entries()) {
-    const inside = isInsideCodeRegion(lineStart, codeRegions) || isInsideCodeRegion(lineStart, htmlRegions);
+    let inside = isInsideCodeRegion(lineStart, codeRegions) || isInsideCodeRegion(lineStart, htmlRegions);
+    if (inside && inBlockquoteRun) {
+      // The line after a quote's starts the block, as the line before is in
+      // none. Only a block that starts there in the Markdown as written too
+      // ends the quote without a blank line
+      written ??= computeMarkdownRegions(markdown, { inlineCode: false, html: 'all' });
+      inside = isInsideCodeRegion(lineStart, written.codeRegions) || isInsideCodeRegion(lineStart, written.htmlRegions);
+    }
     lineStart += line.length + 1;
     if (inside) {
       // Nor is a line after one lazy, as it holds no paragraph a quote's

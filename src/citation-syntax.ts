@@ -36,8 +36,9 @@ function isLinkifyToken(token: Token): boolean {
  *  [e.g., @key] or [for n = 10, see @key]. Formatting before or around the key
  *  (code, emphasis, CriticMarkup, math, HTML) leaves the brackets ordinary
  *  Markdown: a Zotero prefix is plain text, and an `@` inside a code span is not
- *  a key. Escaped characters count as text but never start a key. hasCitations()
- *  in frontmatter.ts and citation_list in the grammar approximate this with regexes. */
+ *  a key. Escaped characters count as text but never start a key. citation_list
+ *  in the grammar approximates this with a regex; hasCitations() in md-to-docx.ts
+ *  asks the parse. */
 function isPlainPrefixedCitationItem(state: Pick<StateInline, 'md' | 'env'>, item: string): boolean {
   const key = CITATION_KEY_RE.exec(item);
   if (!key) return false;

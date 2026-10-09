@@ -9969,6 +9969,42 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     '</w:document>';
 }
 
+/** Whether `runs` hold a citation, in a revision's or a highlight's runs too */
+function runsCite(runs: MdRun[] | undefined): boolean {
+  return !!runs?.some(run => run.type === 'citation' || runsCite(run.innerRuns) || runsCite(run.oldRuns) || runsCite(run.newRuns));
+}
+
+/** Whether `tokens` hold a citation, in a table's cells too */
+function tokensCite(tokens: MdToken[]): boolean {
+  return tokens.some(token => runsCite(token.runs) || !!token.rows?.some(row => row.cells.some(cell => runsCite(cell.runs))));
+}
+
+/**
+ * Whether export reads a citation in `markdown`, which the CLI and the
+ * extension ask before they warn that a bibliography is missing: as
+ * convertMdToDocx parses the body, without its frontmatter and its notes'
+ * definitions, after its grid tables, and each note's body, with the
+ * body's link definitions. So a citation counts where export reads one, as
+ * in a CriticMarkup span that holds an HTML block, which export joins into
+ * a paragraph, and not where it reads none, as in code, in an HTML block it
+ * writes as text, in an HTML table's cell or in a CriticMarkup comment.
+ * Not in an embedded file, which this has no
+ * resolver for, nor one only number formatting could change, which formats
+ * no citation. A deleted citation counts, as the Markdown holds it.
+ */
+export function hasCitations(markdown: string): boolean {
+  // Every citation holds an @
+  if (!markdown.includes('@')) return false;
+  const { body } = parseFrontmatter(markdown);
+  const { cleaned, definitions } = extractFootnoteDefinitions(body);
+  const tokens = parseMd(preprocessGridTables(cleaned));
+  if (tokensCite(tokens)) return true;
+  for (const note of definitions.values()) {
+    if (tokensCite(parseMd(preprocessGridTables(note), undefined, false, undefined, linkDefinitionsOf.get(tokens), undefined, true))) return true;
+  }
+  return false;
+}
+
 export async function convertMdToDocx(
   markdown: string,
   options?: MdToDocxOptions
