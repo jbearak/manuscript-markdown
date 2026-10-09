@@ -20,6 +20,8 @@ export interface MarkdownRegions {
 
 export interface MarkdownRegionOptions {
 	includeCode?: boolean;
+	/** With includeCode, inline code spans too: default true */
+	inlineCode?: boolean;
 	html?: 'all' | 'literal';
 	includeLists?: boolean;
 }
@@ -158,10 +160,10 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	}
 
 	const mergedBlockCodeRegions = includeCode ? mergeRegions(blockCodeRegions) : [];
-	const codeRegions = includeCode
-		? [...mergedBlockCodeRegions, ...computeInlineCodeRegions(text, mergedBlockCodeRegions)]
-			.sort((a, b) => a.start - b.start)
-		: [];
+	const codeRegions = !includeCode ? []
+		: options?.inlineCode === false ? mergedBlockCodeRegions
+		: [...mergedBlockCodeRegions, ...computeInlineCodeRegions(text, mergedBlockCodeRegions)]
+			.sort((a, b) => a.start - b.start);
 	return {
 		codeRegions,
 		htmlRegions: options?.html ? mergeRegions(htmlRegions) : [],
