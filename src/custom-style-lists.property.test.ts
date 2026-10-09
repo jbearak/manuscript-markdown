@@ -17,17 +17,22 @@ import { convertMdToDocx } from './md-to-docx';
 // drops, a fenced code block or an HTML block, that hold the line of a quote
 // in the item or after it, which some quotes repeat, or a directive, with a
 // blank line on one side or both, or a rule or a fenced code block on an
-// item's marker line, or a directive there, which is the item's text,
-// imports the document, and exports what it
-// wrote again, and checks that Word gets the same paragraphs, in the same
-// styles, at the same list levels and indents, and that import writes the
-// same Markdown again, as it does without the blocks items drop, with the
-// blank lines on the side of each with more.
+// item's marker line, or a directive there, which is the item's text, and,
+// at the top level, blocks Word can't give a style block's style, which
+// keep their own, as code, tables, headings, thematic breaks and alerts,
+// and others it can, as display math and HTML blocks. It imports the
+// document, and exports what it wrote again, and checks that Word gets the
+// same paragraphs, in the same styles, at the same list levels and
+// indents, that import writes each block Word can't style in the style
+// block it was in, and that import writes the same Markdown again, as it
+// does without the blocks items drop, with the blank lines on the side of
+// each with more.
 
 type Style = 'box' | 'note';
 type Fence = { kind: 'open'; style: Style; tight: boolean } | { kind: 'close'; tight: boolean };
+type Unit = 'code' | 'pipe' | 'html' | 'heading' | 'hr' | 'alert' | 'math' | 'div';
 type Child = { kind: 'para' } | { kind: 'list'; list: List; directive?: 'indent' | 'no-indent' } | { kind: 'quote'; list?: List; repeated?: boolean }
-  | { kind: 'inline'; style: Style } | { kind: 'dropped'; html: boolean | 'directive'; plain?: boolean; tight?: 'before' | 'after' } | Fence;
+  | { kind: 'inline'; style: Style } | { kind: 'dropped'; html: boolean | 'directive'; plain?: boolean; tight?: 'before' | 'after' } | { kind: 'unit'; unit: Unit } | Fence;
 /** A block an item drops on its marker line, as - ***, or a directive
  *  there, which the item keeps as its text */
 type MarkerBlock = { kind: 'rule' | 'fence' | 'directive'; plain?: boolean };
@@ -73,37 +78,106 @@ const listArb: fc.Memo<List> = fc.memo(depth => fc.record({
 function quoteArb(depth: number): fc.Arbitrary<Child> {
   return fc.oneof(quoteParaArb, listArb(depth).map(list => ({ kind: 'quote' as const, list })));
 }
-/** Documents of up to six paragraphs, lists of up to three levels, some
- *  after an indent directive, quotes, and fences, at the top level */
+/** A block at the top level Word can't give a style block's style, or,
+ *  as display math or an HTML block, can */
+const unitArb: fc.Arbitrary<Child> = fc.record({ kind: fc.constant('unit' as const), unit: fc.constantFrom<Unit>('code', 'pipe', 'html', 'heading', 'hr', 'alert', 'math', 'div') });
+/** Documents of up to eight paragraphs, lists of up to three levels, some
+ *  after an indent directive, quotes, other blocks, and fences, at the top
+ *  level */
 const documentArb: fc.Arbitrary<Child[]> = fc.array(fc.oneof(
   paraArb,
   fc.record({ list: listArb(3), directive: fc.constantFrom(undefined, 'indent' as const, 'no-indent' as const) })
     .map(({ list, directive }) => ({ kind: 'list' as const, list, ...(directive ? { directive } : {}) })),
   quoteArb(2),
+  unitArb,
   fenceArb,
-), { minLength: 1, maxLength: 6 });
+), { minLength: 1, maxLength: 8 })
+  // Not a code block, past fences, before a list whose first item holds
+  // nothing before a quote, as after a block it drops on its marker line,
+  // which import loses, writing the quote right after the code, on main too
+  .filter(blocks => !blocks.some((child, k) => {
+    if (child.kind !== 'unit' || child.unit !== 'code') return false;
+    let next = k + 1;
+    while (blocks[next]?.kind === 'open' || blocks[next]?.kind === 'close') next++;
+    const after = blocks[next];
+    const first = after?.kind === 'list' ? after.list.items[0] : undefined;
+    return !!first?.marker && first.marker.kind !== 'directive' && first.children[0]?.kind === 'quote';
+  }));
 
 /** The Markdown of `blocks`, with each paragraph's and item's text unique,
- *  and the custom style each paragraph at the top level takes in Word, or
- *  '' for none: that of the block open at the top level, or of its block
- *  on one line. A block opens and closes at its fences there, and a block
- *  that opens in a list item closes it, but not one in a quote's item,
- *  which the quote drops, and a block on one line closes it.
+ *  the custom style each paragraph at the top level takes in Word, or ''
+ *  for none: that of the block open at the top level, or of its block on
+ *  one line, and the style block each block Word can't style is in, by its
+ *  text, or else, for a thematic break, which has none, its place among
+ *  them. A block opens and closes at its fences there, and a block that
+ *  opens in a list item closes it, but not one in a quote's item, which
+ *  the quote drops, and a block on one line closes it.
  *  A blank line between blocks, but not after an opening fence or before a
- *  closing one that is `tight` */
-function markdownOf(blocks: Child[], mark = ''): { md: string; styles: Array<[string, string]> } {
+ *  closing one that is `tight`, unless an HTML table or a <div> is the
+ *  last block before it, which would take in what's on the next line */
+function markdownOf(blocks: Child[], mark = ''): { md: string; styles: Array<[string, string]>; units: Array<[string, string]>; recorded: boolean } {
   let n = 0;
   let open: Style | undefined;
   let quoted = false;
+  let rules = 0;
   const styles: Array<[string, string]> = [];
-  type Chunk = { lines: string[]; fence?: Fence; tight?: 'before' | 'after' };
+  const units: Array<[string, string]> = [];
+  // The style block open at the top level, as export counts it: whether
+  // Word has a paragraph of it, has a block of it Word can't style, has one
+  // since its last paragraph, and has one between its paragraphs. And the
+  // block closed last that Word has a paragraph of, with whether such blocks
+  // came after it outside any block, while nothing else has since
+  type Counted = { style: Style; styled: boolean; unstyled: boolean; trail: boolean; inner: boolean };
+  let counted: Counted | undefined;
+  let closed: (Counted & { after: boolean }) | undefined;
+  // Whether export records the blocks Word can't style all through, which
+  // it doesn't past a block of only such blocks, or after a block with them
+  // between its paragraphs and only them since, where another of its style
+  // starts (see recording in generateDocumentXml)
+  let recorded = true;
+  const closeCounted = (implicit = false): void => {
+    if (counted?.unstyled && !counted.styled) recorded = false;
+    closed = counted?.styled && !implicit ? { ...counted, after: false } : implicit ? undefined : closed;
+    counted = undefined;
+  };
+  const styledBlock = (): void => {
+    if (!counted) {
+      closed = undefined;
+      return;
+    }
+    if (!counted.styled && closed?.style === counted.style) {
+      // The two are one where nothing parts their paragraphs in Word
+      if (!closed.trail && !closed.after && !counted.unstyled) counted.inner = closed.inner;
+      else if (closed.inner) recorded = false;
+    }
+    if (counted.styled && counted.trail) counted.inner = true;
+    counted.styled = true;
+    counted.trail = false;
+    closed = undefined;
+  };
+  const unstyledBlock = (): void => {
+    if (!counted) {
+      if (closed) closed.after = true;
+      return;
+    }
+    counted.unstyled = true;
+    if (counted.styled) counted.trail = true;
+  };
+  type Chunk = { lines: string[]; fence?: Fence; tight?: 'before' | 'after'; loose?: boolean };
   const join = (chunks: Chunk[]): string[] => {
     const lines: string[] = [];
+    // Whether the last block but a fence is an HTML table or block that
+    // only a blank line ends, as a <div>'s. A fence on the next line would
+    // be its HTML, which the Markdown then reads as going on in it, and
+    // after an HTML table import writes the block after a fence it drops on
+    // the next line, as on main, which the table's HTML block takes in
+    let afterTable = false;
     chunks.forEach((chunk, k) => {
-      const tight = k > 0 && (chunks[k - 1].fence?.kind === 'open' && chunks[k - 1].fence!.tight || chunk.fence?.kind === 'close' && chunk.fence.tight
+      const tight = k > 0 && !afterTable && (chunks[k - 1].fence?.kind === 'open' && chunks[k - 1].fence!.tight || chunk.fence?.kind === 'close' && chunk.fence.tight
         || chunks[k - 1].tight === 'after' || chunk.tight === 'before');
       if (k > 0 && !tight) lines.push('');
       lines.push(...chunk.lines);
+      if (!chunk.fence) afterTable = !!chunk.loose;
     });
     return lines;
   };
@@ -124,15 +198,25 @@ function markdownOf(blocks: Child[], mark = ''): { md: string; styles: Array<[st
     const top = indent === '' && !quoted;
     switch (child.kind) {
       case 'para':
-        if (top) styles.push(['p' + n, open ? 'MsCustom' + open[0].toUpperCase() + open.slice(1) : '']);
+        if (top) {
+          styles.push(['p' + n, open ? 'MsCustom' + open[0].toUpperCase() + open.slice(1) : '']);
+          styledBlock();
+        }
         return { lines: [indent + 'p' + n++] };
       case 'inline':
         if (top) {
           styles.push(['p' + n, 'MsCustom' + child.style[0].toUpperCase() + child.style.slice(1)]);
           open = undefined;
+          if (counted?.style !== child.style) {
+            closeCounted();
+            counted = { style: child.style, styled: false, unstyled: false, trail: false, inner: false };
+          }
+          styledBlock();
+          closeCounted();
         }
         return { lines: [indent + '<!-- style: ' + child.style + ' -->p' + n++ + '<!-- /style -->'] };
       case 'quote': {
+        if (top) unstyledBlock();
         if (!child.list) return { lines: [indent + '> ' + (child.repeated ? 'q' : 'p' + n++)] };
         // In a quote, which may be in another
         const outer = quoted;
@@ -151,7 +235,24 @@ function markdownOf(blocks: Child[], mark = ''): { md: string; styles: Array<[st
           : child.html ? [indent + '<pre>', line] : [indent + '```', line, indent + '```'];
         return { lines: lines.map(dropped => dropped + mark).concat(child.html === true ? ['', indent + 'p' + n++] : []), tight: child.tight };
       }
+      case 'unit': {
+        const text = 'u' + n++;
+        if (child.unit !== 'math') units.push([child.unit === 'hr' ? '---' + rules++ : text, open ?? '']);
+        if (child.unit === 'math' || child.unit === 'div') styledBlock();
+        else unstyledBlock();
+        switch (child.unit) {
+          case 'code': return { lines: ['```', text, '```'] };
+          case 'pipe': return { lines: ['| ' + text + ' |', '|---|', '| x |'] };
+          case 'html': return { lines: ['<table><tr><td>' + text + '</td></tr></table>'], loose: true };
+          case 'heading': return { lines: ['## ' + text] };
+          case 'hr': return { lines: ['---'] };
+          case 'alert': return { lines: ['> [!NOTE]', '> ' + text] };
+          case 'math': return { lines: ['$' + '$', text, '$' + '$'] };
+          default: return { lines: ['<div>' + text + '</div>'], loose: true };
+        }
+      }
       case 'list':
+        if (top) styledBlock();
         return { lines: (child.directive ? [indent + '<!-- ' + child.directive + ' -->'] : []).concat(join(child.list.items.map((item, k) => {
           const marker = child.list.ordered ? (k + 1) + '. ' : '- ';
           const inner = indent + ' '.repeat(marker.length);
@@ -163,12 +264,44 @@ function markdownOf(blocks: Child[], mark = ''): { md: string; styles: Array<[st
       default:
         if (text) {
           // The item's text, which opens or closes no block
-        } else if (top) open = child.kind === 'open' ? child.style : undefined;
-        else if (child.kind === 'open' && !quoted) open = undefined;
+        } else if (top) {
+          if (child.kind === 'close' || open !== child.style) closeCounted();
+          if (child.kind === 'open' && open !== child.style) counted = { style: child.style, styled: false, unstyled: false, trail: false, inner: false };
+          open = child.kind === 'open' ? child.style : undefined;
+        } else if (child.kind === 'open' && !quoted) {
+          // Which closes the block open at the top level with no fence
+          if (counted) closeCounted(true);
+          open = undefined;
+        }
         return { lines: [indent + (child.kind === 'open' ? '<!-- style: ' + child.style + ' -->' : '<!-- /style -->')], fence: child };
     }
   };
-  return { md: twoStyles + join(blocks.map(block => chunkOf(block, ''))).join('\n') + '\n', styles };
+  const md = twoStyles + join(blocks.map(block => chunkOf(block, ''))).join('\n') + '\n';
+  closeCounted();
+  return { md, styles, units, recorded };
+}
+
+/** The style block at the top level each block Word can't style is in in
+ *  `markdown`, by its text, as markdownOf gives them, or for a thematic
+ *  break, by its place among them: a line in the block's style is between
+ *  its fences at the top level, with no block opened in a list item or on
+ *  one line since */
+function unitsIn(markdown: string, units: Array<[string, string]>): Array<[string, string]> {
+  // Past the frontmatter, whose fences are lines of ---
+  const lines = markdown.slice(markdown.indexOf('\n---\n', 3) + 5).split('\n');
+  const styleAt: string[] = [];
+  let open = '';
+  for (const line of lines) {
+    const fence = /^<!-- (?:style: (\w+)|\/style) -->$/.exec(line);
+    if (fence) open = fence[1] ?? '';
+    else if (/^\s*<!-- style: \w+ -->/.test(line)) open = '';
+    styleAt.push(open);
+  }
+  const rules = lines.flatMap((line, k) => line === '---' ? [k] : []);
+  return units.map(([text]) => {
+    const at = text.startsWith('---') ? rules[Number(text.slice(3))] : lines.findIndex(line => new RegExp('\\b' + text + '\\b').test(line));
+    return [text, at === undefined || at === -1 ? 'missing' : styleAt[at]];
+  });
 }
 
 /** `blocks` with plain text in the blocks items drop, which Word gets
@@ -238,12 +371,15 @@ async function paragraphsOf(docx: Uint8Array): Promise<string[]> {
 describe('Style blocks around lists and in their items', () => {
   test('give paragraphs at the top level their block\'s style, keep paragraphs\' styles and list levels in Word over a round trip, and come back the same', async () => {
     await fc.assert(fc.asyncProperty(documentArb, async blocks => {
-      const { md, styles } = markdownOf(blocks);
+      const { md, styles, units, recorded } = markdownOf(blocks);
       const first = await convertMdToDocx(md);
       // Each paragraph at the top level in the style of the block it's in
       const paragraphs = await paragraphsOf(first.docx);
       expect([md, styles.map(([text]) => [text, paragraphs.find(p => p.endsWith('|' + text))?.split('|')[0]])]).toEqual([md, styles]);
       const back = (await convertDocx(first.docx)).markdown;
+      // Each block Word can't style in the style block it was in, where
+      // export records them
+      if (recorded) expect([md, back, unitsIn(back, units)]).toEqual([md, back, units]);
       const second = await convertMdToDocx(back);
       // With the Markdown, for a failure's report, which comes back as it
       // was the first time
@@ -288,6 +424,9 @@ describe('Style blocks around lists and in their items', () => {
     }), {
       numRuns: 100,
       examples: [
+        // A <div> right before a closing fence that is tight, which a blank
+        // line parts, as the fence would be the <div>'s HTML
+        [[{ kind: 'open', style: 'box', tight: false }, { kind: 'unit', unit: 'div' }, { kind: 'close', tight: true }, { kind: 'para' }]],
         // A style block's fence in an item, after a rule on its marker line,
         // which the item has as its text
         [[{ kind: 'open', style: 'box', tight: false }, { kind: 'list', list: { ordered: false, items: [{ children: [{ kind: 'list', list: { ordered: false, items: [
