@@ -11,6 +11,7 @@ import {
 	findBibFieldLinkAtLine,
 	findBibFileFieldAtLine,
 	findBibKeyAtOffset,
+	findRepeatedBibFields,
 	findCitekeyAtOffset,
 	findUncitableBibKeys,
 	findUsagesForKey,
@@ -179,6 +180,17 @@ describe('citation keys as export reads them', () => {
 		['other characters', "@article{a:b.c/d'e, title = {T}}", []],
 	])('reports a .bib key with %s as one no citation can cite', (_name, text, keys) => {
 		expect(findUncitableBibKeys(parseBibDataFromText('/tmp/test.bib', text).ranges).map(range => range.key)).toEqual(keys);
+	});
+
+	// BibTeX reads the first of a field given twice, but biber and this
+	// extension the last, so the entry's key reports which fields
+	test.each([
+		['a field given twice', '@article{a, title = {A}, title = {B}}', [['a', 'title']]],
+		['fields given twice, in other cases', '@article{a, Year = 1, title = {A}, YEAR = 2, Title = {B}}', [['a', 'year, title']]],
+		['no field given twice', '@article{a, title = {A}}\n@book{a, title = {B}}', []],
+	])('reports an entry with %s', (_name, text, entries) => {
+		const reported = findRepeatedBibFields(parseBibDataFromText('/tmp/test.bib', text).ranges);
+		expect(reported.map(range => [range.key, range.repeatedFields.join(', ')])).toEqual(entries);
 	});
 });
 

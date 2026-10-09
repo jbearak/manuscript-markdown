@@ -18,7 +18,7 @@ The server reads a citation's keys as Word export does: each key is the text aft
 ### Diagnostics
 
 - **In markdown**: a citation key the paired `.bib` file doesn't have is reported where it's cited.
-- **In a `.bib` file**: a key no citation can cite is reported on the key. A `;` or `]` in a key ends the citation's item or the citation there, and a backtick with another after it makes code of the text between, where the server reads no citation.
+- **In a `.bib` file**: a key no citation can cite is reported on the key. A `;` or `]` in a key ends the citation's item or the citation there, and a backtick with another after it makes code of the text between, where the server reads no citation. An entry that gives a field more than once is reported on its key too: BibTeX reads the first value and warns of the rest, but biber and this extension read the last.
 
 ### Go to Definition
 

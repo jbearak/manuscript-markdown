@@ -147,8 +147,12 @@
 			"name": "meta.citation.manuscript-markdown",
 			"patterns": [
 				{
-					"match": "@[A-Za-z0-9_:-]++",
-					"name": "support.function.citation.manuscript-markdown"
+					"comment": "A key as export reads it (see readCitationItem in src/citation-syntax.ts): after the first @ or -@ at its item's start or after a space, past spaces, to its item's comma, without the spaces at its end. An item starts right after the citation's [, where \\G matches, as the begin pattern's match ends there, after a ;, or at a line's start, but not after another [, which is text in an item",
+					"match": "(?:\\G|^|(?<=;))(?:[^;\\]]*?(?<=\\s))??(-?)(@)\\s*([^,;\\]\\s](?:[^,;\\]]*[^,;\\]\\s])?)?",
+					"captures": {
+						"2": { "name": "support.function.citation.manuscript-markdown" },
+						"3": { "name": "support.function.citation.manuscript-markdown" }
+					}
 				},
 				{
 					"match": ";",

@@ -573,31 +573,6 @@ function isInLineComment(input: string, gapStart: number, pos: number): boolean 
   return false;
 }
 
-/** Hoisted so the type-name loop below does not re-dispatch a literal regex
- *  once per character.  Non-global: `test` on a global regex is stateful. */
-const WORD_CHAR = /\w/;
-
-/** True if a construct header — `@type{` or `@type(` — starts at `pos` and is
- *  complete before the end of the line.
- *
- *  A bare `@` is not one: it turns up in email addresses and prose, and
- *  treating it as a boundary cuts a scan short in text BibTeX ignores.
- *
- *  The scanner's own `/@(\w+)\s*([{(])/` accepts a newline between the type and
- *  the delimiter, and `@book\n{k, …}` really is one entry.  This predicate
- *  deliberately does not, because its only caller uses it to stop *before* a
- *  newline: looking across one to answer `true` would suppress the very
- *  newline the caller exists to find.  Where they disagree the caller stops one
- *  character later, at the newline, which is the answer it wanted anyway. */
-function isConstructHeaderAt(text: string, pos: number): boolean {
-  if (text[pos] !== '@') return false;
-  let i = pos + 1;
-  while (i < text.length && WORD_CHAR.test(text[i])) i++;
-  if (i === pos + 1) return false;
-  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
-  return text[i] === '{' || text[i] === '(';
-}
-
 /** Line ending of the first newline after `from`, or null if the next
  *  construct starts first.
  *
@@ -613,7 +588,19 @@ function scanForwardForNewline(text: string, from: number): BibtexEol | null {
     const ch = text[i];
     if (ch === '\n') return text[i - 1] === '\r' ? '\r\n' : '\n';
     if (ch === '%') inComment = true;
-    else if (!inComment && isConstructHeaderAt(text, i)) return null;
+    else if (!inComment && ch === '@') {
+      // A construct header complete before the line's end (see
+      // readEntryHeader). A bare @ is none: it turns up in e-mail addresses
+      // and prose, and treating it as a boundary cuts the walk short in text
+      // BibTeX ignores. The scanner reads a header across a line end, as
+      // `@book\n{k, …}` is one entry, but this walk mustn't, as it would pass
+      // the very line end it's for; where they differ it stops at that line
+      // end, the answer it wants anyway. What the header's reading passed
+      // holds no line end or %, so the walk goes on after it.
+      const header = readEntryHeader(text, i, true);
+      if ('type' in header) return null;
+      i = header.resume - 1;
+    }
   }
   return null;
 }
@@ -745,6 +732,14 @@ export interface BibtexSourceRange {
    *  it may actually sit inside another entry's field value — fine to navigate
    *  to, never safe to splice into. */
   trusted: boolean;
+  /** The names of the fields the entry gives more than once, in lower case,
+   *  in the order of each one's second, or undefined where it gives none
+   *  twice. The parser reads the last value of each, as biber reads it:
+   *  Text::BibTeX stores each value under its name in turn (btxs_support.c),
+   *  and biber's bibtex.pm reads the one stored. BibTeX reads the first and
+   *  warns of the rest ("I'm ignoring k's extra "title" field", bibtex.web), so
+   *  the two read such an entry otherwise. */
+  repeatedFields?: string[];
 }
 
 export interface ParsedBibtexWithRaw {
@@ -827,6 +822,34 @@ function isAtLineStart(input: string, pos: number): boolean {
   return true;
 }
 
+const WHITE_SPACE = /\s/;
+const SAME_LINE_WHITE_SPACE = /[ \t]/;
+
+/** The header of the entry, or the command, as `@comment`, whose @ is at
+ *  `at` in `text`, as bibtex.web reads one (get_bib_command_or_entry_and_process):
+ *  white space after the @, its type, an identifier (see
+ *  BIBTEX_IDENTIFIER_CHAR), white space, and its { or (, so `@my-type{` and
+ *  `@ article (` are headers, and `@2article{` none. With `sameLine`, white
+ *  space is a space or a tab. Where there's no header, `resume` is where
+ *  the next could start: past the type read, as BibTeX reads on from there,
+ *  so each character is read once. An @ in the type, which BibTeX reads in
+ *  an identifier, would start a header only where this one does, with the
+ *  same type's end, unless this one's starts with a digit, where it reads
+ *  none, and the next is looked for right after the @. */
+export function readEntryHeader(text: string, at: number, sameLine = false):
+  { type: string; typeStart: number; opener: '{' | '('; end: number } | { resume: number } {
+  const white = sameLine ? SAME_LINE_WHITE_SPACE : WHITE_SPACE;
+  let i = at + 1;
+  while (i < text.length && white.test(text[i])) i++;
+  ENTRY_TYPE_AT.lastIndex = i;
+  const type = ENTRY_TYPE_AT.exec(text)?.[0];
+  if (!type) return { resume: at + 1 };
+  let j = i + type.length;
+  while (j < text.length && white.test(text[j])) j++;
+  const opener = text[j];
+  return opener === '{' || opener === '(' ? { type, typeStart: i, opener, end: j + 1 } : { resume: i + type.length };
+}
+
 /** A citation key, as BibTeX and biber both read one: after the white
  *  space after the entry's opener, a run of characters to white space, a
  *  comma or the entry's closer, with no @ in it. BibTeX reads a key to white
@@ -870,8 +893,9 @@ export function readEntryKey(text: string, at: number, closer: '}' | ')'): { key
  *  reader of a .bib file's fields reads names and bare values so: the
  *  parser, the body walk Zotero link edits by (see scanBibtexEntryBody),
  *  extractRawField and mergeBibtex, which copy what the parser reads, and
- *  the indentation an added field takes (see detectBibtexFieldIndent).
- *  A space other than ASCII's, as a no-break space, which BibTeX reads in
+ *  the indentation an added field takes (see detectBibtexFieldIndent);
+ *  and every reader of an entry's header reads its type so (see
+ *  readEntryHeader). A space other than ASCII's, as a no-break space, which BibTeX reads in
  *  an identifier, is a space to the parser, as \s is to its patterns, so
  *  it ends one; the body walk refuses an entry that has one between its
  *  fields, which BibTeX reads otherwise. */
@@ -882,6 +906,9 @@ export const BIBTEX_IDENTIFIER_CHAR = '[^\\s\\x00-\\x1f"#%\'(),={}]';
 const IDENTIFIER_RUN_AT = new RegExp(BIBTEX_IDENTIFIER_CHAR + '+', 'y');
 const FIELD_EQUALS_AT = /\s*=\s*/y;
 const BARE_VALUE_AT = new RegExp('[0-9]+|' + BIBTEX_IDENTIFIER_CHAR + '+', 'y');
+// An entry's type, as readEntryHeader reads it: an identifier, not
+// starting with a digit
+const ENTRY_TYPE_AT = new RegExp('(?![0-9])' + BIBTEX_IDENTIFIER_CHAR + '+', 'y');
 
 /**
  * An entry body's fields, as `name = {value}`, `name = "value"` or
@@ -1001,7 +1028,15 @@ function scanBibtex(input: string): ScannedBibtex {
   // that `@` is at the top level or buried in someone's field value.
   // BibTeX accepts either delimiter around an entry body, and skipping the
   // paren form would leave a paren `@comment`'s contents exposed as entries.
-  const headerRe = /@(\w+)\s*([{(])/g;
+  // The next header from `from`, at an @ (see readEntryHeader)
+  const nextHeader = (from: number) => {
+    for (let at = input.indexOf('@', from); at !== -1;) {
+      const header = readEntryHeader(input, at);
+      if ('type' in header) return { at, ...header };
+      at = input.indexOf('@', header.resume);
+    }
+    return undefined;
+  };
   // Where each entry ends, read once for all of them
   const entryEnds = readEntryEnds(input);
 
@@ -1020,14 +1055,13 @@ function scanBibtex(input: string): ScannedBibtex {
   let synced = true;
 
   while (pos < input.length) {
-    headerRe.lastIndex = pos;
-    const match = headerRe.exec(input);
-    if (!match) break;
+    const header = nextHeader(pos);
+    if (!header) break;
 
-    const entryStart = match.index;
-    const afterBrace = entryStart + match[0].length;
-    const type = match[1];
-    const closer: '}' | ')' = match[2] === '(' ? ')' : '}';
+    const entryStart = header.at;
+    const afterBrace = header.end;
+    const type = header.type;
+    const closer: '}' | ')' = header.opener === '(' ? ')' : '}';
 
     // `% @article{fake, …}` is prose, not an entry.  Reporting it would offer
     // a range that splicing could write into, editing the user's commented-out
@@ -1100,21 +1134,27 @@ function scanBibtex(input: string): ScannedBibtex {
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
-    ranges.push({
+    const range: BibtexSourceRange = {
       key, start: entryStart, end: endPos + 1,
       keyStart, keyEnd: keyStart + key.length,
       trusted: synced,
-    });
+    };
+    ranges.push(range);
 
     // Parsed entry
     try {
       const fieldsStr = input.slice(startPos, endPos);
       const fields = new Map<string, string>();
+      const repeated = new Set<string>();
 
       for (const field of readBibtexFields(fieldsStr)) {
         const lowerField = field.name.toLowerCase();
+        // The last value of a field given more than once is the one read (see
+        // BibtexSourceRange.repeatedFields)
+        if (fields.has(lowerField)) repeated.add(lowerField);
         fields.set(lowerField, decodeBibtexFieldValue(lowerField, field.value, field.braced));
       }
+      if (repeated.size > 0) range.repeatedFields = Array.from(repeated);
 
       parsed.set(key, {
         type: type.toLowerCase(),
@@ -1169,11 +1209,11 @@ export function serializeBibtex(entries: Map<string, BibtexEntry>): string {
 
 /** Where the fields of the entry `rawEntry` starts with start, after its
  *  key and the comma after it, or at its closer where it has none, as the
- *  parser reads its key (see readEntryKey); or undefined where the parser
- *  reads no key */
+ *  parser reads its header and key (see readEntryHeader and readEntryKey);
+ *  or undefined where the parser reads none */
 function entryBodyStart(rawEntry: string): number | undefined {
-  const header = ENTRY_HEADER_RE.exec(rawEntry);
-  return header ? readEntryKey(rawEntry, header[0].length, header[0].endsWith('(') ? ')' : '}')?.bodyStart : undefined;
+  const header = rawEntry[0] === '@' ? readEntryHeader(rawEntry, 0) : undefined;
+  return header && 'type' in header ? readEntryKey(rawEntry, header.end, header.opener === '(' ? ')' : '}')?.bodyStart : undefined;
 }
 
 /** A single field of an entry as a line of its own, in the form
@@ -1271,7 +1311,6 @@ export interface BibtexEntryFieldOccurrence {
   readonly valueEnd: number;
 }
 
-const ENTRY_HEADER_RE = /^@(\w+)\s*[{(]/;
 /** What may appear in a field name.  BibTeX names are far more permissive than
  *  the identifiers they usually are: everything up to the next separator is
  *  part of the name, so `:doi`, `+doi`, `.doi` and `@doi` are all names in
@@ -1309,9 +1348,11 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
   let hasConcatenation = false;
   let unbalanced = false;
 
-  const header = ENTRY_HEADER_RE.exec(rawEntry);
+  // Its header as the parser reads it (see readEntryHeader)
+  const read = rawEntry[0] === '@' ? readEntryHeader(rawEntry, 0) : undefined;
+  const header = read && 'type' in read ? read : undefined;
   const entryType = header
-    ? { raw: header[1], start: 1, end: 1 + header[1].length }
+    ? { raw: header.type, start: header.typeStart, end: header.typeStart + header.type.length }
     : undefined;
 
   const result = (): BibtexEntryBodyScan => ({
@@ -1326,7 +1367,7 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
   // The body starts after the key, as the parser reads it (see
   // readEntryKey): past its comma, or at the closer, for an entry with no
   // fields, as `@article{k}`.
-  const key = header ? readEntryKey(rawEntry, header[0].length, header[0].endsWith('(') ? ')' : '}') : undefined;
+  const key = header ? readEntryKey(rawEntry, header.end, header.opener === '(' ? ')' : '}') : undefined;
   if (!key) return result();
 
   // Stop before the closing delimiter, which is the last character of an exact
@@ -1609,8 +1650,8 @@ export function spliceFieldsIntoEntry(
   // but also where it has no fields and its key ends in that character, as
   // `k(` in `@article(k()` (see readEntryKey), which a comma must follow.
   const opener = closer === ')' ? '(' : '{';
-  const header = ENTRY_HEADER_RE.exec(producedRaw);
-  const key = header && header[0].endsWith(opener) ? readEntryKey(producedRaw, header[0].length, closer) : undefined;
+  const header = producedRaw[0] === '@' ? readEntryHeader(producedRaw, 0) : undefined;
+  const key = header && 'type' in header && header.opener === opener ? readEntryKey(producedRaw, header.end, closer) : undefined;
   const endsInKey = key !== undefined && key.keyStart + key.key.length === trimmed.length;
   const needsComma =
     trimmed.length > 0 && !trimmed.endsWith(',') && (!trimmed.endsWith(opener) || endsInKey);
