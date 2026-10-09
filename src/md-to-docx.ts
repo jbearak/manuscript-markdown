@@ -4970,6 +4970,35 @@ interface CommentEntry {
   parentParaId?: string;     // set for replies
 }
 
+// What a state's comments and replies' ranges hold, by id, kept by each
+// array with those added since the last look, as a search of all of them
+// for each comment took time in the square of their number. Each array
+// only grows
+const commentIdsSeen = new WeakMap<CommentEntry[], { seen: number; ids: Set<number> }>();
+const replyRangesSeen = new WeakMap<DocxGenState['replyRanges'], { seen: number; byParent: Map<number, DocxGenState['replyRanges']> }>();
+
+/** Whether `comments` has one with `id` */
+function hasCommentWithId(comments: CommentEntry[], id: number): boolean {
+  let known = commentIdsSeen.get(comments);
+  if (!known) commentIdsSeen.set(comments, known = { seen: 0, ids: new Set() });
+  for (; known.seen < comments.length; known.seen++) known.ids.add(comments[known.seen].id);
+  return known.ids.has(id);
+}
+
+/** The ranges in `ranges` of the replies to the comment with `parentId`, in
+ *  their order there, as of now, which the next look adds to */
+function replyRangesOf(ranges: DocxGenState['replyRanges'], parentId: number): Readonly<DocxGenState['replyRanges']> {
+  let known = replyRangesSeen.get(ranges);
+  if (!known) replyRangesSeen.set(ranges, known = { seen: 0, byParent: new Map() });
+  for (; known.seen < ranges.length; known.seen++) {
+    const range = ranges[known.seen];
+    const forParent = known.byParent.get(range.parentId);
+    if (forParent) forParent.push(range);
+    else known.byParent.set(range.parentId, [range]);
+  }
+  return known.byParent.get(parentId) ?? [];
+}
+
 /**
  * Normalize a date string to UTC ISO format for Word XML.
  * Handles:
@@ -7672,7 +7701,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     } else if (run.type === 'critic_highlight') {
       if (nextRun?.type === 'critic_comment') {
         const reserved = run.reservedCommentId;
-        const commentId = reserved !== undefined && !state.comments.some(comment => comment.id === reserved) ? reserved : state.commentId++;
+        const commentId = reserved !== undefined && !hasCommentWithId(state.comments, reserved) ? reserved : state.commentId++;
         const author = nextRun.author ?? '';
         const date = normalizeToUtcIso(nextRun.date || '', state.timezone);
         const commentBody = nextRun.commentText || '';
@@ -7842,7 +7871,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         state.commentIdMap.set(mdId, numericId);
       }
       xml += '<w:commentRangeStart w:id="' + numericId + '"/>';
-      const replyRanges = state.replyRanges.filter(rr => rr.parentId === numericId);
+      const replyRanges = replyRangesOf(state.replyRanges, numericId);
       for (const reply of replyRanges) {
         xml += '<w:commentRangeStart w:id=\"' + reply.replyId + '\"/>';
       }
@@ -7856,7 +7885,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       }
       xml += '<w:commentRangeEnd w:id="' + numericId + '"/>';
       xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + numericId + '"/></w:r>';
-      const replyRanges = state.replyRanges.filter(rr => rr.parentId === numericId);
+      const replyRanges = replyRangesOf(state.replyRanges, numericId);
       for (const reply of replyRanges) {
         xml += '<w:commentRangeEnd w:id=\"' + reply.replyId + '\"/>';
         xml += '<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"' + reply.replyId + '\"/></w:r>';
@@ -7870,7 +7899,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       }
       // Only emit the comment entry once per ID (multi-paragraph comments
       // may produce duplicate body markers in the markdown).
-      if (!state.comments.some(c => c.id === numericId)) {
+      if (!hasCommentWithId(state.comments, numericId)) {
         const author = run.author ?? '';
         const date = normalizeToUtcIso(run.date || '', state.timezone);
         const commentBody = run.commentText || '';
@@ -7881,7 +7910,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         // Generate reply comment entries (reply IDs may have been
         // pre-allocated by the pre-scan in generateDocumentXml)
         if (run.replies && run.replies.length > 0) {
-          const preAllocated = state.replyRanges.filter(rr => rr.parentId === numericId);
+          const preAllocated = replyRangesOf(state.replyRanges, numericId);
           const replyParaIds: string[] = [];
           for (let i = 0; i < run.replies.length; i++) {
             const reply = run.replies[i];
@@ -8377,11 +8406,22 @@ function withQuoteCommentBodiesMerged(tokens: MdToken[]): MdToken[] {
   const sameQuote = (other: MdToken | undefined, token: MdToken): other is MdToken =>
     other?.type === 'blockquote' && other.blockquoteGroupIndex === token.blockquoteGroupIndex && takesQuoteCommentBodies(other);
   const lineBreak: MdRun = { type: 'softbreak', text: '\n' };
+  // The tokens this made, whose runs are their own, which the next
+  // paragraph's go on the end of, as a copy for each paragraph of many in a
+  // row took time for each before it
+  const made = new Set<MdToken>();
+  const joinedRuns = (before: MdToken, after: MdRun[]): MdRun[] => {
+    const runs = made.has(before) ? before.runs : [...before.runs];
+    runs.push(lineBreak);
+    pushAll(runs, after);
+    return runs;
+  };
   let carried: MdToken | undefined;
   for (const token of tokens) {
     const bodiesOnly = isQuoteCommentBodies(token);
     if (carried && sameQuote(token, carried)) {
-      const joined = { ...token, runs: [...carried.runs, lineBreak, ...token.runs], alertFirst: token.alertFirst || carried.alertFirst };
+      const joined = { ...token, runs: joinedRuns(carried, token.runs), alertFirst: token.alertFirst || carried.alertFirst };
+      made.add(joined);
       // Bodies go on until the quote shows something
       if (bodiesOnly) {
         carried = joined;
@@ -8401,7 +8441,8 @@ function withQuoteCommentBodiesMerged(tokens: MdToken[]): MdToken[] {
     }
     const prev = merged[merged.length - 1];
     if (sameQuote(prev, token)) {
-      merged[merged.length - 1] = { ...prev, runs: [...prev.runs, lineBreak, ...token.runs], alertLast: prev.alertLast || token.alertLast };
+      merged[merged.length - 1] = { ...prev, runs: joinedRuns(prev, token.runs), alertLast: prev.alertLast || token.alertLast };
+      made.add(merged[merged.length - 1]);
     } else {
       carried = token;
     }
@@ -9208,7 +9249,7 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
     } else if (run.type === 'comment_body_with_id' && run.replies && run.replies.length > 0) {
       const mdId = run.commentId || '';
       const numericId = state.commentIdMap.get(mdId);
-      if (numericId !== undefined && !state.replyRanges.some(rr => rr.parentId === numericId)) {
+      if (numericId !== undefined && replyRangesOf(state.replyRanges, numericId).length === 0) {
         for (let replyIndex = 0; replyIndex < run.replies.length; replyIndex++) {
           const replyId = state.commentId++;
           state.replyRanges.push({ replyId, parentId: numericId });
@@ -9674,7 +9715,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         preserveCloseForNextToken = true;
         biblAtSectionStart = biblFirst;
         hiddenAtSectionStart = hiddenBefore + 1;
-        hiddenXml = [...hiddenXmlBefore, paragraphXml];
+        // The run's own array, which nothing else holds: each token takes it
+        // and leaves a new one, unless the run goes on, as a copy for each
+        // paragraph of a long run took time for each before it
+        hiddenXmlBefore.push(paragraphXml);
+        hiddenXml = hiddenXmlBefore;
       }
     }
     // An empty paragraph in a list ends it on import, so before more of the
@@ -10802,7 +10847,7 @@ export async function convertMdToDocx(
 
   // Check for comment range markers without corresponding bodies
   for (const [mdId, numericId] of state.commentIdMap) {
-    if (!state.comments.some(c => c.id === numericId)) {
+    if (!hasCommentWithId(state.comments, numericId)) {
       state.warnings.push(`Comment range markers {#${mdId}}...{/${mdId}} exist without corresponding body {#${mdId}>>...<<}`);
     }
   }
