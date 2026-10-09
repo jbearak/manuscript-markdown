@@ -52,14 +52,16 @@ const documentArb = fc.record({
   // The line ends parseMd reads it with, besides \n
   lineEnd: fc.constantFrom('\r\n', '\r'),
 });
+type Document = { frontmatter: boolean; blocks: Array<{ block: Block; blank: number }>; trailing: number; lineEnd: string };
 
 /** Whether a block is a comment, or a style block's fence, which is one */
 const isComment = (block: Block | undefined) => block?.kind === 'comment' || block?.kind === 'open' || block?.kind === 'close';
 
 /** The Markdown of `blocks`, with the lines like comments' in the blocks
  *  preprocessing rewrites `as` written, with x for their text, or each such
- *  block a line of text, but those export splits, and `trailing` blank lines
- *  at the end. Or 'spaced', as written, with a blank line more on each side
+ *  block a line of text, but those export splits and one right after a
+ *  comment export splits from its paragraph, and `trailing` blank lines at
+ *  the end. Or 'spaced', as written, with a blank line more on each side
  *  of a block a comment is split from, between blocks in PLAIN_KINDS */
 function markdownOf({ frontmatter, blocks, trailing }: { frontmatter: boolean; blocks: Array<{ block: Block; blank: number }>; trailing: number }, as: 'written' | 'x' | 'line' | 'spaced'): string {
   let n = 0;
@@ -80,7 +82,13 @@ function markdownOf({ frontmatter, blocks, trailing }: { frontmatter: boolean; b
     // A note export takes out, or a note's definition, which it takes out
     // too, as a line of its own
     else if (block.kind === 'note') text = as === 'line' ? '[^d' + n++ + ']: x' : 'Citation data for @k' + n++ + ' was not found in the bibliography file.';
-    else if (as === 'line' && block.kind !== 'latexComment' && !SPLIT_KINDS.includes(block.kind)) {
+    // A line right after a comment after an equation or a paragraph break,
+    // with no blank line between, would go on with the comment's paragraph,
+    // which the comment would then not end, so Word would have it in a
+    // paragraph with the line, and not alone, where a code block, an HTML
+    // block, a grid table or a quote there ends the paragraph
+    else if (as === 'line' && block.kind !== 'latexComment' && !SPLIT_KINDS.includes(block.kind)
+      && !(blank === 0 && (blocks[k - 1]?.block.kind === 'mathComment' || blocks[k - 1]?.block.kind === 'breakComment'))) {
       // A note's definition stays one, which Word gets nothing of
       text = block.kind === 'definition' ? '[^d' + n++ + ']: x' : 'x' + n++;
     } else {
@@ -128,6 +136,31 @@ async function commentSpacing(docx: Uint8Array, quotes = false): Promise<string[
     .map(([, name, value]) => name + '=' + value);
 }
 
+/** Checks that `document`'s comments' spacing, and its fences', is the
+ *  same with other text in the blocks preprocessing rewrites, with each of
+ *  them a line, and with other line ends, and with more blank lines around
+ *  a comment split from its block */
+async function expectSameSpacing(document: Document): Promise<void> {
+  const written = markdownOf(document, 'written');
+  const spacing = await commentSpacing((await convertMdToDocx(written)).docx);
+  // With the Markdown, for a failure's report
+  for (const as of ['x', 'line'] as const) {
+    const other = markdownOf(document, as);
+    expect([written, other, await commentSpacing((await convertMdToDocx(other)).docx)]).toEqual([written, other, spacing]);
+  }
+  const other = written.replace(/\n/g, document.lineEnd);
+  expect([written, other, parsedSpacing(other)]).toEqual([written, other, parsedSpacing(written)]);
+  const crlf = written.replace(/\n/g, '\r\n');
+  expect([written, crlf, await commentSpacing((await convertMdToDocx(crlf)).docx)]).toEqual([written, crlf, spacing]);
+  // A comment split from its block has none of its own blank lines,
+  // nor does a quote take any of them
+  const spaced = markdownOf(document, 'spaced');
+  if (spaced !== written) {
+    const quotes = await commentSpacing((await convertMdToDocx(written)).docx, true);
+    expect([written, spaced, await commentSpacing((await convertMdToDocx(spaced)).docx, true)]).toEqual([written, spaced, quotes]);
+  }
+}
+
 describe('Comment spacing through preprocessing', () => {
   const styles = '---\nstyles:\n  box:\n    font-style: italic\n---\n\n';
   test.each([
@@ -162,26 +195,26 @@ describe('Comment spacing through preprocessing', () => {
     }
   });
 
+  test.each(['mathComment', 'breakComment'].flatMap(split => ['code', 'html', 'grid', 'quote'].map(kind => [split, kind] as const)))('is the same with %s, then %s right after its comment, then a comment', async (split, kind) => {
+    // The property below found this: the variant with each block a line
+    // had a line right after the comment, which went on with the comment's
+    // paragraph, so the comment wasn't alone in Word, and the next one was
+    // the first comment alone. The variant keeps such a block as written
+    const document: Document = {
+      frontmatter: false,
+      blocks: [{ block: { kind: split }, blank: 0 }, { block: { kind }, blank: 0 }, { block: { kind: 'comment', repeated: false }, blank: 0 }],
+      trailing: 0,
+      lineEnd: '\r\n',
+    };
+    // The comment after the equation, or the break, is the first comment
+    // alone, with none of the blank lines around it its own, and the last
+    // comment is the second
+    const spacing = await commentSpacing((await convertMdToDocx(markdownOf(document, 'written'))).docx);
+    expect(spacing).toContain('MANUSCRIPT_HTML_COMMENT_AFTER_GAPS_1={"1":0}');
+    await expectSameSpacing(document);
+  });
+
   test('is the same with other text in the blocks preprocessing rewrites, with each of them a line, with other line ends, and with more blank lines around a comment split from its block', async () => {
-    await fc.assert(fc.asyncProperty(documentArb, async document => {
-      const written = markdownOf(document, 'written');
-      const spacing = await commentSpacing((await convertMdToDocx(written)).docx);
-      // With the Markdown, for a failure's report
-      for (const as of ['x', 'line'] as const) {
-        const other = markdownOf(document, as);
-        expect([written, other, await commentSpacing((await convertMdToDocx(other)).docx)]).toEqual([written, other, spacing]);
-      }
-      const other = written.replace(/\n/g, document.lineEnd);
-      expect([written, other, parsedSpacing(other)]).toEqual([written, other, parsedSpacing(written)]);
-      const crlf = written.replace(/\n/g, '\r\n');
-      expect([written, crlf, await commentSpacing((await convertMdToDocx(crlf)).docx)]).toEqual([written, crlf, spacing]);
-      // A comment split from its block has none of its own blank lines,
-      // nor does a quote take any of them
-      const spaced = markdownOf(document, 'spaced');
-      if (spaced !== written) {
-        const quotes = await commentSpacing((await convertMdToDocx(written)).docx, true);
-        expect([written, spaced, await commentSpacing((await convertMdToDocx(spaced)).docx, true)]).toEqual([written, spaced, quotes]);
-      }
-    }), { numRuns: 100 });
+    await fc.assert(fc.asyncProperty(documentArb, expectSameSpacing), { numRuns: 100 });
   }, 60000);
 });
