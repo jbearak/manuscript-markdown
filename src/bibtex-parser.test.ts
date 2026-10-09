@@ -1617,9 +1617,29 @@ describe('scanBibtexEntryBody', () => {
   // walk took for a stray value; and a bare value the parser reads in part
   it.each([
     ['an escaped brace in a quoted value', '  note = "a \\{ b",\n  doi = {10.1/a},\n  y = "c \\} d"'],
-    ['a name the parser reads in part', '  :doi = {10.1/a}'],
+    ['a name that starts with a digit, which BibTeX reads as none', '  1doi = {10.1/a}'],
     ['a field in a stray value', '  title = {T} "x,\n  doi = {10.1/a},\n  note = "'],
     ['a bare value the parser reads in part', '  doi = 10.1000/abc'],
+    // And text BibTeX reads as an error, after which it reads none of the
+    // entry, where the parser reads on: a field with no comma before it, a
+    // word that is no field's name, a value no field has, a field with no
+    // value, a comma or a # with no value before it, or a # with none after
+    // it, and an = with no name
+    ['a field with no comma before it', '  title = {T}\n  doi = {10.1/a}'],
+    ['a word that is no field\'s name', '  title = {T},\n  x doi = {10.1/a}'],
+    ['a value no field has', '  title = {T} {x},\n  doi = {10.1/a}'],
+    ['a field with no value', '  title = {T},\n  doi ='],
+    ['a field with no value before a comma', '  doi = ,\n  title = {T}'],
+    ['a comma with no field before it', '  title = {T},,\n  doi = {10.1/a}'],
+    ['a # with no value before it', '  title = {T}, # {x},\n  doi = {10.1/a}'],
+    ['a # with no value after it', '  doi = {10.1/a} #'],
+    ['an = with no name before it', '  title = {T},=\n  doi = {10.1/a}'],
+    // Spaces BibTeX reads in a name or a macro's, where the parser reads
+    // a space, and a character it reads as neither
+    ['a no-break space between fields', '  title = {T},\u00A0doi = {10.1/a}'],
+    ['a no-break space after a name', '  doi\u00A0= {10.1/a}'],
+    ['a no-break space after a value', '  title = {T}\u00A0,\n  doi = {10.1/a}'],
+    ['a form feed between fields', '  title = {T},\f\n  doi = {10.1/a}'],
   ])('refuses to edit an entry with %s', (_name, body) => {
     expect(scan('@article{k,\n' + body + '\n}').unbalanced).toBe(true);
   });
@@ -1630,6 +1650,9 @@ describe('scanBibtexEntryBody', () => {
     ['a quote in a group', '  note = "a {"} b",\n  doi = {10.1/a}'],
     ['escaped braces that pair', '  note = "a \\{ b \\}",\n  doi = {10.1/a}'],
     ['a concatenation', '  doi = "10.1/" # "a"'],
+    ['a name with a colon in it, as the parser reads it', '  x:y = {a},\n  doi = {10.1/a}'],
+    ['a trailing comma', '  doi = {10.1/a},'],
+    ['line ends of a carriage return and a line feed', '  title = {T},\r\n\tdoi = {10.1/a}\r\n'],
   ])('edits an entry with %s', (_name, body) => {
     const raw = '@article{k,\n' + body + '\n}';
     expect(scan(raw).unbalanced).toBe(false);
@@ -1645,6 +1668,32 @@ describe('BibTeX field reader', () => {
     const entry = parseBibtex('@article{k,\n' + body + '\n}').get('k');
     return entry && Object.fromEntries(entry.fields);
   };
+
+  // Which read a name, or a bare value, as a word, as \w, where BibTeX reads
+  // all of an identifier, as bibtex.web's scan_identifier does, so the
+  // parser read :doi as doi, a field the entry doesn't have, and a macro
+  // x-y as x; and read a name in a run that starts with a digit, which
+  // BibTeX reads as no name, and none in the value after it
+  it.each([
+    ['a name that starts with a colon', '  :doi = {10.1/a},\n  year = 2020', { ':doi': '10.1/a', year: '2020' }],
+    ['a name with a colon in it', '  x:doi = {10.1/a}', { 'x:doi': '10.1/a' }],
+    ['a name of characters that aren\'t letters', '  +.@/é\\x = {a}', { '+.@/é\\x': 'a' }],
+    ['a macro with a hyphen', '  month = x-y,\n  year = 2020', { month: 'x-y', year: '2020' }],
+    ['a name that starts with a digit', '  1doi = {title = {Y}},\n  year = 2020', { year: '2020' }],
+    ['a name in the run a number starts', '  year = 2020title = {x}', { year: '2020' }],
+    // Guards: a number, a bare value BibTeX reads to its first character
+    // that isn't a digit, and a name and a macro of letters
+    ['a number before what isn\'t one', '  doi = 10.1000/abc', { doi: '10' }],
+    ['a name and a macro of letters', '  month = jan', { month: 'jan' }],
+  ])('reads %s as BibTeX does', (_name, body, expected) => {
+    expect(fields(body)).toEqual(expected);
+  });
+
+  // Guard: a no-break space, which BibTeX reads in the name after it, so
+  // the body walk refuses the entry, the parser reads as a space, as before
+  it('reads a no-break space before a name as a space', () => {
+    expect(fields('  title = {T},\u00A0doi = {10.1/a}')).toEqual({ title: 'T', doi: '10.1/a' });
+  });
 
   it.each([
     ['four levels of groups', '{a {b {c {d} e} f} g}', 'a {b {c {d} e} f} g'],
@@ -1688,6 +1737,24 @@ describe('BibTeX field reader', () => {
     time(1000);
     const small = time(1000);
     expect(time(4000) / small).toBeLessThan(8);
+  }, 30000);
+
+  // Each run of an identifier's characters is read once, from its start,
+  // the rest of one a number starts too
+  it.each([
+    ['words with no = after them', (n: number) => '  ' + 'x:y '.repeat(n) + '\n  year = 2020', { year: '2020' }],
+    ['numbers that run into names', (n: number) => '  ' + 'a = 1b'.repeat(n) + ',\n  year = 2020', { a: '1', year: '2020' }],
+  ])('reads a body of %s in linear time', (_name, body, expected) => {
+    expect(fields(body(4000))).toEqual(expected);
+    const time = (n: number) => {
+      const text = body(n);
+      return fastestRun(() => {
+        for (let k = 0; k < 10; k++) fields(text);
+      });
+    };
+    time(4000);
+    const small = time(4000);
+    expect(time(16000) / small).toBeLessThan(8);
   }, 30000);
 
   it.each([

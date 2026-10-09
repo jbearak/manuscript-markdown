@@ -160,9 +160,14 @@ describe('BibTeX Parser Property Tests', () => {
   }, { timeout: 10000 });
 });
 describe('BibTeX field reader parity', () => {
-  // The regex the field reader replaced, which read braces only so deep
-  const fieldRegex = /(\w+(?:-\w+)*)\s*=\s*(?:\{((?:[^{}]|\{(?:[^{}]|\{[^}]*\})*\})*)\}|"((?:\\.|[^"\\])*)"|(\w+))/g;
-  const byRegex = (body: string) => [...body.matchAll(fieldRegex)].map(([, name, braced, quoted, bare]) =>
+  // The regex the field reader replaced, which read braces only so deep,
+  // with names and bare values as BibTeX reads them: each run of an
+  // identifier's characters whole, and none that starts with a digit for a
+  // name, though its value is read past, and a number's digits; with a
+  // space other than ASCII's a space, as \s is
+  const identifier = '[^\\s\\x00-\\x1f"#%\'(),={}]';
+  const fieldRegex = new RegExp('((?<!' + identifier + ')' + identifier + '+)\\s*=\\s*(?:\\{((?:[^{}]|\\{(?:[^{}]|\\{[^}]*\\})*\\})*)\\}|"((?:\\\\.|[^"\\\\])*)"|([0-9]+|' + identifier + '+))', 'g');
+  const byRegex = (body: string) => [...body.matchAll(fieldRegex)].filter(([, name]) => !/^[0-9]/.test(name)).map(([, name, braced, quoted, bare]) =>
     ({ name, value: braced ?? quoted ?? bare, braced: braced !== undefined }));
   // Its deepest braces, every one counted, as the regex counts them
   const depth = (body: string) => {
@@ -196,7 +201,7 @@ describe('BibTeX field reader parity', () => {
    */
   it('reads an entry body as the regex did, where its braces nest as deep as the regex read them', () => {
     const atom = fc.constantFrom('title', 'year', 'a-b', 'x1', '-', ' = ', '=', ' ', '\n', ',', '{', '}', '{a}', '{a {b}}', '"', '\\"', '\\', '\\\\',
-      '\\\n', '\\{', '\\}', 'a b', '2020', '@', '%', '\u00A0', '\u2028');
+      '\\\n', '\\{', '\\}', 'a b', '2020', '@', '%', '\u00A0', '\u2028', ':', '\u00E9');
     fc.assert(
       fc.property(fc.array(atom, { maxLength: 30 }).map(atoms => atoms.join('')), body => {
         fc.pre(depth(body) <= 3 && quotesAsBibtex(body));
@@ -275,16 +280,25 @@ describe('BibTeX field reader parity', () => {
    * scanBibtexEntryBody reads them for Zotero link's edits, are the
    * parser's, unless it finds the entry unbalanced, which Zotero link
    * refuses to edit, or finds a comment or a concatenation in it, which it
-   * refuses too; and each field extractRawField copies for mergeBibtex reads
-   * as the parser read it in the entry, with its escaped braces and quotes,
-   * a backslash before a line end, and a field repeated.
+   * refuses too; and an entry it edits is one BibTeX reads with no error,
+   * with the same fields; and each field extractRawField copies for
+   * mergeBibtex reads as the parser read it in the entry, with its escaped
+   * braces and quotes, a backslash before a line end, and a field repeated.
+   * Names and bare values are at the edges of BibTeX's identifiers, with
+   * characters other than letters, at their start too, as :doi, or a digit,
+   * which none starts with, or a no-break space, which BibTeX reads in one
+   * and the parser as a space, with a comma between fields or not, and a
+   * word between them that is no field's.
    */
   it('reads an entry\'s fields as the parser does in each reader, or the editor refuses the entry', () => {
     const content = fc.array(fc.constantFrom('a', ' ', '{', '}', '\\{', '\\}', '"', '\\"', '\\\\', '\\', '{"}', '\n', ',', '=', 'doi = ', '{x}', '%', '#'), { maxLength: 6, size: 'max' })
       .map(atoms => atoms.join(''));
-    const value = fc.oneof(content.map(c => '{' + c + '}'), content.map(c => '"' + c + '"'), fc.constantFrom('2020', 'jan'));
-    const field = fc.tuple(fc.constantFrom('title', 'doi', 'note', 'x-y'), value).map(([name, v]) => name + ' = ' + v);
-    const body = fc.array(field, { minLength: 1, maxLength: 4, size: 'max' }).map(fields => fields.join(',\n  '));
+    const value = fc.oneof(content.map(c => '{' + c + '}'), content.map(c => '"' + c + '"'), fc.constantFrom('2020', 'jan', 'x-y', '10.1/a', 'a:b'));
+    const name = fc.constantFrom('title', 'doi', 'note', 'x-y', ':doi', 'x:doi', '1doi', 'doi:', '+', '\u00E9t\u00E9', 'a\\b', 'a@b', '\u00A0doi', 'doi\u00A0');
+    const field = fc.tuple(name, value).map(([n, v]) => n + ' = ' + v);
+    const separator = fc.constantFrom(',\n  ', ',\n  ', ',', '\n  ', ', x ', ',\r\n\t', ',\u00A0');
+    const body = fc.array(fc.tuple(field, separator), { minLength: 1, maxLength: 4, size: 'max' })
+      .map(fields => fields.map(([f, sep], k) => (k === 0 ? '' : sep) + f).join(''));
     fc.assert(
       fc.property(body, fields => {
         const result = parseBibtexWithRaw('@article{k,\n  ' + fields + '\n}');
@@ -297,6 +311,14 @@ describe('BibTeX field reader parity', () => {
         if (!scan.unbalanced && !scan.hasTopLevelComment && !scan.hasConcatenation) {
           const scanned = scan.fields.map(read => [read.name, read.value]);
           if (JSON.stringify(scanned) !== JSON.stringify(parsed)) throw new Error(JSON.stringify(raw) + ' scanned as ' + JSON.stringify(scanned) + ', parsed as ' + JSON.stringify(parsed));
+          let read: Array<[string, string[]]>;
+          try {
+            read = readAsBibtex(raw);
+          } catch (error) {
+            throw new Error(JSON.stringify(raw) + ' edited, which BibTeX reads with an error: ' + (error as Error).message);
+          }
+          const asBibtex = read.map(([n, [part]]) => [n.toLowerCase(), /^[{"]/.test(part) ? part.slice(1, -1) : part]);
+          if (JSON.stringify(asBibtex) !== JSON.stringify(parsed)) throw new Error(JSON.stringify(raw) + ' read by BibTeX as ' + JSON.stringify(asBibtex) + ', parsed as ' + JSON.stringify(parsed));
         }
         for (const [name] of parsed) {
           const rawField = extractRawField(raw, name);
@@ -313,26 +335,33 @@ describe('BibTeX field reader parity', () => {
   /** An entry's fields as BibTeX reads them (bibtex.web's get_bib_command_or_entry_and_process):
    *  its name, and each part of its value, as written, in braces, each
    *  brace counted, an escaped one too, in quotes, to the first " in no
-   *  group, a number or a macro, with a # between each two; a comma after
-   *  each but the last, which may have one too, and nothing else. Throws
-   *  where BibTeX would report an error. */
+   *  group that no odd run of backslashes escapes, a number or a macro,
+   *  with a # between each two; a comma after each but the last, which may
+   *  have one too, and nothing else. Throws where BibTeX would report an
+   *  error. BibTeX, and btparse, end a quoted value at the first " in no
+   *  group, escaped or not; the parser reads \" as a quote in the value
+   *  (quotedValueEnds), and so does this. */
   const readAsBibtex = (entry: string): Array<[string, string[]]> => {
     const header = /^@\w+\{[^,\s{}]+,/.exec(entry);
     if (!header) throw new Error('no header');
     let i = header[0].length;
-    const white = () => { while (/\s/.test(entry[i] ?? '')) i++; };
+    const white = () => { while (/[ \t\n\r]/.test(entry[i] ?? '')) i++; };
     const part = (): string => {
       const start = i;
       if (entry[i] === '{' || entry[i] === '"') {
         let depth = 0;
+        let backslashes = 0;
         for (i++; i < entry.length; i++) {
+          const escaped = backslashes % 2 === 1;
+          backslashes = entry[i] === '\\' ? backslashes + 1 : 0;
           if (entry[i] === '{') depth++;
           else if (entry[i] === '}' && depth > 0) depth--;
-          else if (depth === 0 && entry[i] === (entry[start] === '{' ? '}' : '"')) return entry.slice(start, ++i);
+          else if (depth === 0 && entry[start] === '{' && entry[i] === '}') return entry.slice(start, ++i);
+          else if (depth === 0 && entry[start] === '"' && entry[i] === '"' && !escaped) return entry.slice(start, ++i);
         }
         throw new Error('unclosed value at ' + start);
       }
-      const bare = /^(?:\d+|[^\d\s"#%'(),={}][^\s"#%'(),={}]*)/.exec(entry.slice(i));
+      const bare = /^(?:\d+|[^\d\x00-\x20"#%'(),={}][^\x00-\x20"#%'(),={}]*)/.exec(entry.slice(i));
       if (!bare) throw new Error('no value at ' + i);
       i += bare[0].length;
       return bare[0];
@@ -341,7 +370,7 @@ describe('BibTeX field reader parity', () => {
     for (;;) {
       white();
       if (entry[i] === '}' && i === entry.length - 1) return fields;
-      const name = /^[^\d\s"#%'(),={}][^\s"#%'(),={}]*/.exec(entry.slice(i));
+      const name = /^[^\d\x00-\x20"#%'(),={}][^\x00-\x20"#%'(),={}]*/.exec(entry.slice(i));
       if (!name) throw new Error('no field name at ' + i);
       i += name[0].length;
       white();
@@ -374,7 +403,7 @@ describe('BibTeX field reader parity', () => {
   it('copies each field the produced entry lacks into an entry BibTeX reads, as BibTeX read it', () => {
     const content = fc.array(fc.constantFrom('a', ' ', ',', '=', '#', '%', '{x}', '{"}', '\n', '\\&', 'doi = ', '{a {b} c}'), { maxLength: 4 })
       .map(atoms => atoms.join(''));
-    const part = fc.oneof(content.map(c => '{' + c + '}'), content.map(c => '"' + c + '"'), fc.constantFrom('2020', 'jan', 'feb', 'extra', 'Other', 'none'));
+    const part = fc.oneof(content.map(c => '{' + c + '}'), content.map(c => '"' + c + '"'), fc.constantFrom('2020', 'jan', 'feb', 'x-y', 'a:b', 'extra', 'Other', 'none'));
     // Declarations before the entry, each after those it uses: other uses
     // extra, and jan is declared again, which the entry then reads; and
     // after it
@@ -382,7 +411,7 @@ describe('BibTeX field reader parity', () => {
     const declarationsAfter = fc.subarray(['@string{none = {N}}', '@string(late = "l")']);
     const value = fc.array(part, { minLength: 1, maxLength: 3 }).chain(parts => fc.array(fc.constantFrom(' # ', '#', ' #\n    '), { minLength: parts.length - 1, maxLength: parts.length - 1 })
       .map(hashes => parts.map((p, k) => (k === 0 ? '' : hashes[k - 1]) + p).join('')));
-    const name = fc.constantFrom('note', 'url', 'month', 'title', 'Note', 'x-y', 'year');
+    const name = fc.constantFrom('note', 'url', 'month', 'title', 'Note', 'x-y', 'year', ':note', 'x:url', 'doi:', '\u00E9t\u00E9', 'a\\b');
     const existingFields = fc.array(fc.tuple(name, value, fc.constantFrom(',\n  ', ', ', ',', ' ,\n\t')), { minLength: 1, maxLength: 5 });
     const producedNames = fc.subarray(['note', 'url', 'month', 'title', 'year']);
     fc.assert(
