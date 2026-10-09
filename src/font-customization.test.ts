@@ -922,6 +922,62 @@ describe('styles with other whitespace before an attribute', () => {
   });
 });
 
+// An XML parser reads an attribute with whitespace around its =, and its
+// value in single quotes as in double, as other tools may write them
+describe('styles with attributes spelled other ways', () => {
+  /** A document's styles.xml, as `edit` makes it, read back, without the
+   *  copy of custom styles export keeps, so they come from styles.xml */
+  const editedStyles = async (markdown: string, edit: (styles: string) => string) => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    zip.remove('docProps/custom.xml');
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    zip.file('word/styles.xml', edit(styles));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  it('reads the table paragraph style\'s font with whitespace around its attribute\'s =', async () => {
+    // The frontmatter read only w:ascii=", so it had no table-font, and the
+    // next export gave tables the theme's font
+    const { convertDocx } = await import('./converter');
+    const converted = await editedStyles('---\ntable-font: Courier New\n---\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n', styles => {
+      const edited = styles.replace(/(<w:style\b[^>]*w:styleId="TableParagraph"[\s\S]*?)<w:rFonts [^>]*\/>/,
+        (_style, before: string) => before + '<w:rFonts w:ascii = "Courier New" w:hAnsi = "Courier New"/>');
+      expect(edited).toContain('w:ascii = "Courier New"');
+      return edited;
+    });
+    expect(parseFrontmatter(converted).metadata.tableFont).toBe('Courier New');
+    expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+  });
+
+  // A value for each of the frontmatter's fields that it reads from
+  // styles.xml, by its fonts, sizes, toggles, centering, base, name, type,
+  // spacing and indent
+  const markdown = '---\ntitle: T\nfont: Georgia\nfont-size: 12\nheader-font: Verdana\nheader-font-size: 20\nheader-font-style: italic-underline-center\n'
+    + 'title-font: Palatino\ntitle-font-size: 30\ntable-font: Courier New\ntable-font-size: 8\ncode-font: Menlo\ncode-font-size: 9\n'
+    + 'styles:\n  pullquote:\n    font: Garamond\n    font-size: 13\n    spacing-before: 6\n    spacing-after: 12\n    paragraph-indent: 0.5\n---\n\n'
+    + '# One\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```\ncode\n```\n\n<!-- style: pullquote -->\n\nStyled text.\n\n<!-- /style -->\n';
+  const quoted = (value: string) => value.includes("'") ? '"' + value + '"' : "'" + value + "'";
+  it.each([
+    ['in double quotes', (name: string, value: string) => name + '="' + value + '"'],
+    ['with spaces around the =', (name: string, value: string) => name + ' = "' + value + '"'],
+    ['in single quotes', (name: string, value: string) => name + '=' + quoted(value)],
+    ['with a line break and a tab around the =, in single quotes', (name: string, value: string) => name + '\n\t=\t' + quoted(value)],
+  ])('reads each style\'s fonts, sizes and settings with every attribute %s', async (name, spell) => {
+    // Every attribute of every element of styles.xml but its declaration
+    const converted = await editedStyles(markdown, styles => {
+      const edited = styles.replace(/(<[^\s/>!?]+)((?:\s+[^\s=/>]+="[^"]*")+)/g, (_tag, start: string, attributes: string) =>
+        start + attributes.replace(/(\s+)([^\s=/>]+)="([^"]*)"/g, (_attribute, space: string, attribute: string, value: string) => space + spell(attribute, value)));
+      expect(edited === styles).toBe(name === 'in double quotes');
+      return edited;
+    });
+    const { metadata } = parseFrontmatter(converted);
+    expect([metadata.font, metadata.fontSize, metadata.headerFont, metadata.headerFontSize, metadata.headerFontStyle, metadata.titleFont, metadata.titleFontSize,
+      metadata.tableFont, metadata.tableFontSize, metadata.codeFont, metadata.codeFontSize, metadata.styles?.pullquote]).toEqual(['Georgia', 12, ['Verdana'], [20],
+      ['italic-underline-center'], ['Palatino'], [30], 'Courier New', 8, 'Menlo', 9, { font: 'Garamond', fontSize: 13, spacingBefore: 6, spacingAfter: 12, paragraphIndent: 0.5 }]);
+  });
+});
+
 describe('empty run and paragraph properties', () => {
   // Word strips an empty w:rPr or w:pPr on open and marks the document
   // changed (dirty-flag invariant #5)
