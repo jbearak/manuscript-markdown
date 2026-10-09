@@ -2879,26 +2879,37 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     }
   }
 
-  // Post-process: transfer <!-- indent --> / <!-- no-indent --> directives to the next paragraph token
-  for (let i = result.length - 1; i >= 0; i--) {
-    if (result[i].type !== 'paragraph' || result[i].runs.length !== 1) continue;
+  // Post-process: transfer <!-- indent --> / <!-- no-indent --> directives
+  // to the next paragraph token. From the end, with what the scan for each
+  // directive's paragraph would read again for each (`scan`), and the
+  // directives that go (`dropped`), which go from the tokens at the end,
+  // as a splice for each took time for each token after it
+  const dropped = new Set<MdToken>();
+  // The first token after the one at i that a directive's scan stops at,
+  // and how many tokens before it stay, but for a style block's fences
+  const scan = { stop: result.length, kept: 0 };
+  // The items the last directive before a list item gave its override to,
+  // from its item to the end of its list block, which a directive before
+  // an item of that block gives none, as each already has one
+  let given: { from: number; to: number } | undefined;
+  const transfer = (i: number): void => {
+    if (result[i].type !== 'paragraph' || result[i].runs.length !== 1) return;
     const run = result[i].runs[0];
-    if (run.type !== 'html_comment') continue;
+    if (run.type !== 'html_comment') return;
     const text = run.text.trim();
     const indentMatch = text.match(INDENT_RE);
-    if (!indentMatch) continue;
+    if (!indentMatch) return;
     const override = indentMatch[1].toLowerCase() as 'indent' | 'no-indent';
-    // Forward scan: skip HTML comment paragraphs to find the next content paragraph
-    let target = i + 1;
-    while (target < result.length && result[target].type === 'paragraph'
-        && result[target].runs.length === 1 && result[target].runs[0].type === 'html_comment') {
-      target++;
-    }
+    // The next paragraph Word shows, which is the one export keeps the
+    // override of (see showsInWord), past comments and the like. A style
+    // block on one line is its text's, which applyCustomStyleSentinels
+    // gives the override to
+    const target = scan.stop;
     if (target < result.length && result[target].type === 'paragraph' && result[target].runs.length > 0) {
       if (result[target].indentOverride === undefined) {
         result[target].indentOverride = override;
       }
-      result.splice(i, 1);
+      dropped.add(result[i]);
     } else if (target < result.length && result[target].type === 'list_item') {
       // Right after a list, which it ends in Markdown, where Word may have
       // one list, as two of bullets make. The blank line before it goes
@@ -2906,27 +2917,55 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
       // directives in a row, the last one, closest to the item, holds, which
       // this scan from the end gave the item first. A style block's fences,
       // which Word gets no paragraph for, can go between, on either side
+      // (see `scan.kept`)
       let last = i - 1;
       while (last >= 0 && isStyleFenceToken(result[last])) last--;
       const before = result[last];
-      let between = i + 1;
-      while (between < target && isStyleFenceToken(result[between])) between++;
-      if (between === target && before && (before.type === 'list_item' || before.listContinuation)) {
+      if (scan.kept === 0 && before && (before.type === 'list_item' || before.listContinuation)) {
         result[target].listDirective = result[target].indentOverride ?? override;
         const line = result[i].sourceRange?.[0];
         if (line !== undefined && line > 0 && /^[ \t]*\r?$/.test(sourceLines[line - 1] ?? 'x')) result[target].blankLineBefore = true;
       }
-      // Apply to all consecutive list items in this list block
+      // Apply to all consecutive list items in this list block, past the
+      // directives that go from between them. The items another directive
+      // gave its override to after this one's first item end the block
+      // where it ended, as the last item at the top level before each is
+      // the same, and each has one
       let prevTopOrdered: boolean | undefined;
-      for (let j = target; j < result.length && result[j].type === 'list_item'; j++) {
+      let j = target;
+      for (; j < result.length && (result[j].type === 'list_item' || dropped.has(result[j])); j++) {
+        if (dropped.has(result[j])) continue;
         if (startsAdjacentList(result[j], prevTopOrdered)) break;
+        if (j === given?.from) {
+          j = given.to;
+          break;
+        }
         if ((result[j].level ?? 1) === 1) prevTopOrdered = !!result[j].ordered;
         if (result[j].indentOverride === undefined) {
           result[j].indentOverride = override;
         }
       }
-      result.splice(i, 1);
+      given = { from: target, to: j };
+      dropped.add(result[i]);
     }
+  };
+  const anyDirective = result.some(token => token.type === 'paragraph' && token.runs.length === 1
+    && token.runs[0].type === 'html_comment' && INDENT_RE.test(token.runs[0].text.trim()));
+  for (let i = anyDirective ? result.length - 1 : -1; i >= 0; i--) {
+    transfer(i);
+    if (!dropped.has(result[i])) {
+      if (stopsDirectiveScan(result[i], env.references)) {
+        scan.stop = i;
+        scan.kept = 0;
+      } else if (!isStyleFenceToken(result[i])) {
+        scan.kept++;
+      }
+    }
+  }
+  if (dropped.size > 0) {
+    const kept = result.filter(token => !dropped.has(token));
+    result.length = kept.length;
+    kept.forEach((token, k) => { result[k] = token; });
   }
 
   applyCustomStyleSentinels(result, warnings, env.references);
@@ -2943,6 +2982,48 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
  *  paragraphs, passes over it as if it weren't there */
 function isImplicitStyleClose(token: MdToken | undefined): boolean {
   return !!token?.closesImplicitly;
+}
+
+/** Whether an indent directive's scan for its paragraph stops at `token`:
+ *  a paragraph Word shows, or a style block on one line of one, or any
+ *  block but a paragraph */
+function stopsDirectiveScan(token: MdToken, references?: unknown): boolean {
+  if (token.type !== 'paragraph' || token.runs.length === 0) return true;
+  const inline = inlineStyleBlock(token, references);
+  return inline ? showsInWord(inline.content) : showsInWord(token);
+}
+
+// Each comment paragraph's style block on one line, or null, which the
+// scan for indent directives' paragraphs and applyCustomStyleSentinels
+// both read, parsed once
+const inlineStyleBlocks = new WeakMap<MdToken, { style: string; content: MdToken } | null>();
+
+/** Where `token` is a style block on one line, a comment alone in its
+ *  paragraph, as <!-- style: X -->content<!-- /style -->: its style, and
+ *  the paragraph of its content, parsed again to recover inline formatting
+ *  (bold, italic, links, etc.), with the document's link definitions
+ *  (`references`) for reference links */
+function inlineStyleBlock(token: MdToken, references?: unknown): { style: string; content: MdToken } | undefined {
+  if (token.type !== 'paragraph' || token.runs.length !== 1 || token.runs[0].type !== 'html_comment') return undefined;
+  const known = inlineStyleBlocks.get(token);
+  if (known !== undefined) return known ?? undefined;
+  const fence = styleFence(token.runs[0].text);
+  const match = fence?.kind === 'inline' ? fence : undefined;
+  const runs = match ? convertInlineTokens(createMarkdownIt().parseInline(match.content, { references })) : [];
+  const block = match ? { style: match.style, content: { type: 'paragraph' as const, runs: runs.length > 0 ? runs : [{ type: 'text' as const, text: match.content }] } } : undefined;
+  inlineStyleBlocks.set(token, block ?? null);
+  return block;
+}
+
+/** Whether Word shows anything of paragraph `token`, so it's among the body
+ *  paragraphs whose indexes indent overrides keep (see countsForIndent), as
+ *  generateDocumentXml counts them, and an indent directive before it is
+ *  its (see parseMd): not one of comments, which are hidden, or of comment
+ *  bodies only, which Word doesn't get. Export also leaves out one with no
+ *  run in Word, as of an image it couldn't read, which it can only tell
+ *  once it writes the paragraph */
+function showsInWord(token: MdToken): boolean {
+  return token.type === 'paragraph' && countsForIndent(withoutCommentBodyLines(token.runs)) && !isCommentBodyParagraph(token);
 }
 
 /** Convert <!-- style: X --> / <!-- /style --> HTML comments into customStyleOpen/customStyleClose sentinel tokens. */
@@ -2975,22 +3056,21 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
     const fence = run?.type === 'html_comment' ? styleFence(run.text) : undefined;
 
     // Single-line inline style: <!-- style: X -->content<!-- /style -->
-    if (fence?.kind === 'inline') {
+    // Its content, parsed once for this and the scan for indent
+    // directives' paragraphs (see inlineStyleBlock)
+    const inline = fence?.kind === 'inline' ? inlineStyleBlock(tokens[i], references) : undefined;
+    if (inline) {
       closeOuter();
-      const styleName = fence.style;
-      const content = fence.content;
+      const styleName = inline.style;
 
       const openSentinel: MdToken = { type: 'paragraph', runs: [], customStyleOpen: styleName };
       openSentinel.blankLinesBefore = tokens[i].blankLinesBefore;
       openSentinel.blankLinesAfter = 0; // inline: no blank line between open sentinel and content
 
-      // Re-parse content to recover inline formatting (bold, italic, links,
-      // etc.), with the document's link definitions for reference links
-      const md = createMarkdownIt();
-      const contentRuns = convertInlineTokens(md.parseInline(content, { references }));
       const contentToken: MdToken = {
-        type: 'paragraph',
-        runs: contentRuns.length > 0 ? contentRuns : [{ type: 'text', text: content }]
+        ...inline.content,
+        // An indent directive's before the block (see parseMd)
+        ...(tokens[i].indentOverride ? { indentOverride: tokens[i].indentOverride } : {}),
       };
 
       const closeSentinel: MdToken = { type: 'paragraph', runs: [], customStyleClose: true };
@@ -9563,8 +9643,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       // counts the paragraphs that show something, by countsForIndent as
       // here; one whose only image couldn't be read has no run, so it
       // doesn't count.
-      if (token.type === 'paragraph' && countsForIndent(withoutCommentBodyLines(token.runs)) && !isCommentBodyParagraph(token)
-          && PARAGRAPH_CONTENT_RE.test(paragraphXml)) {
+      if (showsInWord(token) && PARAGRAPH_CONTENT_RE.test(paragraphXml)) {
         if (token.indentOverride) {
           state.indentOverrides.set(state.bodyParagraphIndex, token.indentOverride);
         }
