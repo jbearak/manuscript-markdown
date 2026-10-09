@@ -16,7 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, codeFontName, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableFontOnRuns, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments, type FontOverrides } from './md-to-docx';
+import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -6513,10 +6513,14 @@ function holdsRun(nodes: XmlNode[]): boolean {
  * sizes and fonts of their own, as a radical's or a delimiter's, a table
  * in a cell, whose runs take its own style, a phonetic guide, alternate
  * content, which Word shows one choice of, a picture with runs, as a text
- * box, or an element this doesn't know, it can't tell.
+ * box, or an element this doesn't know, it can't tell. A run `read` gives
+ * null for doesn't count, as inline code doesn't for a table's font.
  */
-function tableRunsSetting<T>(tblChildren: XmlNode[], read: (run: ShownRun) => ShownSetting<T> | undefined): ShownSetting<T> | undefined {
+function tableRunsSetting<T>(tblChildren: XmlNode[], read: (run: ShownRun) => ShownSetting<T> | null | undefined): ShownSetting<T> | undefined {
   const settings: (ShownSetting<T> | undefined)[] = [];
+  const counted = (setting: ShownSetting<T> | null | undefined) => {
+    if (setting !== null) settings.push(setting);
+  };
   const visit = (nodes: XmlNode[], level: TableLevel, paragraphStyle?: string) => {
     for (const node of nodes) {
       for (const key of Object.keys(node)) {
@@ -6552,9 +6556,9 @@ function tableRunsSetting<T>(tblChildren: XmlNode[], read: (run: ShownRun) => Sh
           return content === undefined || content === null || content === 'object' ? '' : content;
         }).join('');
         if (unknown) settings.push(undefined);
-        else if (text !== '' || unread) settings.push(read({ rPrChildren, text, unread, paragraphStyle }));
+        else if (text !== '' || unread) counted(read({ rPrChildren, text, unread, paragraphStyle }));
         for (const symbol of children.filter(c => c['w:sym'] !== undefined)) {
-          settings.push(read({ rPrChildren, text: String.fromCodePoint(parseInt(getAttr(symbol, 'char'), 16) || 0xF020), symbolFont: getAttr(symbol, 'font'), paragraphStyle }));
+          counted(read({ rPrChildren, text: String.fromCodePoint(parseInt(getAttr(symbol, 'char'), 16) || 0xF020), symbolFont: getAttr(symbol, 'font'), paragraphStyle }));
         }
       }
     }
@@ -6730,11 +6734,10 @@ export function characterFontSlots(character: string, eastAsiaHint: boolean | un
  *  w:asciiTheme for its w:ascii, but w:cstheme, in lowercase, for its w:cs */
 const THEME_FONT_ATTRIBUTES: Record<string, string> = { ascii: 'asciiTheme', hAnsi: 'hAnsiTheme', eastAsia: 'eastAsiaTheme', cs: 'cstheme' };
 
-/** The font Word shows a table's text in, by its name, whether it takes
- *  it from the table paragraph style, as the document's font for tables,
- *  rather than its runs, and whether any of the text is inline code (see
- *  isCodeStyle) */
-interface TableTextFont { name: string; inherited: boolean; code: boolean }
+/** The font Word shows a table's text in, by its name, and whether it
+ *  takes it from the table paragraph style, as the document's font for
+ *  tables, rather than its runs */
+interface TableTextFont { name: string; inherited: boolean }
 
 /**
  * The font Word shows a run's text in, by its name, where it shows all of
@@ -6812,15 +6815,15 @@ function showsInTableFont(character: string): boolean {
 }
 
 /** The font Word shows a table's text in, where all of it is in one and
- *  import can tell it (see tableRunsSetting and runTextFont) */
+ *  import can tell it (see tableRunsSetting and runTextFont): all of it
+ *  but its inline code (see isCodeStyle), which a table's font isn't for,
+ *  as export shows it in the code font whatever the table's font (see
+ *  tableFontOnRuns in md-to-docx) */
 function tableTextFont(tblChildren: XmlNode[], layouts: StyleLayouts | undefined): TableTextFont | undefined {
   const tableStyle = tableStyleId(tblChildren, layouts);
-  let code = false;
-  const font = tableRunsSetting(tblChildren, run => {
-    code ||= isCodeStyle(getAttr(run.rPrChildren.find(c => c['w:rStyle'] !== undefined), 'val'));
-    return runTextFont(run, layouts, tableStyle);
-  });
-  return font ? { name: font.value, inherited: font.inherited, code } : undefined;
+  const font = tableRunsSetting(tblChildren, run => isCodeStyle(getAttr(run.rPrChildren.find(c => c['w:rStyle'] !== undefined), 'val'))
+    ? null : runTextFont(run, layouts, tableStyle));
+  return font && { name: font.value, inherited: font.inherited };
 }
 
 /**
@@ -10669,7 +10672,7 @@ function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, stri
   return index;
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; tablesWrittenAt?: (number | undefined)[]; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean; cellRangeComments?: Set<string>; aroundTable?: { open: Set<string>; lastItems?: Map<string, ContentItem> }; tableSizeHp?: number; tableFontName?: string; fontOverrides?: FontOverrides };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; tablesWrittenAt?: (number | undefined)[]; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean; cellRangeComments?: Set<string>; aroundTable?: { open: Set<string>; lastItems?: Map<string, ContentItem> }; tableSizeHp?: number; tableFontName?: string };
 
 /**
  * The ranges of comments over more than one paragraph (see
@@ -11271,19 +11274,11 @@ function tableFontSize(renderOpts: RenderOpts, tableIndex: number, textSize: Tab
  *  can't tell that font, else the font Word shows, but none where the text
  *  takes the table paragraph style's and that's the font export gives a
  *  table's text with none of its own, by the frontmatter (see
- *  tableTextDefaultFont in md-to-docx). The one export stored, too, where
- *  export wouldn't show all the text in the font Word shows: where it
- *  leaves the table's font to the table paragraph style, as for the
- *  frontmatter's font for tables, but not on the runs (see
- *  tableFontOnRuns in md-to-docx), and the table has inline code, which
- *  it shows in the code font over that style's, and the code font is
- *  another. CodeChar is the only character style export gives a font. */
+ *  tableTextDefaultFont in md-to-docx). */
 function tableFontName(renderOpts: RenderOpts, tableIndex: number, textFont: TableTextFont | undefined): string | undefined {
   const stored = renderOpts.tableFontMapping?.get(String(tableIndex));
   if (!textFont || stored !== undefined && stored === textFont.name) return stored;
   const font = textFont.inherited && textFont.name === renderOpts.tableFontName ? undefined : textFont.name;
-  const fonts = renderOpts.fontOverrides;
-  if (textFont.code && !tableFontOnRuns(fonts, font ?? fonts?.tableFont) && codeFontName(fonts) !== textFont.name) return stored;
   return font;
 }
 
@@ -13506,7 +13501,7 @@ function popLeast(heap: number[]): number {
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableSizeHp?: number; tableFontName?: string; fontOverrides?: FontOverrides; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableSizeHp?: number; tableFontName?: string; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   trackedBreakStart = undefined;
@@ -13603,7 +13598,6 @@ export function buildMarkdown(
   // comment's range (see cellsTakeNoRanges)
   const rangeSettings: RenderOpts = {
     tableFontName: options?.tableFontName,
-    fontOverrides: options?.fontOverrides,
     tableFontMapping: settingsRead(options?.tableFontMapping),
     tableColWidthsMapping: settingsRead(options?.tableColWidthsMapping),
     embedDirectiveMapping,
@@ -13969,7 +13963,6 @@ export function buildMarkdown(
     tableFontSizeMapping: settingsRead(options?.tableFontSizeMapping),
     tableSizeHp: options?.tableSizeHp,
     tableFontName: options?.tableFontName,
-    fontOverrides: options?.fontOverrides,
     tableFontMapping: settingsRead(options?.tableFontMapping),
     tableColWidthsMapping: settingsRead(options?.tableColWidthsMapping),
     tableDigitsMapping: settingsRead(options?.tableDigitsMapping),
@@ -17179,9 +17172,6 @@ export async function convertDocx(
   let markdown = buildMarkdown(docContent, comments, {
     tableSizeHp: documentFonts.tableSizeHp,
     tableFontName: tableTextDefaultFont(documentFonts),
-    // Which table's font export writes on its runs, and its code font (see
-    // tableFontName)
-    fontOverrides: documentFonts,
     tableIndent: options?.tableIndent,
     // Comment dates in the offset the frontmatter will declare, which export reads them in
     timezone: storedSettings?.timezone,

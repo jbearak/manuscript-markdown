@@ -663,6 +663,33 @@ describe('Font customization unit tests', () => {
       expect(docContent).toMatch(/<w:rPr>[\s\S]*?<w:sz w:val="16"\/>/);
     });
 
+    it.each([
+      ['a pipe table\'s own font', '<!-- table-font-size: 7 -->\n<!-- table-font: Georgia -->\n| A | `code` |\n| --- | --- |\n| {++`added`++} | {--`deleted`--} |\n'],
+      ['a pipe table\'s own font, apart from the document\'s and with a code font', '---\ntable-font: Arial\ncode-font: Courier New\n---\n\n<!-- table-font: Georgia -->\n| A | `code` |\n| --- | --- |\n| 1 | **`bold`** |\n'],
+      ['an HTML table\'s own font', '<table data-font="Georgia">\n  <tr>\n    <td>\n      <p>A <code>code</code></p>\n    </td>\n  </tr>\n</table>\n'],
+    ])('leaves inline code in the code font in a table with %s', async (_name, markdown) => {
+      // Export wrote the table's font on each run of its text, inline
+      // code's too, so Word showed the code in the table's font, over
+      // CodeChar's code font, though code in a table without a font of its
+      // own, and outside a table, shows in the code font
+      const { convertDocx } = await import('./converter');
+      const docx = (await convertMdToDocx(markdown)).docx;
+      const zip = await JSZip.loadAsync(docx);
+      const table = /<w:tbl>[\s\S]*?<\/w:tbl>/.exec(await zip.file('word/document.xml')!.async('string'))![0];
+      const runs = [...table.matchAll(/<w:r>(?:<w:rPr>((?:(?!<\/w:rPr>)[\s\S])*)<\/w:rPr>)?<w:(?:t|delText)\b[^>]*>([^<]*)</g)]
+        .map(([, rPr, text]) => ({ rPr: rPr ?? '', text }));
+      const code = runs.filter(run => run.rPr.includes('<w:rStyle w:val="CodeChar"/>'));
+      expect(code.length).toBeGreaterThan(0);
+      for (const run of code) expect(run.rPr).not.toContain('<w:rFonts');
+      for (const run of runs.filter(run => !code.includes(run))) expect(run.rPr).toContain('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>');
+      // The table's size is still on each run
+      if (markdown.includes('table-font-size: 7')) for (const run of runs) expect(run.rPr).toContain('<w:sz w:val="14"/>');
+      // Import keeps the table's font and the code
+      const once = (await convertDocx(docx)).markdown;
+      expect(once).toBe(markdown);
+      expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+    });
+
     it('table-font family is written to styles.xml', async () => {
       const markdown = '---\ntable-font: "O\'Brien Sans"\ntable-font-size: 8\n---\n\n| A |\n|---|\n| 1 |';
       const result = await convertMdToDocx(markdown);
@@ -1369,12 +1396,19 @@ describe('Font customization unit tests', () => {
       });
 
       /** A table with a directive for Georgia, after `frontmatter`, whose
-       *  runs' w:rFonts Word set to `rFonts` */
+       *  runs' w:rFonts Word set to `rFonts`, its paragraphs' marks' too,
+       *  as Word sets a font on each run of the text it's set for, inline
+       *  code's too, which export gives none */
       const rFontsInWord = async (table: string, rFonts: string, frontmatter = '') => {
         const JSZip = (await import('jszip')).default;
         const zip = await JSZip.loadAsync((await convertMdToDocx(frontmatter + '<!-- table-font: Georgia -->\n' + table)).docx);
         const xml = await zip.file('word/document.xml')!.async('string');
-        const edited = xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, found => found.replace(/<w:rFonts [^>]*\/>/g, rFonts));
+        const edited = xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, found => found.replace(/<w:rFonts [^>]*\/>/g, rFonts)
+          .replace(/<w:r>(?:<w:rPr>((?:(?!<\/w:rPr>)[\s\S])*)<\/w:rPr>)?/g, (run, rPr: string | undefined) => {
+            if (rPr?.includes(rFonts)) return run;
+            const style = /^<w:rStyle [^>]*\/>/.exec(rPr ?? '')?.[0] ?? '';
+            return '<w:r><w:rPr>' + style + rFonts + (rPr ?? '').slice(style.length) + '</w:rPr>';
+          }));
         expect(edited).not.toBe(xml);
         zip.file('word/document.xml', edited);
         return zip.generateAsync({ type: 'uint8array' });
@@ -1689,7 +1723,9 @@ describe('Font customization unit tests', () => {
        * ASCII one for the East Asian one where that's Times New Roman and
        * the ASCII one and the one for the rest are one
        */
-      const shownFonts = async (docx: Uint8Array) => {
+      /** Each character of a table's text and the font Word shows it in,
+       *  of all of it, or of `only` its inline code or the rest */
+      const shownFonts = async (docx: Uint8Array, only?: 'code' | 'text') => {
         const JSZip = (await import('jszip')).default;
         const { characterFontSlots } = await import('./converter');
         const zip = await JSZip.loadAsync(docx);
@@ -1705,6 +1741,7 @@ describe('Font customization unit tests', () => {
             .map(([, rPr, text]): [string | undefined, string, string] => [rPr, text, /<w:pStyle w:val="([^"]*)"\/>/.exec(paragraph)?.[1] ?? 'Normal']));
         for (const [rPr, text, pStyle] of runs) {
           const rStyle = /<w:rStyle w:val="([^"]*)"\/>/.exec(rPr ?? '')?.[1];
+          if (only && (rStyle?.toLowerCase() === 'codechar') !== (only === 'code')) continue;
           const chain = [rFontsIn(rPr), rStyle && styleRFonts(rStyle), styleRFonts(pStyle), styleRFonts('Normal'), defaults];
           const attribute = (name: string) => chain.map(rFonts => rFonts && new RegExp(' w:' + name + '="([^"]*)"').exec(rFonts)?.[1]).find(value => value !== undefined);
           const font = (slot: string) => {
@@ -1724,7 +1761,7 @@ describe('Font customization unit tests', () => {
             shown.push(character + ': ' + font(asAscii ? 'ascii' : slots[0]));
           }
         }
-        expect(shown).not.toEqual([]);
+        if (!only) expect(shown).not.toEqual([]);
         return shown;
       };
       const MIXED = '| A | 中 |\n| --- | --- |\n| 1 | 文 |\n';
@@ -1770,19 +1807,20 @@ describe('Font customization unit tests', () => {
       it.each([
         ['the document\'s font for tables', '---\ntable-font: Arial\n---\n\n', 'Arial'],
         ['the document\'s font for tables and code', '---\ntable-font: Courier New\ncode-font: Arial\n---\n\n', 'Courier New'],
-      ])('keeps the font of its own where Word set %s on a table with inline code, which export shows in the code font', async (_name, frontmatter, font) => {
-        // Export leaves the document's font for tables to the table
-        // paragraph style, which inline code doesn't show, as CodeChar's
-        // font goes over it, so the directive for that font, which import
-        // wrote, showed the code in the code font
+      ])('writes the font Word set on a table with inline code, where it\'s %s, which export shows the rest of its text in and the code in the code font', async (_name, frontmatter, font) => {
+        // Word set the font on all of the text, the code's too, which
+        // export shows in the code font, so import kept the directive it
+        // had, for a font Word doesn't show
         const { convertDocx } = await import('./converter');
         const set = await rFontsInWord(CODE, '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '"/>', frontmatter);
-        const shown = await shownFonts(set);
-        expect(shown.every(character => character.endsWith(': ' + font))).toBe(true);
-        expect(await shownFonts((await convertMdToDocx(frontmatter + '<!-- table-font: ' + font + ' -->\n' + CODE)).docx)).not.toEqual(shown);
+        expect((await shownFonts(set)).every(character => character.endsWith(': ' + font))).toBe(true);
         const converted = (await convertDocx(set)).markdown;
-        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: Georgia -->\n' + CODE);
-        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: ' + font + ' -->\n' + CODE);
+        const exported = (await convertMdToDocx(converted)).docx;
+        expect(await shownFonts(exported, 'text')).toEqual(await shownFonts(set, 'text'));
+        const codeFont = parseFrontmatter(converted).metadata.codeFont ?? 'Consolas';
+        expect((await shownFonts(exported, 'code')).every(character => character.endsWith(': ' + codeFont))).toBe(true);
+        expect((await convertDocx(exported)).markdown).toBe(converted);
       });
 
       it('writes the code font Word set on a table with inline code, where it\'s the document\'s font for tables', async () => {
@@ -1798,9 +1836,11 @@ describe('Font customization unit tests', () => {
         expect((await convertDocx(exported)).markdown).toBe(converted);
       });
 
-      it('writes the font Word set on a table of inline code, links and notes\' references only where export shows all its text in it again', async () => {
+      it('writes the font Word set on a table of inline code, links and notes\' references only where export shows all its text but the code in it again, and the code in the code font', async () => {
         // Import wrote a directive for the font Word showed, whatever the
-        // runs export would leave to their character style's font
+        // runs export would leave to their character style's font. A
+        // table's font is for its text but its inline code, which export
+        // shows in the code font, whatever font Word showed it in
         const fc = (await import('fast-check')).default;
         const { convertDocx } = await import('./converter');
         const FONTS = ['Arial', 'Georgia', 'Consolas', 'Courier New'];
@@ -1826,14 +1866,18 @@ describe('Font customization unit tests', () => {
             zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, found => found
               .replace(/<w:r>(?:<w:rPr>([\s\S]*?)<\/w:rPr>)?/g, (_run, rPr: string | undefined) => '<w:r><w:rPr>' + rFonts + (rPr ?? '').replace(/<w:rFonts [^>]*\/>/, '') + '</w:rPr>')));
             const set = await zip.generateAsync({ type: 'uint8array' });
-            const shown = await shownFonts(set);
-            expect(shown.every(character => character.endsWith(': ' + font))).toBe(true);
+            expect((await shownFonts(set)).every(character => character.endsWith(': ' + font))).toBe(true);
+            const shown = await shownFonts(set, 'text');
             const converted = (await convertDocx(set)).markdown;
             const exported = (await convertMdToDocx(converted)).docx;
-            // A directive import changed shows the text as Word did
-            if (directiveOf(converted) !== directive) expect(await shownFonts(exported)).toEqual(shown);
+            // A directive import changed shows the text but the code as
+            // Word did
+            if (directiveOf(converted) !== directive) expect(await shownFonts(exported, 'text')).toEqual(shown);
             // And import changes it where one for Word's font would
-            if ((await shownFonts((await convertMdToDocx(markdown(font))).docx)).join('\n') === shown.join('\n')) expect(directiveOf(converted)).toBe(font);
+            if (shown.length > 0 && (await shownFonts((await convertMdToDocx(markdown(font))).docx, 'text')).join('\n') === shown.join('\n')) {
+              expect(directiveOf(converted)).toBe(font);
+            }
+            expect((await shownFonts(exported, 'code')).every(character => character.endsWith(': ' + (codeFont ?? 'Consolas')))).toBe(true);
             expect((await convertDocx(exported)).markdown).toBe(converted);
           }), { numRuns: 40 });
       });
