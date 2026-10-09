@@ -822,3 +822,26 @@ describe('table number formatting', () => {
     expect(roundTrip.markdown).toContain('<!-- table-digit-grouping: source -->');
   });
 });
+
+describe('table number formatting edits', () => {
+  test.each([
+    ['a pipe table', 'p\n\n| a |\n|---|\n| 1.5 |\n| x |\n\nq'],
+    ['a grid table', 'p\n\n' + preprocessGridTables('+-------+\n| 12.3  |\n+-------+') + '\n\nq'],
+    ['an HTML table whose cell it writes on fewer lines', 'p\n\n<table><tr><td data-mm-kind="number" data-mm-raw="0">\n-\n</td></tr>\n<tr><td>2.5</td></tr></table>\n\nq'],
+    ['tables after one another', '| a |\n|---|\n| 1 |\n\n<table><tr><td>3</td></tr></table>\n| b |\n|---|\n| 2 |'],
+  ])('make its output of %s, in order and apart, where it changed it', (_name, markdown) => {
+    // Export reads where the lines after a table come from by them (see
+    // line-map.ts)
+    const { output, edits } = formatTableNumbers(markdown, { digits: 2 });
+    expect(output).not.toBe(markdown);
+    let made = '';
+    let cursor = 0;
+    for (const edit of edits) {
+      expect(edit.start).toBeGreaterThanOrEqual(cursor);
+      expect(markdown.slice(edit.start, edit.end)).not.toBe(edit.text);
+      made += markdown.slice(cursor, edit.start) + edit.text;
+      cursor = edit.end;
+    }
+    expect(made + markdown.slice(cursor)).toBe(output);
+  });
+});

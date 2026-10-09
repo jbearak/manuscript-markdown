@@ -2,6 +2,7 @@ import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-
 import type { HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
 import { pushAll } from './arrays';
+import type { LineEdit } from './line-map';
 import { decodeHtmlAttribute, decodeHtmlCharacterReferences, HTML_CHARACTER_REFERENCE } from './html-entities';
 import { isGfmDisallowedRawHtml } from './gfm';
 import {
@@ -31,6 +32,10 @@ export interface TableNumberFormatResult {
   output: string;
   warnings: string[];
   warningDetails: TableNumberFormatWarning[];
+  /** Where it wrote a table's cells, in order, which can take its lines
+   *  out or put them in, as for a cell of lines of a dash a number takes
+   *  the place of, so the lines after it are known (see line-map.ts) */
+  edits: LineEdit[];
 }
 
 export interface TableNumberFormatWarning {
@@ -1314,6 +1319,12 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		}
 	};
 	const output: string[] = [];
+	const edits: LineEdit[] = [];
+	// The text of [start, end) of the Markdown, formatted as `text`
+	const write = (start: number, end: number, text: string) => {
+		output.push(text);
+		if (text !== markdown.slice(start, end)) edits.push({ start, end, text });
+	};
 	let pending: Partial<TableNumberFormat> = {};
 	let pendingInvalid = false;
 	let i = 0;
@@ -1366,7 +1377,7 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 				const tableStart = lineOffsets[i];
 				const lastLine = candidateEnd - 1;
 				const tableEnd = lineOffsets[lastLine] + lines[lastLine].length;
-				output.push(pendingInvalid || error ? markdown.slice(tableStart, tableEnd)
+				write(tableStart, tableEnd, pendingInvalid || error ? markdown.slice(tableStart, tableEnd)
 					: formatIndexedHtmlRange(markdown, tableStart, tableEnd, format, structuralIndex, codeRegions,
 						warnings, warningDetails));
 				if (error) recordHtmlError(error, tableStart, tableEnd);
@@ -1382,7 +1393,7 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 				const tableStart = lineOffsets[i];
 				const lastLine = recoveryEnd - 1;
 				const tableEnd = lineOffsets[lastLine] + lines[lastLine].length;
-				output.push(pendingInvalid || error ? markdown.slice(tableStart, tableEnd)
+				write(tableStart, tableEnd, pendingInvalid || error ? markdown.slice(tableStart, tableEnd)
 					: formatIndexedHtmlRange(markdown, tableStart, tableEnd, format, structuralIndex, codeRegions,
 						warnings, warningDetails));
 				if (error) recordHtmlError(error, tableStart, tableEnd);
@@ -1395,7 +1406,7 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		if (lines[i].includes(GRID_TABLE_PLACEHOLDER_PREFIX) && !lineIsEnclosedInert) {
 			const warningsBefore = warnings.length;
 			const tableStart = lineOffsets[i];
-			output.push(formatGridPlaceholder(lines[i], pendingInvalid || error ? {} : format, warnings));
+			write(tableStart, tableStart + lines[i].length, formatGridPlaceholder(lines[i], pendingInvalid || error ? {} : format, warnings));
 			if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + lines[i].length });
 			recordWarnings(warningsBefore, tableStart, tableStart + lines[i].length);
 			pending = {};
@@ -1411,7 +1422,7 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		if (i + 1 < lines.length && detectionLine.includes('|') && isPipeSeparator(nextDetectionLine)) {
 			const tableStart = lineOffsets[i];
 			const warningsBefore = warnings.length;
-			output.push(formatPipeRow(lines[i], pendingInvalid || error ? {} : format, warnings));
+			write(tableStart, tableStart + lines[i].length, formatPipeRow(lines[i], pendingInvalid || error ? {} : format, warnings));
 			output.push(lines[i + 1]);
 			i += 2;
 			while (i < lines.length && lines[i].trim() !== '') {
@@ -1419,7 +1430,7 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 				const rowStart = lineOffsets[i];
 				const rowDetection = maskedSourceRange(markdown, rowStart, rowStart + lines[i].length, inertRegions);
 				if (!rowDetection.includes('|')) break;
-				output.push(formatPipeRow(lines[i++], pendingInvalid || error ? {} : format, warnings));
+				write(rowStart, rowStart + lines[i].length, formatPipeRow(lines[i++], pendingInvalid || error ? {} : format, warnings));
 			}
 			const tableEnd = lineOffsets[i - 1] + lines[i - 1].length;
 			if (error) warningDetails.push({ message: error, start: tableStart, end: tableEnd });
@@ -1432,5 +1443,5 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) { pending = {}; pendingInvalid = false; }
 		i++;
 	}
-	return { output: output.join('\n'), warnings: [...new Set(warnings)], warningDetails };
+	return { output: output.join('\n'), warnings: [...new Set(warnings)], warningDetails, edits };
 }

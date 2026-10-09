@@ -17,7 +17,7 @@ import { imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlac
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
-import { preprocessGridTables, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
+import { preprocessGridTables, preprocessGridTablesWithSourceMap, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { findStyleElement } from './style-element';
@@ -340,11 +340,12 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
   caution: '⛒',
 };
 
-import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml } from './critic-markup';
+import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { findDollarMathAt } from './math-delimiters';
 import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from './citation-syntax';
 import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments } from './latex-env-preprocess';
+import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines, withEnd } from './line-map';
 export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
@@ -1362,14 +1363,17 @@ function bookmarkedSelfRef(selfRefRun: string, noteId: number, state: DocxGenSta
   return '<w:bookmarkStart w:id="' + bkmkId + '" w:name="' + footnoteBookmarkName(noteId) + '"/>' + selfRefRun + '<w:bookmarkEnd w:id="' + bkmkId + '"/>';
 }
 
-/** Extract footnote definitions from the markdown source and return cleaned markdown. */
-export function extractFootnoteDefinitions(markdown: string): { cleaned: string; definitions: Map<string, string> } {
+/** Extract footnote definitions from the markdown source and return cleaned
+ *  markdown, and for each of its lines, and one past the last, the line of
+ *  the source it comes from (see line-map.ts) */
+export function extractFootnoteDefinitions(markdown: string): { cleaned: string; definitions: Map<string, string>; lines: LineMap } {
   const definitions = new Map<string, string>();
   // A bare \r ends a line, as markdown-it reads one, whose token maps count
   // the lines below
   const source = markdown.replace(/\r(?!\n)/g, '\n');
   const lines = source.split('\n');
   const cleanedLines: string[] = [];
+  const keptLines: number[] = [];
   let currentLabel: string | undefined;
   let currentBody: string[] = [];
   // The lines of fenced code and HTML blocks, their fences' too, as
@@ -1429,6 +1433,7 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
     if (literal.has(i)) {
       finishDefinition();
       cleanedLines.push(line);
+      keptLines.push(i);
       continue;
     }
     const defMatch = line.match(/^\[\^([a-zA-Z0-9_-]+)\]:\s?(.*)/);
@@ -1440,10 +1445,16 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
     }
     finishDefinition();
     cleanedLines.push(line);
+    keptLines.push(i);
   }
   finishDefinition();
 
-  return { cleaned: cleanedLines.join('\n'), definitions };
+  // A blank line comes from the line after the one kept before it, which a
+  // definition taken out between them stood on, as a line of text, and with
+  // none kept, the cleaned text's one empty line comes from the first, as
+  // no line before it was kept (see line-map.ts)
+  const from = keptLines.map((line, k) => /^[ \t\r]*$/.test(cleanedLines[k]) ? (k > 0 ? keptLines[k - 1] + 1 : 0) : line);
+  return { cleaned: cleanedLines.join('\n'), definitions, lines: withEnd(from.length > 0 ? from : [0], lines.length) };
 }
 
 /** Mark first/last tokens in contiguous runs of blockquotes for spacing.
@@ -1680,87 +1691,32 @@ function withoutCommentBodies(src: string): string {
 const LIST_MARKERS_RE = /^\s*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*/;
 const BARE_QUOTE_LINE_RE = /^\s*(?:>\s*)+$/;
 
-/** Whether `lines` occur in `source` at `at`. */
-function linesAt(source: string[], lines: string[], at: number): boolean {
-  return at >= 0 && at + lines.length <= source.length && lines.every((line, k) => source[at + k] === line);
-}
-
-/** Where `lines` first occur in `source` at or after `from`, or -1, given
- *  where each line occurs in `source`. */
-function findLines(source: string[], lineIndex: Map<string, number[]>, lines: string[], from: number): number {
-  const candidates = lineIndex.get(lines[0]) ?? [];
-  let low = 0;
-  let high = candidates.length;
-  while (low < high) {
-    const mid = (low + high) >> 1;
-    if (candidates[mid] < from) low = mid + 1;
-    else high = mid;
-  }
-  for (let k = low; k < candidates.length; k++) {
-    if (linesAt(source, lines, candidates[k])) return candidates[k];
-  }
-  return -1;
-}
-
 /**
  * Record on each quote group's first token the blank lines around the group
  * in the original source, which import restores (see the
  * MANUSCRIPT_BLOCKQUOTE_* custom properties). The groups are the tokens' own
  * (see annotateBlockquoteBoundaries), so spacing can't land on another
- * quote. Each block's lines in `parsedLines`, the text parseMd parses, are
- * found in order in `originalLines`, so a quote can't match the same text
- * before the block above it, as in a code block. A group whose lines other
- * preprocessing changed isn't found and gets no spacing.
+ * quote. Each group's lines in the text parseMd parses go to the source's,
+ * `sourceLines`, through `toSource`, for each line of that text the line of
+ * the source it comes from (see line-map.ts), and not by a search for their
+ * text, which found the text of another block that held it first, as code
+ * does. A group's lines go from the line of its first to the line of the
+ * line after its last, which is past the line of the last character it
+ * holds of the source's, as where a trim of the blank lines at the end
+ * wrote its last line end. A group that holds none, whose lines
+ * preprocessing wrote, gets no spacing. The source's lines say how the
+ * group is laid out alone, its blank lines and markers: what an alert's
+ * marker's line holds is read from `parsedLines`, the text markdown-it
+ * parsed, where a comment body over lines is on one.
  */
-function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], originalLines: string[]): void {
-  // Its lines, from start, and from text, its first's own, as an alert's
-  // marker's, past the lines of a block its quote dropped before it
-  interface Group { first: MdToken; start: number; text: number; end: number; markerLine: boolean; last: number }
+function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceLines: string[], parsedLines: string[]): void {
+  // Its lines, from start, past the lines of a block its quote dropped
+  // before it
+  interface Group { first: MdToken; start: number; end: number; markerLine: boolean; last: number }
   const groups: Array<Group | undefined> = [];
-  const lineIndex = new Map<string, number[]>();
-  originalLines.forEach((line, i) => {
-    const at = lineIndex.get(line);
-    if (at) at.push(i);
-    else lineIndex.set(line, [i]);
-  });
-  // The source line after the last block found
-  let cursor = 0;
-  // Source line minus parsed line where the last block was found, which holds
-  // for the next block unless preprocessing between them changed line counts
-  let offset = 0;
-  let parsedEnd = 0;
-  // The last search and the state it started from. Each paragraph split
-  // from a span over many, as {++a\n\nb++}, searches again for the span's
-  // one line, which compared in full each time made export quadratic in the
-  // span's length. A search of the same lines from the same state finds
-  // the same and leaves the state as it is.
-  let last: { start: number; end: number; offset: number; cursor: number; parsedEnd: number; found: number } | undefined;
-  const find = (start: number, end: number): number => {
-    if (last && last.start === start && last.end === end && last.offset === offset && last.cursor === cursor && last.parsedEnd === parsedEnd) {
-      return last.found;
-    }
-    const from = { start, end, offset, cursor, parsedEnd };
-    const lines = parsedLines.slice(start, end);
-    const at = start + offset;
-    // A block on the last one's lines, as the quote in - > q is, sits at its offset
-    const shared = start < parsedEnd;
-    parsedEnd = Math.max(parsedEnd, end);
-    const found = linesAt(originalLines, lines, at) && (shared || at >= cursor) ? at
-      : shared ? -1 : findLines(originalLines, lineIndex, lines, cursor);
-    if (found >= 0) {
-      cursor = Math.max(cursor, found + lines.length);
-      offset = found - start;
-    }
-    last = { ...from, found };
-    return found;
-  };
+  const source = (line: number) => toSource[Math.min(line, toSource.length - 1)];
   for (let t = 0; t < tokens.length; t++) {
-    if (tokens[t].type !== 'blockquote') {
-      const range = tokens[t].sourceRange;
-      if (range) find(range[0], range[1]);
-      continue;
-    }
-    if (!tokens[t].alertFirst) continue;
+    if (tokens[t].type !== 'blockquote' || !tokens[t].alertFirst) continue;
     let start = Infinity;
     let end = -Infinity;
     let last = t;
@@ -1774,30 +1730,30 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
       }
       if (tokens[k].alertLast) break;
     }
-    const found = start < end ? find(start, end) : -1;
-    if (found < 0) {
+    const from = start < end ? source(start) : 0;
+    const to = start < end ? source(end) : 0;
+    if (to <= from || from >= sourceLines.length) {
       groups.push(undefined);
       continue;
     }
     groups.push({
       first: tokens[t],
-      start: found,
-      text: found + Math.max(0, (tokens[t].sourceRange?.[0] ?? start) - start),
-      end: found + end - start - 1,
+      start: from,
+      end: Math.min(to, sourceLines.length) - 1,
       // As in - > q: blank lines before it belong before the list item
-      markerLine: !originalLines[found].trimStart().startsWith('>'),
+      markerLine: !sourceLines[from].trimStart().startsWith('>'),
       last,
     });
   }
   // A bare > line after a group's text stays in the group
   groups.forEach((group, g) => {
     if (!group) return;
-    const limit = groups[g + 1]?.start ?? originalLines.length;
-    while (group.end + 1 < limit && BARE_QUOTE_LINE_RE.test(originalLines[group.end + 1])) group.end++;
+    const limit = groups[g + 1]?.start ?? sourceLines.length;
+    while (group.end + 1 < limit && BARE_QUOTE_LINE_RE.test(sourceLines[group.end + 1])) group.end++;
   });
   const blankRun = (from: number, step: 1 | -1) => {
     let line = from;
-    while (line >= 0 && line < originalLines.length && originalLines[line].trim() === '') line += step;
+    while (line >= 0 && line < sourceLines.length && sourceLines[line].trim() === '') line += step;
     return { count: Math.abs(line - from), line };
   };
   groups.forEach((group, g) => {
@@ -1817,11 +1773,13 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
       // Not before definitions, of notes or links, with none of the body
       // after them, after which import writes notes' after a blank line of
       // its own
-      if (below.line < originalLines.length && group.last + 1 < tokens.length
+      if (below.line < sourceLines.length && group.last + 1 < tokens.length
         && !(next && !next.markerLine && below.line === next.start)) spacing.after = below.count;
       if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
     }
-    const alertMarker = originalLines[group.text].replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
+    // The first's first line as parsed, which an alert's marker starts
+    const firstLine = group.first.sourceRange ? parsedLines[group.first.sourceRange[0]] : undefined;
+    const alertMarker = firstLine?.replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
     // A comment body on the marker line shows nothing, and import writes it
     // below. Nor does a paragraph of spaces alone, which import drops (see
     // annotateBlankAlertLeads)
@@ -2493,18 +2451,23 @@ function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number
 }
 
 /**
- * `tableNumberFormat` is the table number formatting `markdown` got, if it
- * changed anything, so that `originalText` can get it too: quote spacing
- * matches the parsed lines to the source (see annotateBlockquoteSpacing).
+ * `source` is the Markdown `markdown` was made from, `text`, where it was,
+ * and its `lines`, for each line of `markdown`, and one past its last, the
+ * line of `text` it comes from, as markdown-it ends lines (see
+ * line-map.ts), from which quote spacing reads the blank lines around each
+ * quote (see annotateBlockquoteSpacing). Without it, `markdown` is its own.
  * `linkDefinitions` are the document's, which a note body parsed on its own
  * resolves its reference links and images with, after its own definitions.
  */
-export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false, bodyStartLine = 0): MdToken[] {
+export function parseMd(markdown: string, warnings?: string[], breaks = false, source?: { text: string; lines: LineMap }, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false, bodyStartLine = 0): MdToken[] {
+  const originalText = source?.text;
   const md = createMarkdownIt();
   // Grid tables, quotes without lazy continuation, and bare LaTeX
   // environments, as the orientation scan reads them too
-  const { deLazified, output: wrapped } = preprocessBlocks(markdown);
-  const processed = preprocessCriticMarkup(wrapped);
+  const blocks = preprocessBlocks(markdown);
+  const { deLazified, output: wrapped } = blocks;
+  const critic = preprocessCriticMarkupWithLines(wrapped);
+  const processed = critic.output;
   const env: { references?: Record<string, unknown>; documentLinkDefinitions?: Record<string, unknown> } =
     linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {};
   const tokens = md.parse(processed, env);
@@ -2519,13 +2482,11 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const sourceLines = unformattedLines?.length === processedLines.length ? unformattedLines : processedLines;
   const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, sourceLines)));
   annotateBlockquoteBoundaries(result);
-  // Table number formatting rewrites a table's lines, and CriticMarkup
-  // preprocessing joins a span's lines, so the source gets both too for a
-  // quote holding either to match
-  const source = originalText !== undefined && tableNumberFormat
-    ? formatTableNumbers(originalText, tableNumberFormat).output
-    : originalText ?? markdown;
-  annotateBlockquoteSpacing(result, processedLines, preprocessCriticMarkup(source).split('\n'));
+  // For each line markdown-it read, the line of `markdown` it comes from,
+  // and of the source's, where there is one
+  const markdownLines = throughLines(critic.lines, withEnd(blocks.lines, markdown.split('\n').length));
+  if (!source) annotateBlockquoteSpacing(result, markdownLines, markdown.split('\n'), processedLines);
+  else annotateBlockquoteSpacing(result, throughLines(markdownLines, source.lines), source.text.split(/\r\n|\r|\n/), processedLines);
 
   // When breaks mode is enabled, treat all bare newlines as hard breaks
   if (breaks) {
@@ -10039,14 +10000,31 @@ export async function convertMdToDocx(
         && MISSING_KEY_TEXT.test(runs.map(run => run.text).join('')) ? [k] : [];
     }));
   }
-  const bodyStripped = bodyParts
+  const joinedBody = bodyParts
     // A note's line, and the line end after it
     .filter((_part, k) => !notes?.has((k - k % 2) / 2))
-    .join('')
-    .replace(/\n{3,}$/, '\n'); // trim trailing excess blank lines from removed block
+    .join('');
+  const trailingBlankLines = /\n{3,}$/.exec(joinedBody);
+  const bodyStripped = joinedBody.replace(/\n{3,}$/, '\n'); // trim trailing excess blank lines from removed block
+  // For each line of the body as it goes to parseMd, and one past the last,
+  // the line of the Markdown it comes from (see line-map.ts), after the
+  // frontmatter, without the notes' lines, the notes' definitions, and the
+  // lines embeds and grid tables wrote in place of others. Quote spacing
+  // reads the blank lines around each quote there.
+  const frontmatterLines = lineCount(markdown.slice(0, markdown.length - body.length)) - 1;
+  let bodyLines: LineMap = sameLines(lineCount(body)).map(line => line + frontmatterLines);
+  const noteLineEdits: LineEdit[] = [];
+  let partStart = 0;
+  bodyParts.forEach((part, k) => {
+    if (k % 2 === 0 && notes?.has(k / 2)) noteLineEdits.push({ start: partStart, end: partStart + part.length + (bodyParts[k + 1]?.length ?? 0), text: '' });
+    partStart += part.length;
+  });
+  if (noteLineEdits.length > 0) bodyLines = throughLines(linesAfterEdits(body, noteLineEdits), bodyLines);
+  if (trailingBlankLines) bodyLines = throughLines(linesAfterEdits(joinedBody, [{ start: trailingBlankLines.index, end: joinedBody.length, text: '\n' }]), bodyLines);
 
   // Extract footnote definitions before markdown parsing
-  const { cleaned: bodyWithoutFootnotes, definitions: footnoteDefs } = extractFootnoteDefinitions(bodyStripped);
+  const { cleaned: bodyWithoutFootnotes, definitions: footnoteDefs, lines: withoutFootnotesLines } = extractFootnoteDefinitions(bodyStripped);
+  bodyLines = throughLines(withoutFootnotesLines, bodyLines);
   const parseWarnings: string[] = [];
   // Preprocess embeds before tokenization so embedded files resolve to HTML tables.
   let embedDirectives: string[] = [];
@@ -10056,6 +10034,7 @@ export async function convertMdToDocx(
     const embedResult = preprocessEmbedsTracked(bodyWithoutFootnotes, options.embedResolver, options.documentPath, 0, embedOpts);
     bodyForParsing = embedResult.output;
     embedDirectives = embedResult.embedDirectives;
+    bodyLines = throughLines(embedResult.lines, bodyLines);
     // Also expand embeds inside footnote/endnote definitions
     for (const [label, noteBody] of footnoteDefs) {
       const noteResult = preprocessEmbedsTracked(noteBody, options.embedResolver, options.documentPath, embedDirectives.length, embedOpts);
@@ -10068,7 +10047,9 @@ export async function convertMdToDocx(
 
   // Numeric table formatting runs on the shared HTML/pipe/grid representation so
   // preview and DOCX export apply exactly the same transformations.
-  bodyForParsing = preprocessGridTables(bodyForParsing);
+  const gridTables = preprocessGridTablesWithSourceMap(bodyForParsing);
+  bodyLines = throughLines(withEnd(gridTables.lines, bodyForParsing.split('\n').length), bodyLines);
+  bodyForParsing = gridTables.output;
   const tableNumberFormat: TableNumberFormat = {
     digits: frontmatter.tableDigits,
     decimalMark: frontmatter.tableDecimalMark,
@@ -10077,6 +10058,9 @@ export async function convertMdToDocx(
   const numberResult = formatTableNumbers(bodyForParsing, tableNumberFormat);
   const numbersFormatted = numberResult.output !== bodyForParsing;
   const unformattedBody = bodyForParsing;
+  // Number formatting rewrites a table's cells, which can take its lines out
+  // or put them in, as a cell of lines of a dash a number takes the place of
+  if (numberResult.edits.length > 0) bodyLines = throughLines(linesAfterEdits(bodyForParsing, numberResult.edits), bodyLines);
   bodyForParsing = numberResult.output;
   pushAll(parseWarnings, numberResult.warnings);
 	// A note's body from before number formatting, where it formatted any
@@ -10099,8 +10083,8 @@ export async function convertMdToDocx(
   const bodyStartLine = hadFrontmatter
     ? (markdown.slice(0, markdown.length - body.length) + (body.match(/^(?:\r?\n)*/) ?? [''])[0]).split('\n').length - 1
     : 0;
-  const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, maskFrontmatter(markdown),
-    numbersFormatted ? tableNumberFormat : undefined, undefined, numbersFormatted ? unformattedBody : undefined, false, bodyStartLine);
+  const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, { text: maskFrontmatter(markdown), lines: bodyLines },
+    undefined, numbersFormatted ? unformattedBody : undefined, false, bodyStartLine);
 
   // Number quote groups and collect the source spacing parseMd recorded on them
   annotateBlockquoteGroupIndices(tokens);
@@ -10415,7 +10399,7 @@ export async function convertMdToDocx(
       scannedNotes.add(label);
       const bodyText = footnoteDefs.get(label);
       if (!bodyText) return;
-      for (const item of reachedIn(parseMd(bodyText, undefined, false, undefined, undefined, linkDefinitionsOf.get(tokens)))) {
+      for (const item of reachedIn(parseMd(bodyText, undefined, false, undefined, linkDefinitionsOf.get(tokens)))) {
         if ('keys' in item) registerKeys(item.keys);
         else scanNote(item.label);
       }
@@ -10481,7 +10465,7 @@ export async function convertMdToDocx(
   for (let k = 0; k < noteQueue.length; k++) {
     const label = noteQueue[k];
     const warnings: string[] = [];
-    const noteBody = parseMd(footnoteDefs.get(label)!, warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens),
+    const noteBody = parseMd(footnoteDefs.get(label)!, warnings, frontmatter.breaks ?? false, undefined, linkDefinitionsOf.get(tokens),
       unformattedNotes.get(label), true);
     applyCustomStyleSentinels(noteBody, warnings);
     parsedNotes.set(label, { tokens: noteBody, warnings });
