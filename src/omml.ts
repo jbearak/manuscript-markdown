@@ -3,6 +3,8 @@
 // automatically unescapes XML entities in <m:t> text content, so parsed strings
 // already contain literal characters (e.g. &amp; → &).
 
+import { xmlOn } from './xml-elements';
+
 // ---------------------------------------------------------------------------
 // fast-xml-parser preserve-order structures
 // ---------------------------------------------------------------------------
@@ -148,6 +150,15 @@ const SKIP_TAGS = new Set([
 export function getOmmlAttr(node: XmlNode | undefined, attr: string): string {
   const value = node?.[':@']?.[`@_m:${attr}`] ?? node?.[':@']?.[`@_${attr}`];
   return value === undefined ? '' : String(value);
+}
+
+/** Whether an on/off property of an equation, as a radical's m:degHide, is
+ *  on: where it's there, with no m:val, as a CT_OnOff's is on without one,
+ *  or one that's on (see xmlOn), as Word reads it */
+function ommlOn(node: XmlNode | undefined): boolean {
+  if (!node) return false;
+  const value = getOmmlAttr(node, 'val');
+  return value === '' || xmlOn(value);
 }
 
 /** Reserved LaTeX characters that need escaping in plain text context. */
@@ -622,7 +633,7 @@ function translateSubSup(children: XmlNode[]): string {
 function translateRadical(children: XmlNode[]): string {
   const pr = findChild(children, 'm:radPr');
   const degHideNode = findChildNode(pr, 'm:degHide');
-  const degHide = getOmmlAttr(degHideNode, 'val') === '1';
+  const degHide = ommlOn(degHideNode);
 
   const radicand = ommlToLatex(findChild(children, 'm:e'));
 
@@ -656,9 +667,9 @@ function translateNary(children: XmlNode[]): string {
 
   // Read hide flags
   const subHideNode = findChildNode(pr, 'm:subHide');
-  const subHide = getOmmlAttr(subHideNode, 'val') === '1';
+  const subHide = ommlOn(subHideNode);
   const supHideNode = findChildNode(pr, 'm:supHide');
-  const supHide = getOmmlAttr(supHideNode, 'val') === '1';
+  const supHide = ommlOn(supHideNode);
 
   // Map operator character to LaTeX command
   const op = NARY_MAP.get(chr) || chr;

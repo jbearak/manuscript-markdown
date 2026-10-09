@@ -2,7 +2,8 @@
 // start tag with whitespace around an attribute's = and its value in either
 // quotes, which may hold a >, and its attributes' character references. For
 // import, which reads a document's styles and runs with them, and for the
-// style lookup import and export share (see style-element.ts).
+// style lookup import and export share (see style-element.ts). And reading
+// an on/off value, as WordprocessingML's and an equation's OMML spell it.
 
 // An XML start tag's attributes after its name, as an XML parser reads
 // them: each after whitespace, with any whitespace around its =, and its
@@ -47,4 +48,12 @@ export function xmlAttribute(tag: string, name: string): string | undefined {
         : ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[entity]);
   }
   return undefined;
+}
+
+/** Whether an attribute's value is on, as an ST_OnOff's: true, 1 or on,
+ *  and not false, 0 or off. Every on or off value import reads, an
+ *  element's w:val (see isToggleOn in converter.ts) or m:val (see ommlOn
+ *  in omml.ts), or an attribute's, goes through this. */
+export function xmlOn(value: string | undefined): boolean {
+  return value === 'true' || value === '1' || value === 'on';
 }

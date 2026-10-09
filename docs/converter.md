@@ -87,6 +87,8 @@ The converter is implemented in two modules:
 
 Both modules use their own mapping tables (Unicode ↔ LaTeX, accent characters, n-ary operators) that are kept in sync. The LaTeX-to-OMML direction uses a tokenizer and recursive-descent parser; the OMML-to-LaTeX direction walks the parsed XML tree using fast-xml-parser.
 
+Import reads an equation's on/off properties as Word does, so a radical's `m:degHide` and an n-ary operator's `m:subHide` and `m:supHide` hide the degree or limit where they're present with no `m:val`, or with one that's `1`, `on` or `true`, not only `1`.
+
 ## HTML Comments
 
 HTML comments (`<!-- ... -->`) are preserved through the DOCX round trip. Both inline comments (e.g., `text <!-- note --> more text`) and block-level comments (standalone `<!-- TODO -->` on their own line) are supported.

@@ -7,7 +7,7 @@ import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { findStyleElement } from './style-element';
-import { xmlAttribute, xmlElement, xmlStartTag } from './xml-elements';
+import { xmlAttribute, xmlElement, xmlOn, xmlStartTag } from './xml-elements';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -3191,13 +3191,6 @@ export function isToggleOn(children: XmlNode[], tagName: string): boolean {
   const val = getAttr(element, 'val');
   if (!val) return true; // present with no w:val attribute → true
   return xmlOn(val);
-}
-
-/** Whether an attribute's value is on, as an ST_OnOff's: true, 1 or on,
- *  and not false, 0 or off. Every on or off value import reads, an
- *  element's w:val (see isToggleOn) or an attribute's, goes through this. */
-function xmlOn(value: string | undefined): boolean {
-  return value === 'true' || value === '1' || value === 'on';
 }
 
 /** Whether a run's character style, by its ID, is export's for inline

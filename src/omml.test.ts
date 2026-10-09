@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
+import { XMLParser } from 'fast-xml-parser';
 import { unicodeToLatex, escapeLatex, isMultiLetter, ommlToLatex } from './omml';
+import { latexToOmml } from './latex-to-omml';
+import { parserOptions } from './test-omml-helpers';
 
 // ---------------------------------------------------------------------------
 // Helpers: build OMML node structures matching fast-xml-parser preserveOrder
@@ -1449,5 +1452,49 @@ describe('Unit tests: OMML construct translation', () => {
       };
       expect(ommlToLatex([node])).toBe('\\pmod{p}');
     });
+  });
+});
+
+describe('An on/off property of an equation, in any spelling', () => {
+  // A CT_OnOff's m:val is on where it's absent, and where it's true, 1 or
+  // on, as Word reads it, but import read only 1 as on, so the degree of a
+  // radical and the limits of an n-ary operator that Word hides came back
+  const latexOf = (xml: string) => ommlToLatex(new XMLParser(parserOptions).parse('<m:oMath>' + xml + '</m:oMath>')[0]['m:oMath']);
+  const run = (text: string) => '<m:r><m:t>' + text + '</m:t></m:r>';
+  const ON: [string, (name: string) => string][] = [
+    ['with no m:val', name => '<' + name + '/>'],
+    ['with m:val 1', name => '<' + name + ' m:val="1"/>'],
+    ['with m:val on', name => '<' + name + ' m:val="on"/>'],
+    ['with m:val true', name => '<' + name + ' m:val="true"/>'],
+  ];
+  const OFF: [string, (name: string) => string][] = [
+    ['with m:val 0', name => '<' + name + ' m:val="0"/>'],
+    ['with m:val off', name => '<' + name + ' m:val="off"/>'],
+    ['with m:val false', name => '<' + name + ' m:val="false"/>'],
+    ['absent', () => ''],
+  ];
+  const radical = (degHide: string) => '<m:rad><m:radPr>' + degHide + '</m:radPr><m:deg>' + run('3') + '</m:deg><m:e>' + run('x') + '</m:e></m:rad>';
+  const nary = (hide: string) => '<m:nary><m:naryPr><m:chr m:val="∑"/>' + hide + '</m:naryPr><m:sub>' + run('i') + '</m:sub><m:sup>' + run('n') + '</m:sup><m:e>' + run('x') + '</m:e></m:nary>';
+
+  /** `latex` as import gives it for `xml`, and again for what export writes for it */
+  const expectRoundTrip = (xml: string, latex: string) => {
+    expect(latexOf(xml)).toBe(latex);
+    expect(latexOf(latexToOmml(latex))).toBe(latex);
+  };
+
+  it.each(ON)('hides a radical\'s degree where m:degHide is on, %s', (_name, onOff) => {
+    expectRoundTrip(radical(onOff('m:degHide')), '\\sqrt{x}');
+  });
+  it.each(OFF)('shows a radical\'s degree where m:degHide is off, %s', (_name, onOff) => {
+    expectRoundTrip(radical(onOff('m:degHide')), '\\sqrt[3]{x}');
+  });
+  it.each(ON)('hides an n-ary operator\'s lower limit where m:subHide is on, %s', (_name, onOff) => {
+    expectRoundTrip(nary(onOff('m:subHide')), '\\sum^nx');
+  });
+  it.each(ON)('hides an n-ary operator\'s upper limit where m:supHide is on, %s', (_name, onOff) => {
+    expectRoundTrip(nary(onOff('m:supHide')), '\\sum_ix');
+  });
+  it.each(OFF)('shows an n-ary operator\'s limits where m:subHide and m:supHide are off, %s', (_name, onOff) => {
+    expectRoundTrip(nary(onOff('m:subHide') + onOff('m:supHide')), '\\sum_i^nx');
   });
 });
