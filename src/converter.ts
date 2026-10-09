@@ -16,6 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
+import { readCitationItems } from './citation-syntax';
 import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -1144,23 +1145,16 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
   // as one, or raw HTML's line end (see RAW_LINE_END), in a tag export
   // would read as a prefix's text
   if (/[\n\r]/.test(inner)) return undefined;
-  let offset = open + 1;
   const raw: Array<[number, number]> = [];
   const locators = new Map<string, string>();
   const suppressed = new Set<string>();
-  const items = inner.split(';').flatMap(part => {
-    const item = part.trim();
-    const start = /(^|\s)(-?)@/.exec(item);
-    const prefix = start ? item.slice(0, start.index).trim().replace(/\s+/g, ' ') : '';
-    const rest = start ? item.slice(start.index + start[0].length).trim() : item;
-    const comma = rest.indexOf(',');
-    const key = comma === -1 ? rest : rest.slice(0, comma).trim();
-    if (start) raw.push([offset + part.indexOf(item) + start.index + start[1].length, offset + part.length]);
-    offset += part.length + 1;
-    if (!rest) return [];
-    if (comma !== -1) locators.set(key, rest.slice(comma + 1).trim());
-    if (start?.[2]) suppressed.add(key);
-    return [{ prefix, key }];
+  // An item with nothing after its @ is none, so the text, which has it,
+  // isn't the one written from the items
+  const items = readCitationItems(inner).map(item => {
+    if (item.markStart !== -1) raw.push([open + 1 + item.itemStart + item.markStart, open + 1 + item.itemEnd]);
+    if (item.locator !== undefined) locators.set(item.key, item.locator);
+    if (item.suppressed) suppressed.add(item.key);
+    return { prefix: item.prefix.replace(/\s+/g, ' '), key: item.key };
   });
   return '[' + items.map(({ prefix, key }) => (prefix ? prefix + ' ' : '') + (suppressed.has(key) ? '-@' : '@') + key
     + (locators.get(key) ? ', ' + locators.get(key) : '')).join('; ') + ']' === text.slice(open, close + 1) ? raw : undefined;
@@ -1178,14 +1172,7 @@ function citationKnown(text: string, open: number, close: number): boolean {
 /** The keys of the citation between brackets whose text is `inner`, as
  *  citationKeyRanges reads them */
 function bracketKeys(inner: string): string[] {
-  return inner.split(';').flatMap(part => {
-    const item = part.trim();
-    const start = /(^|\s)-?@/.exec(item);
-    if (!start) return [];
-    const rest = item.slice(start.index + start[0].length).trim();
-    const comma = rest.indexOf(',');
-    return [comma === -1 ? rest : rest.slice(0, comma).trim()];
-  });
+  return readCitationItems(inner).flatMap(item => (item.markStart === -1 ? [] : [item.key]));
 }
 
 /** A tracked break's end mark (see joinTrackedParagraphBreaks): a

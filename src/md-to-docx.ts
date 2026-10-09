@@ -345,7 +345,7 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
 import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { findDollarMathAt } from './math-delimiters';
-import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from './citation-syntax';
+import { citationEnd, citationPrefixText, readCitationItems } from './citation-syntax';
 import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments } from './latex-env-preprocess';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines, withEnd } from './line-map';
 import { normalizeNewlines } from './newlines';
@@ -994,25 +994,11 @@ function citationRule(state: StateInline, silent: boolean): boolean {
     const suppressAuthorKeys = new Set<string>();
     const prefixes: string[] = [];
 
-    for (const part of rawContent.split(';')) {
-      let raw = part.trim();
-      let suppressed = false;
-      let prefix = '';
-      const itemStart = CITATION_ITEM_START_RE.exec(raw);
-      if (itemStart) {
-        prefix = raw.slice(0, itemStart.index).trim();
-        if (prefix) prefix = citationPrefixText(state, prefix).trim();
-        suppressed = itemStart[2] === '-';
-        raw = raw.slice(itemStart.index + itemStart[0].length).trim();
-      }
-      if (!raw) continue;
-
-      const commaPos = raw.indexOf(',');
-      const key = commaPos !== -1 ? raw.slice(0, commaPos).trim() : raw;
+    for (const { key, locator, suppressed, prefix } of readCitationItems(rawContent)) {
       keys.push(key);
-      if (commaPos !== -1) locators.set(key, raw.slice(commaPos + 1).trim());
+      if (locator !== undefined) locators.set(key, locator);
       if (suppressed) suppressAuthorKeys.add(key);
-      prefixes.push(prefix);
+      prefixes.push(prefix ? citationPrefixText(state, prefix).trim() : '');
     }
 
     token.keys = keys;
