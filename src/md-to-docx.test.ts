@@ -3863,6 +3863,133 @@ describe('List blockquote round-trip', () => {
   });
 });
 
+describe('Quote lines in code and HTML blocks', () => {
+  /** That `md` comes back as `expected`, and that the next trip gives Word
+   *  the same paragraphs and import the same Markdown */
+  const twoTrips = async (md: string, expected: string) => {
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const paragraphs = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .matchAll(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g)].map(([p]) => [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+    const first = await convertMdToDocx(md);
+    const back = (await convertDocx(first.docx)).markdown;
+    expect(back).toBe(expected);
+    const second = await convertMdToDocx(back);
+    expect(await paragraphs(second.docx)).toEqual(await paragraphs(first.docx));
+    expect((await convertDocx(second.docx)).markdown).toBe(back);
+  };
+
+  it.each([
+    ['an HTML block', '<div>\n> q\n</div>\n\np\n'],
+    ['an HTML block of quote lines', '<div>\n> q\n> r\n</div>\n\np\n'],
+    ['an HTML block in a list item', '- i1\n\n  <div>\n  > q\n  </div>\n\np\n'],
+    ['a comment', '<!-- c\n> q\nx\n-->\n\np\n'],
+    ['a <script> block', '<script>\n> q\nx\n</script>\n\np\n'],
+  ])('keeps the lines of %s after a line that starts as a quote\'s together', async (_name, md) => {
+    // Export ended the quote it read the line as before the next line, with
+    // a blank line, which ended the block, or went into it, and import
+    // wrote the blank line
+    await twoTrips(md, md);
+  });
+
+  it.each([
+    ['a line feed', '> q\nx\n'],
+    ['a carriage return and a line feed', '> q\r\nx\r\n'],
+    ['a carriage return and a line feed, after an HTML block', '<div>\r\n> q\r\n</div>\r\n\r\n> q\r\nx\r\n'],
+  ])('ends a quote before a line without a > where each line ends in %s', async (_name, md) => {
+    // The check for a line that could go on a quote read none past a \r,
+    // so export left the line, which markdown-it read as the quote's
+    await twoTrips(md, md.replace(/\r\n/g, '\n'));
+  });
+
+  it.each([
+    ['in an HTML block', '<div>\n```\n</div>\n\n> q\nx\n', '<div>\n```\n</div>\n\n> q\nx\n'],
+    ['in a list item the item\'s end closes', '- i\n\n  ```\n  code\n\n> q\nx\n', '- i\n\n> q\nx\n'],
+  ])('ends a quote before a line without a > after a code fence %s', async (_name, md, expected) => {
+    // Export read the fence's line as one that opens a code block, which no
+    // line closed, so it read the quote and the line after it as one
+    await twoTrips(md, expected);
+  });
+
+  // Documents of paragraphs, quotes, some at the top level with a line after
+  // them without a >, HTML blocks of lines that start as a quote's or a code
+  // fence does, or as neither, and lists of these, at the top level and in
+  // list items
+  type Line = 'quote' | 'fence' | 'text';
+  type Block = { kind: 'para' } | { kind: 'quote'; lazy: boolean } | { kind: 'html'; tag: 'div' | 'script' | 'comment'; lines: Line[] }
+    | { kind: 'list'; ordered: boolean; items: Block[][] };
+  const leafArb: fc.Arbitrary<Block> = fc.oneof(
+    fc.constant({ kind: 'para' as const }),
+    fc.record({ kind: fc.constant('quote' as const), lazy: fc.boolean() }),
+    fc.record({
+      kind: fc.constant('html' as const),
+      tag: fc.constantFrom('div' as const, 'script' as const, 'comment' as const),
+      lines: fc.array(fc.constantFrom<Line>('quote', 'fence', 'text'), { minLength: 1, maxLength: 3 }),
+    }),
+  );
+  const listArb: fc.Memo<Block> = fc.memo(depth => fc.record({
+    kind: fc.constant('list' as const),
+    ordered: fc.boolean(),
+    items: fc.array(fc.array(depth > 1 ? fc.oneof(leafArb, listArb(depth - 1)) : leafArb, { maxLength: 3 }), { minLength: 1, maxLength: 3 }),
+  }));
+  const documentArb = fc.array(fc.oneof(leafArb, listArb(2)), { minLength: 1, maxLength: 5 });
+  /** The Markdown of `blocks`, each paragraph's text its own. In `plain`,
+   *  the lines of HTML blocks that start as a quote's or a fence start as
+   *  neither */
+  const markdownOf = (blocks: Block[], plain: boolean): string => {
+    let n = 0;
+    const linesOf = (block: Block, indent: string): string[] => {
+      switch (block.kind) {
+        case 'para': return [indent + 'p' + n++];
+        case 'quote': return [indent + '> q' + n++, ...(block.lazy && !indent ? ['l' + n++] : [])];
+        case 'html': {
+          const [open, close] = block.tag === 'comment' ? ['<!--', '-->'] : ['<' + block.tag + '>', '</' + block.tag + '>'];
+          const inner = block.lines.map(line => indent + (line === 'quote' ? (plain ? 'hq' : '> hq') : line === 'fence' ? (plain ? 'hf' : '```') : 'h' + n++));
+          return [indent + open, ...inner, indent + close];
+        }
+        case 'list': return block.items.flatMap((children, k) => {
+          const marker = block.ordered ? (k + 1) + '. ' : '- ';
+          const inner = indent + ' '.repeat(marker.length);
+          return [...(k > 0 ? [''] : []), indent + marker + 'i' + n++, ...children.flatMap(child => ['', ...linesOf(child, inner)])];
+        });
+      }
+    };
+    return blocks.flatMap((block, k) => [...(k > 0 ? [''] : []), ...linesOf(block, '')]).join('\n') + '\n';
+  };
+
+  it('reads the lines of an HTML block that start as a quote\'s or a code fence\'s as it reads its other lines', async () => {
+    const { convertDocx } = await import('./converter');
+    const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    await fc.assert(fc.asyncProperty(documentArb, async blocks => {
+      const md = markdownOf(blocks, false);
+      const back = await roundTrip(md);
+      // Import writes the same as for lines of text, but those lines
+      const plain = (await roundTrip(markdownOf(blocks, true)))
+        .replace(/^(.*)hq$/gm, (_line, before: string) => before + '> hq')
+        .replace(/^(.*)hf$/gm, (_line, before: string) => before + '```');
+      expect([md, back]).toEqual([md, plain]);
+      expect([md, await roundTrip(back)]).toEqual([md, back]);
+      // And the same with \r\n for each line end
+      expect([md, await roundTrip(md.replace(/\n/g, '\r\n'))]).toEqual([md, back]);
+    }), { numRuns: 100 });
+  }, 60000);
+
+  it('ends quotes before lines without a > in time linear in the lines of HTML blocks', () => {
+    // The blocks are found once, in markdown-it's block structure. Each
+    // block is one paragraph of its text, and the quote after them ends
+    // before the line after it
+    const md = (n: number) => '<div>\n> q\nx\n</div>\n\n'.repeat(n) + '> q\nx\n';
+    expect(parseMd(md(3)).map(token => token.type)).toEqual(['paragraph', 'paragraph', 'paragraph', 'blockquote', 'paragraph']);
+    const time = (n: number) => {
+      const text = md(n);
+      return fastestRun(() => parseMd(text));
+    };
+    time(4000);
+    const small = time(4000);
+    expect(time(16000) / small).toBeLessThan(8);
+  }, 30000);
+});
+
 describe('Quotes a blank line separates', () => {
   /** Each paragraph of Word's body: a quote's spacer, an empty paragraph,
    *  or its style and text */
