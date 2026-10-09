@@ -16272,6 +16272,26 @@ describe('Track changes (CriticMarkup)', () => {
       expect(again).toBe(imported);
     });
 
+    const boxStyle = '---\nstyles:\n  box:\n    font-style: italic\n---\n\n';
+    const itemBlock = '- a\n\n  plain\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n\n  after\n';
+    const itemBlockBeforeItem = '- a\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n- b\n';
+    test.each([
+      ['before a style block in a list item', itemBlock, ['plain'], 'ins', '- a\n\n  plain{++\n\n  ++}\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n\n  after\n'],
+      ['at the end of a style block in a list item', itemBlock, ['styled'], 'del', '- a\n\n  plain\n\n  <!-- style: box -->\n  styled{--\n\n  --}\n  <!-- /style -->\n\n  after\n'],
+      ['at the end of a style block in a list item before the next item', itemBlockBeforeItem, ['styled'], 'ins', '- a\n\n  <!-- style: box -->\n  styled{++\n\n  ++}\n  <!-- /style -->\n- b\n'],
+      ['of a list item before a style block in it', itemBlockBeforeItem, ['a'], 'del', '- a{--\n\n  --}\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n- b\n'],
+    ] as const)('keeps the tracked mark of a paragraph %s', async (_name, md, texts, type, expected) => {
+      // The block's fence went in before the break was split from the
+      // paragraph after it, which dropped it. With the style declared, which
+      // the block in the item needs
+      const docx = await withTrackedMarks(boxStyle + md, [...texts], type);
+      const imported = (await convertDocx(docx)).markdown;
+      expect(imported).toBe(boxStyle + expected);
+      const exported = (await convertMdToDocx(imported)).docx;
+      expect(await trackedMarksOf(exported)).toEqual(await trackedMarksOf(docx));
+      expect((await convertDocx(exported)).markdown).toBe(imported);
+    });
+
     test.each([
       ['before a landscape section', 'a\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n', ['a'], 'del', 'a{--\n\n--}\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n'],
       ['at the end of a landscape section', 'z\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n\nc\n', ['b'], 'ins', 'z\n\n<!-- landscape -->\nb{++\n\n++}\n<!-- /landscape -->\n\nc\n'],

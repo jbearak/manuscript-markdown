@@ -7,7 +7,9 @@ import {
 } from './md-to-docx';
 import { parseFrontmatter, serializeFrontmatter, type CustomStyleDef } from './frontmatter';
 import { convertDocx } from './converter';
+import { styleFence } from './style-fence';
 import { renderWithPlugin } from './test-helpers';
+import { fastestRun } from './test-timing';
 
 // Helper: extract a <w:style ...styleId="X"...>...</w:style> block from styles XML
 function extractStyleBlock(xml: string, styleId: string): string | null {
@@ -277,6 +279,15 @@ describe('Custom Styles — parseMd Sentinels', () => {
     expect(closes.length).toBe(2);
     expect(opens[0].customStyleOpen).toBe('alpha');
     expect(opens[1].customStyleOpen).toBe('beta');
+  });
+
+  it('reads a style block\'s fences with one function, in which no style\'s name holds -->', () => {
+    expect(styleFence('  <!-- style: My Style -->\n')).toEqual({ kind: 'open', style: 'My Style' });
+    expect(styleFence('<!-- /style -->')).toEqual({ kind: 'close' });
+    expect(styleFence('<!-- style: box -->a<!-- /style -->')).toEqual({ kind: 'inline', style: 'box', content: 'a' });
+    expect(styleFence('<!-- style: box --> a -->')).toBeUndefined();
+    expect(styleFence('<!-- style: box -->a')).toBeUndefined();
+    expect(styleFence('<!-- note -->')).toBeUndefined();
   });
 });
 
@@ -565,6 +576,277 @@ describe('Custom Styles — List items', () => {
     const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
     expect(xml).toMatch(/<w:pPr><w:pStyle w:val="MsCustomBox"\/><w:numPr>(?:(?!<\/w:p>).)*<w:t>b<\/w:t>/);
   });
+
+  it.each([
+    ['a paragraph', '- a\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n'],
+    ['a paragraph, before the next item', '- a\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n- b\n'],
+    ['a paragraph, in a numbered item', '1. a\n\n   <!-- style: box -->\n   styled\n   <!-- /style -->\n'],
+    ['two paragraphs', '- a\n\n  <!-- style: box -->\n  styled\n\n  more\n  <!-- /style -->\n'],
+    ['a paragraph, before one that isn\'t', '- a\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n\n  plain\n'],
+    ['a paragraph, after one that isn\'t', '- a\n\n  plain\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n'],
+    ['a paragraph, before one after the list', '- a\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n\npara\n'],
+    ['a paragraph, in a sublist\'s item', '- a\n  - b\n\n    <!-- style: box -->\n    styled\n    <!-- /style -->\n- c\n'],
+    ['paragraphs, in two items', '- a\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n\n- b\n\n  <!-- style: box -->\n  more\n  <!-- /style -->\n'],
+    // Which export writes as paragraphs in the item too. Only a blank line
+    // ends a <div>'s HTML block, so the closing fence goes after one
+    ['an HTML block', '- a\n\n  <!-- style: box -->\n  <div>styled</div>\n\n  <!-- /style -->\n'],
+    ['a paragraph and an HTML block', '- a\n\n  <!-- style: box -->\n  styled\n\n  <div>more</div>\n\n  <!-- /style -->\n'],
+    ['a comment', '- a\n\n  <!-- style: box -->\n  <!-- c -->\n  <!-- /style -->\n'],
+    ['a paragraph and a comment', '- a\n\n  <!-- style: box -->\n  styled\n\n  <!-- c -->\n  <!-- /style -->\n'],
+    ['a comment, before one that isn\'t', '- a\n\n  <!-- style: box -->\n  <!-- c -->\n  <!-- /style -->\n\n  plain\n'],
+    // Whose fences, which have no tokens, export found in the source for
+    // those of the block at the top level, with the blank lines around them
+    ['a paragraph, before a block of its style after the list', '- a\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n\n<!-- style: box -->\n\nmore\n\n<!-- /style -->\n'],
+  ])('keeps a style block of %s in a list item', async (_name, body) => {
+    // Export dropped its fences, as HTML blocks in an item, and gave the
+    // paragraph no style
+    const md = styled + body;
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  it('gives a paragraph in a style block in a list item its style, with the item\'s indent', async () => {
+    const { docx, warnings } = await convertMdToDocx(styled + '- a\n\n  <!-- style: box -->\n  styled\n  <!-- /style -->\n');
+    expect(warnings).toEqual([]);
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:pPr><w:pStyle w:val="MsCustomBox"\/><w:ind w:left="720"\/><\/w:pPr>(?:(?!<\/w:p>).)*<w:t>styled<\/w:t>/);
+  });
+
+  it.each([
+    ['Blockquote', '  > q\n'],
+    ['List', '  - b\n'],
+  ])('warns of a %s in a style block in a list item, which keeps no style', async (kind, block) => {
+    const { warnings } = await convertMdToDocx(styled + '- a\n\n  <!-- style: box -->\n  styled\n\n' + block + '  <!-- /style -->\n');
+    expect(warnings.some(warning => warning.startsWith(kind + ' inside a style block in a list item'))).toBe(true);
+  });
+
+  const twoStyles = '---\nstyles:\n  box:\n    font-style: italic\n  note:\n    font-style: bold\n---\n\n';
+  /** Each paragraph's style and text in the document of `docx` */
+  const paragraphStyles = async (docx: Uint8Array) => {
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<w:p\b[^>]*>((?:(?!<\/w:p>).)*)<\/w:p>/gs)].map(([, p]) =>
+      (/<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? '') + ':' + [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''))
+      .filter(p => !p.endsWith(':'));
+  };
+
+  it('keeps a style block in a list item in the style of a block the item is in', async () => {
+    // Import wrote no fences around the paragraph, as the style was its
+    // item's, but export gives a paragraph in an item in a block the
+    // continuation's style, so the next export lost the paragraph's
+    const md = twoStyles + '<!-- style: box -->\n- a\n\n  <!-- style: box -->\n  p\n  <!-- /style -->\n';
+    const first = await convertMdToDocx(md);
+    expect(await paragraphStyles(first.docx)).toEqual(['MsCustomBox:a', 'MsCustomBox:p']);
+    const markdown = (await convertDocx(first.docx)).markdown;
+    expect(markdown).toBe(md);
+    expect(await paragraphStyles((await convertMdToDocx(markdown)).docx)).toEqual(['MsCustomBox:a', 'MsCustomBox:p']);
+  });
+
+  it('closes a style block a list item is in where a style block opens in the item, with a warning', async () => {
+    // As a style block that opens in another closes it. Export left the
+    // block the item is in open, so the items after it took its style
+    const md = twoStyles + '<!-- style: box -->\n- a\n\n  <!-- style: note -->\n  p\n  <!-- /style -->\n- b\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual(['Nested <!-- style: --> directives are not supported; outer style "box" closed implicitly.']);
+    expect(await paragraphStyles(docx)).toEqual(['MsCustomBox:a', 'MsCustomNote:p', ':b']);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(md);
+  });
+
+  it('closes a style block in a list item where another opens in the item before its closing fence, with a warning', async () => {
+    // As a style block that opens in another closes it, which a block at the
+    // top level that a block in the item opens in warns of. In the item, the
+    // second block took the place of the first with no warning
+    const md = twoStyles + '- a\n\n  <!-- style: box -->\n  p\n\n  <!-- style: note -->\n  q\n  <!-- /style -->\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual(['Nested <!-- style: --> directives are not supported; outer style "box" closed implicitly.']);
+    expect(await paragraphStyles(docx)).toEqual([':a', 'MsCustomBox:p', 'MsCustomNote:q']);
+    // Import closes the first block before the second, which the next
+    // export reads with no warning
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(twoStyles + '- a\n\n  <!-- style: box -->\n  p\n  <!-- /style -->\n\n  <!-- style: note -->\n  q\n  <!-- /style -->\n');
+    const again = await convertMdToDocx(markdown);
+    expect(again.warnings).toEqual([]);
+    expect((await convertDocx(again.docx)).markdown).toBe(markdown);
+  });
+
+  it('closes a style block in a list item where a block opens in an item of its sublist, with a warning', async () => {
+    // As a style block that opens in another closes it. The sublist's item
+    // read its blocks alone, so the block in the item above it stayed open,
+    // with no warning, and the item's paragraph after the sublist took its
+    // style
+    const md = twoStyles + '- a\n\n  <!-- style: box -->\n  p\n\n  - x\n\n    <!-- style: note -->\n    y\n    <!-- /style -->\n\n  q\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([
+      'List inside a style block in a list item exported without the style (not supported). Move the style block outside the list for round-trip fidelity.',
+      'Nested <!-- style: --> directives are not supported; outer style "box" closed implicitly.',
+    ]);
+    expect(await paragraphStyles(docx)).toEqual([':a', 'MsCustomBox:p', ':x', 'MsCustomNote:y', 'ManuscriptListContinuation:q']);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(twoStyles + '- a\n\n  <!-- style: box -->\n  p\n  <!-- /style -->\n\n  - x\n\n    <!-- style: note -->\n    y\n    <!-- /style -->\n\n  q\n');
+    const again = await convertMdToDocx(markdown);
+    expect(again.warnings).toEqual([]);
+    expect((await convertDocx(again.docx)).markdown).toBe(markdown);
+  });
+
+  it('keeps the place of a quote in a list item after a sublist and a style block in the item that closes one at the top level', async () => {
+    // The block's close at the top level, which Word gets nothing for,
+    // ended the items open as other blocks do, so export kept no record of
+    // the quote's place, and import read it in the sublist's item, by its
+    // indent
+    const md = twoStyles + '<!-- style: box -->\n- a\n  - x\n\n  <!-- style: note -->\n  <!-- /style -->\n\n  > > > > q\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual(['Nested <!-- style: --> directives are not supported; outer style "box" closed implicitly.']);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(twoStyles + '<!-- style: box -->\n- a\n  - x\n\n  > > > > q\n\n<!-- /style -->\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  it('keeps two quotes in a list item as one around a style block in the item that closes one at the top level', async () => {
+    // Which Word has as one, with nothing between them. Export counted the
+    // block's close at the top level, which Word gets nothing for, as the
+    // end of the first, so the records of the quotes went to other groups
+    // than import reads, and the second came back after the block's closing
+    // fence, out of the list on the next trip
+    const md = twoStyles + '<!-- style: box -->\n- a\n\n  > q1\n\n  <!-- style: note -->\n  <!-- /style -->\n\n  > q2\n';
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(markdown).toBe(twoStyles + '<!-- style: box -->\n- a\n\n  > q1\n\n  > q2\n\n<!-- /style -->\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  it('writes nothing between a quote in a list item and the next item for a style block in the item that closes one at the top level', async () => {
+    // Export took the block's close at the top level, which Word gets
+    // nothing for, for the block after the quote, which isn't the list's
+    // next item, and wrote an empty paragraph there, which ends the list in
+    // Word
+    const JSZip = (await import('jszip')).default;
+    /** The paragraphs Word has between q and b, with no IDs */
+    const between = async (md: string) => {
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(twoStyles + md)).docx)).file('word/document.xml')!.async('string');
+      const paragraphs = [...xml.matchAll(/<w:p\b[^>]*>(?:(?!<\/w:p>).)*<\/w:p>|<w:p\/>/gs)].map(([p]) => p.replace(/ w(?:14)?:(?:paraId|textId|rsidR|rsidRDefault)="[^"]*"/g, ''));
+      return paragraphs.slice(paragraphs.findIndex(p => p.includes('>q<')) + 1, paragraphs.findIndex(p => p.includes('>b<')));
+    };
+    expect(await between('<!-- style: box -->\n- a\n\n  > q\n\n  <!-- style: note -->\n  <!-- /style -->\n- b\n'))
+      .toEqual(await between('<!-- style: box -->\n- a\n\n  > q\n- b\n'));
+  });
+
+  const listInBlockWarning = 'List inside a style block in a list item exported without the style (not supported). Move the style block outside the list for round-trip fidelity.';
+  const nestedWarning = 'Nested <!-- style: --> directives are not supported; outer style "box" closed implicitly.';
+
+  it('keeps a sublist in a list item where a style block in the item that closes one at the top level opens before it', async () => {
+    // Import closed the block at the top level before the sublist, with a
+    // fence there that ended the item, so the next trip read the sublist at
+    // the top level, and the paragraph after it out of the item
+    const md = twoStyles + '<!-- style: box -->\n- a\n\n  <!-- style: note -->\n\n  - x\n\n  p\n  <!-- /style -->\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([listInBlockWarning, nestedWarning]);
+    expect(await paragraphStyles(docx)).toEqual(['MsCustomBox:a', ':x', 'MsCustomNote:p']);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(md);
+  });
+
+  it('closes a style block at the top level in a list item before a sublist with nothing in a style block after it, as an empty block in the item', async () => {
+    // Which closes the block at the top level as the one there did, as a
+    // closing fence would end the item there
+    const md = twoStyles + '<!-- style: box -->\n- a\n\n  <!-- style: note -->\n  - x\n  <!-- /style -->\n\n  q\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([listInBlockWarning, nestedWarning]);
+    expect(await paragraphStyles(docx)).toEqual(['MsCustomBox:a', ':x', 'ManuscriptListContinuation:q']);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(twoStyles + '<!-- style: box -->\n- a\n\n  <!-- style: box -->\n  <!-- /style -->\n  - x\n\n  q\n');
+    const again = await convertMdToDocx(markdown);
+    expect(again.warnings).toEqual([nestedWarning]);
+    expect(await paragraphStyles(again.docx)).toEqual(['MsCustomBox:a', ':x', 'ManuscriptListContinuation:q']);
+    expect((await convertDocx(again.docx)).markdown).toBe(markdown);
+  });
+
+  it('closes a style block at the top level in the item of a sublist before an item of it with no style, so the sublist stays one list', async () => {
+    // Not in the item the sublist is in, before the item, which ends the
+    // sublist there, so the next export started its numbering again
+    const md = twoStyles + '<!-- style: box -->\n1. a\n   1. b\n\n      <!-- style: note -->\n   2. c\n   3. d\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([nestedWarning]);
+    expect(await paragraphStyles(docx)).toEqual(['MsCustomBox:a', 'MsCustomBox:b', ':c', ':d']);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(twoStyles + '<!-- style: box -->\n1. a\n   1. b\n\n      <!-- style: box -->\n      <!-- /style -->\n   2. c\n   3. d\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  it.each([
+    ['in the item before it', styled + '- a\n\n  <!-- style: box -->\n  p\n  <!-- /style -->\n\n<!-- indent -->\n- b\n'],
+    ['in the item before it, that closes one at the top level', twoStyles + '<!-- style: box -->\n- a\n\n  <!-- style: note -->\n  p\n  <!-- /style -->\n\n<!-- indent -->\n- b\n'],
+    // Which import closes in the item
+    ['with no closing fence in the item', styled + '- a\n\n  <!-- style: box -->\n  p\n\n<!-- no-indent -->\n- b\n',
+      styled + '- a\n\n  <!-- style: box -->\n  p\n  <!-- /style -->\n\n<!-- no-indent -->\n- b\n'],
+    ['at the top level', styled + '<!-- style: box -->\n- a\n<!-- /style -->\n\n<!-- indent -->\n- b\n'],
+    // Which import writes after the fence
+    ['at the top level after it', styled + '- a\n\n<!-- indent -->\n\n<!-- style: box -->\n- b\n<!-- /style -->\n',
+      styled + '- a\n\n<!-- style: box -->\n<!-- indent -->\n- b\n<!-- /style -->\n'],
+  ])('keeps an indent directive between list items beside a style block %s', async (_name, md, back = md) => {
+    // Which reads as right after the item, as Word gets no paragraph for
+    // the block's fences. Export took a fence for a block between the item
+    // and the directive, so it kept no record of the directive, and the two
+    // lists of bullets came back as one, with no directive
+    expect(await roundTrip(md)).toBe(back);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  it('drops a style block in an item of a list in a quote, with a warning, so it closes no block around the quote', async () => {
+    // The quote's items are its paragraphs, in its style, as it has no
+    // lists, so the block's fences go, as they did before list items held
+    // style blocks. The opening one closed the block around the quote, so
+    // the paragraphs after the quote lost its style
+    const md = twoStyles + '<!-- style: box -->\nx\n\n> - a\n>\n>   <!-- style: note -->\n>   p\n>   <!-- /style -->\n\ny\n<!-- /style -->\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([
+      'HTML block inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.',
+      'List inside blockquote exported as quote paragraphs (not supported). Move it outside the quote for round-trip fidelity.',
+    ]);
+    expect(await paragraphStyles(docx)).toEqual(['MsCustomBox:x', 'GitHubBlockquote:a', 'GitHubBlockquote:p', 'MsCustomBox:y']);
+  });
+
+  it('parses style blocks in many list items in linear time', () => {
+    // Four times as many take about four times as long, not sixteen. The
+    // search of the source for each fence in an item, for the comments
+    // after it, started at the first line, and each fence took the list's
+    // lines as its own, which the spacing of quotes compared in full for each
+    const md = (n: number) => Array.from({ length: n }, (_, k) => '- i' + k + '\n\n  <!-- style: box -->\n  p' + k + '\n  <!-- /style -->\n').join('\n');
+    const [small, large] = [md(2000), md(8000)];
+    expect(fastestRun(() => parseMd(large)) / fastestRun(() => parseMd(small))).toBeLessThan(8);
+  }, 30000);
+
+  it('drops a one-line style block in a list item, with a warning', async () => {
+    // As it did before style blocks in items, which read the whole line as
+    // an opening fence, with the text in the style's name, and dropped the
+    // text with only a warning that no style of that name was declared
+    const { docx, warnings } = await convertMdToDocx(styled + '- a\n\n  <!-- style: box -->styled<!-- /style -->\n\n  plain\n');
+    expect(warnings).toEqual(['HTML block inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.']);
+    expect(await paragraphStyles(docx)).toEqual([':a', 'ManuscriptListContinuation:plain']);
+  });
+
+  it('keeps a style block in a list item that Word has at a level the list skips, with tabs', async () => {
+    // Import wrote its paragraph at the level Markdown nests the item at,
+    // but its fences at Word's, as code, which export dropped, with the
+    // style
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(styled + '- c\n\n\t<!-- style: box -->\n\tp\n\t<!-- /style -->\n\n- d\n\t- e\n')).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const item = /<w:p\b[^>]*>(?:(?!<\/w:p>).)*?<w:t>c<\/w:t>/s.exec(xml)![0];
+    xml = xml.replace(item, item.replace('<w:ilvl w:val="0"/>', '<w:ilvl w:val="2"/>'));
+    const paragraph = /<w:p\b[^>]*>(?:(?!<\/w:p>).)*?<w:t>p<\/w:t>/s.exec(xml)![0];
+    xml = xml.replace(paragraph, paragraph.replace('w:left="720"', 'w:left="2160"'));
+    zip.file('word/document.xml', xml);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    const expected = '-\tc\n\n\t<!-- style: box -->\n\tp\n\t<!-- /style -->\n\n-\td\n\t-\te\n';
+    expect(markdown.endsWith('\n' + expected)).toBe(true);
+    const again = await convertMdToDocx(markdown);
+    expect(again.warnings).toEqual([]);
+    expect(await paragraphStyles(again.docx)).toContain('MsCustomBox:p');
+    expect((await convertDocx(again.docx)).markdown).toBe(markdown);
+  });
 });
 
 // ============================================================
@@ -675,6 +957,14 @@ describe('Custom Styles — Preview Plugin', () => {
     const divOpenCount = (html.match(/<div[^>]*>/g) || []).length;
     expect(divCloseCount).toBe(divOpenCount);
     expect(html).toContain('<!-- /style -->');
+  });
+
+  it('opens no block for a style block on one line, which a stray closing fence would close', () => {
+    // Its whole line read as an opening fence, of a style with the text in
+    // its name
+    const html = renderWithPlugin('<!-- style: box -->styled<!-- /style -->\n\npara\n\n<!-- /style -->', 'github');
+    expect(html).not.toContain('ms-custom-style');
+    expect(html).toContain('<div data-line="4"><!-- /style --></div>');
   });
 });
 
