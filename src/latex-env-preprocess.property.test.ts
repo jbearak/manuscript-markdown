@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
 import { wrapBareLatexEnvironments } from './latex-env-preprocess';
+import { parseMd } from './md-to-docx';
 
 describe('wrapBareLatexEnvironments property tests', () => {
 	test('idempotent: applying twice equals applying once', () => {
@@ -44,6 +45,24 @@ describe('wrapBareLatexEnvironments property tests', () => {
 				const result = wrapBareLatexEnvironments(input);
 				expect(result).toContain('$$\\begin{' + env + '}');
 				expect(result).toContain('\\end{' + env + '}$$');
+			}),
+			{ numRuns: 200 }
+		);
+	});
+
+	test('wraps an environment with escaped dollar signs before dollar signs before it, in it and after it, which export reads as display math', () => {
+		// A backslash and two dollar signs, which open and close no math
+		const escaped = '\\$' + '$';
+		const display = '$' + '$';
+		const envArb = fc.constantFrom('equation', 'align*', 'gather', 'cases');
+		const textArb = fc.array(fc.constantFrom('a', ' ', '5', escaped), { maxLength: 6 }).map(parts => parts.join(''));
+		fc.assert(
+			fc.property(envArb, textArb, textArb, textArb, (env: string, before: string, inside: string, after: string) => {
+				const input = 'p' + before + '\n\n\\begin{' + env + '}\nx' + inside + '\n\\end{' + env + '}\n\nq' + after + '\n';
+				const result = wrapBareLatexEnvironments(input);
+				expect([input, result.includes(display + '\\begin{' + env + '}') && result.includes('\\end{' + env + '}' + display)]).toEqual([input, true]);
+				const math = parseMd(input).flatMap(token => token.runs).filter(run => run.type === 'math' && run.display);
+				expect([input, math.length]).toEqual([input, 1]);
 			}),
 			{ numRuns: 200 }
 		);

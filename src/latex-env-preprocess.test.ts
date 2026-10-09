@@ -9,6 +9,28 @@ describe('wrapBareLatexEnvironments', () => {
 		);
 	});
 
+	// A backslash and two dollar signs: an escaped dollar sign, which opens
+	// no math, and a dollar sign
+	const escaped = '\\$' + '$';
+	const display = '$' + '$';
+	test.each([
+		['in it', '\\begin{equation}\na ' + escaped + ' b\n\\end{equation}\n'],
+		['before it and after it', 'Costs ' + escaped + '5.\n\n\\begin{equation}\na\n\\end{equation}\n\nAnd ' + escaped + '6.\n'],
+		['before it, with display math after it', 'Costs ' + escaped + '5.\n\n\\begin{equation}\na\n\\end{equation}\n\n' + display + 'x' + display + '\n'],
+	])('wraps an environment with an escaped dollar sign before a dollar sign %s', (_name, input) => {
+		// The scan for display math paired the escaped one's two with the
+		// next two, so the environment between them was left as it was
+		const result = wrapBareLatexEnvironments(input);
+		expect(result).toContain(display + '\\begin{equation}');
+		expect(result).toContain('\\end{equation}' + display);
+	});
+
+	test('leaves an environment in display math with an escaped dollar sign before a dollar sign before it in the math', () => {
+		// Which closes no math, so the environment is the math's
+		const input = display + '\na ' + escaped + '\n\\begin{equation}\nx\n\\end{equation}\n' + display + '\n';
+		expect(wrapBareLatexEnvironments(input)).toBe(input);
+	});
+
 	test('wraps a bare align* environment', () => {
 		const input = '\\begin{align*}\na &= b \\\\\nc &= d\n\\end{align*}';
 		expect(wrapBareLatexEnvironments(input)).toBe(

@@ -2440,6 +2440,16 @@ describe('CriticMarkup OOXML generation', () => {
     expect(display).toEqual(expect.objectContaining({ text: 'x+\\$', display: true }));
   });
 
+  it.each([
+    ['in it', '\\begin{equation}\na \\$' + '$ b\n\\end{equation}\n'],
+    ['before it and after it', 'Costs \\$' + '$5.\n\n\\begin{equation}\na\n\\end{equation}\n\nAnd \\$' + '$6.\n'],
+  ])('reads a bare environment with an escaped dollar sign before a dollar sign %s as display math', (_name, md) => {
+    // The environment's wrap paired the two dollar signs, which open no
+    // math, with the next two, and so left the environment as text
+    const math = parseMd(md).flatMap(token => token.runs).filter(run => run.type === 'math' && run.display);
+    expect(math).toHaveLength(1);
+  });
+
   it('generates Word revisions for substituted fragments inside inline math', () => {
     const token = parseMd('$a{~~+b~>+c~~}$')[0];
     const state = createState();
