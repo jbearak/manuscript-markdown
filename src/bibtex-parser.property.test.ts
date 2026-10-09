@@ -1,6 +1,6 @@
 import { describe, it } from 'bun:test';
 import * as fc from 'fast-check';
-import { parseBibtex, serializeBibtex, readBibtexFields, quotedValueEnds, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, serializeBibtex, readBibtexFields, quotedValueEnds, readEntryEnds, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser Property Tests', () => {
   // A field's whitespace as BibTeX reads it: a run of it one space, and
@@ -235,6 +235,34 @@ describe('BibTeX field reader parity', () => {
         for (let i = 0; i < text.length; i++) {
           const expected = text[i] === '"' ? scanFrom(text, i) : -1;
           if (ends[i] !== expected) throw new Error(JSON.stringify(text) + ' ends the " at ' + i + ' at ' + ends[i] + ', not ' + expected);
+        }
+        return true;
+      }),
+      { numRuns: 5000 }
+    );
+  });
+
+  /**
+   * Where an entry ends, as the tables read for all entries at once find it,
+   * after one doesn't end, is where a scan from its start ends it, as the
+   * parser reads each until then: for a body, at the }, or the ) of a paren
+   * entry, at its level, past groups and quoted values there, and in a paren
+   * entry, pairs of parens, where " is text; and for a comment, at the
+   * delimiter that pairs with its opening one.
+   */
+  it('ends each entry in the tables where a scan from its start ends it', () => {
+    const atom = fc.constantFrom('{', '}', '(', ')', '"', '"', '\\', '\\"', '\\{', 'a', ' ', '\n', '{"}', '(a)', '{a}', '"a"', '@a{k,');
+    fc.assert(
+      fc.property(fc.array(atom, { maxLength: 40, size: 'max' }).map(atoms => atoms.join('')), input => {
+        const tables = readEntryEnds(input, false);
+        for (let at = 0; at <= input.length; at++) {
+          for (const closer of ['}', ')'] as const) {
+            const scanned = readEntryEnds(input).body(at, closer);
+            if (tables.body(at, closer) !== scanned) throw new Error(JSON.stringify(input) + ' ends the body at ' + at + ' to ' + closer + ' at ' + tables.body(at, closer) + ', not ' + scanned);
+            if (input[at] !== (closer === ')' ? '(' : '{')) continue;
+            const comment = readEntryEnds(input).comment(at, closer);
+            if (tables.comment(at, closer) !== comment) throw new Error(JSON.stringify(input) + ' ends the comment at ' + at + ' at ' + tables.comment(at, closer) + ', not ' + comment);
+          }
         }
         return true;
       }),

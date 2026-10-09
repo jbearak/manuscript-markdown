@@ -339,7 +339,7 @@ function isEscapedAt(text: string, index: number): boolean {
  *  the value's groups, as a group keeps a " in it, as in "a {"} b", that no
  *  odd run of backslashes escapes, as in "a \" b". Every brace counts, an
  *  escaped one too, as BibTeX counts them, but a } with no { open in the value
- *  takes none off. findEntryEnd, detectEntryEol and readBibtexFields all end a
+ *  takes none off. readEntryEnds, detectEntryEol and readBibtexFields all end a
  *  quoted value here, so they read an entry's body the same way.
  *
  *  Every " is read as one that opens a value, in one pass from the left, as
@@ -390,12 +390,8 @@ export function quotedValueEnds(text: string): Int32Array {
  *  gives where each quoted value in `input` ends (see quotedValueEnds), read
  *  once for all the input's entries.
  *
- *  Note: unlike extractRawField's brace scanner, this does NOT skip `\{`/`\}`
- *  escapes — it counts them as real braces.  This is intentional: at the
- *  entry-boundary level, `\{` inside a field value is always nested inside a
- *  brace-delimited value, so the net depth change is zero and the result is
- *  the same.  extractRawField needs escape-awareness because it scans a
- *  single field value where `\{` must not alter depth. */
+ *  It counts `\{`/`\}` escapes as real braces, as BibTeX does, and as
+ *  readBibtexFields does. */
 function findEntryEnd(
   input: string,
   startPos: number,
@@ -451,6 +447,107 @@ function findCommentEnd(input: string, startPos: number, closer: '}' | ')' = '}'
     else if (input[j] === closer && --depth === 0) return j;
   }
   return -1;
+}
+
+/** For each `open` in `text`, the index of the `close` that pairs with it,
+ *  or -1, every one counted, an escaped one too, as BibTeX counts braces */
+function delimiterCloses(text: string, open: '{' | '(', close: '}' | ')'): Int32Array {
+  const closes = new Int32Array(text.length).fill(-1);
+  const opens: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === open) opens.push(i);
+    else if (text[i] === close && opens.length > 0) closes[opens.pop()!] = i;
+  }
+  return closes;
+}
+
+/** Where the entries of `input` end, read once for all of them: what
+ *  readEntryEnds returns */
+export interface BibtexEntryEnds {
+  /** The closing `}` or `)` of an entry body that starts at `startPos`, just
+   *  after the `@type{key,` header, or -1 if unmatched */
+  body(startPos: number, closer: '}' | ')'): number;
+  /** The closing delimiter of an `@comment` whose opening one is at `at`,
+   *  counting delimiters only, or -1 if unmatched.  A comment is arbitrary
+   *  prose, so an apostrophe or a lone `"` in it is ordinary text — applying
+   *  field-value quote semantics here would swallow the closing delimiter and
+   *  make a balanced comment look unterminated. */
+  comment(at: number, closer: '}' | ')'): number;
+}
+
+/** Where the entries of `input` end, as findEntryEnd and findCommentEnd
+ *  find it, from wherever they start. Each is scanned from its start, which
+ *  reads each entry that ends once; but one that doesn't end is read to the
+ *  input's end, and recovery then tries the next at each line start, so many
+ *  such entries took time in the square of the input's length. After the
+ *  first that doesn't end, each end is looked up in tables read for every
+ *  index at once (`scanFirst` false: from the start), which take memory in
+ *  the input's length, so they're read only then.
+ *
+ *  A body's end in a table: at the body's own level, a group goes to the
+ *  `}` that pairs with its `{`, every brace counted, as findEntryEnd counts
+ *  them; a quoted value to the `"` that ends it (see quotedValueEnds); and in
+ *  a paren entry, a `(` to the `)` that pairs with it at its level, past
+ *  groups, where `"` is text, and a `}` with no `{` open is nothing. Where
+ *  any of them doesn't end, the body doesn't, and otherwise it ends where the
+ *  body from past it ends, so the table is read from the right. A comment's
+ *  end is the delimiter that pairs with its opening one. */
+export function readEntryEnds(input: string, scanFirst = true): BibtexEntryEnds {
+  let quoteEnds: Int32Array | undefined;
+  const inputQuoteEnds = () => (quoteEnds ??= quotedValueEnds(input));
+  let tables = !scanFirst;
+  let braceCloses: Int32Array | undefined;
+  let parenCloses: Int32Array | undefined;
+  let braceBodyEnds: Int32Array | undefined;
+  let parenBodyEnds: Int32Array | undefined;
+  const bodyEnds = (parens: boolean): Int32Array => {
+    const closes = (braceCloses ??= delimiterCloses(input, '{', '}'));
+    const quotes = inputQuoteEnds();
+    const n = input.length;
+    const ends = new Int32Array(n + 1).fill(-1);
+    // In a paren entry, the first ) from each index at its level, where " is
+    // text, as in a pair of parens in the body
+    const firstClose = parens ? new Int32Array(n + 1).fill(-1) : undefined;
+    for (let i = n - 1; i >= 0; i--) {
+      const c = input[i];
+      if (c === (parens ? ')' : '}')) {
+        ends[i] = i;
+        if (firstClose) firstClose[i] = i;
+        continue;
+      }
+      // Past what starts here: a group, or a pair of parens, whole, or 0
+      // where it doesn't end
+      let past = i + 1;
+      if (c === '{') past = closes[i] + 1;
+      else if (firstClose && c === '(') past = firstClose[i + 1] + 1;
+      if (firstClose) firstClose[i] = past > i ? firstClose[past] : -1;
+      if (c === '"' && !isEscapedAt(input, i)) past = quotes[i] + 1;
+      ends[i] = past > i ? ends[past] : -1;
+    }
+    return ends;
+  };
+  return {
+    body: (startPos, closer) => {
+      if (!tables) {
+        const end = findEntryEnd(input, startPos, closer, inputQuoteEnds);
+        tables = end < 0;
+        return end;
+      }
+      return closer === '}'
+        ? (braceBodyEnds ??= bodyEnds(false))[startPos]
+        : (parenBodyEnds ??= bodyEnds(true))[startPos];
+    },
+    comment: (at, closer) => {
+      if (!tables) {
+        const end = findCommentEnd(input, at + 1, closer);
+        tables = end < 0;
+        return end;
+      }
+      return closer === '}'
+        ? (braceCloses ??= delimiterCloses(input, '{', '}'))[at]
+        : (parenCloses ??= delimiterCloses(input, '(', ')'))[at];
+    },
+  };
 }
 
 export type BibtexEol = '\n' | '\r\n';
@@ -739,8 +836,8 @@ const BARE_VALUE_AT = /\w+/y;
  * between them, as commas, and anything else that isn't one. A braced value
  * goes to the } that pairs with its {, however deep its groups nest, every
  * brace counted, an escaped one too, as BibTeX counts them, and as
- * findEntryEnd does, so the two read a body the same way. A quoted one goes
- * to the " that ends it as findEntryEnd reads it (see quotedValueEnds), the
+ * readEntryEnds does, so the two read a body the same way. A quoted one goes
+ * to the " that ends it as readEntryEnds reads it (see quotedValueEnds), the
  * next one outside its groups. Where a value doesn't end, there's no field at its name, and
  * the search goes on after the name, into the value, as the regex this
  * replaced searched. In one pass, with each { paired once: the regex read
@@ -750,12 +847,7 @@ const BARE_VALUE_AT = /\w+/y;
 export function readBibtexFields(body: string): Array<{ name: string; value: string; braced: boolean }> {
   const fields: Array<{ name: string; value: string; braced: boolean }> = [];
   // The } that pairs with each {, or -1
-  const closes = new Int32Array(body.length).fill(-1);
-  const opens: number[] = [];
-  for (let i = 0; i < body.length; i++) {
-    if (body[i] === '{') opens.push(i);
-    else if (body[i] === '}' && opens.length > 0) closes[opens.pop()!] = i;
-  }
+  const closes = delimiterCloses(body, '{', '}');
   let quoteEnds: Int32Array | undefined;
   let i = 0;
   while (i < body.length) {
@@ -822,9 +914,8 @@ function scanBibtex(input: string): ScannedBibtex {
   // paren form would leave a paren `@comment`'s contents exposed as entries.
   const headerRe = /@(\w+)\s*([{(])/g;
   const keyRe = /\s*([^,\s]+)\s*,/y;
-  // Where each quoted value in the input ends, read once for all its entries
-  let quoteEnds: Int32Array | undefined;
-  const inputQuoteEnds = () => (quoteEnds ??= quotedValueEnds(input));
+  // Where each entry ends, read once for all of them
+  const entryEnds = readEntryEnds(input);
 
   let pos = 0;
   // After a construct we could not delimit, we no longer know whether we are
@@ -872,8 +963,8 @@ function scanBibtex(input: string): ScannedBibtex {
       // A comment's body is prose: a stray `"` in it is ordinary text, not the
       // start of a quoted value, so count delimiters only.
       const close = lowerType === 'comment'
-        ? findCommentEnd(input, afterBrace, closer)
-        : findEntryEnd(input, afterBrace, closer, inputQuoteEnds);
+        ? entryEnds.comment(afterBrace - 1, closer)
+        : entryEnds.body(afterBrace, closer);
       if (close === -1) {
         // Unterminated declaration — fall back to line-start recovery.
         pos = afterBrace;
@@ -893,7 +984,7 @@ function scanBibtex(input: string): ScannedBibtex {
       // `@type{` opened but the header has no citation key.  Consume its
       // balanced body rather than scanning into it — the `@book{...}` sitting
       // in a field of a malformed entry is that entry's data, not an entry.
-      const close = findEntryEnd(input, afterBrace, closer, inputQuoteEnds);
+      const close = entryEnds.body(afterBrace, closer);
       if (close === -1) {
         pos = afterBrace;
         requireLineStart = true;
@@ -909,7 +1000,7 @@ function scanBibtex(input: string): ScannedBibtex {
     const key = keyMatch[1];
     const startPos = afterBrace + keyMatch[0].length;
 
-    const endPos = findEntryEnd(input, startPos, closer, inputQuoteEnds);
+    const endPos = entryEnds.body(startPos, closer);
     if (endPos === -1) {
       pos = startPos;
       requireLineStart = true;

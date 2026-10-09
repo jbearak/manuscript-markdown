@@ -663,6 +663,27 @@ describe('parseBibtex via parseBibtexWithRaw parity', () => {
 });
 
 describe('parseBibtexWithRaw source ranges', () => {
+  // Each tried the next entry at a line's start by reading on from its start,
+  // to the input's end where that entry didn't end either, so these took
+  // seconds; the entry after them, which ends, is still read
+  it.each([
+    ['an unclosed group', '@article{k,\n x = {\n'],
+    ['no end', '@article{k,\n'],
+    ['parens and no end', '@article(k,\n x = {a}\n'],
+    ['an unclosed pair of parens', '@article(k,\n x = (a\n'],
+    ['no key', '@article{,\n'],
+    ['an unclosed comment', '@comment{\n'],
+    ['an unclosed comment in parens', '@comment(\n'],
+    ['an unclosed string', '@string{\n'],
+  ])('reads many entries with %s in linear time', (_name, entry) => {
+    const input = entry.repeat(20000) + '@book{b,\n  title = {T}\n}\n';
+    expect(fastestRun(() => {
+      const { parsed, ranges } = parseBibtexWithRaw(input);
+      expect(ranges.map(range => range.key)).toEqual(['b']);
+      expect(parsed.get('b')?.fields.get('title')).toBe('T');
+    })).toBeLessThan(1000);
+  }, 60000);
+
   // Source ranges let callers splice edits into the original text by offset
   // instead of re-finding raw substrings, which is ambiguous when two
   // entries share a citation key.
