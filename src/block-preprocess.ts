@@ -29,8 +29,8 @@ export function preprocessBlocks(markdown: string): PreprocessedBlocks {
 /** A line that starts as a quote's, at the top level or in a list item one level in */
 const QUOTE_LINE_RE = /^ {0,3}>/;
 /** A quote's line, before a line with text that starts as none does, which
- *  lazy continuation can make the quote's. Its line ends at a \n alone, as
- *  the lines here do, past a \r, which a . doesn't match */
+ *  lazy continuation can make the quote's. Its line ends at a \n, as each
+ *  line end is here (see normalizeNewlines in newlines.ts) */
 const LAZY_LINE_RE = /^ {0,3}>[^\n]*\n(?! {0,3}>)[^\S\n]*\S/m;
 
 /**

@@ -7,6 +7,7 @@
 import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import blockquote from 'markdown-it/lib/rules_block/blockquote.mjs';
+import { normalizeNewlines } from './newlines';
 
 export interface CodeRegion {
 	start: number;
@@ -203,8 +204,9 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	const blockTokens: Token[] = [];
 	// The normal core rule performs this conversion before block parsing.
 	// Invoke the block parser directly to avoid unnecessary inline parsing, but
-	// retain its line-ending semantics (including bare CR documents).
-	const normalizedBlockText = text.replace(/\r\n?/g, '\n');
+	// retain its line-ending semantics (including bare CR documents), which
+	// lineStarts counts the same way.
+	const normalizedBlockText = normalizeNewlines(text);
 	const env: { quoteEnds?: number[] } = {};
 	if (exportQuotes && normalizedBlockText.includes('>')) {
 		// Each line with text after a quote's line that doesn't start as one

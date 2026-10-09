@@ -2777,23 +2777,6 @@ describe('preprocessCriticMarkup', () => {
     );
   });
 
-  it('treats CR-only blank lines as paragraph breaks inside CriticMarkup', () => {
-    const input = '{++a\r\rb++}';
-    expect(preprocessCriticMarkup(input)).toBe('{++a' + PARA_PLACEHOLDER + 'b++}');
-  });
-
-  it('does not backtrack one CRLF into a paragraph break', () => {
-    expect(preprocessCriticMarkup('{++a\r\nb++}'))
-      .toBe('{++a' + LINE_PLACEHOLDER + 'b++}');
-    expect(preprocessCriticMarkup('{++a\r\n\r\nb++}'))
-      .toBe('{++a' + PARA_PLACEHOLDER + 'b++}');
-  });
-
-  it('does not protect CriticMarkup newlines in a CR-only indented code block', () => {
-    const input = 'Intro\r\r    {++first\r    second++}';
-    expect(preprocessCriticMarkup(input)).toBe(input);
-  });
-
   it('leaves CriticMarkup literal in indented and container-nested fences', () => {
     for (const input of [
       '  ~~~\n  {++first\n  second++}\n  ~~~',
@@ -2802,13 +2785,6 @@ describe('preprocessCriticMarkup', () => {
     ]) {
       expect(preprocessCriticMarkup(input)).toBe(input);
     }
-  });
-
-  it('does not let a CR-only fence hide later CriticMarkup', () => {
-    const input = '~~~\r{++code\rline++}\r~~~\rAfter {++revision\rline++}';
-    const processed = preprocessCriticMarkup(input);
-    expect(processed).toContain('{++code\rline++}');
-    expect(processed).toContain('{++revision' + LINE_PLACEHOLDER + 'line++}');
   });
 
   it('replaces \\n\\n inside a multi-paragraph comment', () => {
@@ -2831,12 +2807,6 @@ describe('preprocessCriticMarkup', () => {
     expect(result).not.toContain('\n\n');
   });
 
-  it('protects whitespace-only blank lines and CRLF inside CriticMarkup', () => {
-    const input = '{++before\r\n   \r\nafter++}';
-    const result = preprocessCriticMarkup(input);
-    expect(result).toContain('before' + PARA_PLACEHOLDER + 'after');
-    expect(result).not.toContain('\r\n');
-  });
 
   it('moves an empty leading paragraph break before a stranded Critic opener', () => {
     const input = 'Before.{++\n\nAfter.++}';
@@ -3384,14 +3354,6 @@ describe('extractFootnoteDefinitions', () => {
     const { cleaned, definitions } = extractFootnoteDefinitions(before + '\n[^1]: Footnote.');
     expect([...definitions]).toEqual([['1', 'Footnote.']]);
     expect(cleaned).toBe(before);
-  });
-
-  it('reads a definition after fenced code after a bare carriage return, as a line end', () => {
-    // markdown-it reads a bare \r as one, which put the fence's lines one
-    // later, and the definition in them
-    const { cleaned, definitions } = extractFootnoteDefinitions('T [^1]\r```\nx\n```\n[^1]: Note.');
-    expect(definitions.get('1')).toBe('Note.');
-    expect(cleaned).toBe('T [^1]\n```\nx\n```');
   });
 });
 

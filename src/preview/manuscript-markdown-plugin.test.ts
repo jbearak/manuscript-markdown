@@ -1255,6 +1255,12 @@ describe('CriticMarkup headings in preview', () => {
     }
   });
 
+  it('maps a CriticMarkup span of two lines, and the paragraph after it, with any line end', () => {
+    for (const eol of ['\n', '\r\n', '\r']) {
+      expect(parseBlockMaps('{++a' + eol + 'b++}' + eol + eol + 'After')).toEqual([[0, 2], [3, 4]]);
+    }
+  });
+
   it('maps headings exactly within surrounding content', () => {
     for (const eol of ['\n', '\r\n', '\r']) {
       for (const [open, close] of [['{++', '++}'], ['{--', '--}']]) {
@@ -2309,6 +2315,18 @@ describe('Embed preview document resolution', () => {
       (src) => src.includes('embed') ? '/dynamic/file.md' : undefined,
     );
 
+    expect(html).toContain('Carol');
+  });
+
+  it.each([['\\r\\n', '\r\n'], ['\\r', '\r']])('gives manuscriptGetDocumentPath the source as it is, with %s line ends', (_name, eol) => {
+    // The extension finds the document whose text is the source, which the
+    // preview had read with its line ends as \n by then, so it found none
+    // and embedded nothing
+    const resolver = makeEmbedResolver({
+      '/dynamic/data.csv': 'Name,Age\nCarol,40',
+    });
+    const source = 'p' + eol + eol + '<!-- embed: data.csv -->' + eol;
+    const html = renderWithEmbedSetup(source, resolver, undefined, undefined, src => src === source ? '/dynamic/file.md' : undefined);
     expect(html).toContain('Carol');
   });
 

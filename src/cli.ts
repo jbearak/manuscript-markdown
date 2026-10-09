@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { parseFrontmatter, normalizeBibPath, normalizeBlockquoteStyle, normalizeColorScheme, type ColorScheme, type BlockquoteStyle } from './frontmatter';
+import { normalizeNewlines } from './newlines';
 
 // --- Implementation notes ---
 // - Flag parsing: validate missing-next-arg and next-token-is-flag before consuming args[++i]
@@ -260,7 +261,9 @@ export function assertNoMdToDocxConflict(docxPath: string, force: boolean) {
 
 async function runMdToDocx(options: CliOptions) {
   const { convertMdToDocx, hasCitations } = await import('./md-to-docx');
-  const markdown = fs.readFileSync(options.inputPath, 'utf8');
+  // Each line end as markdown-it reads it, as \n, as export reads the file,
+  // so its frontmatter names the bibliography here too
+  const markdown = normalizeNewlines(fs.readFileSync(options.inputPath, 'utf8'));
 
   // Resolve bib file: --bib flag > frontmatter bibliography > auto-detect {base}.bib
   let bibtex: string | undefined;

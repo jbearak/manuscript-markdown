@@ -129,8 +129,10 @@ function buildMapFromLines(origLines: string[], outLines: string[]): LineMap {
   return LineMap.fromLineMappings(mappings);
 }
 
+// The preview's rule gives these steps \n line ends alone (see
+// normalizeNewlines), each line end as markdown-it reads it
 function splitPhysicalLines(source: string): string[] {
-  return source.split(/\r\n?|\n/);
+  return source.split('\n');
 }
 
 function buildCriticLineMap(source: string, output: string): LineMap {

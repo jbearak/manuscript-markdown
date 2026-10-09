@@ -1371,9 +1371,9 @@ function bookmarkedSelfRef(selfRefRun: string, noteId: number, state: DocxGenSta
  *  the source it comes from (see line-map.ts) */
 export function extractFootnoteDefinitions(markdown: string): { cleaned: string; definitions: Map<string, string>; lines: LineMap } {
   const definitions = new Map<string, string>();
-  // A bare \r ends a line, as markdown-it reads one, whose token maps count
-  // the lines below
-  const source = markdown.replace(/\r(?!\n)/g, '\n');
+  // Its line ends are \n alone (see normalizeNewlines), as convertMdToDocx
+  // has them
+  const source = markdown;
   const lines = source.split('\n');
   const cleanedLines: string[] = [];
   const keptLines: number[] = [];
@@ -1456,7 +1456,7 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
   // definition taken out between them stood on, as a line of text, and with
   // none kept, the cleaned text's one empty line comes from the first, as
   // no line before it was kept (see line-map.ts)
-  const from = keptLines.map((line, k) => /^[ \t\r]*$/.test(cleanedLines[k]) ? (k > 0 ? keptLines[k - 1] + 1 : 0) : line);
+  const from = keptLines.map((line, k) => /^[ \t]*$/.test(cleanedLines[k]) ? (k > 0 ? keptLines[k - 1] + 1 : 0) : line);
   return { cleaned: cleanedLines.join('\n'), definitions, lines: withEnd(from.length > 0 ? from : [0], lines.length) };
 }
 
@@ -2744,11 +2744,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
       const lineNumAt = (offset: number): number => {
         if (!lineEnds) {
           lineEnds = [];
-          // A line feed or carriage return, alone or both, as the scanner
-          // reads them
-          for (let i = 0; i < scanText.length; i++) {
-            if (scanText[i] === '\n' || (scanText[i] === '\r' && scanText[i + 1] !== '\n')) lineEnds.push(i);
-          }
+          for (let i = scanText.indexOf('\n'); i !== -1; i = scanText.indexOf('\n', i + 1)) lineEnds.push(i);
         }
         let lo = 0;
         let hi = lineEnds.length;
@@ -2921,7 +2917,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
       if (scan.kept === 0 && before && (before.type === 'list_item' || before.listContinuation)) {
         result[target].listDirective = result[target].indentOverride ?? override;
         const line = result[i].splitPart ? undefined : result[i].sourceRange?.[0];
-        if (line !== undefined && line > 0 && /^[ \t]*\r?$/.test(sourceLines[line - 1] ?? 'x')) result[target].blankLineBefore = true;
+        if (line !== undefined && line > 0 && /^[ \t]*$/.test(sourceLines[line - 1] ?? 'x')) result[target].blankLineBefore = true;
       }
       // Apply to all consecutive list items in this list block, past the
       // directives that go from between them. The items another directive
@@ -4285,7 +4281,7 @@ type DroppedBlocks = Map<number, number>;
  *  the list is tight */
 function blankLineBeforeItem(line: number, sourceLines: string[] | undefined, dropped: DroppedBlocks): boolean {
   for (let at = line - 1; at >= 0;) {
-    if (/^[ \t]*\r?$/.test(sourceLines?.[at] ?? 'x')) return true;
+    if (/^[ \t]*$/.test(sourceLines?.[at] ?? 'x')) return true;
     const start = dropped.get(at + 1);
     if (start === undefined) return false;
     at = start - 1;
@@ -7452,8 +7448,11 @@ function generateUnembeddedImageRun(run: MdRun, deleted = false): string {
 
 function generateHiddenHtmlCommentRun(text: string, tag: 'w:t' | 'w:delText' = 'w:t'): string {
   const textXml = tag === 'w:t' ? wt : delText;
-  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const lines = normalized.split('\n');
+  // Each line end as \n, as the Markdown's are by now, and also one that a
+  // character reference decodes to after that, as &#13;&#10; in an image's
+  // title or attributes, whose Markdown this writes, so no \r goes into
+  // Word's text beside the break, which Word reads as a second line end
+  const lines = normalizeNewlines(text).split('\n');
   // vanish hides the run in Word Desktop; white color makes it invisible in Word Online
   // (which shows hidden text in editing mode regardless of showDraftContent).
   // Schema order: vanish precedes color in CT_RPr.
@@ -10071,10 +10070,12 @@ function tokensCite(tokens: MdToken[]): boolean {
  * resolver for, nor one only number formatting could change, which formats
  * no citation. A deleted citation counts, as the Markdown holds it.
  */
-export function hasCitations(markdown: string): boolean {
+export function hasCitations(source: string): boolean {
   // Every citation holds an @
-  if (!markdown.includes('@')) return false;
-  const { body } = parseFrontmatter(markdown);
+  if (!source.includes('@')) return false;
+  // Each line end as markdown-it reads it, as \n, as convertMdToDocx reads
+  // the text, whose steps it runs, as the editor's text can have \r\n
+  const { body } = parseFrontmatter(normalizeNewlines(source));
   const { cleaned, definitions } = extractFootnoteDefinitions(body);
   const tokens = parseMd(preprocessGridTables(cleaned));
   if (tokensCite(tokens)) return true;
@@ -10085,18 +10086,20 @@ export function hasCitations(markdown: string): boolean {
 }
 
 export async function convertMdToDocx(
-  markdown: string,
+  source: string,
   options?: MdToDocxOptions
 ): Promise<MdToDocxResult> {
+  // Each line end as markdown-it reads it, \r\n or a \r alone as well as \n,
+  // as \n, so each step before it splits lines where it does
+  const markdown = normalizeNewlines(source);
   // Parse frontmatter for CSL style and other metadata
   const { metadata: frontmatter, body, fieldOrder } = parseFrontmatter(markdown);
   // Count blank lines between frontmatter closing --- and body content.
   // parseFrontmatter strips the closing line's end; the line ends left at
-  // the body's start are the blank lines, with any line end markdown-it
-  // reads, \r\n or a \r alone as well as \n
+  // the body's start are the blank lines
   const hadFrontmatter = body !== markdown;
   const frontmatterBlankLines = hadFrontmatter
-    ? (body.match(/^(?:\r\n?|\n)*/)?.[0] ?? '').replace(/\r\n?/g, '\n').length
+    ? (body.match(/^\n*/)?.[0] ?? '').length
     : -1; // -1 means no frontmatter present
   const fontOverrides = resolveFontOverrides(frontmatter);
   const isInsetMode = frontmatter.codeBackgroundColor === 'none' || frontmatter.codeBackgroundColor === 'transparent';
@@ -10125,7 +10128,7 @@ export async function convertMdToDocx(
   // the line alone before, of a key of no spaces
   const NOTE_LINE = /^Citation data for @.+ was not found in the bibliography file\.[ \t]*$/;
   const BARE_NOTE_LINE = /^Citation data for @\S+ was not found in the bibliography file\.$/;
-  const bodyParts = body.split(/(\r\n?|\n)/);
+  const bodyParts = body.split(/(\n)/);
   const lines = bodyParts.filter((_part, k) => k % 2 === 0);
   let notes: Set<number> | undefined;
   if (lines.some(line => NOTE_LINE.test(line))) {
@@ -10241,7 +10244,7 @@ export async function convertMdToDocx(
   // counted in the blank lines before it: import puts those nowhere at the
   // document's start, but between two fences where it writes another first
   const bodyStartLine = hadFrontmatter
-    ? (markdown.slice(0, markdown.length - body.length) + (body.match(/^(?:\r?\n)*/) ?? [''])[0]).split('\n').length - 1
+    ? (markdown.slice(0, markdown.length - body.length) + (body.match(/^\n*/) ?? [''])[0]).split('\n').length - 1
     : 0;
   const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, { text: maskFrontmatter(markdown), lines: bodyLines },
     undefined, numbersFormatted ? unformattedBody : undefined, false, bodyStartLine);

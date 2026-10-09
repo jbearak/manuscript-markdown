@@ -127,8 +127,9 @@ describe('Quote spacing through preprocessing', () => {
 });
 
 describe('Line maps', () => {
-  /** Whether `at` ends a line of `text`, as markdown-it ends one */
-  const endsLineAt = (text: string, at: number) => text[at] === '\n' || (text[at] === '\r' && text[at + 1] !== '\n');
+  /** Whether `at` ends a line of `text`, whose line ends are \n, as export
+   *  writes each markdown-it reads (see normalizeNewlines) */
+  const endsLineAt = (text: string, at: number) => text[at] === '\n';
 
   /** The lines of `input` after `edits`, character by character, as the
    *  contract in line-map.ts has them */
@@ -163,20 +164,18 @@ describe('Line maps', () => {
     return [...ranges.map(([from, to]) => {
       const own = copied(from, to);
       // Not blank, of spaces and tabs alone
-      if (own.length > 0 && /[^ \t\r\n]/.test(output.slice(from, to))) return own[0];
+      if (own.length > 0 && /[^ \t\n]/.test(output.slice(from, to))) return own[0];
       const before = copied(0, from);
       const after = copied(from, chars.length);
       return Math.min(before.length > 0 ? before[before.length - 1] + 1 : 0, after.length > 0 ? after[0] : last);
     }), last + 1];
   }
 
-  // Text of lines and parts of them, with each line end markdown-it reads,
-  // whole lines, blank or not, or none, so that edits take out or replace
-  // whole lines, or parts, put lines in at a line's start, start and end the
-  // text, and come one after another
-  const lineEndArb = fc.constantFrom('\n', '\r\n', '\r');
-  const partArb = fc.array(fc.constantFrom('a', ' ', '\t', '\n', '\r\n', '\r'), { maxLength: 5 }).map(parts => parts.join(''));
-  const wholeLinesArb = fc.array(fc.tuple(fc.constantFrom('', ' ', 'a', 'ab '), lineEndArb).map(([text, end]) => text + end), { minLength: 1, maxLength: 3 })
+  // Text of lines and parts of them, whole lines, blank or not, or none, so
+  // that edits take out or replace whole lines, or parts, put lines in at a
+  // line's start, start and end the text, and come one after another
+  const partArb = fc.array(fc.constantFrom('a', ' ', '\t', '\n'), { maxLength: 5 }).map(parts => parts.join(''));
+  const wholeLinesArb = fc.array(fc.constantFrom('', ' ', 'a', 'ab ').map(text => text + '\n'), { minLength: 1, maxLength: 3 })
     .map(lines => lines.join(''));
   const textArb = fc.oneof(fc.constant(''), partArb, wholeLinesArb);
   const editsArb = fc.record({
