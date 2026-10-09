@@ -668,9 +668,10 @@ describe('Overlapping comments: one ID in more than one range', () => {
   });
 
   test('keeps a comment from a paragraph into a table\'s cell one range, around another comment', async () => {
-    // Import writes the comment in a range of each paragraph and cell, as a
-    // cell can't hold one that goes on past it. Export wrote three ranges
-    // with one ID, which Word takes once.
+    // Import writes the comment in one range, open from the paragraph into
+    // the cell, with its body after the table. It wrote a range of each
+    // paragraph and cell, which export wrote with one ID, which Word takes
+    // once.
     const JSZip = (await import('jszip')).default;
     const zip = await JSZip.loadAsync((await convertMdToDocx('Before.\n\nZ {==z==}{>>@A (2024-01-15 10:30) | c<<}\n\n| a | b |\n| --- | --- |\n| 1 | 2 |')).docx);
     const ref = '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="90"/></w:r>';
@@ -681,9 +682,9 @@ describe('Overlapping comments: one ID in more than one range', () => {
       .replace('</w:comments>', '<w:comment w:id="90" w:author="B" w:date="2024-02-01T09:00:00Z"><w:p><w:r><w:t>new</w:t></w:r></w:p></w:comment></w:comments>'));
     const docx = await zip.generateAsync({ type: 'uint8array' });
     const once = (await convertDocx(docx)).markdown;
-    expect(once).toContain('{#1}Before.{/1}\n{#1>>@B ');
-    expect(once).toContain('{#1}Z {#2}z{/1}{/2}');
-    expect(once).toContain('| {#1}a{/1} | b |');
+    expect(once).toContain('{#1}Before.\n\nZ {#2}z{/2}\n');
+    expect(once).toContain('| a{/1} | b |');
+    expect(once).toContain('| 1 | 2 |\n\n{#1>>@B ');
     const again = (await convertMdToDocx(once)).docx;
     expect(await markers(again)).toEqual(await markers(docx));
     expect((await convertDocx(again)).markdown).toBe(once);

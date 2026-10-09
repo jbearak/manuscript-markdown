@@ -18,6 +18,8 @@ import {
   DEFAULT_FORMATTING,
   RunFormatting,
   ContentItem,
+  Comment,
+  TableRow,
   RevisionInfo,
   isToggleOn,
   parseHeadingLevel,
@@ -3450,12 +3452,12 @@ describe('Comments on an alert\'s label', () => {
     expect(markdown).toContain('> {==[**※ Note**](https://e.com)\\\n');
   });
 
-  test('starts a comment from a table\'s cell after the label of an alert after the table', async () => {
-    // Import writes the range in parts, one for the cell and one for the
-    // alert, which kept the label as text before the alert's text
+  test('keeps a comment from a table\'s cell open over the label of an alert after the table', async () => {
+    // Import keeps the range open from the cell, but closed it before the
+    // label, as for a range in parts, and opened it again after
     const md = '| A |\n| --- |\n| {#1}a |\n\n> [!NOTE]\n> text{/1} more\n> ' + '{#1>>@A (2024-01-15 10:30) | c<<}' + '\n';
     const markdown = strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
-    expect(markdown).toContain('\n> [!NOTE]\n> {==text==}{>>@A (2024-01-15 10:30) | c<<} more\n');
+    expect(markdown).toBe(md);
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
     // One label in Word
     expect(xml.match(/<w:b\/><w:color w:val="[0-9A-F]+"\/><\/w:rPr><w:t>/g)).toHaveLength(1);
@@ -3512,11 +3514,11 @@ describe('Comments on an alert\'s label', () => {
   };
 
   test('starts a comment Word put on the label after it, where a comment over a table and the paragraph after it goes on in the alert', async () => {
-    // Import writes the range from the table in a part for each paragraph,
-    // which starts before the label, so the label stayed, and the line
-    // break after it went, which ran the label into the text
-    const markdown = await withSecondOnLabel('| A |\n| --- |\n| {#1}a |\n\nBody.\n\n> [!NOTE]\n> {#2}text{/1} more{/2}\n> ' + body(1, 'c') + '\n> ' + body(2, 'd') + '\n');
-    expect(markdown).toContain('\n{#1}Body.{/1}\n\n> [!NOTE]\n> {#1}{#2}text{/1} more{/2}\n');
+    // Import keeps the range from the table open, but closed it before the
+    // label, as for a range in parts, and opened it again after
+    const md = '| A |\n| --- |\n| {#1}a |\n\nBody.\n\n> [!NOTE]\n> {#2}text{/1} more{/2}\n> ' + body(1, 'c') + '\n> ' + body(2, 'd') + '\n';
+    const markdown = await withSecondOnLabel(md);
+    expect(markdown).toBe(md);
     expect(await roundTrip(markdown)).toBe(markdown);
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
     // One label in Word
@@ -3795,10 +3797,124 @@ describe('Comments across paragraphs', () => {
     ['another comment it overlaps', '{#1}A {#2}b\n\nc{/1} d{/2}.\n' + body(1, 'one') + '\n' + body(2, 'two') + '\n'],
     ['paragraphs in a footnote', 'Text.[^1]\n\n[^1]: x {#1}A\n\n    B\n\n    C{/1} c.\n    ' + body(1, 'n') + '\n'],
     ['paragraphs in the body and in a footnote', '{#1}P1\n\nP2{/1}.[^1]\n' + body(1, 'b') + '\n\n[^1]: {#2}A\n\n    B{/2} c.\n    ' + body(2, 'n') + '\n'],
+    ['two cells of a row', '| a | b |\n| --- | --- |\n| {#1}c | d{/1} |\n\n' + body(1, 'cells') + '\n'],
+    ['cells of two rows', '| a | b |\n| --- | --- |\n| c {#1}d | e |\n| f | g{/1} h |\n\n' + body(1, 'rows') + '\n'],
+    ['a header cell and a body cell', '| {#1}a | b |\n| --- | --- |\n| c{/1} | d |\n\n' + body(1, 'header') + '\n'],
+    ['cells around an empty one', '| a | b | c |\n| --- | --- | --- |\n| {#1}d | | e{/1} |\n\n' + body(1, 'empty') + '\n'],
+    ['cells, with another comment in one', '| a | b |\n| --- | --- |\n| {#1}c {#2}x{/2} | d{/1} |\n\n' + body(2, 'two') + '\n' + body(1, 'one') + '\n'],
+    ['cells of a grid table', '+-------+-------+\n| a     | b     |\n+=======+=======+\n| {#1}c | d     |\n| e     | f{/1} |\n+-------+-------+\n\n' + body(1, 'grid') + '\n'],
+    ['cells and the paragraph after their table', 'Z.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| {#1}3 | 4 |\n\nAfter.{/1}\n' + body(1, 'out') + '\n'],
+    ['a paragraph and cells of the table after it', '{#1}Z.\n\n| a | b |\n| --- | --- |\n| 1 | 2{/1} |\n| 3 | 4 |\n\n' + body(1, 'in') + '\n\nAfter.\n'],
+    ['a table between paragraphs', 'Z {#1}z.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nAfter{/1}.\n' + body(1, 'over') + '\n'],
+    ['cells of two tables and a paragraph between them', '| a |\n| --- |\n| {#1}1 |\n\nZ.\n\n| b |\n| --- |\n| 2{/1} |\n\n' + body(1, 'two') + '\n'],
+    ['a grid table\'s cells and the paragraph after it', '+-------+-----+\n| a     | b   |\n+=======+=====+\n| {#1}c | d   |\n| e     | f   |\n+-------+-----+\n\nAfter.{/1}\n' + body(1, 'grid') + '\n'],
+    ['cells and a paragraph after their table in a note', 'T.[^1]\n\n[^1]: x\n\n    | a | b |\n    | --- | --- |\n    | {#1}1 | 2 |\n\n    After.{/1}\n    ' + body(1, 'n') + '\n'],
   ])('keeps one comment over %s', async (_name, md) => {
     // Each paragraph got a copy of the comment, which export made into a comment each
     expect(await roundTrip(md)).toBe(md);
   });
+
+  test.each([
+    ['from a cell to the paragraph after its table', '3', 'After.', 'Z {==z==}{>>c<<}\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| {#2}3 | 4 |\n\nAfter.{/2}\n'],
+    ['from a paragraph to a cell of the table after it', 'Z ', '2', '{#1}Z {#2}z{/2}\n{#2>>c<<}\n\n| a | b |\n| --- | --- |\n| 1 | 2{/1} |\n| 3 | 4 |\n\n'],
+  ])('keeps one comment Word puts %s', async (_name, from, to, expected) => {
+    // A copy in each paragraph and cell, each a comment of its own in Word
+    // after the next export
+    const markdown = await wordComment('Z {==z==}{>>c<<}\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\nAfter.\n', from, to);
+    expect(markdown).toStartWith(expected);
+    const again = (await convertMdToDocx(markdown)).docx;
+    const document = await (await JSZip.loadAsync(again)).file('word/document.xml')!.async('string');
+    expect(document.match(/<w:commentRangeStart /g)).toHaveLength(2);
+    expect(document.match(/<w:commentReference /g)).toHaveLength(2);
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  const htmlTable = (cells: string, attributes = '') => 'Before {==z==}{>>c<<}\n\n<table' + attributes + '>\n<tr><th>a</th><th>b</th></tr>\n' + cells + '\n</table>\n\nAfter.\n';
+  const MERGED = htmlTable('<tr><td colspan="2">X</td></tr>\n<tr><td>3</td><td>4</td></tr>');
+  const PARAGRAPHS = htmlTable('<tr><td><p>X</p><p>Y</p></td><td>W</td></tr>');
+  const FONT = htmlTable('<tr><td>X</td><td>W</td></tr>', ' data-font="A --> B"');
+  test.each([
+    ['from a paragraph into a merged cell', MERGED, 'Before ', 'X', ['{#1}Before {#2}z{/1}{/2}\n{#1>>@B']],
+    ['from a merged cell to the paragraph after its table', MERGED, 'X', 'After.', ['\n\n{==After.==}{>>@B']],
+    ['over a table with a merged cell', MERGED, 'Before ', 'After.', ['{#1}Before {#2}z{/2}\n', '<p>X</p>', '\n\nAfter.{/1}\n{#1>>@B']],
+    ['from a paragraph into a cell of paragraphs', PARAGRAPHS, 'Before ', 'Y', ['{#1}Before {#2}z{/1}{/2}\n{#1>>@B']],
+    ['from a cell of paragraphs to the paragraph after its table', PARAGRAPHS, 'X', 'After.', ['\n\n{==After.==}{>>@B']],
+    ['from a paragraph into a table with a font a directive can\'t hold', FONT, 'Before ', 'X', ['{#1}Before {#2}z{/1}{/2}\n{#1>>@B']],
+    ['from a table with such a font to the paragraph after it', FONT, 'X', 'After.', ['\n\n{==After.==}{>>@B']],
+    ['over a table with such a font', FONT, 'Before ', 'After.', ['{#1}Before {#2}z{/2}\n', '<p>X</p>', '\n\nAfter.{/1}\n{#1>>@B']],
+  ])('keeps a comment Word puts %s', async (_name, base, from, to, parts) => {
+    // HTML cells hold no comment's markers: its range was left open past
+    // the text before the table, and its body went, so export wrote none
+    await expectCommentKept(await wordComment(base, from, to), parts);
+  });
+
+  test.each([
+    ['a merged cell', MERGED],
+    ['a table with a font a directive can\'t hold', FONT],
+  ])('starts a comment Word puts from %s to the text of an alert after its table after the alert\'s label', async (_name, base) => {
+    // Its range, which the cell can't hold, is in parts, but was taken for
+    // one open from the cell, which kept the label as text
+    const markdown = await wordComment(base.replace('\n\nAfter.\n', '\n\n> [!NOTE]\n> text\n'), 'X', 'text');
+    await expectCommentKept(markdown, ['\n> [!NOTE]\n> {==text==}{>>@B (2024-01-15 10:30) | note<<}\n']);
+  });
+
+  const NOTE_FONT = 'Text.[^1]\n\n[^1]: Before {==z==}{>>c<<}\n\n    <table data-font="A --> B">\n      <tr>\n        <td>\n          <p>X</p>\n        </td>\n      </tr>\n    </table>\n';
+  const embedded = { embedResolver: { readFile: () => new TextEncoder().encode('H\nX\n'), resolveRelative: (_base: string, relative: string) => relative }, documentPath: '/doc/paper.md' };
+  test.each([
+    ['into a table with a font a directive can\'t hold, which ends the document', FONT.replace('\n\nAfter.\n', '\n'), 'word/document.xml',
+      ['{#1}Before {#2}z{/1}{/2}\n{#1>>@B'], undefined],
+    ['into such a table, before another table', FONT.replace('After.\n', '| p |\n| --- |\n| q |\n'), 'word/document.xml',
+      ['{#1}Before {#2}z{/1}{/2}\n{#1>>@B', '</table>\n\n| p |\n| --- |\n| q |\n'], undefined],
+    ['into such a table, which ends a note', NOTE_FONT, 'word/footnotes.xml', ['[^1]: {#1}Before {#2}z{/1}{/2}\n    {#1>>@B'], undefined],
+    ['into a table written as its embed directive', 'Before {==z==}{>>c<<}\n\n<!-- embed: t.csv headers=1 -->\n\nAfter.\n', 'word/document.xml',
+      ['{#1}Before {#2}z{/1}{/2}\n{#1>>@B', '<!-- embed: t.csv headers=1 -->\n\nAfter.\n'], embedded],
+  ])('keeps a comment Word puts from a paragraph %s', async (_name, base, part, parts, exportOptions) => {
+    // Its range was left open, with no text after the table to end it, or
+    // went on over the next table, or the text after the table, as the
+    // cells it ended in weren't written
+    await expectCommentKept(await wordComment(base, 'Before ', 'X', part, exportOptions), parts, exportOptions);
+  });
+
+  test('keeps the text of a comment Word puts over the cells of two tables with a font a directive can\'t hold', async () => {
+    // With no text around the tables to hold it, it was gone
+    const table = (text: string) => '<table data-font="A --> B">\n<tr><td>' + text + '</td></tr>\n</table>\n';
+    const markdown = await wordComment('Before {==z==}{>>c<<}\n\n' + table('X') + '\n' + table('Y') + '\nAfter.\n', 'X', 'Y');
+    expect(markdown).toContain('<p>{==X==}{>>@B (2024-01-15 10:30) | note<<}</p>');
+    expect(markdown).toContain('<p>{==Y==}{>>@B (2024-01-15 10:30) | note<<}</p>');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  /** That the Markdown holds `parts`, and the next export the comment, and
+   *  that the next round trip leaves it as it is */
+  async function expectCommentKept(markdown: string, parts: string[], exportOptions?: Parameters<typeof convertMdToDocx>[1]): Promise<void> {
+    for (const part of parts) expect(markdown).toContain(part);
+    const again = (await convertMdToDocx(markdown, exportOptions)).docx;
+    const commentsXml = await (await JSZip.loadAsync(again)).file('word/comments.xml')!.async('string');
+    expect(commentsXml.match(/<w:comment /g)).toHaveLength(2);
+    expect(commentsXml).toContain('note');
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  }
+
+  /** The Markdown of `base` where Word put a comment from the run of text
+   *  `from` to that of `to`, in the document or another `part`, exported
+   *  with `exportOptions` */
+  async function wordComment(base: string, from: string, to: string, part = 'word/document.xml', exportOptions?: Parameters<typeof convertMdToDocx>[1]): Promise<string> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(base, exportOptions)).docx);
+    let xml = await zip.file(part)!.async('string');
+    const run = (text: string, from = 0) => {
+      const found = new RegExp('<w:r>(?:(?!<w:r>|</w:r>).)*?<w:t(?: [^>]*)?>' + text.replace('.', '\\.') + '</w:t></w:r>').exec(xml.slice(from))!;
+      return { start: from + found.index, end: from + found.index + found[0].length };
+    };
+    const first = run(from);
+    const last = run(to, first.end);
+    xml = xml.slice(0, first.start) + '<w:commentRangeStart w:id="90"/>' + xml.slice(first.start, last.end)
+      + '<w:commentRangeEnd w:id="90"/><w:r><w:commentReference w:id="90"/></w:r>' + xml.slice(last.end);
+    zip.file(part, xml);
+    const commentsXml = await zip.file('word/comments.xml')!.async('string');
+    zip.file('word/comments.xml', commentsXml.replace('</w:comments>',
+      '<w:comment w:id="90" w:author="B" w:date="2024-01-15T10:30:00Z"><w:p><w:r><w:t>note</w:t></w:r></w:p></w:comment></w:comments>'));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  }
 
   test.each([
     ['a paragraph', 'A{#1}\n\nb{/1} c.\n' + body(1, 'p') + '\n'],
@@ -3855,6 +3971,24 @@ describe('Comments across paragraphs', () => {
     ] as ContentItem[], comments);
     expect(markdown).toContain('A {==b==}{>>@A | c<<}');
   });
+
+  test('writes a table with a comment over the cells of each of many rows in linear time', () => {
+    // Each cell went through every comment's range, those that had ended
+    // too. Four times the rows take about four times as long, not sixteen.
+    const time = (rows: number) => {
+      const cell = (text: string, ids: string[]) => ({ paragraphs: [[{ type: 'text' as const, text, commentIds: new Set(ids), formatting: DEFAULT_FORMATTING }]] });
+      const comments = new Map<string, Comment>();
+      const tableRows: TableRow[] = [{ isHeader: true, cells: [cell('A', []), cell('B', [])] }];
+      for (let i = 0; i < rows; i++) {
+        comments.set('c' + i, { author: 'A', text: 'n' + i, date: '' });
+        tableRows.push({ isHeader: false, cells: [cell('a' + i, ['c' + i]), cell('b' + i, ['c' + i])] });
+      }
+      const content: ContentItem[] = [{ type: 'table', rows: tableRows }];
+      return fastestRun(() => expect(buildMarkdown(content, comments).split('\n').slice(2, 4)).toEqual(['| {#1}a0 | b0{/1} |', '| {#2}a1 | b1{/2} |']));
+    };
+    time(1000);
+    expect(time(8000) / time(2000)).toBeLessThan(8);
+  }, 30000);
 });
 
 describe('Comments over display equations', () => {

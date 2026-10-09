@@ -38,6 +38,16 @@ export function renderWithPlugin(input: string, colorScheme?: ColorScheme): stri
   return createMarkdownItWithPlugin(colorScheme).render(input);
 }
 
+/** Render input as VS Code's preview does by default, with linkify on too,
+ *  which reads the levels of the tokens the plugin's rules write. Tests of
+ *  random text keep it off (see renderWithPlugin), as linkify links text
+ *  that looks like a domain, as "a.co". */
+export function renderLikePreview(input: string): string {
+  const md: ManuscriptMarkdownIt = new MarkdownIt({ html: true, linkify: true });
+  md.use(manuscriptMarkdownPlugin);
+  return md.render(input);
+}
+
 /** CriticMarkup type definitions for parameterized tests. */
 export interface CriticType {
   name: string;

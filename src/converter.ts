@@ -9114,7 +9114,9 @@ function renderInlineRange(
     (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment' || item.type === 'image') &&
     item.commentIds && [...item.commentIds].some(id => forceIdCommentIds.has(id))
   ));
-  const useIds = renderOpts?.alwaysUseCommentIds || hasForcedIdCommentInSegment || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
+  // A range open from before, as one an HTML table ended (see
+  // renderTableOrFallback), ends here
+  const useIds = renderOpts?.alwaysUseCommentIds || hasForcedIdCommentInSegment || !!renderOpts?.openIdComments?.size || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
   // Where the bodies go, whose == an == in the runs before them pairs with,
   // as it does with one past a display equation the paragraph goes on in
   markBodyEquals(segment, startIndex, segmentEnd, comments, !!useIds);
@@ -10040,7 +10042,92 @@ function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, stri
   return index;
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; tablesWrittenAt?: (number | undefined)[]; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; tablesWrittenAt?: (number | undefined)[]; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean; cellRangeComments?: Set<string>; aroundTable?: { open: Set<string>; lastItems?: Map<string, ContentItem> } };
+
+/**
+ * The ranges of comments over more than one paragraph (see
+ * collectCommentSpans) in a table's cells: the last cell, in the table's
+ * order, that each is in, and whether it goes on past the table, to an
+ * item after it (see lastCommentItem in buildMarkdown).
+ */
+function tableCommentRanges(rows: TableRow[], renderOpts?: RenderOpts): Map<string, { lastCell: number; goesOn: boolean }> {
+  const ranges = new Map<string, { lastCell: number; goesOn: boolean }>();
+  const items = new Set<ContentItem>();
+  let k = 0;
+  for (const row of rows) {
+    for (const cell of row.cells) {
+      for (const item of cell.paragraphs.flat()) {
+        items.add(item);
+        for (const id of 'commentIds' in item ? item.commentIds ?? [] : []) if (renderOpts?.cellRangeComments?.has(id)) ranges.set(id, { lastCell: k, goesOn: false });
+      }
+      k++;
+    }
+  }
+  for (const [id, range] of ranges) {
+    const last = renderOpts?.aroundTable?.lastItems?.get(id);
+    range.goesOn = !!last && !items.has(last);
+  }
+  return ranges;
+}
+
+/**
+ * The options the cells of a pipe or grid table render with, where a
+ * comment's range goes from one of them on to another (see
+ * collectCommentSpans): in ID syntax, open from cell to cell in the
+ * table's order, past each but its last cell, with its body after the
+ * table, as other cells' bodies are. A range open from the text before
+ * the table (`aroundTable`) is open in its first cell, and one that goes on
+ * past the table stays open past its last, for the text after it (see
+ * commentsOpenAfterTable). One copy of it in each cell gave Word a comment
+ * for each. `cell` goes before each cell's text renders, in that order, an
+ * empty cell's too, and changes only the ranges that end in that cell, as
+ * a table can have a range in each of thousands of rows.
+ */
+function cellCommentRanges(rows: TableRow[], renderOpts?: RenderOpts): { renderOpts?: RenderOpts; cell: () => void } {
+  const ranges = tableCommentRanges(rows, renderOpts);
+  if (ranges.size === 0) return { renderOpts, cell: () => {} };
+  // An item no cell holds, which a range's last item is till its last cell,
+  // so the range stays open past each cell before it (see
+  // renderInlineRangeWithIds)
+  const later: ContentItem = { type: 'table', rows: [] };
+  const lastCommentItem = new Map<string, ContentItem>();
+  // The ranges that end in each cell, by its place in the table's order
+  const endIn = new Map<number, string[]>();
+  for (const [id, { lastCell, goesOn }] of ranges) {
+    lastCommentItem.set(id, later);
+    if (goesOn) continue;
+    const ending = endIn.get(lastCell);
+    if (ending) ending.push(id);
+    else endIn.set(lastCell, [id]);
+  }
+  const open = new Set([...renderOpts?.aroundTable?.open ?? []].filter(id => ranges.has(id)));
+  let at = 0;
+  return {
+    renderOpts: { ...renderOpts, forceIdCommentIds: new Set([...renderOpts?.forceIdCommentIds ?? [], ...ranges.keys()]), openIdComments: open, lastCommentItem, aroundTable: undefined },
+    cell: () => {
+      for (const id of endIn.get(at++) ?? []) lastCommentItem.delete(id);
+    },
+  };
+}
+
+/** A table's rows without the comments `ids` in their cells */
+function withoutCellComments(rows: TableRow[], ids: string[] | Set<string>): TableRow[] {
+  const leftOut = new Set(ids);
+  const without = (item: ContentItem): ContentItem => item.type === 'table' ? { ...item, rows: withoutCellComments(item.rows, leftOut) }
+    : 'commentIds' in item && item.commentIds && [...item.commentIds].some(id => leftOut.has(id))
+      ? { ...item, commentIds: new Set([...item.commentIds].filter(id => !leftOut.has(id))) } : item;
+  return rows.map(row => ({ ...row, cells: row.cells.map(cell => ({ ...cell, paragraphs: cell.paragraphs.map(para => para.map(without)) })) }));
+}
+
+/** The ranges open after a pipe or grid table, from `open` before it: those
+ *  that go on past it, from its cells or around them, and not those that
+ *  end in it (see cellCommentRanges) */
+function commentsOpenAfterTable(rows: TableRow[], open: Set<string>, renderOpts?: RenderOpts): void {
+  for (const [id, { goesOn }] of tableCommentRanges(rows, renderOpts)) {
+    if (goesOn) open.add(id);
+    else open.delete(id);
+  }
+}
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is
@@ -10086,9 +10173,11 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
 
   // Render all cell contents (single pass — side effects happen here)
   const rendered: { text: string; deferred: string[] }[][] = [];
+  const ranges = cellCommentRanges(rows, renderOpts);
   for (const row of rows) {
     const rowCells: { text: string; deferred: string[] }[] = [];
     for (const cell of row.cells) {
+      ranges.cell();
       if (cell.paragraphs.length > 0) {
         // Strip auto-bold from header row cells — md-to-docx forces bold on
         // header cells, so we undo it here to avoid spurious **...** on round-trip.
@@ -10100,7 +10189,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
           : cell.paragraphs[0];
         // Its line breaks at its end too, which renderInlineSegment drops
         // for a grid table's, as a cell of one line holds them as Word's
-        const r = renderInlineRange(joinSplitComments(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), !!renderOpts?.htmlCells), 0, comments, { cell: true }, renderOpts);
+        const r = renderInlineRange(joinSplitComments(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), !!renderOpts?.htmlCells), 0, comments, { cell: true }, ranges.renderOpts);
         // A line break, which a cell's one line can't hold, as <br>, which a
         // cell reads as one, but not a line end in code, an equation or a
         // comment, which isn't one
@@ -10283,6 +10372,30 @@ function gridLineBeforeBreak(line: string): string {
   return before + (backslashes % 2 === 1 ? '\\' : '') + whitespace[0].replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
 }
 
+/** Whether a grid table holds a table's shape, which a pipe table needs
+ *  too: no merged cell, nor a cell of paragraphs, whose lines export reads
+ *  as one paragraph with line breaks, nor a header row after a body row,
+ *  which would lose its header, as a grid table's header is its leading
+ *  rows, and the bold its header stripped. A table of another is HTML. */
+function gridHoldsTableShape(rows: TableRow[]): boolean {
+  if (rows.some(row => row.cells.some(cell => (cell.colspan ?? 1) > 1 || (cell.rowspan ?? 1) > 1 || cell.paragraphs.length > 1))) return false;
+  const firstBody = rows.findIndex(r => !r.isHeader);
+  return firstBody === -1 || !rows.slice(firstBody).some(r => r.isHeader);
+}
+
+/**
+ * Whether a table's cells can't hold a comment's ID markers: where it's
+ * HTML whatever they hold, for its shape (see gridHoldsTableShape) or a
+ * font or column widths no directive's comment can hold (see
+ * buildTableDirectivePrefix), as an HTML cell's markers are text, or it's
+ * written as its embed directive, which leaves its cells out. The table at
+ * `tableIndex` among those the body and then the notes render.
+ */
+function cellsTakeNoRanges(rows: TableRow[], renderOpts: RenderOpts, tableIndex: number): boolean {
+  return !gridHoldsTableShape(rows) || buildTableDirectivePrefix(renderOpts, tableIndex).commentUnsafeFont
+    || !!renderOpts.embedDirectiveMapping?.get(String(tableIndex));
+}
+
 function tryRenderGridTable(
   table: { rows: TableRow[] },
   comments: Map<string, Comment>,
@@ -10294,19 +10407,7 @@ function tryRenderGridTable(
   const rows = table.rows;
   if (rows.length === 0) return null;
 
-  // Grid tables don't support colspan/rowspan, nor a cell of paragraphs,
-  // whose lines export reads as one paragraph with line breaks
-  for (const row of rows) {
-    for (const cell of row.cells) {
-      if (cell.colspan && cell.colspan > 1) return null;
-      if (cell.rowspan && cell.rowspan > 1) return null;
-      if (cell.paragraphs.length > 1) return null;
-    }
-  }
-  // A grid table's header is its leading rows: a header row after a body
-  // row would lose its header, and the bold its header stripped
-  const firstBody = rows.findIndex(r => !r.isHeader);
-  if (firstBody !== -1 && rows.slice(firstBody).some(r => r.isHeader)) return null;
+  if (!gridHoldsTableShape(rows)) return null;
 
   const numCols = maxOf(rows.map(r => r.cells.length));
 
@@ -10322,9 +10423,11 @@ function tryRenderGridTable(
 
   // Render all cells: a cell's line breaks → multiple lines
   const rendered: { lines: string[]; deferred: string[] }[][] = [];
+  const ranges = cellCommentRanges(rows, renderOpts);
   for (const row of rows) {
     const rowCells: { lines: string[]; deferred: string[] }[] = [];
     for (const cell of row.cells) {
+      ranges.cell();
       const cellLines: string[] = [];
       const cellDeferred: string[] = [];
       for (const para of cell.paragraphs) {
@@ -10336,7 +10439,7 @@ function tryRenderGridTable(
                 ? { ...item, formatting: { ...item.formatting, bold: false } }
                 : item)
           : para;
-        const r = renderInlineSegment(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), comments, renderOpts, { cell: true });
+        const r = renderInlineSegment(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), comments, ranges.renderOpts, { cell: true });
         // Split on newlines within a paragraph (e.g. hard breaks).
         // Strip the backslash of the break that ends each line but the last —
         // grid table cells treat bare newlines as hard breaks, so the
@@ -10380,6 +10483,7 @@ function tryRenderGridTable(
 
   // Find header boundary: a table of header rows alone ends its header at
   // its last row, under +===+, which export reads as a header's
+  const firstBody = rows.findIndex(r => !r.isHeader);
   const headerEnd = firstBody === -1 ? rows.length : firstBody;
   const hasHeader = headerEnd > 0;
   const aligns = columnAlignments(rows, numCols);
@@ -11066,11 +11170,34 @@ function renderTableOrFallback(
   // lines, though the format export wrote at its index, where Word added or
   // deleted a table before it, is another table's
   if (around) storedFormat = 'html';
-  // A cell holds no range that goes on past it, and a range open around the
-  // table, with no item in it, stays open for the text after. A cell's
-  // comments are the browser's where the table was HTML.
-  if (renderOpts?.openIdComments || storedFormat === 'html') renderOpts = { ...renderOpts, openIdComments: undefined, htmlCells: storedFormat === 'html' };
+  // A range open around the table, with no item in it, stays open for the
+  // text after, and one over its cells goes on from cell to cell in a pipe
+  // or grid table, which takes those open before it, and leaves open those
+  // that go on after it (see cellCommentRanges). A cell's comments are the
+  // browser's where the table was HTML.
+  const openAround = renderOpts?.openIdComments;
+  if (openAround || storedFormat === 'html') {
+    renderOpts = { ...renderOpts, openIdComments: undefined, htmlCells: storedFormat === 'html',
+      aroundTable: openAround && { open: new Set(openAround), lastItems: renderOpts?.lastCommentItem } };
+  }
+  // The ranges over the table's cells and the text around it, which HTML
+  // cells can't hold, as their markers are text there, so they hold none of
+  // them, where the table is HTML: a range open from the text before the
+  // table and after it is open over the table. One that starts or ends in
+  // a table that's HTML for its shape or font is copies (see
+  // collectCommentSpans), but one where it's HTML as a grid table can't be
+  // read back, which import can't tell before, open from before that ends
+  // in it ends at the text after it, or after the table where there's none
+  // (see closeOpenRanges), and one from a cell starts at the text after it
+  const ranges = tableCommentRanges(item.rows, renderOpts);
+  const crossing = [...ranges.keys()].filter(id => renderOpts?.forceIdCommentIds?.has(id));
+  const htmlTable = () => {
+    for (const id of crossing) if (openAround?.has(id) && !ranges.get(id)!.goesOn) renderOpts?.lastCommentItem?.delete(id);
+    const table = crossing.length === 0 ? item : { ...item, rows: withoutCellComments(item.rows, crossing) };
+    return rHtml(renderHtmlTable(table, comments, options?.tableIndent, renderOpts, htmlFontAttrs, html));
+  };
   const r = (body: string) => {
+    if (openAround) commentsOpenAfterTable(item.rows, openAround, renderOpts);
     // Neither, where one can't be read as it was, as a <pre> before the
     // table and its end after it
     let before = html && detachedTableHtml(html[0]);
@@ -11087,9 +11214,7 @@ function renderTableOrFallback(
   // If the original format was HTML or font value is comment-unsafe, emit HTML
   // directly. A table that holds what HTML cells can't goes on as if it had
   // no stored format, to a format that can, unless it needs HTML.
-  if ((storedFormat === 'html' && htmlCellsHoldTable(item)) || forceHtmlTable) {
-    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, html));
-  }
+  if ((storedFormat === 'html' && htmlCellsHoldTable(item)) || forceHtmlTable) return htmlTable();
   // Parse stored grid source column widths for this table
   const gridSrcWidthsStr = tableIndex !== undefined ? renderOpts?.gridSourceColWidthsMapping?.get(String(tableIndex)) : undefined;
   let gridSrcWidths = gridSrcWidthsStr ? gridSrcWidthsStr.split(',').map(Number) : undefined;
@@ -11103,7 +11228,7 @@ function renderTableOrFallback(
   if (storedFormat === 'grid') {
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
-    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, html));
+    return htmlTable();
   }
   // When the original was a pipe table, skip the width check to preserve format
   const pipeMax = storedFormat === 'pipe' ? Infinity : (options?.pipeTableMaxLineWidth ?? 120);
@@ -11124,7 +11249,7 @@ function renderTableOrFallback(
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
   }
-  return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, html));
+  return htmlTable();
 }
 
 const PARAGRAPH_CONTENT_ELEMENTS = new Set([
@@ -11589,9 +11714,13 @@ function alertGlyphForType(alertType: GfmAlertType): string | undefined {
  * on it ends with it or starts on it. Only at an alert's start, as
  * buildMarkdown finds it, where the label is, and before buildMarkdown
  * merges runs and finds the comments' ranges' ends, which keep the items
- * they end in. Returns `content`, or a copy with the changes.
+ * they end in. Returns `content`, or a copy with the changes. A table
+ * whose cells can't hold a range, by its index (`takesNoRanges`, see
+ * cellsTakeNoRanges), splits the comments in it (see
+ * commentIdsSplitAtTables).
  */
-function startCommentsAfterAlertLabels(content: ContentItem[], inlineByGroup: Map<number, boolean> | null | undefined): ContentItem[] {
+function startCommentsAfterAlertLabels(content: ContentItem[], inlineByGroup: Map<number, boolean> | null | undefined,
+  takesNoRanges: (rows: TableRow[], index: number) => boolean): ContentItem[] {
   // The items that go in place of each item changed, by its index
   const changed = new Map<number, ContentItem[]>();
   let splitAtTables: Set<string> | undefined;
@@ -11613,7 +11742,7 @@ function startCommentsAfterAlertLabels(content: ContentItem[], inlineByGroup: Ma
         || label.text !== glyph + ' ' + gfmAlertTitle(para.alertType)) continue;
     const { bold, ...others } = label.formatting;
     if (!bold || Object.values(others).some(Boolean)) continue;
-    const open = commentIdsBefore(content, i, splitAtTables ??= commentIdsSplitAtTables(content));
+    const open = commentIdsBefore(content, i, splitAtTables ??= commentIdsSplitAtTables(content, takesNoRanges));
     if ([...label.commentIds].every(id => open.has(id))) continue;
     // The items the line break and space are in, and how much of each, each
     // plain text, as export writes them, which stripAlertLeadPrefix takes
@@ -11683,39 +11812,62 @@ function holdsCommentMarkers(item: ContentItem, inCodeBlock: boolean, inTable: b
 }
 
 /** The comments whose ranges import writes in parts at a table, one in each
- *  paragraph, rather than keep them open from one paragraph to the next:
- *  those on an item in a table's cell that holds their markers (see
- *  holdsCommentMarkers), as a cell can't hold a range that goes on. A
- *  range over a table whose cells hold none of it goes on past it. */
-function commentIdsSplitAtTables(content: ContentItem[]): Set<string> {
-  const ids = new Set<string>();
+ *  paragraph and cell, rather than keep them open from one paragraph to
+ *  the next: those whose first item or last that holds their markers (see
+ *  holdsCommentMarkers) is in the cells of a table that can't hold a range,
+ *  by its index from `firstIndex` among the tables buildMarkdown renders
+ *  (`takesNoRanges`, see cellsTakeNoRanges), or of a table in one's cell,
+ *  as its range can't end there. A range from the text before such a table
+ *  to the text after it goes on over it, as one through the cells of a
+ *  table that holds it does. */
+function commentIdsSplitAtTables(content: ContentItem[], takesNoRanges: (rows: TableRow[], index: number) => boolean, firstIndex = 0): Set<string> {
+  // Whether each comment's first item and its last are in such a table
+  const ends = new Map<string, [boolean, boolean]>();
   let inCodeBlock = false;
-  const visit = (items: ContentItem[], inTable: boolean) => {
+  let index = firstIndex;
+  const visit = (items: ContentItem[], inTable: boolean, noRanges: boolean) => {
     for (const item of items) {
       if (item.type === 'para') {
         inCodeBlock = !!item.isCodeBlock;
       } else if (item.type === 'table') {
-        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true);
-      } else if (inTable && 'commentIds' in item && holdsCommentMarkers(item, inCodeBlock, true)) {
-        for (const id of item.commentIds ?? []) ids.add(id);
+        const html = inTable ? noRanges || !gridHoldsTableShape(item.rows) : takesNoRanges(item.rows, index++);
+        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true, html);
+      } else if ('commentIds' in item && holdsCommentMarkers(item, inCodeBlock, inTable)) {
+        for (const id of item.commentIds ?? []) ends.set(id, [ends.get(id)?.[0] ?? noRanges, noRanges]);
       }
     }
   };
-  visit(content, false);
-  return ids;
+  visit(content, false, false);
+  return new Set([...ends].flatMap(([id, [first, last]]) => first || last ? [id] : []));
 }
 
 /** The comments whose ranges are open where the content before `index`
  *  ends: those of its last item, past paragraphs and other structure with
- *  no text, as a thematic break, an empty list item or a table, but those
- *  import writes in parts at a table, `splitAtTables` (see
- *  commentIdsSplitAtTables), each part with its own markers. */
+ *  no text, as a thematic break or an empty list item, and in a table, the
+ *  last of its cells' items, as a range goes on from a table's cells, or
+ *  over one whose cells hold none of it, but those import writes in parts
+ *  at a table, `splitAtTables` (see commentIdsSplitAtTables), each part
+ *  with its own markers. */
 function commentIdsBefore(content: ContentItem[], index: number, splitAtTables: Set<string>): Set<string> {
-  for (let k = index - 1; k >= 0; k--) {
-    const item = content[k];
-    if ('commentIds' in item) return new Set([...item.commentIds ?? []].filter(id => !splitAtTables.has(id)));
-  }
-  return new Set();
+  const lastIds = (items: ContentItem[], end: number): Set<string> | undefined => {
+    for (let k = end - 1; k >= 0; k--) {
+      const item = items[k];
+      if ('commentIds' in item) return item.commentIds ?? new Set();
+      if (item.type !== 'table') continue;
+      for (let r = item.rows.length - 1; r >= 0; r--) {
+        const cells = item.rows[r].cells;
+        for (let c = cells.length - 1; c >= 0; c--) {
+          for (let p = cells[c].paragraphs.length - 1; p >= 0; p--) {
+            const para = cells[c].paragraphs[p];
+            const ids = lastIds(para, para.length);
+            if (ids) return ids;
+          }
+        }
+      }
+    }
+    return undefined;
+  };
+  return new Set([...lastIds(content, index) ?? []].filter(id => !splitAtTables.has(id)));
 }
 
 function paragraphStartsWithExportedAlertLead(
@@ -12722,8 +12874,67 @@ export function buildMarkdown(
   const joinedContent = joinTrackedParagraphBreaks(content, marks, (para, opening) => (
     opening && prefixesQuoteLines(opening) ? '' : paragraphLinePrefix(para)
   ));
+  // Notes in the order they're written, after the body
+  // Those only notes refer to after the others, as they reach them
+  const allNotes = [...(options?.notes?.map.values() ?? [])];
+  const noteEntries = [...allNotes.filter(entry => !entry.reached).sort((a, b) => compareNoteLabels(a.label, b.label)), ...allNotes.filter(entry => entry.reached)];
+  // The tables the body and then the notes render, by their indices, each
+  // with its note's key, or the body's '', as export's are: the body's
+  // before its runs merge, which keeps its tables, as the comments on an
+  // alert's label go by them (see startCommentsAfterAlertLabels)
+  const noteScopes = new Map([...options?.notes?.map ?? []].map(([key, entry]) => [entry, key]));
+  const tablesRead = [['', joinedContent] as const, ...noteEntries.map(entry => [noteScopes.get(entry) ?? '', entry.body] as const)]
+    .flatMap(([scope, items]) => items.flatMap(item => item.type === 'table' ? [{ scope, rows: item.rows }] : []));
+  // The settings export wrote for each table by the index it wrote it at,
+  // as its format and font, by the index it's rendered at, which differs
+  // where Word added or deleted a table before it: the settings of the one
+  // export wrote that it is (see matchTables), or, where export wrote no
+  // identities, of the one at its index
+  // The notes' tables go to matchTables in the order export wrote their
+  // notes in, which the identities' scopes give, as Word may show a note in
+  // another turn (see convertDocx), and those of a note export didn't write
+  // after
+  let writtenAt: (number | undefined)[] | undefined;
+  if (options?.tableIdentities) {
+    const firstWritten = new Map<string, number>();
+    options.tableIdentities.forEach(([scope], index) => { if (!firstWritten.has(scope)) firstWritten.set(scope, index); });
+    const turn = (index: number) => tablesRead[index].scope === '' ? -1 : firstWritten.get(tablesRead[index].scope) ?? options.tableIdentities!.length;
+    const order = tablesRead.map((_, index) => index).sort((a, b) => turn(a) - turn(b) || a - b);
+    const matched = matchTables(options.tableIdentities, order.map(index => tableIdentityOf(tablesRead[index].rows.map(row => row.cells.map(tableCellText)), tablesRead[index].scope)));
+    writtenAt = [];
+    order.forEach((index, k) => { writtenAt![index] = matched[k]; });
+  }
+  const settingsRead = <T>(settings: Map<string, T> | null | undefined): Map<string, T> | undefined => {
+    if (!settings || !writtenAt) return settings ?? undefined;
+    const read = new Map<string, T>();
+    writtenAt.forEach((at, index) => { if (at !== undefined && settings.has(String(at))) read.set(String(index), settings.get(String(at))!); });
+    return read;
+  };
+  const indicesRead = (tables: Set<number> | null | undefined): Set<number> | undefined => tables && writtenAt
+    ? new Set(writtenAt.flatMap((at, index) => at !== undefined && tables.has(at) ? [index] : []))
+    : tables ?? undefined;
+  const embedDirectiveMapping = settingsRead(options?.embedDirectiveMapping);
+  // How many tables the body and each note have with each first row and
+  // text, which the HTML export wrote around one goes to no other while
+  // it's there (see renderTableOrFallback), but one written as its embed
+  // directive, which export doesn't count
+  const tablesAlike = new Map<string, number>();
+  if (options?.tableHtmlAroundMapping) {
+    tablesRead.forEach((table, index) => {
+      const key = table.scope + '\n' + tableIdentity(table.rows);
+      if (!embedDirectiveMapping?.get(String(index))) tablesAlike.set(key, (tablesAlike.get(key) ?? 0) + 1);
+    });
+  }
+  // What of each table's settings decides whether its cells can hold a
+  // comment's range (see cellsTakeNoRanges)
+  const rangeSettings: RenderOpts = {
+    tableFontMapping: settingsRead(options?.tableFontMapping),
+    tableColWidthsMapping: settingsRead(options?.tableColWidthsMapping),
+    embedDirectiveMapping,
+  };
+  const takesNoRanges = (rows: TableRow[], index: number) => cellsTakeNoRanges(rows, rangeSettings, index);
   const mergedContent = mergeConsecutiveRuns(withoutHiddenCommentSpace(options?.calloutLabels === false ? joinedContent
-    : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup)));
+    : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup, takesNoRanges)));
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
   const commentIdRemap = new Map<string, string>();
@@ -12806,10 +13017,6 @@ export function buildMarkdown(
       }
     }
   }
-  // Notes in the order they're written, after the body
-  // Those only notes refer to after the others, as they reach them
-  const allNotes = [...(options?.notes?.map.values() ?? [])];
-  const noteEntries = [...allNotes.filter(entry => !entry.reached).sort((a, b) => compareNoteLabels(a.label, b.label)), ...allNotes.filter(entry => entry.reached)];
   // Each note's content as it renders, which collectCommentSpans finds the
   // last item of a comment's range in
   // Whether each of a note's code blocks goes as its paragraphs, before
@@ -12848,18 +13055,34 @@ export function buildMarkdown(
   }
 
   // A comment whose range spans paragraphs takes ID syntax, which keeps its
-  // range open from one to the next, up to its last item. One that reaches
-  // into a table, whose cells can't hold that, goes on in each paragraph.
+  // range open from one to the next, up to its last item. Over a table's
+  // cells it goes from cell to cell there, and on into and out of the
+  // table where the paragraphs around it hold it too (see
+  // cellCommentRanges), as a copy in each paragraph and cell gave Word a
+  // comment for each. One that starts or ends in a table whose cells can't
+  // hold its markers (see commentIdsSplitAtTables), as one only HTML holds, is a
+  // copy in each paragraph and cell, as its range can't end there, nor its
+  // body follow it, nor start there, and one over it goes over it, from
+  // the text before to the text after (see renderTableOrFallback).
   // Code blocks, display equations and HTML comments can't hold ID markers
   // either, so a range starts and ends in the text around them.
   const lastCommentItem = new Map<string, ContentItem>();
+  const cellRangeComments = new Set<string>();
+  // The index of the next table the body or a note renders, as
+  // buildMarkdown counts them (see tablesRead)
+  let tablesVisited = 0;
   function collectCommentSpans(items: ContentItem[]): void {
     const paragraphOf = new Map<string, number>();
     const spanning = new Set<string>();
-    const inTable = commentIdsSplitAtTables(items);
+    const inTable = new Set<string>();
+    // The table each comment is in, or none where it's outside one too, or
+    // in more than one
+    const tableOf = new Map<string, ContentItem | undefined>();
+    const splitAtTables = commentIdsSplitAtTables(items, takesNoRanges, tablesVisited);
+    tablesVisited += items.filter(item => item.type === 'table').length;
     let paragraph = 0;
     let inCodeBlock = false;
-    const visit = (list: ContentItem[], table: boolean) => {
+    const visit = (list: ContentItem[], table: ContentItem | undefined) => {
       for (const item of list) {
         if (item.type === 'para') {
           paragraph++;
@@ -12869,7 +13092,7 @@ export function buildMarkdown(
         if (item.type === 'table') {
           for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) {
             paragraph++;
-            visit(para, true);
+            visit(para, item);
           }
           paragraph++;
           continue;
@@ -12877,7 +13100,7 @@ export function buildMarkdown(
         // A display equation outside a table is a block of its own, which
         // ID markers go around
         const displayBlock = item.type === 'math' && item.display && !table;
-        const marked = holdsCommentMarkers(item, inCodeBlock, table);
+        const marked = holdsCommentMarkers(item, inCodeBlock, !!table);
         if (displayBlock) paragraph++;
         // A tracked break joinTrackedParagraphBreaks put in the text ends a
         // paragraph too, where text after it goes on in the next, as a
@@ -12896,16 +13119,20 @@ export function buildMarkdown(
             const first = paragraphOf.get(id);
             if (first === undefined) paragraphOf.set(id, paragraph);
             else if (first !== paragraph) spanning.add(id);
+            if (table) inTable.add(id);
+            tableOf.set(id, !tableOf.has(id) || tableOf.get(id) === table ? table : undefined);
             lastCommentItem.set(id, item);
           }
         }
         if (displayBlock) paragraph++;
       }
     };
-    visit(items, false);
+    visit(items, undefined);
     for (const id of paragraphOf.keys()) {
-      if (spanning.has(id) && !inTable.has(id)) forceIdCommentIds.add(id);
+      const ranged = spanning.has(id) && !splitAtTables.has(id);
+      if (ranged && !tableOf.get(id)) forceIdCommentIds.add(id);
       else lastCommentItem.delete(id);
+      if (ranged && inTable.has(id)) cellRangeComments.add(id);
     }
   }
   collectCommentSpans(mergedContent);
@@ -13091,51 +13318,6 @@ export function buildMarkdown(
   for (const id of idOverComments) forceIdCommentIds.add(id);
 
   const noteLabels = options?.notes?.assignedLabels;
-  // The tables the body and then the notes render, by their indices, each
-  // with its note's key, or the body's '', as export's are
-  const noteScopes = new Map([...options?.notes?.map ?? []].map(([key, entry]) => [entry, key]));
-  const tablesRead = [['', mergedContent] as const, ...noteEntries.map(entry => [noteScopes.get(entry) ?? '', entry.body] as const)]
-    .flatMap(([scope, items]) => items.flatMap(item => item.type === 'table' ? [{ scope, rows: item.rows }] : []));
-  // The settings export wrote for each table by the index it wrote it at,
-  // as its format and font, by the index it's rendered at, which differs
-  // where Word added or deleted a table before it: the settings of the one
-  // export wrote that it is (see matchTables), or, where export wrote no
-  // identities, of the one at its index
-  // The notes' tables go to matchTables in the order export wrote their
-  // notes in, which the identities' scopes give, as Word may show a note in
-  // another turn (see convertDocx), and those of a note export didn't write
-  // after
-  let writtenAt: (number | undefined)[] | undefined;
-  if (options?.tableIdentities) {
-    const firstWritten = new Map<string, number>();
-    options.tableIdentities.forEach(([scope], index) => { if (!firstWritten.has(scope)) firstWritten.set(scope, index); });
-    const turn = (index: number) => tablesRead[index].scope === '' ? -1 : firstWritten.get(tablesRead[index].scope) ?? options.tableIdentities!.length;
-    const order = tablesRead.map((_, index) => index).sort((a, b) => turn(a) - turn(b) || a - b);
-    const matched = matchTables(options.tableIdentities, order.map(index => tableIdentityOf(tablesRead[index].rows.map(row => row.cells.map(tableCellText)), tablesRead[index].scope)));
-    writtenAt = [];
-    order.forEach((index, k) => { writtenAt![index] = matched[k]; });
-  }
-  const settingsRead = <T>(settings: Map<string, T> | null | undefined): Map<string, T> | undefined => {
-    if (!settings || !writtenAt) return settings ?? undefined;
-    const read = new Map<string, T>();
-    writtenAt.forEach((at, index) => { if (at !== undefined && settings.has(String(at))) read.set(String(index), settings.get(String(at))!); });
-    return read;
-  };
-  const indicesRead = (tables: Set<number> | null | undefined): Set<number> | undefined => tables && writtenAt
-    ? new Set(writtenAt.flatMap((at, index) => at !== undefined && tables.has(at) ? [index] : []))
-    : tables ?? undefined;
-  const embedDirectiveMapping = settingsRead(options?.embedDirectiveMapping);
-  // How many tables the body and each note have with each first row and
-  // text, which the HTML export wrote around one goes to no other while
-  // it's there (see renderTableOrFallback), but one written as its embed
-  // directive, which export doesn't count
-  const tablesAlike = new Map<string, number>();
-  if (options?.tableHtmlAroundMapping) {
-    tablesRead.forEach((table, index) => {
-      const key = table.scope + '\n' + tableIdentity(table.rows);
-      if (!embedDirectiveMapping?.get(String(index))) tablesAlike.set(key, (tablesAlike.get(key) ?? 0) + 1);
-    });
-  }
   const renderOpts = {
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
     timezone: options?.timezone,
@@ -13145,6 +13327,7 @@ export function buildMarkdown(
     emittedIdCommentBodies,
     openIdComments: new Set<string>(),
     lastCommentItem,
+    cellRangeComments,
     noteLabels,
     imageFormatMapping: options?.imageFormatMapping ?? undefined,
     noteImageFormatMapping: options?.noteImageFormatMapping ?? undefined,
@@ -13166,6 +13349,32 @@ export function buildMarkdown(
     portraitTableIndices: indicesRead(options?.portraitTableIndices),
     embedDirectiveMapping,
   };
+
+  /** The ends of the ranges open where the body or a note ends, as one
+   *  that ends in an HTML table, which the text after the table ends (see
+   *  renderTableOrFallback), where none follows, and the bodies of those
+   *  that end, in a paragraph of their own, which export writes as Word's
+   *  empty one after the table, which import leaves out; or, before a
+   *  table (`ended`), those that end there, which have no last item to
+   *  end at, whose paragraph is Word's empty one between the tables */
+  function closeOpenRanges(ended = false): { markers: string; bodies: string[] } | undefined {
+    const open = renderOpts.openIdComments;
+    const ids = [...open].filter(id => !ended || !lastCommentItem.has(id));
+    if (ids.length === 0) return undefined;
+    const remap = (id: string) => commentIdRemap.get(id) ?? id;
+    let markers = '';
+    const bodies: string[] = [];
+    for (const id of ids) {
+      open.delete(id);
+      markers += '{/' + remap(id) + '}';
+      const comment = comments.get(id);
+      if (comment && !emittedIdCommentBodies.has(id)) {
+        emittedIdCommentBodies.add(id);
+        bodies.push(formatCommentBodyWithId(remap(id), comment, options?.timezone));
+      }
+    }
+    return { markers, bodies };
+  }
 
   /** A display equation's block with the ID markers of the comments over
    *  it, which open before its fences, unless open from the text before,
@@ -14300,6 +14509,8 @@ export function buildMarkdown(
       } else if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
         output.push('\n\n');
       }
+      const ended = closeOpenRanges(true);
+      if (ended) output.push([ended.markers, ...ended.bodies].join('\n'), '\n\n');
       // If this table was originally an embed directive, emit the directive instead of
       // rendering the table. Table directives (font-size, etc.) are emitted as a prefix
       // before the embed directive. Multi-table embeds (e.g. a .md file with 2 tables)
@@ -14723,6 +14934,12 @@ export function buildMarkdown(
   // Trailing empty revised heading: serialize its deferred marker.
   flushPendingHeadingCriticMarker();
   closeHtmlBlocks();
+  const leftOpen = closeOpenRanges();
+  if (leftOpen) {
+    // After a blank line, as after the empty paragraph it is in Word
+    const end = /\n*$/.exec(output.join(''))![0].length;
+    output.push('\n'.repeat(output.length > 0 ? Math.max(0, 2 - end) : 0) + [leftOpen.markers, ...leftOpen.bodies].join('\n'));
+  }
 
   // Leave out a <!-- references --> marker the body ends with, where export
   // puts the bibliography without one, at the end of the document, which in
@@ -14885,6 +15102,12 @@ export function buildMarkdown(
           }
           endParagraph();
           paragraphPart = undefined;
+          const ended = closeOpenRanges(true);
+          if (ended) {
+            bodyParts.push(ended.markers);
+            pushAll(paragraphBodies, ended.bodies);
+            endParagraph();
+          }
           const noteRawEmbedValue = noteRenderOpts?.embedDirectiveMapping?.get(String(tableIndex));
           if (noteRawEmbedValue) {
             const noteTabPos = noteRawEmbedValue.indexOf('\t');
@@ -14951,6 +15174,12 @@ export function buildMarkdown(
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
         pushInline(inlinePart(part.text));
         pushAll(paragraphBodies, part.deferredComments);
+      }
+      const noteLeftOpen = closeOpenRanges();
+      if (noteLeftOpen) {
+        endParagraph();
+        bodyParts.push(noteLeftOpen.markers);
+        pushAll(paragraphBodies, noteLeftOpen.bodies);
       }
       if (bodyParts.length === 0) {
         bodyParts.push('');
