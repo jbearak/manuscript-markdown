@@ -5323,7 +5323,7 @@ function noteHtmlBlock(block: HtmlBlock, piece: string, length: number): void {
 /** A line, as of a hidden comment, that would end the paragraph it's in or
  *  make it a heading: one that starts a block (see startsBlockLine), a rule,
  *  or a heading's underline */
-function breaksParagraph(line: string): boolean {
+export function breaksParagraph(line: string): boolean {
   // The whitespace after a rule's last character goes to that character's
   // own [ \t]*, not to one after the group too, which would try each split
   // of it between the two, in time in the square of its length

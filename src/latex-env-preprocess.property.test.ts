@@ -2,6 +2,14 @@ import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
 import { wrapBareLatexEnvironments } from './latex-env-preprocess';
 import { parseMd } from './md-to-docx';
+import { breaksParagraph } from './converter';
+
+// Markdown reads a line of display math that starts a block, such as a ~~~
+// fence or a list item, as that block, which ends the paragraph the math is
+// in, and the environment with it, so the content of an environment here
+// starts no such line (see "Inline and Display Math" in
+// docs/latex-equations.md).
+const inParagraph = (content: string) => !content.split('\n').some(breaksParagraph);
 
 describe('wrapBareLatexEnvironments property tests', () => {
 	test('idempotent: applying twice equals applying once', () => {
@@ -9,7 +17,7 @@ describe('wrapBareLatexEnvironments property tests', () => {
 		const envArb = fc.constantFrom(...envNames);
 		const contentArb = fc.string({ maxLength: 30 }).map(s =>
 			s.replace(/\\begin\{/g, '').replace(/\\end\{/g, '')
-		);
+		).filter(inParagraph);
 
 		fc.assert(
 			fc.property(envArb, contentArb, (env: string, content: string) => {
@@ -37,7 +45,7 @@ describe('wrapBareLatexEnvironments property tests', () => {
 		const envArb = fc.constantFrom(...envNames);
 		const contentArb = fc.string({ maxLength: 20 }).map(s =>
 			s.replace(/\\begin\{/g, '').replace(/\\end\{/g, '').replace(/\$/g, '')
-		);
+		).filter(inParagraph);
 
 		fc.assert(
 			fc.property(envArb, contentArb, (env: string, content: string) => {
