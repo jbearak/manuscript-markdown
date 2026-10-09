@@ -36,7 +36,7 @@ import { decodeXml } from './template-sections';
 // Commented text:
 // - Group adjacent runs by identical commentIds even when formatting differs
 // - Comment ID remap: collect IDs from top-level and nested table-cell paragraphs
-// - Cross-paragraph overlap detection: global via detectGlobalOverlaps() during
+// - Cross-paragraph overlap detection: global via globallyOverlappingComments() during
 //   buildMarkdown metadata collection, not per-segment
 // - Non-numeric comment ID roundtrip: persist mapping in docProps/custom.xml under
 //   MANUSCRIPT_COMMENT_IDS[_N]
@@ -8551,8 +8551,59 @@ function renderInlineSegment(
   };
 }
 
+/** A comment's range over the runs that carry it, from the position of the
+ *  first to the end, [start, end) */
+export interface CommentRange { id: string; start: number; end: number }
+
+/**
+ * The ids of `ranges` that overlap another, where each starts before the
+ * other ends. Sorted by start, those that start before a range ends are the
+ * first so many, and it overlaps one of them, not itself, where the latest
+ * end among them is after its start. The latest end of each first so many,
+ * which range has it, and the latest end of another give that, so this
+ * takes time n log n, where comparing each pair took time n squared. A
+ * range that ends where or before it starts overlaps one around it, as a
+ * comparison of the pair has it.
+ */
+export function overlappingCommentRanges(ranges: readonly CommentRange[]): Set<string> {
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  // For the first k + 1: the latest end, the place of the range with it,
+  // and the latest end of the others
+  const latest: number[] = [];
+  const latestAt: number[] = [];
+  const latestOther: number[] = [];
+  let first = -Infinity;
+  let firstAt = -1;
+  let second = -Infinity;
+  sorted.forEach((range, k) => {
+    if (range.end > first) {
+      second = first;
+      first = range.end;
+      firstAt = k;
+    } else if (range.end > second) {
+      second = range.end;
+    }
+    latest.push(first);
+    latestAt.push(firstAt);
+    latestOther.push(second);
+  });
+  const overlapping = new Set<string>();
+  sorted.forEach((range, k) => {
+    // How many start before it ends
+    let low = 0;
+    let high = sorted.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (sorted[mid].start < range.end) low = mid + 1;
+      else high = mid;
+    }
+    if (low > 0 && (latestAt[low - 1] === k ? latestOther[low - 1] : latest[low - 1]) > range.start) overlapping.add(range.id);
+  });
+  return overlapping;
+}
+
 /** Check whether any position in the segment has more than one active comment. */
-function hasOverlappingComments(segment: ContentItem[]): boolean {
+export function hasOverlappingComments(segment: ContentItem[]): boolean {
   const allIds = new Set<string>();
   for (const item of segment) {
     if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment' || item.type === 'image') && item.commentIds) {
@@ -8594,16 +8645,54 @@ function hasOverlappingComments(segment: ContentItem[]): boolean {
     }
   }
 
-  // Check if any pair of comment ranges overlaps
+  // Whether any pair of comment ranges overlaps
   const ranges = [...allIds].map(id => ({ id, start: starts.get(id) ?? 0, end: ends.get(id) ?? 0 }));
-  for (let a = 0; a < ranges.length; a++) {
-    for (let b = a + 1; b < ranges.length; b++) {
-      if (ranges[a].start < ranges[b].end && ranges[b].start < ranges[a].end) {
-        return true;
+  return overlappingCommentRanges(ranges).size > 0;
+}
+
+/** The ranges of the comments in `items`, and in their tables' cells, by
+ *  the runs that carry any, one position for each */
+function commentRangesAcross(items: ContentItem[]): CommentRange[] {
+  const starts = new Map<string, number>();
+  const ends = new Map<string, number>();
+  let pos = 0;
+  let prevIds = new Set<string>();
+
+  function scan(itemList: ContentItem[]): void {
+    for (const item of itemList) {
+      if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment' || item.type === 'image') && item.commentIds) {
+        const ids = item.commentIds;
+        for (const id of ids) {
+          if (!prevIds.has(id)) starts.set(id, Math.min(starts.get(id) ?? pos, pos));
+        }
+        for (const id of prevIds) {
+          if (!ids.has(id)) ends.set(id, Math.max(ends.get(id) ?? pos, pos));
+        }
+        prevIds = ids;
+        pos++;
+      } else if (item.type === 'table') {
+        for (const row of item.rows) {
+          for (const cell of row.cells) {
+            for (const para of cell.paragraphs) {
+              scan(para);
+            }
+          }
+        }
       }
     }
   }
-  return false;
+  scan(items);
+  for (const id of prevIds) {
+    if (!ends.has(id)) ends.set(id, pos);
+  }
+  return [...starts.keys()].map(id => ({ id, start: starts.get(id) ?? 0, end: ends.get(id) ?? 0 }));
+}
+
+/** The comments in `items` whose ranges overlap another's there, anywhere,
+ *  which take ID syntax. Only the comments in these items, so that a scan
+ *  of each note compares its own and not all the document's */
+export function globallyOverlappingComments(items: ContentItem[]): Set<string> {
+  return overlappingCommentRanges(commentRangesAcross(items));
 }
 
 function formatDateSuffix(date: string | undefined, timezone?: string): string {
@@ -13140,55 +13229,11 @@ export function buildMarkdown(
   collectCommentSpans(mergedContent);
   for (const body of noteBodies.values()) collectCommentSpans(body);
 
-  // Global overlap detection: mark comments that overlap anywhere in the document
-  function detectGlobalOverlaps(items: ContentItem[]): void {
-    const starts = new Map<string, number>();
-    const ends = new Map<string, number>();
-    let pos = 0;
-    let prevIds = new Set<string>();
-
-    function scan(itemList: ContentItem[]): void {
-      for (const item of itemList) {
-        if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment' || item.type === 'image') && item.commentIds) {
-          const ids = item.commentIds;
-          for (const id of ids) {
-            if (!prevIds.has(id)) starts.set(id, Math.min(starts.get(id) ?? pos, pos));
-          }
-          for (const id of prevIds) {
-            if (!ids.has(id)) ends.set(id, Math.max(ends.get(id) ?? pos, pos));
-          }
-          prevIds = ids;
-          pos++;
-        } else if (item.type === 'table') {
-          for (const row of item.rows) {
-            for (const cell of row.cells) {
-              for (const para of cell.paragraphs) {
-                scan(para);
-              }
-            }
-          }
-        }
-      }
-    }
-    scan(items);
-    for (const id of prevIds) {
-      if (!ends.has(id)) ends.set(id, pos);
-    }
-
-    // Only the comments in these items, so that a scan of each note compares
-    // its own and not every pair in the document
-    const ranges = [...starts.keys()].map(id => ({ id, start: starts.get(id) ?? 0, end: ends.get(id) ?? 0 }));
-    for (let a = 0; a < ranges.length; a++) {
-      for (let b = a + 1; b < ranges.length; b++) {
-        if (ranges[a].start < ranges[b].end && ranges[b].start < ranges[a].end) {
-          forceIdCommentIds.add(ranges[a].id);
-          forceIdCommentIds.add(ranges[b].id);
-        }
-      }
-    }
+  // Global overlap detection: mark comments that overlap anywhere in the
+  // document, or in a note
+  for (const items of [mergedContent, ...noteEntries.map(entry => entry.body)]) {
+    for (const id of globallyOverlappingComments(items)) forceIdCommentIds.add(id);
   }
-  detectGlobalOverlaps(mergedContent);
-  for (const entry of noteEntries) detectGlobalOverlaps(entry.body);
   // Over an HTML comment, a range takes ID syntax, as {#1}<!-- a -->{/1},
   // where the paragraph that holds it, as written, reads back as one
   // paragraph with its comments inline, each as its hidden run holds it,
