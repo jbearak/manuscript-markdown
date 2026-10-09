@@ -6426,3 +6426,71 @@ describe('Blank lines before list items', () => {
     expect(time(400) / small).toBeLessThan(8);
   }, 60000);
 });
+
+describe('Export of many hidden paragraphs, comment bodies and comments', () => {
+  // Word's document of Markdown, from a copy of its tokens for each run,
+  // parsed before, as generateDocumentXml changes the tokens it gets, as
+  // the id it reserves for a highlight's comment. Four times as many take
+  // about four times as long, not sixteen.
+  const time = (md: string) => {
+    const copies = Array.from({ length: 3 }, () => parseMd(md));
+    return fastestRun(() => generateDocumentXml(copies.pop()!, makeState()), copies.length);
+  };
+  const growth = (md: (n: number) => string, n: number) => {
+    time(md(n));
+    const small = time(md(n));
+    return time(md(4 * n)) / small;
+  };
+
+  it('writes a long run of hidden paragraphs in linear time', () => {
+    // Each comment alone in its paragraph, which Word gets hidden, copied
+    // the run's paragraphs before it, for the paragraph after the run, which
+    // took time in the square of their number
+    const md = (n: number) => '<!-- c -->\n'.repeat(n) + '\np\n';
+    const xml = generateDocumentXml(parseMd(md(3)), makeState());
+    expect(xml.match(/<w:spacing w:after="0" w:line="1" w:lineRule="exact"\/><w:rPr><w:vanish\/>/g)).toHaveLength(3);
+    expect(growth(md, 20000)).toBeLessThan(8);
+  }, 30000);
+
+  // Comment `k`'s range, over a word, and its body
+  const range = (k: number) => '{#' + k + '}w' + k + '{/' + k + '}';
+  const body = (k: number) => '{#' + k + '>>note ' + k + '<<}';
+  it.each([
+    ['after', (n: number) => '> ' + Array.from({ length: n }, (_, k) => range(k)).join(' ') + '\n' + Array.from({ length: n }, (_, k) => '>\n> ' + body(k) + '\n').join('') + '\nend\n'],
+    ['before', (n: number) => Array.from({ length: n }, (_, k) => '> ' + body(k) + '\n>\n').join('') + '> ' + Array.from({ length: n }, (_, k) => range(k)).join(' ') + '\n\nend\n'],
+  ])('puts many paragraphs of comment bodies in a quote %s its text in linear time', (_name, md) => {
+    // Each paragraph of comment bodies alone goes in the quote's paragraph
+    // with text, and copied the runs of the bodies there before it, which
+    // took time in the square of their number
+    const state = makeState();
+    const xml = generateDocumentXml(parseMd(md(3)), state);
+    expect(xml.match(/<w:pStyle w:val="GitHubBlockquote"\/>/g)).toHaveLength(1);
+    expect(state.comments.map(comment => comment.text)).toEqual(['note 0', 'note 1', 'note 2']);
+    expect(growth(md, 4000)).toBeLessThan(8);
+  }, 30000);
+
+  it('puts comment bodies in a quote before a paragraph of more runs than a call takes arguments', () => {
+    // The paragraph of bodies went on the start of the runs of the one
+    // after it, which a spread of them into push passed as arguments, past
+    // about 120,000 of which Node, the extension's runtime, overflows its
+    // stack, and Bun past about 1,000,000
+    const md = '> {#1>>note<<}\n>\n> {#1}a{/1}' + ' **x**'.repeat(520000) + '\n';
+    const state = makeState();
+    const xml = generateDocumentXml(parseMd(md), state);
+    expect(xml.match(/<w:pStyle w:val="GitHubBlockquote"\/>/g)).toHaveLength(1);
+    expect(xml.split('<w:t>x</w:t>')).toHaveLength(520001);
+    expect(state.comments.map(comment => comment.text)).toEqual(['note']);
+  }, 30000);
+
+  it('writes many comments with replies in linear time', () => {
+    // Each comment's range and body searched all the comments, and all the
+    // replies' ranges, before it, which took time in the square of their
+    // number
+    const md = (n: number) => Array.from({ length: n }, (_, k) => range(k) + body(k) + '{>>reply ' + k + '<<}').join('\n\n') + '\n';
+    const state = makeState();
+    const xml = generateDocumentXml(parseMd(md(2)), state);
+    expect(state.comments.map(comment => [comment.id, comment.text])).toEqual([[0, 'note 0'], [1, 'reply 0'], [2, 'note 1'], [3, 'reply 1']]);
+    expect(xml.match(/<w:commentRangeStart w:id="(\d+)"\/>/g)).toEqual(['0', '1', '2', '3'].map(id => '<w:commentRangeStart w:id="' + id + '"/>'));
+    expect(growth(md, 4000)).toBeLessThan(8);
+  }, 30000);
+});
