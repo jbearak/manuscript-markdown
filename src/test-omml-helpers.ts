@@ -1,7 +1,8 @@
 // Shared test helpers for OMML round-trip tests.
-// Centralises XMLParser config so changes (e.g. parseTagValue) are made once.
+// Centralises XMLParser config so changes (e.g. parseTagValue) are made once,
+// built as every parser is (see xmlParser).
 
-import { XMLParser } from 'fast-xml-parser';
+import { xmlParser } from './xml-parser';
 import { latexToOmml } from './latex-to-omml';
 import { ommlToLatex } from './omml';
 
@@ -16,7 +17,7 @@ export const parserOptions = {
 /** Parse OMML XML string back to node structure and convert to LaTeX. */
 export function roundTrip(latex: string): string {
   const omml = latexToOmml(latex);
-  const parser = new XMLParser(parserOptions);
+  const parser = xmlParser(parserOptions);
   const parsed = parser.parse('<m:oMath>' + omml + '</m:oMath>');
   if (!Array.isArray(parsed) || !parsed[0]?.['m:oMath']) {
     throw new Error('roundTrip: XMLParser returned unexpected shape for OMML: ' + omml);

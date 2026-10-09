@@ -310,6 +310,21 @@ describe('a template\'s headers and footers', () => {
     expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS, 'landscape', 'portrait']);
   });
 
+  it('take the last section\'s where the template\'s relationships hold more than a thousand references to entities', async () => {
+    // The parser of a part had fast-xml-parser's default limit of a
+    // thousand, of which every &apos; counts, and read the relationships as
+    // none, so the template's headers and footers went
+    const target = 'https://example.com/' + '&apos;'.repeat(1001);
+    const templateDocx = await editTemplate(await headerTemplate({ landscapeLast: true }), 'word/_rels/document.xml.rels', xml => xml.replace('</Relationships>',
+      () => '<Relationship Id="rId99" Type="' + REL + 'hyperlink" Target="' + target + '" TargetMode="External"/></Relationships>'));
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(await sectionHeaders(docx)).toEqual(['landscape titlePg header:even=EVEN HEADER header:default=LANDSCAPE HEADER footer:even=EVEN FOOTER ' +
+      'footer:default=LANDSCAPE FOOTER header:first=FIRST HEADER footer:first=FIRST FOOTER']);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
   it('take the last section\'s, each as that section shows it, and the first\'s title page', async () => {
     const { docx } = await convertMdToDocx('Hello', { templateDocx: await headerTemplate({ landscapeLast: true }) });
     expect(await packageProblems(docx)).toEqual([]);
@@ -652,9 +667,11 @@ describe('a template\'s headers and footers', () => {
     // A header and the numbering whose relationships skip IDs, as a tool
     // other than Word writes them. The header names them by r:embed, by
     // another prefix for the relationships namespace, and by VML's o:relid.
+    // The hyperlink's target has a tab and a carriage return, each written
+    // as a reference, which the relationships keep as one.
     const namespace = REL.slice(0, -1);
     let templateDocx = await editTemplate(await headerTemplate({ headerList: 'direct', pictureBullet: true }), 'word/_rels/header1.xml.rels', xml => xml.replace('Id="rId1"', 'Id="rId4"')
-      .replace('</Relationships>', '<Relationship Id="rId9" Type="' + REL + 'image" Target="media/image1.png"/><Relationship Id="rId7" Type="' + REL + 'hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>'));
+      .replace('</Relationships>', '<Relationship Id="rId9" Type="' + REL + 'image" Target="media/image1.png"/><Relationship Id="rId7" Type="' + REL + 'hyperlink" Target="https://example.com/a&#9;b&#xD;c" TargetMode="External"/></Relationships>'));
     templateDocx = await editTemplate(templateDocx, 'word/header1.xml', xml => xml.replace('r:embed="rId1"', 'r:embed="rId4"').replace('<w:r><w:t>RUNNING HEAD</w:t></w:r>',
       '<w:hyperlink xmlns:rel="' + namespace + '" rel:id = \'rId7\'><w:r><w:t>RUNNING HEAD</w:t></w:r></w:hyperlink>' +
       // An ID as text and as a bookmark's name, which stay
@@ -666,7 +683,7 @@ describe('a template\'s headers and footers', () => {
     expect(await packageProblems(word1)).toEqual([]);
     const zip = await JSZip.loadAsync(word1);
     const rels = [...(await textOf(zip, 'word/_rels/header1.xml.rels'))!.matchAll(/<Relationship Id="(\w+)" Type="[^"]*\/(\w+)" Target="([^"]*)"/g)].map(m => m.slice(1).join(' '));
-    expect(rels).toEqual(['rId1 image media/image1.png', 'rId2 hyperlink https://example.com/', 'rId3 image media/image1.png']);
+    expect(rels).toEqual(['rId1 image media/image1.png', 'rId2 hyperlink https://example.com/a&#9;b&#xD;c', 'rId3 image media/image1.png']);
     const header = (await textOf(zip, 'word/header1.xml'))!;
     for (const reference of ['r:embed="rId1"', 'rel:id = \'rId2\'', 'office:relid="rId3"', 'w:name="rId7"', '<w:t>r:id="rId9"</w:t>']) expect(header).toContain(reference);
     expect((await textOf(zip, 'word/_rels/numbering.xml.rels'))!).toContain('Id="rId1"');
@@ -1620,7 +1637,12 @@ describe('a template\'s numbering', () => {
 });
 
 describe('a template header\'s DOCPROPERTY fields', () => {
-  it('keep the custom properties they show, after export\'s own', async () => {
+  it.each([
+    ['one character', 'x'],
+    // The parser of a part had fast-xml-parser's default limit of a
+    // thousand, and read the template's properties as none
+    ['more than a thousand references to entities', '&quot;'.repeat(1001)],
+  ])('keep the custom properties they show, after export\'s own, where another of the template\'s holds %s', async (_, unshown) => {
     let templateDocx = await headerTemplate();
     // A complex field whose code is in pieces, and a simple field
     templateDocx = await editTemplate(templateDocx, 'word/header2.xml', xml => xml.replace('<w:r><w:t>FIRST HEADER</w:t></w:r>',
@@ -1633,7 +1655,7 @@ describe('a template header\'s DOCPROPERTY fields', () => {
     templateDocx = await editTemplate(templateDocx, 'docProps/custom.xml', () => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
       '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
       property(2, 'ClientName', '<vt:lpwstr>Acme &amp; Sons "Ltd" &#x2019;</vt:lpwstr>') + property(3, 'Project Code', '<vt:i4>42</vt:i4>') +
-      property(4, 'Unshown', '<vt:lpwstr>x</vt:lpwstr>') + '</Properties>');
+      property(4, 'Unshown', '<vt:lpwstr>' + unshown + '</vt:lpwstr>') + '</Properties>');
     templateDocx = await editTemplate(templateDocx, '_rels/.rels', xml => xml.replace('</Relationships>',
       '<Relationship Id="rId9" Type="' + REL + 'custom-properties" Target="docProps/custom.xml"/></Relationships>'));
     templateDocx = await editTemplate(templateDocx, '[Content_Types].xml', xml => xml.replace('</Types>',

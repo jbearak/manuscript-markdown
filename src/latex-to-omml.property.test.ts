@@ -2,7 +2,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import * as fc from 'fast-check';
-import { XMLParser } from 'fast-xml-parser';
+import { xmlParser } from './xml-parser';
 import { latexToOmml } from './latex-to-omml';
 import { ommlToLatex } from './omml';
 import { parserOptions } from './test-omml-helpers';
@@ -126,7 +126,7 @@ describe('LaTeX-to-OMML round-trip property tests', () => {
           }
 
           // Parse OMML XML
-          const parser = new XMLParser(parserOptions);
+          const parser = xmlParser(parserOptions);
           const parsed = parser.parse('<m:oMath>' + omml + '</m:oMath>');
           
           // Extract children from parsed structure
@@ -187,7 +187,7 @@ describe('LaTeX-to-OMML round-trip property tests', () => {
           const omml = latexToOmml(latex);
           if (!omml) return false;
 
-          const parser = new XMLParser(parserOptions);
+          const parser = xmlParser(parserOptions);
           const parsed = parser.parse('<m:oMath>' + omml + '</m:oMath>');
 
           let children: any[] = [];
@@ -233,7 +233,7 @@ describe('LaTeX-to-OMML round-trip property tests', () => {
           const omml = latexToOmml(latex);
           if (!omml) return false;
 
-          const parser = new XMLParser(parserOptions);
+          const parser = xmlParser(parserOptions);
           const parsed = parser.parse('<m:oMath>' + omml + '</m:oMath>');
 
           let children: any[] = [];

@@ -2,7 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
 import JSZip from 'jszip';
-import { XMLParser } from 'fast-xml-parser';
+import { xmlParser } from './xml-parser';
 import {
   convertDocx,
   extractComments,
@@ -157,7 +157,7 @@ describe('Comment reply threads: MD→DOCX', () => {
 
     // Check comments.xml has 3 comments (parent + 2 replies)
     const commentsXml = await zip.file('word/comments.xml')!.async('string');
-    const parser = new XMLParser({
+    const parser = xmlParser({
       ignoreAttributes: false,
       attributeNamePrefix: '@_',
       preserveOrder: true,

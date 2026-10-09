@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { XMLBuilder, XMLParser } from 'fast-xml-parser';
+import { XMLBuilder } from 'fast-xml-parser';
 import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
 import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
@@ -8,6 +8,7 @@ import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './ima
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { styleFinder } from './style-element';
 import { replaceXmlElements, universalMeasure, xmlAttribute, xmlElement, xmlInteger, xmlNumber, xmlOn, xmlStartTag, xmlTwips } from './xml-elements';
+import { xmlParser } from './xml-parser';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -26,7 +27,6 @@ import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
 import { asUtf8, decodeXml, parsePart, relatedPartPath } from './template-sections';
-import { XML_ENTITIES } from './xml-parser';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -2142,14 +2142,14 @@ function parseCslAuthors(value: unknown): CitationMetadata['authors'] {
   });
 }
 
+/** How a part is read, by a parser that reads entities as every parser does
+ *  (see xmlParser), however many a long manuscript has */
 const parserOptions = {
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   preserveOrder: true,
   trimValues: false,
   parseTagValue: false,
-  // Uncapped, and safe (see XML_ENTITIES)
-  processEntities: XML_ENTITIES,
 };
 
 /** XML of what the parser read, as a title paragraph's (see ContentItem's titleXml) */
@@ -2706,36 +2706,6 @@ async function loadZip(data: Uint8Array): Promise<JSZip> {
   return JSZip.loadAsync(data);
 }
 
-/**
- * XML with its numeric character references written as the characters they
- * stand for, as an XML parser reads them, where fast-xml-parser leaves them
- * as text, as &#x25CF; for a bullet. Word writes characters as they are, but
- * other tools write references. One pass, so &#38;#x41; stays the text
- * &#x41;. A reference to a character markup reads, as &#60;, becomes its
- * entity, and one to a character XML can't hold stays as it is. One to a
- * carriage return becomes &#xD;, which the parser reads (see readZipXml),
- * as it would turn the character into a line feed with the line ends it
- * normalizes. A CDATA section or a comment holds none.
- */
-function decodeCharacterReferences(xml: string): string {
-  if (!xml.includes('&#')) return xml;
-  return xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));/g, (match, hex?: string, dec?: string) => {
-    if (hex === undefined && dec === undefined) return match;
-    const code = hex !== undefined ? parseInt(hex, 16) : parseInt(dec!, 10);
-    switch (code) {
-      case 0x26: return '&amp;';
-      case 0x3C: return '&lt;';
-      case 0x3E: return '&gt;';
-      case 0x22: return '&quot;';
-      case 0x27: return '&apos;';
-      case 0xD: return '&#xD;';
-    }
-    const xmlCharacter = code === 0x9 || code === 0xA || code >= 0x20 && code <= 0xD7FF
-      || code >= 0xE000 && code <= 0xFFFD || code >= 0x10000 && code <= 0x10FFFF;
-    return xmlCharacter ? String.fromCodePoint(code) : match;
-  });
-}
-
 /** A part's text, in the encoding its BOM or declaration names, as UTF-16,
  *  which some tools write, or else UTF-8; or undefined for no such part */
 async function readZipText(zip: JSZip, path: string): Promise<string | undefined> {
@@ -2746,11 +2716,10 @@ async function readZipText(zip: JSZip, path: string): Promise<string | undefined
 async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
   const text = await readZipText(zip, path);
   if (text === undefined) { return null; }
-  const xml = decodeCharacterReferences(text);
-  const parser = new XMLParser(parserOptions);
-  parser.addEntity('#xD', '\r');
-  const parsed: unknown = parser.parse(xml);
-  return asXmlNodes(parsed);
+  // Each reference to a character, as &#x25CF; for a bullet, which other
+  // tools than Word write, read as that character, and an attribute's white
+  // space as XML reads it (see xmlParser)
+  return asXmlNodes(xmlParser(parserOptions).parse(text));
 }
 
 function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50): XmlNode[] {
@@ -4161,8 +4130,7 @@ export async function extractZoteroPrefs(data: Uint8Array | JSZip): Promise<Zote
   } catch {
     // Try XML parse (dataVersion 3)
     try {
-      const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
-      const xmlData = xmlParser.parse(prefString);
+      const xmlData = xmlParser({ ignoreAttributes: false, attributeNamePrefix: '@_' }).parse(prefString);
       const styleId: string = xmlData?.data?.style?.['@_id'] ?? '';
       const locale: string = xmlData?.data?.style?.['@_locale'] ?? '';
       const noteType: number | undefined = xmlData?.data?.prefs?.['@_noteType'] != null

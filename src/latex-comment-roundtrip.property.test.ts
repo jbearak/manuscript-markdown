@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import * as fc from 'fast-check';
-import { XMLParser } from 'fast-xml-parser';
+import { xmlParser } from './xml-parser';
 import { latexToOmml } from './latex-to-omml';
 import { ommlToLatex } from './omml';
 import { parserOptions } from './test-omml-helpers';
@@ -15,7 +15,7 @@ import { parserOptions } from './test-omml-helpers';
 function roundtrip(latex: string): string {
   const omml = latexToOmml(latex);
   if (!omml) return '';
-  const parser = new XMLParser(parserOptions);
+  const parser = xmlParser(parserOptions);
   const parsed = parser.parse('<m:oMath>' + omml + '</m:oMath>');
   let children: any[] = [];
   if (parsed && Array.isArray(parsed) && parsed[0]?.['m:oMath']) {

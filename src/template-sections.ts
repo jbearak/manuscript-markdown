@@ -72,8 +72,7 @@
 //   The core and app properties, as Title or Company, stay export's.
 
 import type JSZip from 'jszip';
-import { XMLParser } from 'fast-xml-parser';
-import { XML_ENTITIES, xmlBuilder } from './xml-parser';
+import { escapeXmlAttribute, xmlBuilder, xmlParser } from './xml-parser';
 import { xmlOn, xmlTwips } from './xml-elements';
 import { EXPORT_CONTEXT, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, NO_COMPATIBILITY, ORDERED_OPTIONS, WORDPROCESSINGML, WORD_UNDERSTOOD_NAMESPACES, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, expandName, expandedNameOf, isElement, isIgnored, isNamed, moved, nameOf, parseOrdered, readsChoice, scopeIn, sectPrPropertyOf, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
 
@@ -142,9 +141,9 @@ export interface TemplateSections {
 
 /** A package part (relationships, content types, settings, custom
  *  properties) as data, its prefixes dropped, its text as it is, with
- *  its character references, as &#x2019;, read too */
-const partParser = new XMLParser({
-  processEntities: XML_ENTITIES,
+ *  its character references, as &#x2019;, read too, and however many
+ *  entities it has (see xmlParser) */
+const partParser = xmlParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   removeNSPrefix: true,
@@ -238,8 +237,6 @@ function relationshipsOf(source: string, xml: string | undefined): Relationship[
   return relationships;
 }
 
-const escapeAttr = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
 /** A part's relationships part, if it has one */
 async function relsOf(zip: JSZip, path: string): Promise<Rels | undefined> {
   const data = await zip.file(relsPathOf(path))?.async('uint8array');
@@ -306,7 +303,7 @@ export function withRelationshipIds(xml: string, ids: Map<string, string> | unde
 /** A relationships part */
 const relsXml = (relationships: Relationship[]) => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-  relationships.map(r => '<Relationship Id="' + escapeAttr(r.id) + '" Type="' + escapeAttr(r.type) + '" Target="' + escapeAttr(r.target) + '"' +
+  relationships.map(r => '<Relationship Id="' + escapeXmlAttribute(r.id) + '" Type="' + escapeXmlAttribute(r.type) + '" Target="' + escapeXmlAttribute(r.target) + '"' +
     (r.external ? ' TargetMode="External"' : '') + '/>').join('') + '</Relationships>';
 
 /** A comment, CDATA section, processing instruction or declaration, an end

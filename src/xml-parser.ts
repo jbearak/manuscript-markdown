@@ -12,12 +12,13 @@
 //   part of a package has (ECMA-376 Part 2 §8.1.4), so it reads no entity
 //   one declares.
 // - xmlBuilder(options): an XMLBuilder that writes what xmlParser read as it
-//   was: in text and values, the characters markup reads, & < > " ', as
-//   entities, and in an attribute's value a tab, line feed or carriage
-//   return as a reference, as a carriage return in text, which a reader
-//   would otherwise read as other white space.
-// - escapeXmlAttribute(value): an attribute's value written so, for XML
-//   built as text.
+//   was: in text, the characters markup reads, & < > " ', as entities; in
+//   an attribute's value, which it writes between double quotes, & < > "
+//   as entities, and a tab, line feed or carriage return as a reference, as
+//   a carriage return in text, which a reader would otherwise read as other
+//   white space.
+// - escapeXmlAttribute(value): an attribute's value written so, between
+//   double quotes, for XML built as text.
 // - XML_ENTITIES: how many entities fast-xml-parser reads, and how long one
 //   a DOCTYPE declares can be.
 //
@@ -27,8 +28,18 @@
 // tab written as one from a reference to one; and its default caps how many
 // entities it reads at a thousand, and throws past that, so it refused a
 // long document, valid as it is. So the parser replaces no entity itself,
-// and its processors read each text and value as the document has it. Not
-// every parser and builder here is built with these yet.
+// and its processors read each text and value as the document has it.
+//
+// Every parser in src is built with xmlParser but two of md-to-docx.ts's,
+// which fix/respelled-templates changes: that of a template's numbering,
+// which has fast-xml-parser's default, and that of a template's styles,
+// which reads no entities, so that the style IDs it reads are as styles.xml
+// writes them, for export to write back, but reads a name written with a
+// character reference, as heading&#32;1, otherwise than Word does. That
+// branch reads both parts another way. Of the builders, buildOrdered's
+// (see scoped-xml.ts) and a template's sections' are built with
+// xmlBuilder; converter.ts's of a title paragraph and md-to-docx.ts's of a
+// template's numbering aren't yet.
 
 import { XMLBuilder, XMLParser, type X2jOptions, type XmlBuilderOptions } from 'fast-xml-parser';
 
@@ -151,11 +162,14 @@ export const xmlParser = (options: X2jOptions): XmlTextParser => new ReferencePa
 const escapeXmlText = (text: string) => text.replace(/[&<>"'\r]/g, character => ESCAPES[character]);
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&apos;', '\t': '&#9;', '\n': '&#xA;', '\r': '&#xD;' };
 
-/** An attribute's value written for XML between quotes, either: the
- *  characters markup reads as entities, and a tab, line feed or carriage
- *  return, which a reader would read as a space (XML 1.0 §3.3.3), as a
- *  reference */
-export const escapeXmlAttribute = (value: string): string => value.replace(/[&<>"'\t\n\r]/g, character => ESCAPES[character]);
+/** An attribute's value written for XML between double quotes: the
+ *  characters markup reads as entities there, & < > ", and a tab, line feed
+ *  or carriage return, which a reader would read as a space (XML 1.0
+ *  §3.3.3), as a reference. An apostrophe, which ends no value between
+ *  double quotes, stays as it is, as Word writes it, and as export did, so
+ *  that its readers of a template's text, which export may have written,
+ *  read it as before */
+export const escapeXmlAttribute = (value: string): string => value.replace(/[&<>"\t\n\r]/g, character => ESCAPES[character]);
 
 /** A builder with `options` that writes what xmlParser read as it was (see
  *  the file's header), its own processors of text and values in place of
