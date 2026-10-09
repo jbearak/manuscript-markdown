@@ -122,6 +122,7 @@ export interface MdToken {
   sourceRange?: [number, number]; // lines [start, end) of the text parseMd parses that the token came from
   splitPart?: true;         // one of the blocks parseMd split a block of the Markdown into, which share its lines (see criticBlockSegment)
   droppedRange?: [number, number]; // lines of the blocks next to it its quote dropped (see blockquote_open)
+  itemDropped?: Array<[number, number]>; // for list items: the lines of each block the item dropped (see extractListItems)
   blockquoteSpacing?: BlockquoteSpacing; // on a quote group's first token (see annotateBlockquoteSpacing)
   startNumber?: number;     // for ordered lists: first item's start number (when ≠ 1)
   listStart?: boolean;      // for list items: the first item of its list
@@ -1711,6 +1712,46 @@ const BARE_QUOTE_LINE_RE = /^\s*(?:>\s*)+$/;
  * marker's line holds is read from `parsedLines`, the text markdown-it
  * parsed, where a comment body over lines is on one.
  */
+/** The blocks list items of `tokens` dropped, which Word gets nothing of,
+ *  in the source's lines through `source`: the first line of each by the
+ *  line after its last, and that line by its first */
+interface DroppedLines { before: Map<number, number>; after: Map<number, number> }
+function droppedBlocksOf(tokens: MdToken[], source: (line: number) => number): DroppedLines {
+  const before = new Map<number, number>();
+  const after = new Map<number, number>();
+  for (const token of tokens) {
+    for (const [start, end] of token.itemDropped ?? []) {
+      const from = source(start);
+      const to = source(end);
+      if (from >= to) continue;
+      before.set(to, from);
+      after.set(from, to);
+    }
+  }
+  return { before, after };
+}
+
+/** The most blank lines in a row from `from` of `lines`, by `step`, from
+ *  `low` on, past the blocks list items dropped, `dropped`, which Word gets
+ *  nothing of, so that those on either side of one are those of the block
+ *  beside it: as many as on the side with more. Not those after the last
+ *  before the end of `lines` */
+function blankLinesPastDropped(lines: string[], dropped: DroppedLines, from: number, step: 1 | -1, low = 0): number {
+  const blankRun = (start: number) => {
+    let line = start;
+    while (line >= low && line < lines.length && lines[line].trim() === '') line += step;
+    return { count: Math.abs(line - start), line };
+  };
+  let run = blankRun(from);
+  let count = run.count;
+  for (let past = step < 0 ? dropped.before.get(run.line + 1) : dropped.after.get(run.line); past !== undefined;
+    past = step < 0 ? dropped.before.get(run.line + 1) : dropped.after.get(run.line)) {
+    run = blankRun(step < 0 ? past - 1 : past);
+    if (run.line < lines.length) count = Math.max(count, run.count);
+  }
+  return count;
+}
+
 function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceLines: string[], parsedLines: string[]): void {
   // Its lines, from start, past the lines of a block its quote dropped
   // before it
@@ -1758,6 +1799,10 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
     while (line >= 0 && line < sourceLines.length && sourceLines[line].trim() === '') line += step;
     return { count: Math.abs(line - from), line };
   };
+  // Past the blocks list items dropped, so that the blank lines on either
+  // side of one are the quote's
+  const dropped = droppedBlocksOf(tokens, source);
+  const blankRunPastDropped = (from: number, step: 1 | -1) => blankLinesPastDropped(sourceLines, dropped, from, step);
   groups.forEach((group, g) => {
     if (!group) return;
     const previous = groups[g - 1];
@@ -1768,7 +1813,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
     const sharesNext = !!next && next.start <= group.end;
     const above = blankRun(group.start - 1, -1);
     if (group.markerLine) spacing.before = 0;
-    else if (!sharesPrevious && above.line >= 0 && !(previous && above.line === previous.end)) spacing.before = above.count;
+    else if (!sharesPrevious && above.line >= 0 && !(previous && above.line === previous.end)) spacing.before = blankRunPastDropped(group.start - 1, -1);
     const below = blankRun(group.end + 1, 1);
     if (sharesNext) spacing.gapAfter = 0;
     else {
@@ -1776,7 +1821,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
       // after them, after which import writes notes' after a blank line of
       // its own
       if (below.line < sourceLines.length && group.last + 1 < tokens.length
-        && !(next && !next.markerLine && below.line === next.start)) spacing.after = below.count;
+        && !(next && !next.markerLine && below.line === next.start)) spacing.after = blankRunPastDropped(group.end + 1, 1);
       if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
     }
     // The first's first line as parsed, which an alert's marker starts
@@ -2534,6 +2579,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
   // it first, as in a code block that held the same line
   {
     const sourceLine = (line: number) => toSource[Math.min(line, toSource.length - 1)];
+    const dropped = droppedBlocksOf(result, sourceLine);
     for (const tok of result) {
       const withIds = isCommentsWithIds(tok);
       if (!withIds && (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment')) continue;
@@ -2546,12 +2592,10 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
       // preprocessing wrote (see line-map.ts)
       if (commentEndLine < commentLine) continue;
       // Count blank lines before: scan backwards from commentLine, to the
-      // body's start (see bodyStartLine)
-      let beforeCount = 0;
-      for (let li = commentLine - 1; li >= bodyStartLine; li--) {
-        if (spacingLines[li].trim() === '') beforeCount++;
-        else break;
-      }
+      // body's start (see bodyStartLine), past the blocks list items
+      // dropped, so that the blank lines on either side of one are the
+      // comment's
+      const beforeCount = blankLinesPastDropped(spacingLines, dropped, commentLine - 1, -1, bodyStartLine);
       // Count blank lines after: scan forward from end of comment
       let afterCount = 0;
       for (let li = commentEndLine + 1; li < spacingLines.length; li++) {
@@ -4228,7 +4272,28 @@ function droppedListBlockWarning(kind: string): string {
  *  block that opens in another does at the top level */
 interface ItemStyleBlock { open?: { style: string; level: number } }
 
-function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[], styleBlock: ItemStyleBlock = {}): MdToken[] {
+/** The first line of each block a list item dropped, by the line after its
+ *  last, of the list and its sublists */
+type DroppedBlocks = Map<number, number>;
+
+/** Whether a blank line comes before `line` in `sourceLines`, or before or
+ *  after a block a list item dropped right before it, which Word gets
+ *  nothing of, so that the blank lines beside it are the next item's, as
+ *  without the block. Blank as Markdown reads a line, of spaces and tabs
+ *  alone (CommonMark §4.9), not of other whitespace, which trim() takes
+ *  too: a line of a no-break space goes on in the item's paragraph, and
+ *  the list is tight */
+function blankLineBeforeItem(line: number, sourceLines: string[] | undefined, dropped: DroppedBlocks): boolean {
+  for (let at = line - 1; at >= 0;) {
+    if (/^[ \t]*\r?$/.test(sourceLines?.[at] ?? 'x')) return true;
+    const start = dropped.get(at + 1);
+    if (start === undefined) return false;
+    at = start - 1;
+  }
+  return false;
+}
+
+function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[], styleBlock: ItemStyleBlock = {}, droppedBlocks: DroppedBlocks = new Map()): MdToken[] {
   const items: MdToken[] = [];
   let i = 0;
   let itemOrdinal = 0;
@@ -4253,6 +4318,20 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
       // The item's own lines: its first paragraph's, or else its marker line
       const itemMap = tokens[i].map;
       let itemRange: [number, number] | undefined = itemMap ? [itemMap[0], itemMap[0] + 1] : undefined;
+      // The lines of the blocks the item drops, which Word gets nothing of,
+      // so the blank lines around one are those of the blocks beside it
+      // (see annotateBlockquoteSpacing). But not the item's marker line, as
+      // of a block on it, as - *** or - ```, which Word gets the item's
+      // paragraph for, so the blank lines before the item aren't the next
+      // block's
+      const dropped: Array<[number, number]> = [];
+      const drop = (map: [number, number] | null) => {
+        if (!map) return;
+        const start = itemMap && map[0] === itemMap[0] ? map[0] + 1 : map[0];
+        if (start >= map[1]) return;
+        dropped.push([start, map[1]]);
+        droppedBlocks.set(map[1], start);
+      };
       for (let j = 0; j < itemTokens.length; j++) {
         if (itemTokens[j].type === 'paragraph_open' || itemTokens[j].type === 'heading_open') {
           // A heading's text goes as a paragraph's, which is all an item holds
@@ -4312,7 +4391,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           childSegments.push({
             startIndex: itemTokens[j].map?.[0] ?? j,
             order: childSegmentOrder++,
-            items: extractListItems(itemTokens.slice(j + 1, subClose), subOrdered, level + 1, warnings, subStart, sourceLines, styleBlock),
+            items: extractListItems(itemTokens.slice(j + 1, subClose), subOrdered, level + 1, warnings, subStart, sourceLines, styleBlock, droppedBlocks),
           });
           j = subClose;
         } else if (itemTokens[j].type === 'inline' && !foundFirstParagraph) {
@@ -4360,6 +4439,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           }
           if (fate === 'dropped' || directive) {
             warnings?.push(droppedListBlockWarning('HTML block'));
+            drop(itemTokens[j].map);
           } else if (first) {
             runs = blocks[0].runs;
             foundFirstParagraph = true;
@@ -4388,6 +4468,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
             : itemTokens[j].type === 'hr' ? 'Horizontal rule'
             : 'Block element';
           warnings?.push(droppedListBlockWarning(kind));
+          drop(itemTokens[j].map);
           // Past its cells, whose text went for the item's
           if (itemTokens[j].type === 'table_open') j = findClosingToken(itemTokens, j, 'table_close');
         }
@@ -4399,10 +4480,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
       // As GFM, a box only at the start of the item's first block, a paragraph
       const taskInfo = itemTokens[0]?.type === 'paragraph_open' || itemTokens[0]?.type === 'inline' ? extractTaskListItem(runs) : undefined;
       const sourceLineIndex = tokens[i].map?.[0];
-      // Blank as Markdown reads a line, of spaces and tabs alone (CommonMark
-      // §4.9), not of other whitespace, which trim() takes too: a line of a
-      // no-break space goes on in the item's paragraph, and the list is tight
-      const blankLineBefore = sourceLineIndex !== undefined && sourceLineIndex > 0 && /^[ \t]*\r?$/.test(sourceLines?.[sourceLineIndex - 1] ?? 'x');
+      const blankLineBefore = sourceLineIndex !== undefined && blankLineBeforeItem(sourceLineIndex, sourceLines, droppedBlocks);
       const authoredBulletMarker = !ordered && sourceLineIndex !== undefined
         ? extractBulletMarkerFromSourceLine(sourceLines?.[sourceLineIndex])
         : undefined;
@@ -4415,6 +4493,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
         taskChecked: taskInfo?.checked,
         ...(authoredBulletMarker ? { bulletMarker: authoredBulletMarker } : {}),
         ...(blankLineBefore ? { blankLineBefore } : {}),
+        ...(dropped.length > 0 ? { itemDropped: dropped } : {}),
       };
       // Attach startNumber only to the first item of an ordered list with start ≠ 1
       if (items.length === 0 && startNumber !== undefined && startNumber !== 1) {

@@ -15,16 +15,23 @@ import { convertMdToDocx } from './md-to-docx';
 // paragraphs, at the top level and in items, and fences anywhere, open or
 // close, with a blank line after or before them or none, and blocks an item
 // drops, a fenced code block or an HTML block, that hold the line of a quote
-// in the item or after it, which some quotes repeat, imports the
-// document, and exports what it wrote again, and checks that Word gets the
-// same paragraphs, in the same styles, at the same list levels and
-// indents, and that import writes the same Markdown again.
+// in the item or after it, which some quotes repeat, or a directive, with a
+// blank line on one side or both, or a rule or a fenced code block on an
+// item's marker line, or a directive there, which is the item's text,
+// imports the document, and exports what it
+// wrote again, and checks that Word gets the same paragraphs, in the same
+// styles, at the same list levels and indents, and that import writes the
+// same Markdown again, as it does without the blocks items drop, with the
+// blank lines on the side of each with more.
 
 type Style = 'box' | 'note';
 type Fence = { kind: 'open'; style: Style; tight: boolean } | { kind: 'close'; tight: boolean };
 type Child = { kind: 'para' } | { kind: 'list'; list: List; directive?: 'indent' | 'no-indent' } | { kind: 'quote'; list?: List; repeated?: boolean }
-  | { kind: 'inline'; style: Style } | { kind: 'dropped'; html: boolean; plain?: boolean } | Fence;
-type Item = { children: Child[] };
+  | { kind: 'inline'; style: Style } | { kind: 'dropped'; html: boolean | 'directive'; plain?: boolean; tight?: 'before' | 'after' } | Fence;
+/** A block an item drops on its marker line, as - ***, or a directive
+ *  there, which the item keeps as its text */
+type MarkerBlock = { kind: 'rule' | 'fence' | 'directive'; plain?: boolean };
+type Item = { children: Child[]; marker?: MarkerBlock };
 type List = { ordered: boolean; items: Item[] };
 
 const twoStyles = '---\nstyles:\n  box:\n    font-style: italic\n  note:\n    font-style: bold\n---\n\n';
@@ -40,14 +47,26 @@ const paraArb: fc.Arbitrary<Child> = fc.oneof(
 /** A quote of a paragraph, of its own text or of the text some quotes
  *  repeat */
 const quoteParaArb: fc.Arbitrary<Child> = fc.record({ kind: fc.constant('quote' as const), repeated: fc.boolean() });
-/** A block an item drops, which holds the line of a quote that repeats */
-const droppedArb: fc.Arbitrary<Child> = fc.record({ kind: fc.constant('dropped' as const), html: fc.boolean() });
+/** A block an item drops, which holds the line of a quote that repeats, or
+ *  a directive, with no blank line before it or after it where it's
+ *  `tight`, but one on the other side */
+const droppedArb: fc.Arbitrary<Child> = fc.record({
+  kind: fc.constant('dropped' as const),
+  html: fc.constantFrom<boolean | 'directive'>(true, false, 'directive'),
+  tight: fc.constantFrom(undefined, 'before' as const, 'after' as const),
+}).map(child => child.html === true && child.tight === 'after' ? { ...child, tight: undefined } : child);
 const listArb: fc.Memo<List> = fc.memo(depth => fc.record({
   ordered: fc.boolean(),
   items: fc.array(fc.record({
     children: fc.array(depth > 1 ? fc.oneof(paraArb, listArb(depth - 1).map(list => ({ kind: 'list' as const, list })), quoteArb(depth - 1), fenceArb, droppedArb)
       : fc.oneof(paraArb, quoteParaArb, fenceArb, droppedArb), { maxLength: 4 }),
-  }), { minLength: 1, maxLength: 3 }),
+    marker: fc.oneof({ weight: 4, arbitrary: fc.constant(undefined) },
+      { weight: 1, arbitrary: fc.constantFrom<MarkerBlock['kind']>('rule', 'fence', 'directive').map(kind => ({ kind })) }),
+  // Before nothing in the item, or a quote, a sublist or a style block's
+  // fence, but not a paragraph or a directive, which is the item's own text
+  // after the block too
+  }).map(({ children, marker }) => marker && (children.length === 0 || ['list', 'quote', 'open', 'close'].includes(children[0].kind))
+    ? { children, marker } : { children }), { minLength: 1, maxLength: 3 }),
 }));
 /** A quote of a paragraph, or of a list, whose items, with their fences,
  *  are its paragraphs */
@@ -72,22 +91,36 @@ const documentArb: fc.Arbitrary<Child[]> = fc.array(fc.oneof(
  *  which the quote drops, and a block on one line closes it.
  *  A blank line between blocks, but not after an opening fence or before a
  *  closing one that is `tight` */
-function markdownOf(blocks: Child[]): { md: string; styles: Array<[string, string]> } {
+function markdownOf(blocks: Child[], mark = ''): { md: string; styles: Array<[string, string]> } {
   let n = 0;
   let open: Style | undefined;
   let quoted = false;
   const styles: Array<[string, string]> = [];
-  type Chunk = { lines: string[]; fence?: Fence };
+  type Chunk = { lines: string[]; fence?: Fence; tight?: 'before' | 'after' };
   const join = (chunks: Chunk[]): string[] => {
     const lines: string[] = [];
     chunks.forEach((chunk, k) => {
-      const tight = k > 0 && (chunks[k - 1].fence?.kind === 'open' && chunks[k - 1].fence!.tight || chunk.fence?.kind === 'close' && chunk.fence.tight);
+      const tight = k > 0 && (chunks[k - 1].fence?.kind === 'open' && chunks[k - 1].fence!.tight || chunk.fence?.kind === 'close' && chunk.fence.tight
+        || chunks[k - 1].tight === 'after' || chunk.tight === 'before');
       if (k > 0 && !tight) lines.push('');
       lines.push(...chunk.lines);
     });
     return lines;
   };
-  const chunkOf = (child: Child, indent: string): Chunk => {
+  // A block an item drops on its marker line, `start`, with no blank line
+  // after it, after which an item that starts empty holds nothing more. Its
+  // other lines end in `mark`, where there is one, and its marker line is
+  // the marker alone then, as Word has the item's paragraph. But a
+  // directive, which is the item's text
+  const markerChunk = (block: MarkerBlock, start: string, inner: string): Chunk => ({
+    lines: [block.kind === 'directive' ? start + '<!-- landscape -->' : mark ? start.trimEnd() : start + (block.kind === 'rule' ? '***' : '```'),
+      ...(block.kind === 'fence' ? [inner + (block.plain ? 'x' : '> q'), inner + '```'].map(line => line + mark) : [])],
+    tight: 'after',
+  });
+  // `text` where a fence is an item's first block after one the item drops
+  // on its marker line, which the item has as its text, as no text comes
+  // before it, and which opens or closes no block (see extractListItems)
+  const chunkOf = (child: Child, indent: string, text = false): Chunk => {
     const top = indent === '' && !quoted;
     switch (child.kind) {
       case 'para':
@@ -112,18 +145,25 @@ function markdownOf(blocks: Child[]): { md: string; styles: Array<[string, strin
         // Its line the same as a quote's that repeats at its indent, but
         // where it's `plain`. An HTML block without its end, which a blank
         // line ends in the item, the item drops with more of the item after
-        // it
+        // it. Each line it has ends in `mark`, where there is one
         const line = indent + (child.plain ? 'x' : '> q');
-        return { lines: child.html ? [indent + '<pre>', line, '', indent + 'p' + n++] : [indent + '```', line, indent + '```'] };
+        const lines = child.html === 'directive' ? [indent + '<!-- landscape -->']
+          : child.html ? [indent + '<pre>', line] : [indent + '```', line, indent + '```'];
+        return { lines: lines.map(dropped => dropped + mark).concat(child.html === true ? ['', indent + 'p' + n++] : []), tight: child.tight };
       }
       case 'list':
         return { lines: (child.directive ? [indent + '<!-- ' + child.directive + ' -->'] : []).concat(join(child.list.items.map((item, k) => {
           const marker = child.list.ordered ? (k + 1) + '. ' : '- ';
           const inner = indent + ' '.repeat(marker.length);
-          return { lines: join([{ lines: [indent + marker + 'i' + n++] }, ...item.children.map(grandchild => chunkOf(grandchild, inner))]) };
+          // Not in a quote, whose items' blocks the quote drops
+          const first = item.marker && !quoted ? markerChunk(item.marker, indent + marker, inner) : { lines: [indent + marker + 'i' + n++] };
+          const dropsMarker = !!item.marker && item.marker.kind !== 'directive' && !quoted;
+          return { lines: join([first, ...item.children.map((grandchild, c) => chunkOf(grandchild, inner, dropsMarker && c === 0))]) };
         }))) };
       default:
-        if (top) open = child.kind === 'open' ? child.style : undefined;
+        if (text) {
+          // The item's text, which opens or closes no block
+        } else if (top) open = child.kind === 'open' ? child.style : undefined;
         else if (child.kind === 'open' && !quoted) open = undefined;
         return { lines: [indent + (child.kind === 'open' ? '<!-- style: ' + child.style + ' -->' : '<!-- /style -->')], fence: child };
     }
@@ -134,10 +174,47 @@ function markdownOf(blocks: Child[]): { md: string; styles: Array<[string, strin
 /** `blocks` with plain text in the blocks items drop, which Word gets
  *  nothing of */
 function withPlainDropped(blocks: Child[]): Child[] {
-  const list = (l: List): List => ({ ...l, items: l.items.map(item => ({ children: withPlainDropped(item.children) })) });
+  const list = (l: List): List => ({ ...l, items: l.items.map(item => ({ children: withPlainDropped(item.children), ...(item.marker ? { marker: { ...item.marker, plain: true } } : {}) })) });
   return blocks.map(child => child.kind === 'dropped' ? { ...child, plain: true }
     : child.kind === 'list' ? { ...child, list: list(child.list) }
     : child.kind === 'quote' && child.list ? { ...child, list: list(child.list) } : child);
+}
+
+/** Whether blocks an item drops are all that parts two lists of a kind in
+ *  an item of `blocks`, which are one list without them, as Word has them.
+ *  Each of the two may be tight, where the one list is loose, with the
+ *  blank lines around the blocks between its items */
+function droppedPartsLists(blocks: Child[]): boolean {
+  const parts = (list?: List) => !!list && list.items.some(item => droppedPartsLists(item.children));
+  return blocks.some((child, k) => {
+    if ((child.kind === 'list' || child.kind === 'quote') && parts(child.list)) return true;
+    if (child.kind !== 'list') return false;
+    let next = k + 1;
+    while (blocks[next]?.kind === 'dropped') next++;
+    const after = blocks[next];
+    return next > k + 1 && after?.kind === 'list' && !after.directive && after.list.ordered === child.list.ordered;
+  });
+}
+
+/** The Markdown `marked`, the lines of the blocks items drop marked (see
+ *  markdownOf), without them: the blank lines on either side of each, or
+ *  of a run of them, as many as on the side with more */
+function withoutDropped(marked: string, mark: string): string {
+  const lines = marked.split('\n');
+  const kept: string[] = [];
+  for (let k = 0; k < lines.length;) {
+    if (!lines[k].endsWith(mark)) {
+      kept.push(lines[k++]);
+      continue;
+    }
+    let before = 0;
+    while (kept.length > 0 && kept[kept.length - 1] === '') { kept.pop(); before++; }
+    while (k < lines.length && lines[k].endsWith(mark)) k++;
+    let after = 0;
+    while (k < lines.length - 1 && lines[k] === '') { k++; after++; }
+    for (let blank = 0; blank < Math.max(before, after); blank++) kept.push('');
+  }
+  return kept.join('\n');
 }
 
 /** Each paragraph with text Word shows in the document of `docx`: its
@@ -182,6 +259,38 @@ describe('Style blocks around lists and in their items', () => {
         expect([md, other, await paragraphsOf(plain.docx)]).toEqual([md, other, paragraphs]);
         expect([md, other, (await convertDocx(plain.docx)).markdown]).toEqual([md, other, back]);
       }
-    }), { numRuns: 100 });
+      // And the same without them, with the blank lines on the side of each
+      // with more, which import writes around a quote beside one, or before
+      // an item after one. Not where they part two lists, which are one
+      // without them (see droppedPartsLists)
+      const without = withoutDropped(markdownOf(blocks, '\u0000').md, '\u0000');
+      if (without !== md && !droppedPartsLists(blocks)) {
+        const none = await convertMdToDocx(without);
+        expect([md, without, await paragraphsOf(none.docx)]).toEqual([md, without, paragraphs]);
+        // Import closes a style block between a quote in an item and one
+        // after the list that a blank line alone parts, and writes two
+        // blank lines after the fence it puts in there, on main too, which
+        // is no block's an item drops. Where such a block parts the quotes,
+        // it writes one. So the blank lines after a closing fence import put
+        // in read as one
+        const noneBack = (await convertDocx(none.docx)).markdown;
+        const closings = (text: string) => (text.match(/^<!-- \/style -->$/gm) ?? []).length;
+        const oneAfterFences = (text: string) => closings(noneBack) > closings(without) ? text.replace(/^(<!-- \/style -->\n)\n+/gm, (_blank, fence: string) => fence + '\n') : text;
+        expect([md, without, oneAfterFences(noneBack)]).toEqual([md, without, oneAfterFences(back)]);
+      }
+    }), {
+      numRuns: 100,
+      examples: [
+        // A style block's fence in an item, after a rule on its marker line,
+        // which the item has as its text
+        [[{ kind: 'open', style: 'box', tight: false }, { kind: 'list', list: { ordered: false, items: [{ children: [{ kind: 'list', list: { ordered: false, items: [
+          { children: [{ kind: 'open', style: 'box', tight: false }], marker: { kind: 'rule' } }, { children: [] }] } }] }] } }, { kind: 'para' }]],
+        // A quote in an item and one after the list in a style block, which
+        // a directive the item drops parts
+        [[{ kind: 'open', style: 'box', tight: false }, { kind: 'list', list: { ordered: false, items: [{ children: [
+          { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }, { kind: 'dropped', html: 'directive', tight: undefined }], marker: { kind: 'rule' } }] } },
+        { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }]],
+      ],
+    });
   }, 60000);
 });

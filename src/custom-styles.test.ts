@@ -1001,6 +1001,64 @@ describe('Custom Styles — Quotes beside fences', () => {
     await twoTrips('- i1\n\n' + block + '\n  > q\n\n\n\np\n', '- i1\n\n  > q\n\n\n\np\n', [':i1', 'GitHubBlockquote:q', ':p']);
   });
 
+  it.each([
+    ['a comment the item drops', '- i1\n\n  <!-- landscape -->\n  > q\n\n  > q\n\n\n\np\n', '- i1\n\n  > q\n\n  > q\n\n\n\np\n', [':i1', 'GitHubBlockquote:q', 'GitHubBlockquote:q', ':p']],
+    ['a comment the item drops, two blank lines after the item\'s text', '- i1\n\n\n  <!-- landscape -->\n  > q\n\np\n', '- i1\n\n\n  > q\n\np\n', [':i1', 'GitHubBlockquote:q', ':p']],
+    ['a fenced code block the item drops', '- i1\n\n  ```\n  x\n  ```\n  > q\n\np\n', '- i1\n\n  > q\n\np\n', [':i1', 'GitHubBlockquote:q', ':p']],
+    ['a comment the item drops after another quote', '- i1\n\n  > q0\n\n\n  <!-- landscape -->\n  > q\n\np\n', '- i1\n\n  > q0\n\n\n  > q\n\np\n', [':i1', 'GitHubBlockquote:q0', 'GitHubBlockquote:q', ':p']],
+    ['a comment the item drops, with fewer blank lines after it', '- i1\n\n\n  <!-- landscape -->\n\n  > q\n\np\n', '- i1\n\n\n  > q\n\np\n', [':i1', 'GitHubBlockquote:q', ':p']],
+  ])('keeps the blank lines before %s for the quote after it', async (_name, md, expected, styles) => {
+    // Import writes the blank lines the source had right before the quote,
+    // after the block, of which there were none, so the quote came back on
+    // the line after the item's text. Word has nothing of the block, so the
+    // blank lines on either side of it are the quote's, as many as on the
+    // side with more
+    await twoTrips(md, expected, styles);
+  });
+
+  it.each([
+    ['a paragraph in the item', '- i1\n\n  > q\n  <!-- landscape -->\n\n\n  p2\n\np\n', '- i1\n\n  > q\n\n\n  p2\n\np\n', [':i1', 'GitHubBlockquote:q', 'ManuscriptListContinuation:p2', ':p']],
+    ['the next item', '- i1\n\n  > q\n  <!-- landscape -->\n\n\n- i2\n', '- i1\n\n  > q\n\n\n- i2\n', [':i1', 'GitHubBlockquote:q', ':i2']],
+    ['a paragraph after the list', '- i1\n\n  > q\n  <!-- landscape -->\n\n\np\n', '- i1\n\n  > q\n\n\np\n', [':i1', 'GitHubBlockquote:q', ':p']],
+  ])('keeps the blank lines after a block a list item drops after a quote for %s', async (_name, md, expected, styles) => {
+    // Import writes the blank lines the source had right after the quote,
+    // before the block, of which there were none
+    await twoTrips(md, expected, styles);
+  });
+
+  it.each([
+    ['the next item', '- i1\n\n  <!-- landscape -->\n- i2\n', '- i1\n\n- i2\n', [':i1', ':i2']],
+    ['the next item, after a fenced code block', '- i1\n\n  ```\n  x\n  ```\n- i2\n', '- i1\n\n- i2\n', [':i1', ':i2']],
+    ['a sublist', '- i0\n\n  - i1\n\n    <!-- landscape -->\n    - i2\n', '- i0\n\n  - i1\n\n    - i2\n', [':i0', ':i1', ':i2']],
+    ['a comment after the list', '- i1\n\n  ```\n  x\n  ```\n<!-- c -->\n\np\n', '- i1\n\n<!-- c -->\n\np\n', [':i1', ':p']],
+  ])('keeps the blank line before a block a list item drops for %s after the block', async (_name, md, expected, styles) => {
+    // The item or the comment after the block had no blank line right
+    // before it, so export recorded none, and import wrote the list tight,
+    // or the comment on the line after the item
+    await twoTrips(md, expected, styles);
+  });
+
+  it.each([
+    ['a quote after a rule', 'p\n\n- ***\n  > q\n', 'p\n\n- \n  > q\n', [':p', 'GitHubBlockquote:q']],
+    ['a quote after a fenced code block', 'p\n\n- ```\n  x\n  ```\n  > q\n', 'p\n\n- \n  > q\n', [':p', 'GitHubBlockquote:q']],
+    ['a quote after a rule in an item of numbers', 'p\n\n1. ***\n   > q\n', 'p\n\n1. \n   > q\n', [':p', 'GitHubBlockquote:q']],
+    ['a comment after the list, after a rule', 'p\n\n- ***\n<!-- c -->\n\nq\n', 'p\n\n- \n<!-- c -->\n\nq\n', [':p', ':q']],
+  ])('keeps %s on a list item\'s marker line, which the item drops, as it was', async (_name, md, expected, styles) => {
+    // The item's marker line, which Word gets the item's paragraph for, was
+    // among the lines of the block it dropped, so the blank line before the
+    // item went for the quote's or the comment's, and import wrote the
+    // quote after the list
+    await twoTrips(md, expected, styles);
+  });
+
+  it.each([
+    ['a line without a > after a quote in a list item', '- i0\n\n  > q1\n  l2\n\np\n', '- i0\n\n  > q1\n\n  l2\n\np\n', [':i0', 'GitHubBlockquote:q1', 'ManuscriptListContinuation:l2', ':p']],
+    ['a landscape directive without its end between two quotes', '> q0\n\n<!-- landscape -->\n> q\n\np\n', '> q0\n\n> q\n\np\n', ['GitHubBlockquote:q0', 'GitHubBlockquote:q', ':p']],
+  ])('keeps the blank lines around a quote beside %s', async (_name, md, expected, styles) => {
+    // The line map since #533 finds these quotes' lines in the source
+    await twoTrips(md, expected, styles);
+  });
+
   it('finds a quote in the source past a LaTeX environment that holds its line, whose lines preprocessing rewrites', async () => {
     // markdown-it reads the environment wrapped as display math, whose
     // lines aren't the source's, so the search for the quote after it
