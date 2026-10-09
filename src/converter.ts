@@ -13476,11 +13476,28 @@ export function buildMarkdown(
   function blankLinesBeforeListQuote(item: Extract<ContentItem, { type: 'para' }>): number {
     if (item.blockquoteGroupIndex === undefined) return 0;
     if (lastBlockquoteGroupIndex !== undefined && lastBlockquoteGroupIndex !== item.blockquoteGroupIndex) {
-      const gap = blockquoteGaps?.get(lastBlockquoteGroupIndex);
+      const gap = quoteGroupGap(item);
       if (gap !== undefined && gap >= 0) return gap;
       if (gap === undefined) return 1;
     }
     return blockquotePreContentBlankLines?.get(item.blockquoteGroupIndex) ?? 0;
+  }
+
+  /** The blank lines between the last quote group and `item`'s, another,
+   *  as export recorded them after the last: -1 where something else stood
+   *  between them. Where import wrote nothing of that, as of a style block
+   *  of quotes alone, whose fences it doesn't write, as Word's quotes keep
+   *  their own style, or of an HTML block in a list item, which export
+   *  drops, the blank lines before the second quote, as where import wrote
+   *  it. With none, they adjoin, as for a gap of 0 (see
+   *  adjoiningQuoteGroups), as on the line after the first quote the
+   *  second would be one with it on reparse. */
+  function quoteGroupGap(item: Extract<ContentItem, { type: 'para' }>): number | undefined {
+    if (lastBlockquoteGroupIndex === undefined) return undefined;
+    const gap = blockquoteGaps?.get(lastBlockquoteGroupIndex);
+    if (gap !== -1 || lastQuoteEnd === undefined || output.slice(lastQuoteEnd).some(part => part.trim())) return gap;
+    const before = item.blockquoteGroupIndex === undefined ? undefined : blockquotePreContentBlankLines?.get(item.blockquoteGroupIndex);
+    return before ?? 0;
   }
 
   /** Blank lines before a plain list continuation paragraph: one, or after a
@@ -13627,6 +13644,11 @@ export function buildMarkdown(
   };
   let lastBlockquoteGroupIndex: number | undefined;
   let pendingPostContentGroupIndex: number | undefined;
+  // Where the last quote paragraph's text ends in output, once the next
+  // block starts, which a quote after it adjoins where nothing import
+  // writes goes between them (see quoteGroupGap)
+  let lastQuoteEnd: number | undefined;
+  let quoteEnds = false;
   // Track previous blockquote type to detect group boundaries when gap
   // metadata is absent (plain↔alert or alert↔different-alert transitions).
   let lastBlockquoteAlertType: GfmAlertType | 'plain' | undefined;
@@ -13761,6 +13783,10 @@ export function buildMarkdown(
 
   while (i < mergedContent.length) {
     closeHtmlBlocks();
+    if (quoteEnds && isStructuralBoundaryItem(mergedContent[i])) {
+      lastQuoteEnd = output.length;
+      quoteEnds = false;
+    }
     const wordItem = mergedContent[i];
     const tableJoin = lastTableJoin;
     lastTableJoin = undefined;
@@ -13800,6 +13826,10 @@ export function buildMarkdown(
       afterSentinel = true;
       lastWasSectionSentinel = false;
       lastSentinelAfterGapKey = undefined;
+      // The blank lines the source had after a quote before the fence are
+      // the fence's, which its own gap wrote, and not the next paragraph's
+      // after this one
+      pendingPostContentGroupIndex = undefined;
     }
 
     if (item.type === 'para') {
@@ -13856,8 +13886,11 @@ export function buildMarkdown(
         // are that blank line, as before a paragraph, whose text goes on from
         // them: export reads more blank lines as one, so the next trip would
         // drop them. A tracked mark before one is in the text before it (see
-        // joinTrackedParagraphBreaks)
-        if (nextPara && (nextPara.listMeta || nextPara.headingLevel || nextPara.isCodeBlock || nextPara.isTitle || nextPara.horizontalRule)) {
+        // joinTrackedParagraphBreaks). So are those in a style block before
+        // a paragraph in it, after a quote in a list item, where the quote's
+        // spacing writes the blank lines (see the sentinels' pass in
+        // convertDocx)
+        if (nextPara && (nextPara.listMeta || nextPara.headingLevel || nextPara.isCodeBlock || nextPara.isTitle || nextPara.horizontalRule || nextPara.customStyleName)) {
           // One at a list level Word shows no number for still ends the
           // items under the one it's in, which an item after it would nest
           // in, as a paragraph with text does
@@ -13946,8 +13979,11 @@ export function buildMarkdown(
           // blank lines the source had before them.
           ensureTrailingNewlines(afterItemFence ? 1 : item.blockquoteLevel ? 1 + blankLinesBeforeListQuote(item) : 1 + blankLinesAfterListQuote());
           afterItemFence = false;
+          // The blank lines the source had after a quote are this
+          // paragraph's, and not those of a paragraph after the list
+          if (!item.blockquoteLevel) pendingPostContentGroupIndex = undefined;
           if (item.blockquoteLevel && lastBlockquoteGroupIndex !== undefined && item.blockquoteGroupIndex !== undefined
-            && item.blockquoteGroupIndex !== lastBlockquoteGroupIndex && blockquoteGaps?.get(lastBlockquoteGroupIndex) === 0) {
+            && item.blockquoteGroupIndex !== lastBlockquoteGroupIndex && quoteGroupGap(item) === 0) {
             output.push(adjoiningQuoteGroups(item));
           }
         } else if (incomingSep !== null) {
@@ -13961,7 +13997,7 @@ export function buildMarkdown(
         ) {
           // Transitioning between blockquote groups — use gap metadata to
           // emit the exact number of blank lines from the original source.
-          const gapCount = blockquoteGaps.get(lastBlockquoteGroupIndex);
+          const gapCount = quoteGroupGap(item);
           if (gapCount === 0) {
             output.push('\n' + adjoiningQuoteGroups(item));
           } else if (gapCount !== undefined && gapCount >= 0) {
@@ -14045,7 +14081,10 @@ export function buildMarkdown(
             const blankCount = blockquotePostContentBlankLines.get(pendingPostContentGroupIndex)
               ?? item.emptyParagraphCount;
             if (blankCount !== undefined && blankCount >= 0) {
-              output.push('\n' + '\n'.repeat(blankCount));
+              // At least one after a quote in a list item, which the
+              // paragraph would go on, as a lazy line, where none were, as
+              // where the item dropped a block between them
+              output.push('\n' + '\n'.repeat(prevItemWasListQuote ? Math.max(1, blankCount) : blankCount));
             } else {
               output.push('\n\n');
             }
@@ -14121,6 +14160,7 @@ export function buildMarkdown(
       if (item.blockquoteLevel && item.blockquoteGroupIndex !== undefined) {
         lastBlockquoteGroupIndex = item.blockquoteGroupIndex;
         pendingPostContentGroupIndex = item.blockquoteGroupIndex;
+        quoteEnds = true;
       } else if (item.headingLevel || item.listMeta || item.isCodeBlock) {
         // Real non-blockquote content resets the tracking
         lastBlockquoteGroupIndex = undefined;
@@ -14455,6 +14495,9 @@ export function buildMarkdown(
       ensureTrailingNewlines(item.type === 'custom_style_open' || blockGoesOn ? 2 : 1);
       output.push(prefix + (item.type === 'custom_style_open' ? '<!-- style: ' + item.styleName + ' -->\n' : '<!-- /style -->'));
       afterItemFence = item.type === 'custom_style_open';
+      // The blank lines the source had after a quote before the fence, which
+      // aren't those of the item after it
+      pendingPostContentGroupIndex = undefined;
       i++;
       continue;
     }
@@ -16195,6 +16238,10 @@ export async function convertDocx(
     // The items with the sentinels, which go back in docContent at the end,
     // as a splice for each sentinel took time for each item after it
     const out: ContentItem[] = [];
+    // The index of the paragraph after the empty ones after a quote in a
+    // list item, in a block they don't end, and those (see below)
+    let separatorsInBlock = -1;
+    const keptSeparators = new Set<ContentItem>();
     // A tracked mark on `para`, which a style block in a list item starts
     // or ends at, is the break that ends the paragraph before it, which
     // stays before the block's fence, on an empty paragraph, as at the top
@@ -16205,6 +16252,13 @@ export async function convertDocx(
       const { breakRevision, ...rest } = para;
       out.push({ type: 'para', breakRevision, listContinuation });
       return rest;
+    };
+    // Whether the item at `at` is an empty paragraph, with no text of its
+    // own, which an empty one before a paragraph that isn't in a block has
+    // (see the empty paragraphs' count)
+    const separator = (at: number): boolean => {
+      const entry = docContent[at];
+      return entry.type === 'para' && isPlainEmptyParagraph(entry) && !paragraphHasContent(docContent, at);
     };
     // The level of a list item, as buildMarkdown writes one
     const itemLevel = (entry: ContentItem): number | undefined => entry.type === 'para' && entry.listMeta && !entry.headingLevel && !entry.isCodeBlock && !entry.isTitle ? entry.listMeta.level : undefined;
@@ -16232,7 +16286,7 @@ export async function convertDocx(
         const beforeLevel = itemLevel(before);
         if (beforeLevel !== undefined) {
           if (beforeLevel <= depth) host = before as ParaItem;
-        } else if (before.type === 'para' ? !before.listContinuation : isStructuralBoundaryItem(before)) {
+        } else if (before.type === 'para' ? !before.listContinuation && !keptSeparators.has(before) : isStructuralBoundaryItem(before)) {
           return undefined;
         }
       }
@@ -16314,6 +16368,32 @@ export async function convertDocx(
           activeStyle = undefined;
         }
         return item;
+      }
+      // The empty paragraphs export writes after a quote in a list item, at
+      // which a list block ends, before an item that starts another list or
+      // a paragraph after the list (see generateDocumentXml in
+      // md-to-docx.ts), in a block that goes on after them, which they
+      // don't end, as the quote didn't. Nor before another list item, where
+      // the block ends, if it does, as a block in an item (see
+      // sublistInBlock), or at the item, which keeps the list it starts
+      // apart from the one before, as a fence before it does
+      if (!styleName && activeStyle && i < separatorsInBlock) {
+        keptSeparators.add(item);
+        return item;
+      }
+      if (!styleName && activeStyle && separator(i)) {
+        let before = out.length - 1;
+        while (before >= 0 && !isStructuralBoundaryItem(out[before])) before--;
+        const quote = out[before];
+        let next = i + 1;
+        while (next < docContent.length && (!isStructuralBoundaryItem(docContent[next]) || separator(next))) next++;
+        const after = docContent[next];
+        if (quote?.type === 'para' && quote.blockquoteLevel && quote.listContinuation
+            && after?.type === 'para' && (after.customStyleName === activeStyle || itemLevel(after) !== undefined)) {
+          separatorsInBlock = next;
+          keptSeparators.add(item);
+          return item;
+        }
       }
       // A tracked mark before a paragraph a style block starts or ends at is
       // the break that ends the paragraph before it, which the block keeps

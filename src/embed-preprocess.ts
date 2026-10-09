@@ -230,6 +230,11 @@ export interface PreprocessEmbedsResult {
   output: string;
   /** Original directive text for each embed, in order of appearance. */
   embedDirectives: string[];
+  /** For each line of `output`, and one past the last, the line of the
+   *  Markdown it comes from: an embed's, and the blank lines put in around
+   *  it, its directive's, but the one after it, the line after (see
+   *  line-map.ts) */
+  lines: number[];
 }
 
 export function preprocessEmbeds(markdown: string, resolver: EmbedResolver, documentPath: string, options?: EmbedOptions): string {
@@ -243,6 +248,9 @@ export function preprocessEmbeds(markdown: string, resolver: EmbedResolver, docu
 export function preprocessEmbedsTracked(markdown: string, resolver: EmbedResolver, documentPath: string, startIdx = 0, options?: EmbedOptions): PreprocessEmbedsResult {
   const lines = markdown.split('\n');
   const result: string[] = [];
+  const sourceLines: number[] = [];
+  // A line of the Markdown, or one written in its place or before it
+  const push = (line: string, from: number) => { result.push(line); sourceLines.push(from); };
   const embedDirectives: string[] = [];
   let i = 0;
   let fenceChar: '`' | '~' | null = null;
@@ -263,12 +271,12 @@ export function preprocessEmbedsTracked(markdown: string, resolver: EmbedResolve
         fenceChar = null;
         fenceLen = 0;
       }
-      result.push(lines[i]);
+      push(lines[i], i);
       i++;
       continue;
     }
     if (fenceChar) {
-      result.push(lines[i]);
+      push(lines[i], i);
       i++;
       continue;
     }
@@ -287,29 +295,29 @@ export function preprocessEmbedsTracked(markdown: string, resolver: EmbedResolve
 
       // Ensure blank line before
       if (result.length > 0 && result[result.length - 1].trim() !== '') {
-        result.push('');
+        push('', i);
       }
 
       // Add expanded content
       const expandedLines = expanded.split('\n');
       for (const line of expandedLines) {
-        result.push(line);
+        push(line, i);
       }
 
       // Ensure blank line after
       if (i + 1 < lines.length && lines[i + 1]?.trim() !== '') {
-        result.push('');
+        push('', i + 1);
       }
 
       i++;
       continue;
     }
 
-    result.push(lines[i]);
+    push(lines[i], i);
     i++;
   }
 
-  return { output: result.join('\n'), embedDirectives };
+  return { output: result.join('\n'), embedDirectives, lines: [...sourceLines, lines.length] };
 }
 
 function resolveEmbed(directive: EmbedDirective, resolver: EmbedResolver, documentPath: string, options?: EmbedOptions): string {

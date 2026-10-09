@@ -2,6 +2,7 @@ import type MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import { type CodeRegion, computeMarkdownRegions, isInsideCodeRegion, mergeRegions } from './code-regions';
 import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
+import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines } from './line-map';
 
 // Placeholder used to preserve paragraph breaks inside CriticMarkup spans.
 // Uses Private Use Area characters to avoid markdown-it's normalize step
@@ -159,14 +160,20 @@ function computeCriticBlockAnalysis(
 
 const LEADING_CRITIC_BREAK_RE = /(?:\{\+\+|\{--|\{~~|\{==|\{>>)(?:\r\n|\r|\n)/;
 
-function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): CriticBlockAnalysis {
+/** The analysis of the Markdown with each opener stranded at a line's end
+ *  moved, and the edits that moved them */
+function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): CriticBlockAnalysis & { edits: LineEdit[] } {
   // When an opener is stranded at the end of a line, start the Critic span in
   // a new paragraph. Authors commonly put the opener at the end of the prior
   // paragraph's last line; a single source newline otherwise remains a soft
   // break and incorrectly pulls that paragraph into the revision.
   const { source: markdown, inertRegions, listRegions } = analysis;
   const mathRegions = computeDollarMathRegions(markdown, inertRegions);
-  let changed = false;
+  const edits: LineEdit[] = [];
+  const moved = (offset: number, full: string, text: string) => {
+    edits.push({ start: offset, end: offset + full.length, text });
+    return text;
+  };
   const transformed = markdown.replace(
     /(\{\+\+|\{--|\{~~|\{==|\{>>)((?:\r\n|\r|\n)(?:[ \t]*(?:>[ \t]*)?(?:\r\n|\r|\n))?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
     (full, open: string, leadingBreak: string, nextPrefix: string, offset: number) => {
@@ -209,18 +216,16 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
         const paragraphBreak = lineEndings.length > 1
           ? leadingBreak
           : eol + quoteMatch[1].trimEnd() + eol;
-        changed = true;
-        return paragraphBreak + nextPrefix + open;
+        return moved(offset, full, paragraphBreak + nextPrefix + open);
       }
 
       // Preserve an existing blank line. For a lone newline, add the second
       // newline needed to form a Markdown paragraph boundary.
       const paragraphBreak = lineEndings.length > 1 ? leadingBreak : eol + eol;
-      changed = true;
-      return paragraphBreak + open + nextPrefix;
+      return moved(offset, full, paragraphBreak + open + nextPrefix);
     },
   );
-  return changed ? computeCriticBlockAnalysis(transformed) : analysis;
+  return edits.length > 0 ? { ...computeCriticBlockAnalysis(transformed), edits } : { ...analysis, edits };
 }
 
 function quoteDepthAt(content: string, offset: number): number {
@@ -391,18 +396,38 @@ export function criticPayloadRanges(markdown: string): Array<[number, number]> {
 }
 
 export function preprocessCriticMarkup(markdown: string, moveLeadingBreaks = true): string {
+  return criticPreprocessed(markdown, moveLeadingBreaks).output;
+}
+
+/** The Markdown as preprocessCriticMarkup writes it, and for each of its
+ *  lines, and one past the last, the line of `markdown` it comes from (see
+ *  line-map.ts): a span's lines, joined, from its first, and those an
+ *  opener moved past its line's end starts, from the opener's */
+export function preprocessCriticMarkupWithLines(markdown: string, moveLeadingBreaks = true): { output: string; lines: LineMap } {
+  const { output, moved, edits } = criticPreprocessed(markdown, moveLeadingBreaks);
+  if (!moved) return { output, lines: edits.length > 0 ? linesAfterEdits(markdown, edits) : sameLines(lineCount(markdown)) };
+  return { output, lines: throughLines(linesAfterEdits(moved.source, edits), linesAfterEdits(markdown, moved.edits)) };
+}
+
+/** The Markdown as preprocessCriticMarkup writes it, from the Markdown with
+ *  the openers stranded at a line's end `moved`, where any were, by the
+ *  edits of each span's line ends to placeholders */
+function criticPreprocessed(markdown: string, moveLeadingBreaks: boolean): { output: string; moved?: { source: string; edits: LineEdit[] }; edits: LineEdit[] } {
   // Fast path: if no CriticMarkup opening markers, return unchanged
   if (!markdown.includes('{++') && !markdown.includes('{--') &&
       !markdown.includes('{~~') && !markdown.includes('{>>') &&
       !markdown.includes('{==') && !markdown.includes('{#')) {
-    return markdown;
+    return { output: markdown, edits: [] };
   }
 
-  const analysis = moveLeadingBreaks && LEADING_CRITIC_BREAK_RE.test(markdown)
+  const movedAnalysis = moveLeadingBreaks && LEADING_CRITIC_BREAK_RE.test(markdown)
     ? moveLeadingBreakOutsideCritic(computeCriticBlockAnalysis(markdown, true))
-    : computeCriticBlockAnalysis(markdown);
+    : undefined;
+  const analysis = movedAnalysis ?? computeCriticBlockAnalysis(markdown);
   const { source: result, inertRegions } = analysis;
+  const moved = movedAnalysis && movedAnalysis.edits.length > 0 ? { source: result, edits: movedAnalysis.edits } : undefined;
   const segments: string[] = [];
+  const edits: LineEdit[] = [];
   let lastPos = 0;
   for (const { start, contentStart, closeIdx } of criticSpans(result, inertRegions)) {
     const content = result.slice(contentStart, closeIdx);
@@ -414,10 +439,11 @@ export function preprocessCriticMarkup(markdown: string, moveLeadingBreaks = tru
       const protectedContent = protectLineBreaks(withoutQuotePrefixes);
       segments.push(result.slice(lastPos, contentStart));
       segments.push(protectedContent);
+      edits.push({ start: contentStart, end: closeIdx, text: protectedContent });
       lastPos = closeIdx;
     }
   }
   if (segments.length > 0) segments.push(result.slice(lastPos));
 
-  return segments.length > 0 ? segments.join('') : result;
+  return { output: segments.length > 0 ? segments.join('') : result, moved, edits };
 }

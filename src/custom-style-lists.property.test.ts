@@ -11,15 +11,19 @@ import { convertMdToDocx } from './md-to-docx';
 // This exports documents of paragraphs, some in blocks on one line, and
 // lists, nested and of either type, some after an indent directive, which
 // Word may have as one with the list before, with paragraphs in their
-// items, quotes of lists, whose items are the quote's paragraphs, and
-// fences anywhere, open or close, with a blank line after or before them or
-// none, imports the document, and exports what it wrote again, and checks
-// that Word gets the same paragraphs, in the same styles, at the same list
-// levels and indents, and that import writes the same Markdown again.
+// items, quotes, of paragraphs or of lists, whose items are the quote's
+// paragraphs, at the top level and in items, and fences anywhere, open or
+// close, with a blank line after or before them or none, and blocks an item
+// drops, a fenced code block or an HTML block, that hold the line of a quote
+// in the item or after it, which some quotes repeat, imports the
+// document, and exports what it wrote again, and checks that Word gets the
+// same paragraphs, in the same styles, at the same list levels and
+// indents, and that import writes the same Markdown again.
 
 type Style = 'box' | 'note';
 type Fence = { kind: 'open'; style: Style; tight: boolean } | { kind: 'close'; tight: boolean };
-type Child = { kind: 'para' } | { kind: 'list'; list: List; directive?: 'indent' | 'no-indent' } | { kind: 'quote'; list: List } | { kind: 'inline'; style: Style } | Fence;
+type Child = { kind: 'para' } | { kind: 'list'; list: List; directive?: 'indent' | 'no-indent' } | { kind: 'quote'; list?: List; repeated?: boolean }
+  | { kind: 'inline'; style: Style } | { kind: 'dropped'; html: boolean; plain?: boolean } | Fence;
 type Item = { children: Child[] };
 type List = { ordered: boolean; items: Item[] };
 
@@ -33,22 +37,25 @@ const paraArb: fc.Arbitrary<Child> = fc.oneof(
   { weight: 3, arbitrary: fc.constant({ kind: 'para' as const }) },
   { weight: 1, arbitrary: fc.record({ kind: fc.constant('inline' as const), style: fc.constantFrom<Style>('box', 'note') }) },
 );
+/** A quote of a paragraph, of its own text or of the text some quotes
+ *  repeat */
+const quoteParaArb: fc.Arbitrary<Child> = fc.record({ kind: fc.constant('quote' as const), repeated: fc.boolean() });
+/** A block an item drops, which holds the line of a quote that repeats */
+const droppedArb: fc.Arbitrary<Child> = fc.record({ kind: fc.constant('dropped' as const), html: fc.boolean() });
 const listArb: fc.Memo<List> = fc.memo(depth => fc.record({
   ordered: fc.boolean(),
   items: fc.array(fc.record({
-    children: fc.array(depth > 1 ? fc.oneof(paraArb, listArb(depth - 1).map(list => ({ kind: 'list' as const, list })), fenceArb) : fc.oneof(paraArb, fenceArb), { maxLength: 4 }),
+    children: fc.array(depth > 1 ? fc.oneof(paraArb, listArb(depth - 1).map(list => ({ kind: 'list' as const, list })), quoteArb(depth - 1), fenceArb, droppedArb)
+      : fc.oneof(paraArb, quoteParaArb, fenceArb, droppedArb), { maxLength: 4 }),
   }), { minLength: 1, maxLength: 3 }),
 }));
-/** A quote of a list, whose items, with their fences, are its paragraphs.
- *  Only at the top level: in a list item, a quote, at the end of an item
- *  before a list of the other type or with no blank line between it and a
- *  fence or a block the item drops, comes back so the next trip reads
- *  another document, on main too */
+/** A quote of a paragraph, or of a list, whose items, with their fences,
+ *  are its paragraphs */
 function quoteArb(depth: number): fc.Arbitrary<Child> {
-  return listArb(depth).map(list => ({ kind: 'quote' as const, list }));
+  return fc.oneof(quoteParaArb, listArb(depth).map(list => ({ kind: 'quote' as const, list })));
 }
 /** Documents of up to six paragraphs, lists of up to three levels, some
- *  after an indent directive, quotes of lists, and fences, at the top level */
+ *  after an indent directive, quotes, and fences, at the top level */
 const documentArb: fc.Arbitrary<Child[]> = fc.array(fc.oneof(
   paraArb,
   fc.record({ list: listArb(3), directive: fc.constantFrom(undefined, 'indent' as const, 'no-indent' as const) })
@@ -64,20 +71,17 @@ const documentArb: fc.Arbitrary<Child[]> = fc.array(fc.oneof(
  *  that opens in a list item closes it, but not one in a quote's item,
  *  which the quote drops, and a block on one line closes it.
  *  A blank line between blocks, but not after an opening fence or before a
- *  closing one that is `tight`, unless a quote is on the other side: two
- *  quotes with a fence between them and no blank line on one side of it
- *  come back on lines in a row, which the next trip reads as one
- *  paragraph, on main too */
+ *  closing one that is `tight` */
 function markdownOf(blocks: Child[]): { md: string; styles: Array<[string, string]> } {
   let n = 0;
   let open: Style | undefined;
   let quoted = false;
   const styles: Array<[string, string]> = [];
-  type Chunk = { lines: string[]; fence?: Fence; quote?: true };
+  type Chunk = { lines: string[]; fence?: Fence };
   const join = (chunks: Chunk[]): string[] => {
     const lines: string[] = [];
     chunks.forEach((chunk, k) => {
-      const tight = k > 0 && !chunk.quote && !chunks[k - 1].quote && (chunks[k - 1].fence?.kind === 'open' && chunks[k - 1].fence!.tight || chunk.fence?.kind === 'close' && chunk.fence.tight);
+      const tight = k > 0 && (chunks[k - 1].fence?.kind === 'open' && chunks[k - 1].fence!.tight || chunk.fence?.kind === 'close' && chunk.fence.tight);
       if (k > 0 && !tight) lines.push('');
       lines.push(...chunk.lines);
     });
@@ -96,10 +100,21 @@ function markdownOf(blocks: Child[]): { md: string; styles: Array<[string, strin
         }
         return { lines: [indent + '<!-- style: ' + child.style + ' -->p' + n++ + '<!-- /style -->'] };
       case 'quote': {
+        if (!child.list) return { lines: [indent + '> ' + (child.repeated ? 'q' : 'p' + n++)] };
+        // In a quote, which may be in another
+        const outer = quoted;
         quoted = true;
         const lines = chunkOf({ kind: 'list', list: child.list }, '').lines.map(line => indent + (line ? '> ' + line : '>'));
-        quoted = false;
-        return { lines, quote: true };
+        quoted = outer;
+        return { lines };
+      }
+      case 'dropped': {
+        // Its line the same as a quote's that repeats at its indent, but
+        // where it's `plain`. An HTML block without its end, which a blank
+        // line ends in the item, the item drops with more of the item after
+        // it
+        const line = indent + (child.plain ? 'x' : '> q');
+        return { lines: child.html ? [indent + '<pre>', line, '', indent + 'p' + n++] : [indent + '```', line, indent + '```'] };
       }
       case 'list':
         return { lines: (child.directive ? [indent + '<!-- ' + child.directive + ' -->'] : []).concat(join(child.list.items.map((item, k) => {
@@ -114,6 +129,15 @@ function markdownOf(blocks: Child[]): { md: string; styles: Array<[string, strin
     }
   };
   return { md: twoStyles + join(blocks.map(block => chunkOf(block, ''))).join('\n') + '\n', styles };
+}
+
+/** `blocks` with plain text in the blocks items drop, which Word gets
+ *  nothing of */
+function withPlainDropped(blocks: Child[]): Child[] {
+  const list = (l: List): List => ({ ...l, items: l.items.map(item => ({ children: withPlainDropped(item.children) })) });
+  return blocks.map(child => child.kind === 'dropped' ? { ...child, plain: true }
+    : child.kind === 'list' ? { ...child, list: list(child.list) }
+    : child.kind === 'quote' && child.list ? { ...child, list: list(child.list) } : child);
 }
 
 /** Each paragraph with text Word shows in the document of `docx`: its
@@ -134,20 +158,9 @@ async function paragraphsOf(docx: Uint8Array): Promise<string[]> {
   }).filter(p => !p.endsWith('|'));
 }
 
-/** `md` without a blank line between a closing fence at the top level and
- *  a list item after it, which the next trip adds where a quote is before
- *  the fence, which changes nothing it renders, on main too */
-function withoutBlankAfterFence(md: string): string {
-  return md.replace(/<!-- \/style -->\n\n(?=(?:[-*+]|\d+\.) )/g, fence => fence.slice(0, -1));
-}
-
 describe('Style blocks around lists and in their items', () => {
   test('give paragraphs at the top level their block\'s style, keep paragraphs\' styles and list levels in Word over a round trip, and come back the same', async () => {
     await fc.assert(fc.asyncProperty(documentArb, async blocks => {
-      // Not a quote at a block's start, which import writes before the
-      // block's opening fence, with no blank line between, so the next trip
-      // loses the one between the block's next two paragraphs, on main too
-      fc.pre(!blocks.some((block, k) => block.kind === 'quote' && blocks[k - 1]?.kind === 'open'));
       const { md, styles } = markdownOf(blocks);
       const first = await convertMdToDocx(md);
       // Each paragraph at the top level in the style of the block it's in
@@ -158,7 +171,17 @@ describe('Style blocks around lists and in their items', () => {
       // With the Markdown, for a failure's report, which comes back as it
       // was the first time
       expect([md, back, await paragraphsOf(second.docx)]).toEqual([md, back, paragraphs]);
-      expect([md, withoutBlankAfterFence((await convertDocx(second.docx)).markdown)]).toEqual([md, withoutBlankAfterFence(back)]);
+      expect([md, (await convertDocx(second.docx)).markdown]).toEqual([md, back]);
+      // Word gets nothing of the blocks items drop, so it gets the same
+      // with other text in them, and import writes the same Markdown, with
+      // the blank lines around each quote, which the search for a quote's
+      // lines in the source took from such a block's that held them
+      const other = markdownOf(withPlainDropped(blocks)).md;
+      if (other !== md) {
+        const plain = await convertMdToDocx(other);
+        expect([md, other, await paragraphsOf(plain.docx)]).toEqual([md, other, paragraphs]);
+        expect([md, other, (await convertDocx(plain.docx)).markdown]).toEqual([md, other, back]);
+      }
     }), { numRuns: 100 });
   }, 60000);
 });

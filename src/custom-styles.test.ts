@@ -11,6 +11,16 @@ import { styleFence } from './style-fence';
 import { renderWithPlugin } from './test-helpers';
 import { fastestRun } from './test-timing';
 
+const twoStyles = '---\nstyles:\n  box:\n    font-style: italic\n  note:\n    font-style: bold\n---\n\n';
+/** Each paragraph's style and text in the document of `docx` */
+const paragraphStyles = async (docx: Uint8Array) => {
+  const JSZip = (await import('jszip')).default;
+  const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+  return [...xml.matchAll(/<w:p\b[^>]*>((?:(?!<\/w:p>).)*)<\/w:p>/gs)].map(([, p]) =>
+    (/<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? '') + ':' + [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''))
+    .filter(p => !p.endsWith(':'));
+};
+
 // Helper: extract a <w:style ...styleId="X"...>...</w:style> block from styles XML
 function extractStyleBlock(xml: string, styleId: string): string | null {
   const re = new RegExp(
@@ -676,16 +686,6 @@ describe('Custom Styles — List items', () => {
     expect(warnings.some(warning => warning.startsWith(kind + ' inside a style block in a list item'))).toBe(true);
   });
 
-  const twoStyles = '---\nstyles:\n  box:\n    font-style: italic\n  note:\n    font-style: bold\n---\n\n';
-  /** Each paragraph's style and text in the document of `docx` */
-  const paragraphStyles = async (docx: Uint8Array) => {
-    const JSZip = (await import('jszip')).default;
-    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
-    return [...xml.matchAll(/<w:p\b[^>]*>((?:(?!<\/w:p>).)*)<\/w:p>/gs)].map(([, p]) =>
-      (/<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? '') + ':' + [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''))
-      .filter(p => !p.endsWith(':'));
-  };
-
   it('keeps a style block in a list item in the style of a block the item is in', async () => {
     // Import wrote no fences around the paragraph, as the style was its
     // item's, but export gives a paragraph in an item in a block the
@@ -901,6 +901,161 @@ describe('Custom Styles — List items', () => {
     expect(again.warnings).toEqual([]);
     expect(await paragraphStyles(again.docx)).toContain('MsCustomBox:p');
     expect((await convertDocx(again.docx)).markdown).toBe(markdown);
+  });
+});
+
+describe('Custom Styles — Quotes beside fences', () => {
+  /** Each paragraph's style and text, but a comment's, which is hidden */
+  const shown = async (docx: Uint8Array) => (await paragraphStyles(docx)).filter(p => !p.includes('&lt;!--'));
+  /** That `md` comes back as `expected`, after the frontmatter, with the
+   *  same paragraphs in the same styles in Word, `styles`, and that the
+   *  next trip gives Word the same paragraphs and import the same Markdown */
+  const twoTrips = async (md: string, expected: string, styles: string[]) => {
+    const first = await convertMdToDocx(twoStyles + md);
+    expect(await shown(first.docx)).toEqual(styles);
+    const back = (await convertDocx(first.docx)).markdown;
+    expect(back).toBe(twoStyles + expected);
+    const second = await convertMdToDocx(back);
+    expect(await shown(second.docx)).toEqual(styles);
+    expect((await convertDocx(second.docx)).markdown).toBe(back);
+  };
+
+  it.each([
+    ['a style block of quotes alone, with no blank line after its fence', '> a\n\n<!-- style: box -->\n> b\n', '> a\n\n> b\n', ['GitHubBlockquote:a', 'GitHubBlockquote:b']],
+    ['a style block of quotes alone, with no blank line around its fence', '> a\n<!-- style: box -->\n> b\n<!-- /style -->\n', '> a\n\n> b\n', ['GitHubBlockquote:a', 'GitHubBlockquote:b']],
+    ['a block a list item drops', '- i1\n\n  > i2\n\n  <!-- landscape -->\n  > i3\n', '- i1\n\n  > i2\n\n  > i3\n', [':i1', 'GitHubBlockquote:i2', 'GitHubBlockquote:i3']],
+    ['a block a quote\'s list item drops', '> - i1\n>\n>   > i2\n>\n>   <!-- landscape -->\n>   > i3\n', '> i1\n> > i2\n>\n> > i3\n', ['GitHubBlockquote:i1', 'GitHubBlockquote:i2', 'GitHubBlockquote:i3']],
+  ])('keeps two quotes apart around %s', async (_name, md, expected, styles) => {
+    // Import writes nothing for what was between them, and wrote the blank
+    // lines before the second quote, of which there were none, so the two
+    // came back on lines in a row, which the next trip read as one
+    // paragraph
+    await twoTrips(md, expected, styles);
+  });
+
+  it.each([
+    ['a style block\'s opening fence', '<!-- style: box -->\n\n> q\n\np1\n\np2\n', '> q\n<!-- style: box -->\n\np1\n\np2\n\n<!-- /style -->\n', ['GitHubBlockquote:q', 'MsCustomBox:p1', 'MsCustomBox:p2']],
+    ['a section\'s fence', '> q\n<!-- landscape -->\n\np1\n\np2\n\n<!-- /landscape -->\n', '> q\n<!-- landscape -->\n\np1\n\np2\n\n<!-- /landscape -->\n', ['GitHubBlockquote:q', ':p1', ':p2']],
+  ])('keeps the blank line between the paragraphs after a quote and %s right after it', async (_name, md, expected, styles) => {
+    // The blank lines after the quote, none, are the fence's, but went to
+    // the paragraph after the one after the fence, which the fence's own
+    // record spaces
+    await twoTrips(md, expected, styles);
+  });
+
+  it.each([
+    ['a sublist of the other type', '<!-- style: box -->\n- i0\n  - i1\n\n    > i2\n\n  1. i3\n<!-- /style -->\n', ['MsCustomBox:i0', 'MsCustomBox:i1', 'GitHubBlockquote:i2', 'MsCustomBox:i3']],
+    ['a list of the other type', '<!-- style: box -->\n- i0\n\n  > q\n\n1. n\n<!-- /style -->\n', ['MsCustomBox:i0', 'GitHubBlockquote:q', 'MsCustomBox:n']],
+    ['a paragraph after the list', '<!-- style: box -->\n- i0\n\n  > q\n\np1\n<!-- /style -->\n', ['MsCustomBox:i0', 'GitHubBlockquote:q', 'MsCustomBox:p1']],
+  ])('keeps a style block open past a quote at the end of a list item before %s', async (_name, md, styles) => {
+    // Export writes an empty paragraph there, which ends the list block,
+    // and has no style, so import closed the block at it, and opened
+    // another at the top level after it, which ended the list
+    await twoTrips(md, md, styles);
+  });
+
+  it.each([
+    ['a list of the other type, after the block\'s closing fence', '<!-- style: box -->\n\n1. i0\n\n   > p1\n\n<!-- /style -->\n\n2. i2\n', '<!-- style: box -->\n\n1. i0\n\n   > p1\n\n<!-- /style -->\n\n2. i2\n', ['MsCustomBox:i0', 'GitHubBlockquote:p1', ':i2']],
+    ['a sublist of the other type, where a block in the item closes it', '<!-- style: box -->\n\n- i0\n\n  - i1\n\n    <!-- style: box -->\n\n    > p2\n\n  1. i3\n', '<!-- style: box -->\n\n- i0\n\n  - i1\n\n    > p2\n\n    <!-- style: box -->\n    <!-- /style -->\n\n  1. i3\n', ['MsCustomBox:i0', 'MsCustomBox:i1', 'GitHubBlockquote:p2', ':i3']],
+  ])('closes a style block after a quote at the end of a list item before %s, so the next trip reads the lists the same', async (_name, md, expected, styles) => {
+    // Import closed the block at the top level at the empty paragraph after
+    // the quote, before the item, which ended the list there: the next
+    // trip read the sublist at the top level, or wrote a comment to keep the
+    // two lists apart, which the fence after the quote did
+    await twoTrips(md, expected, styles);
+  });
+
+  it('keeps an empty style block in a list item after a quote tight against the next item', async () => {
+    // The blank lines after the quote, none, went to the item after the
+    // block's fences, so the next trip wrote a blank line before it
+    await twoTrips('<!-- style: box -->\n\n- i0\n\n  - i1\n\n    > p2\n    <!-- /style -->\n\n    <!-- style: box -->\n\n  - i3\n',
+      '<!-- style: box -->\n\n- i0\n\n  - i1\n\n    > p2\n\n    <!-- style: box -->\n    <!-- /style -->\n  - i3\n',
+      ['MsCustomBox:i0', 'MsCustomBox:i1', 'GitHubBlockquote:p2', ':i3']);
+  });
+
+  it.each([
+    ['a comment and a paragraph in the item', '- i0\n\n  > i1\n  <!-- c -->\n\n  p2\n\np3\n', '- i0\n\n  > i1\n\n  <!-- c -->\n\n  p2\n\np3\n', [':i0', 'GitHubBlockquote:i1', 'ManuscriptListContinuation:p2', ':p3']],
+    ['a block the item drops', '- i0\n\n  - i1\n\n    > i2\n    <!-- landscape -->\n\np3\n', '- i0\n\n  - i1\n\n    > i2\n\np3\n', [':i0', ':i1', 'GitHubBlockquote:i2', ':p3']],
+  ])('keeps a paragraph after a list apart from a quote in its item, with no blank line after the quote, and %s', async (_name, md, expected, styles) => {
+    // The blank lines after the quote, none, went to the paragraph after
+    // the list, which the next trip read as the quote's, or the one before
+    await twoTrips(md, expected, styles);
+  });
+
+  it('finds each quote in the source past lines the same as one after a quote', async () => {
+    // Export puts a blank line in after a quote with none, so a block after
+    // it is a line later than in the source, and the same line in the next
+    // block matched it there. Each block after that was looked for a line
+    // later, and the quotes after it lost the blank lines around them
+    await twoTrips('> q\n<!-- c -->\n<!-- c -->\n\np1\n\n> p\n\np2\n\n<!-- c -->\n', '> q\n<!-- c -->\n<!-- c -->\n\np1\n\n> p\n\np2\n\n<!-- c -->\n',
+      ['GitHubBlockquote:q', ':p1', 'GitHubBlockquote:p', ':p2']);
+  });
+
+  it.each([
+    ['a fenced code block', '  ```\n  > q\n  ```\n'],
+    ['an HTML block', '  <pre>\n  > q\n'],
+  ])('finds a quote in a list item in the source past %s the item drops, which holds its line', async (_name, block) => {
+    // The item drops the block, which no token has, so the search for the
+    // quote after it started before the block, and found the quote's line
+    // in it, with no blank lines around it
+    await twoTrips('- i1\n\n' + block + '\n  > q\n\n\n\np\n', '- i1\n\n  > q\n\n\n\np\n', [':i1', 'GitHubBlockquote:q', ':p']);
+  });
+
+  it('finds a quote in the source past a LaTeX environment that holds its line, whose lines preprocessing rewrites', async () => {
+    // markdown-it reads the environment wrapped as display math, whose
+    // lines aren't the source's, so the search for the quote after it
+    // started before it, and found the quote's line in it, with no blank
+    // lines after it. Export now takes each quote's lines in the source
+    // from where each preprocessing step says it wrote them from.
+    const back = (await convertDocx((await convertMdToDocx('\\begin{equation}\n> q\n\\end{equation}\n\n> q\n\n\np\n')).docx)).markdown;
+    expect(back.endsWith('\n\n> q\n\n\np\n')).toBe(true);
+  });
+
+  it.each([
+    ['the blank lines at the end export trims', 'p\n\n\n> [!NOTE] q\n\n\n', 'p\n\n\n> [!NOTE] q\n'],
+    ['the note of a missing citation export takes out before it', 'Citation data for @k was not found in the bibliography file.\n> [!NOTE] q\n', '> [!NOTE] q\n'],
+  ])('keeps the blank lines before an alert, and its marker\'s line, past %s', async (_name, md, expected) => {
+    // The line after the alert came from the alert's own line, where
+    // export wrote its last line end, and the alert's line came from the
+    // line export took out before it, so the alert had no lines, or the
+    // note's
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(expected);
+  });
+
+  it.each([
+    ['the note of a missing citation', 'Citation data for @a was not found in the bibliography file.'],
+    ['a note\'s definition', '[^1]: d'],
+  ])('reads the blank lines after a quote past %s right after it, which export takes out, as past a line of text', async (_name, line) => {
+    // The blank line after the line export took out came from its own
+    // line, so the quote's lines went on past the line taken out, and the
+    // blank lines after it were the quote's
+    const JSZip = (await import('jszip')).default;
+    const after = async (md: string) => {
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('docProps/custom.xml')!.async('string');
+      return /name="MANUSCRIPT_BLOCKQUOTE_POST_CONTENT_BLANK_LINES_[^"]*"[^>]*>(?:(?!<\/property>).)*?<vt:lpwstr>([^<]*)</s.exec(xml)?.[1];
+    };
+    expect(await after('> q\n' + line + '\n\n\np\n')).toBe('{"0":0}');
+    expect(await after('> q\nx\n\n\np\n')).toBe('{"0":0}');
+  });
+
+  it('keeps three blank lines between two quotes before a table whose cell number formatting writes on fewer lines', async () => {
+    // Codex's: export took the lines of the whole document as unknown
+    // where number formatting wrote a table on fewer lines, so no quote got
+    // the blank lines around it
+    const md = '---\ntable-digits: 2\n---\n\n> a\n\n\n\n> b\n\n<table><tr><td data-mm-kind="number" data-mm-raw="0">\n-\n</td></tr></table>\n';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown)
+      .toBe('---\ntable-digits: 2\n---\n\n> a\n\n\n\n> b\n\n<table>\n  <tr>\n    <td>\n      <p>0.00</p>\n    </td>\n  </tr>\n</table>\n');
+  });
+
+  it('reads an alert\'s marker\'s line as holding no text where a comment\'s body over lines is all it holds', async () => {
+    // Codex's: export read the marker's line in the source, which holds the
+    // body's start but not its end, so it took the body for text, and
+    // import, with the label hidden, wrote the comment after it on the
+    // marker's line, which the next export read as the alert's text
+    const md = '---\ncallout-labels: false\n---\n\n> [!NOTE] {#1>>a\n> b<<}\n>\n> <!-- c -->\n>\n> q\n';
+    const back = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(back).toBe('---\ncallout-labels: false\n---\n\n> [!NOTE]\n>     <!-- c -->\n>\n> q\n');
+    expect((await convertDocx((await convertMdToDocx(back)).docx)).markdown).toBe(back);
   });
 });
 
