@@ -4824,7 +4824,8 @@ export interface DocxGenState {
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
   htmlCommentGaps: Map<number, number>; // blank-line-before count per HTML comment index (non-default only)
   htmlCommentAfterGaps: Map<number, number>; // blank-line-after count per HTML comment index (non-default only)
-  tableRunRPrExtra: string; // extra rPr elements injected into every run inside a table cell (per-table font/size overrides)
+  tableRunRPrExtra: string; // extra rPr elements injected into every run inside a table cell (per-table size overrides)
+  tableRunFont?: string; // the table's font, its directive's or the frontmatter's, which tableRunRPr writes on the runs tableFontOnRuns says
   landscapeTables: Set<number>; // table indices that have data-orientation="landscape"
   portraitTables: Set<number>;  // table indices that have data-orientation="portrait"
   inLandscapeSection: boolean;  // tracks current landscape state during generation
@@ -5170,13 +5171,15 @@ export function tableRFonts(font: string): string {
 }
 
 /** Whether export writes a table's font, `font`, its directive's or else
- *  the frontmatter's for tables, on each of the table's runs, as it does
- *  where that's not the frontmatter's, which it leaves to the table
- *  paragraph style (see generateTable). A run in a character style with a
- *  font of its own, as inline code is, CodeChar, shows that font over the
- *  table paragraph style's, but not over one on the run. */
-export function tableFontOnRuns(overrides: FontOverrides | undefined, font: string | undefined): boolean {
-  return !!font && font !== overrides?.tableFont;
+ *  the frontmatter's for tables, on a run of the table's text, `run`, or
+ *  on its paragraphs' marks, where none is given: where that's not the
+ *  frontmatter's, which it leaves to the table paragraph style (see
+ *  generateTable), and not on inline code. A run in a character style with
+ *  a font of its own, as inline code is, CodeChar, shows that font over
+ *  the table paragraph style's, but not over one on the run, so inline
+ *  code shows in the code font in a table, as it does outside one. */
+export function tableFontOnRuns(overrides: FontOverrides | undefined, font: string | undefined, run?: MdRun): boolean {
+  return !!font && font !== overrides?.tableFont && !run?.code;
 }
 
 /** The font export shows inline code and code blocks in: the
@@ -7476,7 +7479,7 @@ function generateInlineCriticContent(
     return generateRuns(formattedRuns, state, options, bibEntries, citeprocEngine);
   }
   const fallbackRun = mergeRunFormatting({ type: 'text', text: fallbackText }, outer, forced);
-  return generateRun(fallbackText, generateRPr(fallbackRun, state.tableRunRPrExtra || undefined));
+  return generateRun(fallbackText, generateRPr(fallbackRun, tableRunRPr(state, fallbackRun)));
 }
 
 /** Whether runs hold a comment, a comment range marker or a comment body, at any depth */
@@ -7531,7 +7534,6 @@ function generateDeletedCriticContent(
   fallbackText: string,
   outer: MdRun,
   forced: Partial<MdRun>,
-  extraRPr: string | undefined,
   warnings: string[] | undefined,
   state: DocxGenState,
   options?: MdToDocxOptions,
@@ -7539,7 +7541,7 @@ function generateDeletedCriticContent(
   const formattedRuns = formatCriticInnerRuns(runs, outer, forced);
   if (!formattedRuns || formattedRuns.length === 0) {
     const fallbackRun = mergeRunFormatting({ type: 'text', text: fallbackText }, outer, forced);
-    const rPr = generateRPr(fallbackRun, extraRPr);
+    const rPr = generateRPr(fallbackRun, tableRunRPr(state, fallbackRun));
     return '<w:r>' + (rPr ? rPr : '') + delText(fallbackText) + '</w:r>';
   }
 
@@ -7567,12 +7569,12 @@ function generateDeletedCriticContent(
   for (const run of formattedRuns) {
     if (run.type === 'softbreak') {
       const merged = mergeRunFormatting(run, outer, forced);
-      const rPr = generateRPr(merged, extraRPr);
+      const rPr = generateRPr(merged, tableRunRPr(state, merged));
       emit('<w:r>' + (rPr ? rPr : '') + delText(' ') + '</w:r>', run);
       continue;
     }
     if (run.type === 'hardbreak') {
-      const rPr = generateRPr(run, extraRPr);
+      const rPr = generateRPr(run, tableRunRPr(state, run));
       emit('<w:r>' + (rPr ? rPr : '') + '<w:br/></w:r>', run);
       continue;
     }
@@ -7581,17 +7583,17 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'critic_add' || run.type === 'critic_del') {
-      emit(generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options));
+      emit(generateDeletedCriticContent(run.innerRuns, run.text, run, {}, warnings, state, options));
       continue;
     }
     if (run.type === 'critic_sub') {
-      emit(generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings, state, options));
-      if (run.newText) emit(generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings, state, options));
+      emit(generateDeletedCriticContent(run.oldRuns, run.text, run, {}, warnings, state, options));
+      if (run.newText) emit(generateDeletedCriticContent(run.newRuns, run.newText, run, {}, warnings, state, options));
       continue;
     }
     if (run.type === 'critic_highlight' || run.type === 'critic_comment') {
       if (run.type === 'critic_highlight' && run.text) {
-        emit(generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options));
+        emit(generateDeletedCriticContent(run.innerRuns, run.text, run, {}, warnings, state, options));
       }
       continue;
     }
@@ -7609,12 +7611,12 @@ function generateDeletedCriticContent(
       // fields), so deleted citations keep their literal source syntax.
       const literal = '[' + run.text + ']';
       const merged = mergeRunFormatting({ type: 'text', text: literal, highlight: run.highlight, highlightColor: run.highlightColor }, outer, forced);
-      const rPr = generateRPr(merged, extraRPr);
+      const rPr = generateRPr(merged, tableRunRPr(state, merged));
       emit('<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>');
       continue;
     }
     if (run.type !== 'text' || !run.text) continue;
-    const rPr = generateRPr(run, extraRPr);
+    const rPr = generateRPr(run, tableRunRPr(state, run));
     emit('<w:r>' + (rPr ? rPr : '') + (holdsRawHtmlLineEnd(run) ? rawHtmlTextElements(run, 'w:delText') : delText(run.text)) + '</w:r>', run);
   }
   close();
@@ -7650,7 +7652,7 @@ function noteReferenceXml(label: string, state: DocxGenState, revision?: 'additi
   const owns = !owned.has(label) && !(revision && state.untrackedNoteLabels?.has(label));
   if (state.notesMode === 'endnotes') state.hasEndnotes = true;
   else state.hasFootnotes = true;
-  const noteExtraRPr = state.tableRunRPrExtra || '';
+  const noteExtraRPr = tableRunRPr(state) ?? '';
   const refStyleName = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
   const rPr = '<w:rPr>' + orderRPr('<w:rStyle w:val="' + refStyleName + '"/>' + extraRPr + noteExtraRPr) + '</w:rPr>';
   if (owns) {
@@ -7758,15 +7760,15 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       xml += '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + inner + '</w:hyperlink>';
       ri = end - 1;
     } else if (run.type === 'text' && holdsRawHtmlLineEnd(run)) {
-      xml += '<w:r>' + generateRPr(run, state.tableRunRPrExtra || undefined) + rawHtmlTextElements(run, 'w:t') + '</w:r>';
+      xml += '<w:r>' + generateRPr(run, tableRunRPr(state, run)) + rawHtmlTextElements(run, 'w:t') + '</w:r>';
     } else if (run.type === 'text') {
-      const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
+      const rPr = generateRPr(run, tableRunRPr(state, run));
       xml += generateRun(run.text, rPr);
     } else if (run.type === 'softbreak') {
-      const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
+      const rPr = generateRPr(run, tableRunRPr(state, run));
       xml += '<w:r>' + (rPr ? rPr : '') + '<w:t xml:space="preserve"> </w:t></w:r>';
     } else if (run.type === 'hardbreak') {
-      const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
+      const rPr = generateRPr(run, tableRunRPr(state, run));
       xml += '<w:r>' + (rPr ? rPr : '') + '<w:br/></w:r>';
     } else if (run.type === 'critic_add') {
       const author = run.author || options?.authorName || 'Unknown';
@@ -7780,7 +7782,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
+      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.warnings, state, options);
       xml += deletionXml(deletedXml, author, dateAttr, state);
     } else if (run.type === 'critic_sub' && hasCommentRuns(run.oldRuns)) {
       const deletion: MdRun = { ...run, type: 'critic_del', innerRuns: run.oldRuns, oldRuns: undefined, newRuns: undefined, newText: undefined };
@@ -7790,7 +7792,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
+      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.warnings, state, options);
       const insertedXml = insertedContent(state, () => generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine));
       xml += deletionXml(deletedXml, author, dateAttr, state);
       xml += insertionXml(insertedXml, author, dateAttr, state);
@@ -7942,7 +7944,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       xml += noteReferenceXml(run.footnoteLabel || '', state, state.noteRevision, highlightRPr(run));
     } else if (run.type === 'citation') {
       const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds,
-        orderRPr(highlightRPr(run) + (state.tableRunRPrExtra || '')) || undefined, generateRPr(run, state.tableRunRPrExtra || undefined));
+        orderRPr(highlightRPr(run) + (tableRunRPr(state, run) ?? '')) || undefined, generateRPr(run, tableRunRPr(state, run)));
       xml += result.xml;
       if (result.warning) state.warnings.push(result.warning);
       if (result.missingKeys) {
@@ -8855,6 +8857,15 @@ function tableGridColumns(rows: MdTableRow[]): number {
   return totalCols || 1;
 }
 
+/** The run properties a table gives a run of its text, `run`, or a note's
+ *  reference where none is given, past the run's own: the table's font,
+ *  where export writes it on the run (see tableFontOnRuns), and its size,
+ *  where it's the table's own. None out of a table. */
+function tableRunRPr(state: DocxGenState, run?: MdRun): string | undefined {
+  const font = tableFontOnRuns(state.fontOverrides, state.tableRunFont, run) ? tableRFonts(state.tableRunFont!) : '';
+  return font + state.tableRunRPrExtra || undefined;
+}
+
 export function generateTable(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   if (!token.rows) return '';
 
@@ -8869,7 +8880,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
   // which creates asymmetric vertical padding — cell margin alone should control inset).
   const spacingZero = '<w:spacing w:after="0"/>';
   let tablePPr: string;
-  let tableRunRPr = '';
+  let runSizeRPr = '';
   if (effectiveTableSizeHp || effectiveTableFont) {
     const hasDocLevelStyle = !!(fo?.tableSizeHp || fo?.tableFont);
     // Per-table overrides that differ from doc-level require inline rPr on both pPr and runs
@@ -8877,17 +8888,17 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
     let pPrInner = '';
     if (hasDocLevelStyle) pPrInner += '<w:pStyle w:val="TableParagraph"/>';
     pPrInner += spacingZero;
-    let rPrInner = '';
-    if (tableFontOnRuns(fo, effectiveTableFont)) {
-      rPrInner += tableRFonts(effectiveTableFont!);
-    }
+    let sizeRPr = '';
     if (needsInlineSize || (!hasDocLevelStyle && effectiveTableSizeHp)) {
-      rPrInner += '<w:sz w:val="' + effectiveTableSizeHp + '"/><w:szCs w:val="' + effectiveTableSizeHp + '"/>';
+      sizeRPr = '<w:sz w:val="' + effectiveTableSizeHp + '"/><w:szCs w:val="' + effectiveTableSizeHp + '"/>';
     }
+    // The paragraph mark's font, as a run's (see tableFontOnRuns)
+    const rPrInner = (tableFontOnRuns(fo, effectiveTableFont) ? tableRFonts(effectiveTableFont!) : '') + sizeRPr;
     tablePPr = '<w:pPr>' + pPrInner + (rPrInner ? '<w:rPr>' + rPrInner + '</w:rPr>' : '') + '</w:pPr>';
-    // Run-level rPr: same inline overrides so runs inherit per-table font/size
-    // (pPr > rPr only sets the paragraph mark, not run properties)
-    tableRunRPr = rPrInner;
+    // Run-level rPr: the same size, and the font where tableRunRPr writes it,
+    // so runs take per-table font/size (pPr > rPr only sets the paragraph
+    // mark, not run properties)
+    runSizeRPr = sizeRPr;
   } else {
     tablePPr = '<w:pPr>' + spacingZero + '</w:pPr>';
   }
@@ -9009,7 +9020,9 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
 
   // Set per-table run rPr so generateRuns injects font/size on each run
   const prevRunRPrExtra = state.tableRunRPrExtra;
-  state.tableRunRPrExtra = tableRunRPr;
+  const prevRunFont = state.tableRunFont;
+  state.tableRunRPrExtra = runSizeRPr;
+  state.tableRunFont = effectiveTableFont;
 
   for (let rowIdx = 0; rowIdx < token.rows.length; rowIdx++) {
     const row = token.rows[rowIdx];
@@ -9116,6 +9129,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
   }
 
   state.tableRunRPrExtra = prevRunRPrExtra;
+  state.tableRunFont = prevRunFont;
 
   xml += '</w:tbl>';
   return xml;
