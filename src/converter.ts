@@ -6,6 +6,8 @@ import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, seria
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
+import { findStyleElement } from './style-element';
+import { xmlAttribute, xmlElement, xmlStartTag } from './xml-elements';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -15543,50 +15545,6 @@ const FONT_STYLE_TOGGLES = ['w:b', 'w:i', 'w:u', 'w:smallCaps', 'w:caps'];
  *  (w:rPrChange, w:pPrChange), which Word doesn't show */
 const withoutFormatChanges = (xml: string) => xml.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, '');
 
-// An XML start tag's attributes after its name, as an XML parser reads
-// them: each after whitespace, with any whitespace around its =, and its
-// value in double or single quotes, which may hold a >
-const XML_TAG_ATTRIBUTES = '(?:\\s+[^\\s=/>]+\\s*=\\s*(?:"[^"]*"|\'[^\']*\'))*\\s*';
-
-/** The start tag of the first element `name` in `xml` from `from`, as
- *  `<w:sz w:val="22"/>`, with its attributes as XML may spell them (see
- *  XML_TAG_ATTRIBUTES), where it starts and ends, and whether it's empty,
- *  as `<w:rPr/>`. By its name with the w prefix, as import's other
- *  readers take WordprocessingML's (see readZipXml). Undefined for none. */
-function xmlStartTag(xml: string, name: string, from = 0): { tag: string; start: number; end: number; empty: boolean } | undefined {
-  const start = new RegExp('<' + name + XML_TAG_ATTRIBUTES + '(/?)>', 'g');
-  start.lastIndex = from;
-  const match = start.exec(xml);
-  return match ? { tag: match[0], start: match.index, end: match.index + match[0].length, empty: match[1] === '/' } : undefined;
-}
-
-/** The first element `name` in `xml` from `from` (see xmlStartTag), with
- *  its content, '' where it's empty, up to the first end tag of its name,
- *  as the elements read so don't hold their own, and where it ends.
- *  Undefined for none, or one with no end. */
-function xmlElement(xml: string, name: string, from = 0): { tag: string; content: string; start: number; end: number } | undefined {
-  const start = xmlStartTag(xml, name, from);
-  if (!start) return undefined;
-  if (start.empty) return { tag: start.tag, content: '', start: start.start, end: start.end };
-  const close = new RegExp('</' + name + '\\s*>', 'g');
-  close.lastIndex = start.end;
-  const end = close.exec(xml);
-  return end ? { tag: start.tag, content: xml.slice(start.end, end.index), start: start.start, end: end.index + end[0].length } : undefined;
-}
-
-/** An attribute of a start tag (see xmlStartTag), by its name, as `w:val`,
- *  with its character references decoded, as export escapes a name such as
- *  "A & B", or undefined where it hasn't it */
-function xmlAttribute(tag: string, name: string): string | undefined {
-  for (const [, attribute, double, single] of tag.matchAll(/\s([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
-    if (attribute !== name) continue;
-    return (double ?? single).replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));/g, (_, dec: string, hex: string, entity: string) =>
-      dec ? String.fromCodePoint(Number(dec)) : hex ? String.fromCodePoint(parseInt(hex, 16))
-        : ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[entity]);
-  }
-  return undefined;
-}
-
 /** An attribute of the first element `name` in `xml` (see xmlStartTag and
  *  xmlAttribute) */
 function xmlElementAttribute(xml: string, name: string, attribute: string): string | undefined {
@@ -15624,24 +15582,13 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     styleElements.push({ tag: style.tag, block: stylesXml.slice(style.start, style.end) });
   }
 
-  /** The w:style element of the paragraph style `id`, or of the document's
-   *  ID for it, or else of one whose ID differs only in case, as Word
-   *  matches a style's ID whatever its case, as `heading1`, but not of
-   *  another type, which a paragraph doesn't take, as a character style
-   *  `Normal`. With `anyType`, as for a custom style, which can be a
-   *  character style, the style of the ID itself is of any type. As Word
-   *  shows it, without a tracked change's record (see withoutFormatChanges) */
+  /** The w:style element of the paragraph style `id`, by the document's ID
+   *  for a built-in style, of any type with `anyType` (see
+   *  findStyleElement), as Word shows it, without a tracked change's record
+   *  (see withoutFormatChanges) */
   function styleBlock(id: string, anyType = false): string | null {
-    const styleId = documentIds.get(id) ?? id;
-    let caseless: string | null = null;
-    for (const { tag, block } of styleElements) {
-      // A style without a type is a paragraph style
-      const paragraph = (xmlAttribute(tag, 'w:type') ?? 'paragraph') === 'paragraph';
-      const ownId = xmlAttribute(tag, 'w:styleId');
-      if (ownId === styleId && (paragraph || anyType)) return withoutFormatChanges(block);
-      caseless ??= paragraph && ownId?.toLowerCase() === styleId.toLowerCase() ? withoutFormatChanges(block) : null;
-    }
-    return caseless;
+    const found = findStyleElement(stylesXml, id, documentIds, anyType);
+    return found ? withoutFormatChanges(found.element) : null;
   }
 
   // Helper: a style block's style-level rPr, or '' for none
