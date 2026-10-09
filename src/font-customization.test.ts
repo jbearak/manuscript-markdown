@@ -1290,6 +1290,734 @@ describe('Font customization unit tests', () => {
         expect((await convertDocx((await convertMdToDocx(converted, EMBED_OPTIONS)).docx)).markdown).toBe(converted);
       });
     });
+
+    describe('a font Word set on a table', () => {
+      // Word sets the font on each of the table's runs, where its text is
+      // all selected, or on the runs of the text it is, and clearing the
+      // formatting takes it off, and then the table's XML as `edit` makes it
+      const fontInWord = async (markdown: string, font: string | null, runs = Infinity, edit = (table: string) => table) => {
+        const JSZip = (await import('jszip')).default;
+        const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        const rFonts = font === null ? '' : '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '" w:cs="' + font + '"/>';
+        let set = 0;
+        const edited = xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, table => edit(table
+          .replace(/<w:r>(?:<w:rPr>([\s\S]*?)<\/w:rPr>)?/g, (run, rPr: string | undefined) => set++ >= runs ? run
+            : '<w:r><w:rPr>' + rFonts + (rPr ?? '').replace(/<w:rFonts [^>]*\/>/, '') + '</w:rPr>')));
+        expect(edited).not.toBe(xml);
+        zip.file('word/document.xml', edited);
+        return zip.generateAsync({ type: 'uint8array' });
+      };
+      const tableFonts = async (markdown: string) => {
+        const JSZip = (await import('jszip')).default;
+        const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+        const table = /<w:tbl>[\s\S]*?<\/w:tbl>/.exec(xml)![0];
+        return [...new Set([...table.matchAll(/<w:r><w:rPr>(?:(?!<\/w:rPr>)[\s\S])*?<w:rFonts w:ascii="([^"]+)"/g)].map(m => m[1]))];
+      };
+      const TABLE = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
+      const HTML = (attributes: string) => '<table' + attributes + '>\n  <tr>\n    <td>\n      <p>A</p>\n    </td>\n  </tr>\n</table>\n';
+      const DOCUMENT = '---\ntable-font: Courier New\n---\n\n';
+      const EQUATION = '<!-- table-font: Georgia -->\n| A | B |\n| --- | --- |\n| $x$ | 2 |\n';
+      const HEBREW = '| \u05d0 | \u05d1 |\n| --- | --- |\n| \u05d2 | \u05d3 |\n';
+      const CHINESE = '| \u4e2d | \u6587 |\n| --- | --- |\n| \u8868 | \u683c |\n';
+      const GREEK = '| \u03b1 | \u03b2 |\n| --- | --- |\n| \u03b3 | \u03b4 |\n';
+
+      it.each([
+        ['one of its own', '<!-- table-font: Georgia -->\n' + TABLE, 'Arial', '<!-- table-font: Arial -->\n' + TABLE, ['Arial']],
+        ['none of its own', TABLE, 'Arial', '<!-- table-font: Arial -->\n' + TABLE, ['Arial']],
+        ['one of its own, to the document\'s', DOCUMENT + '<!-- table-font: Georgia -->\n' + TABLE, 'Courier New', '<!-- table-font: Courier New -->\n' + TABLE, []],
+        ['none of its own, to the document\'s', DOCUMENT + TABLE, 'Courier New', '<!-- table-font: Courier New -->\n' + TABLE, []],
+        ['one of its own, in HTML', HTML(' data-font="Georgia"'), 'Arial', HTML(' data-font="Arial"'), ['Arial']],
+        ['none of its own, in HTML', HTML(''), 'Arial', HTML(' data-font="Arial"'), ['Arial']],
+        ['one of its own, taken off its text, which then takes the document\'s', DOCUMENT + '<!-- table-font: Georgia -->\n' + TABLE, null, TABLE, []],
+      ])('writes the font Word shows on a table with %s', async (_name, markdown, font, expected, fonts) => {
+        // The table took the font export stored, or none, as Word's was lost
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await fontInWord(markdown, font))).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe(expected);
+        expect(await tableFonts(converted)).toEqual(fonts);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes no font on a table whose text takes the document\'s body font where that\'s export\'s default, Calibri', async () => {
+        // The frontmatter import writes leaves out a body font of Calibri,
+        // the theme's, which text without a font of its own takes, so the
+        // table's text, in Calibri from the table paragraph style, took
+        // Calibri as a font of its own, which a later body font didn't reach
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx((await convertMdToDocx('---\nfont: Calibri\n---\n\n' + TABLE)).docx)).markdown;
+        expect(converted).toBe(TABLE);
+        expect(await tableFonts('---\nfont: Georgia\n---\n\n' + converted)).toEqual([]);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the font Word shows on a table where it set it on some of the text and the rest takes it from the style', async () => {
+        // All of it shows in Courier New, the table paragraph style's, but
+        // some had it of its own, so it read as two fonts
+        const { convertDocx } = await import('./converter');
+        const set = await fontInWord(DOCUMENT + '<!-- table-font: Georgia -->\n' + TABLE, 'Courier New', 1, table => {
+          const edited = table.replace(/<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"\/>/g, '');
+          expect(edited).not.toBe(table);
+          return edited;
+        });
+        const converted = (await convertDocx(set)).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: Courier New -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      /** A table with a directive for Georgia, after `frontmatter`, whose
+       *  runs' w:rFonts Word set to `rFonts` */
+      const rFontsInWord = async (table: string, rFonts: string, frontmatter = '') => {
+        const JSZip = (await import('jszip')).default;
+        const zip = await JSZip.loadAsync((await convertMdToDocx(frontmatter + '<!-- table-font: Georgia -->\n' + table)).docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        const edited = xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, found => found.replace(/<w:rFonts [^>]*\/>/g, rFonts));
+        expect(edited).not.toBe(xml);
+        zip.file('word/document.xml', edited);
+        return zip.generateAsync({ type: 'uint8array' });
+      };
+
+      it.each([
+        ['set another on some of its text', () => fontInWord('<!-- table-font: Georgia -->\n' + TABLE, 'Arial', 1)],
+        ['took it off its text, which then takes the theme\'s, by the document\'s default', () => fontInWord('<!-- table-font: Georgia -->\n' + TABLE, null)],
+        ['set a theme\'s on its text', () => rFontsInWord(TABLE, '<w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/>')],
+        ['set a theme\'s on its text with a name, which the theme goes before', () => rFontsInWord(TABLE,
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/>')],
+        ['set one for ASCII and another for the other characters of a cell with both', () => rFontsInWord('| A | B |\n| --- | --- |\n| 1 | A\u03b1 |\n',
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Times New Roman"/>')],
+        ['set one for ASCII and another for the characters of a cell without it', () => rFontsInWord('| A | B |\n| --- | --- |\n| 1 | \u03b1 |\n',
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Times New Roman"/>')],
+        ['set one for ASCII and the rest and another for East Asian text, on a cell with both, a small form\'s', () => rFontsInWord('| A | B |\n| --- | --- |\n| 1 | A\ufe56 |\n',
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="MS Mincho"/>')],
+        ['set another on all of its text but an equation, in the document\'s font for equations', () => fontInWord(EQUATION, 'Arial')],
+        ['set another on all of its text but a symbol, in a font of its own', () => fontInWord('<!-- table-font: Georgia -->\n' + TABLE, 'Arial', Infinity,
+          table => table.replace(/<\/w:p><\/w:tc><\/w:tr><\/w:tbl>$/, '<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r>$&'))],
+        ['set another on all of its text but a non-breaking hyphen', () => fontInWord('<!-- table-font: Georgia -->\n' + TABLE, 'Arial', Infinity,
+          table => table.replace(/<w:t>2<\/w:t><\/w:r>/, '$&<w:r><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/></w:rPr><w:noBreakHyphen/></w:r>'
+            + '<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>3</w:t></w:r>'))],
+        ['set another on text it shows, though it has a vanish turned off', () => fontInWord('<!-- table-font: Georgia -->\n' + TABLE, 'Arial', 1,
+          table => table.replace(/(<w:rFonts w:ascii="Georgia"[^>]*\/>)/g, '$1<w:vanish w:val="0"/>'))],
+      ])('keeps the font of its own where Word %s', async (_name, docx) => {
+        // Markdown has no font for part of a table, nor one by a theme's, nor
+        // one for some characters
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await docx())).markdown;
+        expect(parseFrontmatter(converted).body).toStartWith('<!-- table-font: Georgia -->\n| A | B |');
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps the font of its own where Word set another on a table\'s equations too, whose parts may show in fonts of their own', async () => {
+        // An equation's runs read as the table's text, though Word shows a
+        // radical or a delimiter in the font of its own properties
+        const { convertDocx } = await import('./converter');
+        const set = await fontInWord(EQUATION, 'Arial', Infinity, table => table.replace(/<m:r>/g, '<m:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr>'));
+        const converted = (await convertDocx(set)).markdown;
+        expect(parseFrontmatter(converted).body).toBe(EQUATION);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the font Word set on a table whose runs name the default paragraph font, a style whose properties Word ignores, that marks them right-to-left', async () => {
+        // Word ignores the elements of DefaultParagraphFont (MS-OI29500,
+        // Part 1 17.7.4.17), but its mark read as the runs', so they seemed
+        // to show its complex script font, the style's, which can't be told
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx('<!-- table-font: Georgia -->\n' + TABLE)).docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        const edited = xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, table => table.replace(/<w:rFonts [^>]*\/>/g,
+          '<w:rStyle w:val="DefaultParagraphFont"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>'));
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const marked = styles.replace(/(<w:style\b[^>]*w:styleId="DefaultParagraphFont"[^>]*>[\s\S]*?)(<\/w:style>)/,
+          (_style, body: string, close: string) => body + '<w:rPr><w:rFonts w:cs="Times New Roman"/><w:rtl/></w:rPr>' + close);
+        expect(edited).not.toBe(xml);
+        expect(marked).not.toBe(styles);
+        zip.file('word/document.xml', edited);
+        zip.file('word/styles.xml', marked);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: Arial -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['a CSV', '<!-- table-font: Georgia -->\n<!-- embed: t.csv headers=1 -->\n'],
+        ['a CSV in a note', 'A[^1].\n\n[^1]: Note.\n\n    <!-- table-font: Georgia -->\n    <!-- embed: t.csv headers=1 -->\n'],
+      ])('writes the font Word set on the table of %s embedded with a font of its own', async (_name, markdown) => {
+        // An embed's directive took the font export stored, as its table's
+        // font went unread
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const options = { embedResolver: { readFile: () => new TextEncoder().encode('H,I\na,b\n'), resolveRelative: (_base: string, relative: string) => relative }, documentPath: '/doc/paper.md' };
+        const zip = await JSZip.loadAsync((await convertMdToDocx(markdown, options)).docx);
+        let set = 0;
+        for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+          const xml = await zip.file(part)?.async('string');
+          if (xml !== undefined) zip.file(part, xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/g, table => (set++, table.replace(/<w:rFonts [^>]*\/>/g, '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>'))));
+        }
+        expect(set).toBe(1);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(converted).toBe(markdown.replace('Georgia', 'Arial'));
+        expect((await convertDocx((await convertMdToDocx(converted, options)).docx)).markdown).toBe(converted);
+      });
+
+      const ARIAL = '<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/></w:rPr>';
+      // A table's XML with content after the run of its 2, in its paragraph,
+      // or after that paragraph, in its cell
+      const inParagraph = (content: string) => (table: string) => table.replace(/<w:t>2<\/w:t><\/w:r>/, (run: string) => run + content);
+      const inCell = (content: string) => (table: string) => table.replace(/<w:t>2<\/w:t><\/w:r><\/w:p>/, (paragraph: string) => paragraph + content);
+      it.each([
+        ['a phonetic guide', inParagraph('<w:r><w:ruby><w:rubyPr><w:hps w:val="11"/><w:hpsBaseText w:val="22"/></w:rubyPr>'
+          + '<w:rt><w:r>' + ARIAL + '<w:t>x</w:t></w:r></w:rt><w:rubyBase><w:r>' + ARIAL + '<w:t>3</w:t></w:r></w:rubyBase></w:ruby></w:r>')],
+        ['alternate content in a run', inParagraph('<w:r>' + ARIAL + '<mc:AlternateContent><mc:Choice Requires="w14"><w:t>3</w:t></mc:Choice>'
+          + '<mc:Fallback><w:t>3</w:t></mc:Fallback></mc:AlternateContent></w:r>')],
+        ['alternate content in a paragraph', inParagraph('<mc:AlternateContent><mc:Choice Requires="w14"><w:r>' + ARIAL
+          + '<w:t>3</w:t></w:r></mc:Choice><mc:Fallback><w:r>' + ARIAL + '<w:t>3</w:t></w:r></mc:Fallback></mc:AlternateContent>')],
+        ['a text box', inParagraph('<w:r>' + ARIAL + '<w:drawing><wp:inline><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r>'
+          + ARIAL + '<w:t>3</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')],
+        ['an equation whose radical is in a font of its own', inParagraph('<m:oMath><m:rad><m:radPr><m:degHide m:val="1"/><m:ctrlPr>'
+          + '<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/></w:rPr></m:ctrlPr></m:radPr><m:deg/><m:e><m:r>' + ARIAL + '<m:t>x</m:t></m:r></m:e></m:rad></m:oMath>')],
+        ['an equation of delimiters alone, as `$\\left(\\right)$`', inParagraph('<m:oMath><m:d><m:dPr><m:ctrlPr><w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/></w:rPr>'
+          + '</m:ctrlPr></m:dPr><m:e/></m:d></m:oMath>')],
+        ['an equation of its own paragraph', inCell('<w:p><m:oMathPara><m:oMath><m:r>' + ARIAL + '<m:t>x</m:t></m:r></m:oMath></m:oMathPara></w:p>')],
+        ['a table in a cell, whose runs take its own style', inCell('<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="0" w:type="auto"/></w:tblPr>'
+          + '<w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="1000" w:type="dxa"/></w:tcPr>'
+          + '<w:p><w:r>' + ARIAL + '<w:t>3</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>')],
+        ['runs in an element import doesn\'t know', inParagraph('<w:unknown><w:r>' + ARIAL + '<w:t>3</w:t></w:r></w:unknown>')],
+        ['an element import doesn\'t know', inParagraph('<w:unknown/>')],
+      ])('keeps the font of its own where Word set another on a table with %s, though its runs are in it too', async (_name, edit) => {
+        // The walk of the table's runs read what it didn't know as showing
+        // nothing, or as both of alternate content's choices, and an
+        // equation's runs or a table's in a cell as the table's own
+        const { convertDocx } = await import('./converter');
+        const markdown = '<!-- table-font: Georgia -->\n' + TABLE;
+        const set = await fontInWord(markdown, 'Arial', Infinity, table => {
+          const edited = edit(table);
+          expect(edited).not.toBe(table);
+          return edited;
+        });
+        const converted = (await convertDocx(set)).markdown;
+        expect(parseFrontmatter(converted).body).toMatch(/^(?:<!-- table-font: Georgia -->\n\| A \| B \||<table data-font="Georgia")/);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['marks complex script', '<w:cs/>', 'Times New Roman'],
+        ['marks not complex script', '<w:cs w:val="0"/>', 'Arial'],
+      ])('writes the font Word shows on a table whose text it %s', async (_name, cs, font) => {
+        // A w:cs turned off still took the text for complex script's
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await rFontsInWord(TABLE, '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Times New Roman"/>' + cs))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: ' + font + ' -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['with whitespace around an attribute\'s =, which the frontmatter reads as the document\'s font for tables, so the table has no directive',
+          DOCUMENT + '<!-- table-font: Georgia -->\n' + TABLE, '<w:rFonts w:ascii = "Courier New" w:hAnsi = "Courier New"/>', TABLE],
+        ['with a theme\'s for the rest, which its ASCII text doesn\'t take, so the table has no directive',
+          DOCUMENT + TABLE, '<w:rFonts w:ascii="Courier New" w:hAnsiTheme="minorHAnsi"/>', TABLE],
+        ['as its East Asian font too, for Chinese text, which export doesn\'t set a table\'s font as, so the table keeps having no directive',
+          DOCUMENT + CHINESE, '<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:eastAsia="Courier New"/>', CHINESE],
+      ])('writes the font of a table whose text takes the table paragraph style\'s, %s', async (_name, markdown, rFonts, expected) => {
+        // The document's font for tables was read from the style apart from
+        // the frontmatter, which export gives the table's text with none of
+        // its own: as the style's ASCII font, where the frontmatter has none,
+        // or as none, for the theme's font for the rest, or as the East
+        // Asian font, which the frontmatter's isn't but export can't set
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, table => table.replace(/<w:rFonts [^>]*\/>/g, '')));
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const set = styles.replace(/(<w:style\b[^>]*w:styleId="TableParagraph"[\s\S]*?)<w:rFonts [^>]*\/>/, (_style, before: string) => before + rFonts);
+        expect(set).not.toBe(styles);
+        zip.file('word/styles.xml', set);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe(expected);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps a font of its own, the document\'s, where the style sets it with more whitespace', async () => {
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx(DOCUMENT + '<!-- table-font: Courier New -->\n' + TABLE)).docx);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const spaced = styles.replace(/(<w:style\b[^>]*w:styleId="TableParagraph"[\s\S]*?)<w:rFonts w:ascii=/, '$1<w:rFonts \n  w:ascii=');
+        expect(spaced).not.toBe(styles);
+        zip.file('word/styles.xml', spaced);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: Courier New -->\n' + TABLE);
+      });
+
+      it('keeps a font of its own, the document\'s, where a character style has the table paragraph style\'s ID', async () => {
+        // A paragraph takes no character style, but its font was read as the
+        // document's for tables, so the table's seemed another
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx(DOCUMENT + '<!-- table-font: Courier New -->\n' + TABLE)).docx);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const character = '<w:style w:type="character" w:styleId="TableParagraph"><w:name w:val="Table Paragraph Char"/><w:rPr><w:rFonts w:ascii="Impact" w:hAnsi="Impact"/></w:rPr></w:style>';
+        const added = styles.replace(/<w:style\b[^>]*w:styleId="TableParagraph"/, character + '$&');
+        expect(added).not.toBe(styles);
+        zip.file('word/styles.xml', added);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: Courier New -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the font Word set for ASCII on a table whose text is all ASCII', async () => {
+        // Its East Asian font, which no character of the text takes, isn't shown
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await rFontsInWord(TABLE, '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="MS Mincho"/>'))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: Arial -->\n' + TABLE);
+      });
+
+      it.each([
+        ['Hebrew', HEBREW],
+        ['Chinese', CHINESE],
+      ])('keeps a font of its own on a table whose text is all %s', async (_name, table) => {
+        // Export sets the font for ASCII and the rest, not for a complex
+        // script's or East Asian characters, which read as Word took it off
+        const { convertDocx } = await import('./converter');
+        const markdown = '<!-- table-font: Arial -->\n' + table;
+        const converted = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+        expect(parseFrontmatter(converted).body).toBe(markdown);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps the font of its own where Word set a theme\'s for a complex script on its text in one, marked right-to-left', async () => {
+        // Its w:cstheme went unread, so its complex script font seemed set
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await rFontsInWord(HEBREW,
+          '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia" w:cs="Courier New" w:cstheme="majorBidi"/><w:rtl/>'))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: Georgia -->\n' + HEBREW);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['Hebrew, which Word shows in its ASCII font where nothing marks it right-to-left', HEBREW, '', 'Arial'],
+        ['Hebrew, which Word shows in its complex script font where a run marks it right-to-left', HEBREW, '<w:rtl/>', 'Times New Roman'],
+      ])('writes the font Word shows on a table whose text is all %s', async (_name, table, rtl, font) => {
+        // Its complex script font was read for a complex script's text, as
+        // its size is
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await rFontsInWord(table, '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Times New Roman"/>' + rtl))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: ' + font + ' -->\n' + table);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['ASCII and the rest are in one, its ASCII font', '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Times New Roman" w:hint="eastAsia"/>', 'Arial'],
+        ['ASCII and the rest are in two, its East Asian font', '<w:rFonts w:ascii="Arial" w:hAnsi="Verdana" w:eastAsia="Times New Roman" w:hint="eastAsia"/>', 'Times New Roman'],
+      ])('writes the font Word shows on a table of Greek it shows in its East Asian font, by an East Asian hint, which is Times New Roman, where %s', async (_name, rFonts, font) => {
+        // Word shows East Asian text in the ASCII font where the East Asian
+        // one is Times New Roman and the ASCII font and the font for the
+        // rest are one
+        const { convertDocx } = await import('./converter');
+        const set = await rFontsInWord(GREEK, rFonts);
+        const converted = (await convertDocx(set)).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: ' + font + ' -->\n' + GREEK);
+        const exported = (await convertMdToDocx(converted)).docx;
+        expect(await shownFonts(exported)).toEqual(await shownFonts(set));
+        expect((await convertDocx(exported)).markdown).toBe(converted);
+      });
+
+      // A font for each of a w:rFonts' fonts Word may show a character in,
+      // but its complex script one, without and with an East Asian hint
+      const SLOTS = 'w:ascii="Arial" w:hAnsi="Verdana" w:eastAsia="MS Mincho"';
+      const PLAIN = '<w:rFonts ' + SLOTS + '/>';
+      const HINTED = '<w:rFonts ' + SLOTS + ' w:hint="eastAsia"/>';
+      /** A table whose text is all `character` */
+      const ALL = (character: string) => '| ' + character + ' | ' + character + ' |\n| --- | --- |\n| ' + character + ' | ' + character + ' |\n';
+
+      it.each([
+        ['Basic Latin, in its ASCII font', 'A', PLAIN, 'Arial'],
+        ['Basic Latin, in its ASCII font, whatever its hint', 'A', HINTED, 'Arial'],
+        ['Latin-1 Supplement, in its font for the rest', '\u00c4', PLAIN, 'Verdana'],
+        ['Latin-1 Supplement, in its font for the rest, whatever its hint', '\u00c4', HINTED, 'Verdana'],
+        ['Latin-1 Supplement that an East Asian hint takes, in its East Asian font', '\u00b0', HINTED, 'MS Mincho'],
+        ['Latin-1 Supplement that an East Asian hint takes in Chinese, in the one font it has for the rest and East Asian text', '\u00e9',
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Verdana" w:eastAsia="Verdana" w:hint="eastAsia"/>', 'Verdana'],
+        ['Greek, in its font for the rest', '\u03b1', PLAIN, 'Verdana'],
+        ['Greek, in its East Asian font, by its hint', '\u03b1', HINTED, 'MS Mincho'],
+        ['Hebrew, in its ASCII font, whatever its hint', '\u05d0', HINTED, 'Arial'],
+        ['Thai, in its font for the rest, as the table lists no range for it', '\u0e01', PLAIN, 'Verdana'],
+        ['Bopomofo Extended, in its font for the rest, as the table lists no range for it', '\u31a0', PLAIN, 'Verdana'],
+        ['Katakana Phonetic Extensions, in its font for the rest, as the table lists no range for it', '\u31ff', PLAIN, 'Verdana'],
+        ['Latin ligatures, in its font for the rest', '\ufb00', PLAIN, 'Verdana'],
+        ['Latin ligatures, in its East Asian font, by its hint', '\ufb00', HINTED, 'MS Mincho'],
+        ['Hebrew presentation forms, in its ASCII font, whatever its hint', '\ufb2a', HINTED, 'Arial'],
+      ])('writes the font Word shows on a table all of %s', async (_name, character, rFonts, font) => {
+        // Word picks the font for a character by its range and the run's
+        // w:hint (MS-OI29500, Part 1 17.3.2.26), which was read only roughly: Thai as
+        // in either font, a small form's character as not East Asian, and
+        // a hint as for East Asian text and the rest alike
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await rFontsInWord(ALL(character), rFonts))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: ' + font + ' -->\n' + ALL(character));
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['Chinese', '\u4e2d'],
+        ['Kanbun', '\u319f'],
+        ['Enclosed CJK Letters and Months', '\u3200'],
+        ['small forms', '\ufe56'],
+        ['a character beyond the Basic Multilingual Plane', '\u{20000}'],
+      ])('keeps the font of its own on a table all of %s, which Word shows in its East Asian font, which export doesn\'t set a table\'s font as', async (_name, character) => {
+        // Its East Asian font was written as the table's, which export
+        // showed none of its text in
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await rFontsInWord(ALL(character), PLAIN))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: Georgia -->\n' + ALL(character));
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      /**
+       * The font Word shows each character of a DOCX's first table in, as
+       * `character: font`, for the XML export writes, or Word as
+       * rFontsInWord sets it: the font of its run's w:rFonts, else its
+       * character style's, as CodeChar's for inline code, else its
+       * paragraph's style's, the table paragraph style's or Normal's for
+       * none, else Normal's, else the document's default,
+       * each font apart, as `theme minorHAnsi` for a theme's, that Word
+       * picks for it: the complex script one for a run marked so, else the
+       * one its range and the hint take (see characterFontSlots), but the
+       * ASCII one for the East Asian one where that's Times New Roman and
+       * the ASCII one and the one for the rest are one
+       */
+      const shownFonts = async (docx: Uint8Array) => {
+        const JSZip = (await import('jszip')).default;
+        const { characterFontSlots } = await import('./converter');
+        const zip = await JSZip.loadAsync(docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const rFontsIn = (xmlPart: string | undefined) => xmlPart === undefined ? undefined : /<w:rFonts\b[^>]*\/>/.exec(xmlPart)?.[0];
+        const styleRFonts = (id: string) => rFontsIn(new RegExp('<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>[\\s\\S]*?</w:style>').exec(styles)?.[0]);
+        const defaults = rFontsIn(/<w:rPrDefault>[\s\S]*?<\/w:rPrDefault>/.exec(styles)?.[0]);
+        const table = /<w:tbl>[\s\S]*?<\/w:tbl>/.exec(xml)![0];
+        const shown: string[] = [];
+        const runs = [...table.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)].flatMap(([paragraph]) =>
+          [...paragraph.matchAll(/<w:r>(?:<w:rPr>((?:(?!<\/w:rPr>)[\s\S])*)<\/w:rPr>)?<w:t(?: [^>]*)?>([^<]*)<\/w:t><\/w:r>/g)]
+            .map(([, rPr, text]): [string | undefined, string, string] => [rPr, text, /<w:pStyle w:val="([^"]*)"\/>/.exec(paragraph)?.[1] ?? 'Normal']));
+        for (const [rPr, text, pStyle] of runs) {
+          const rStyle = /<w:rStyle w:val="([^"]*)"\/>/.exec(rPr ?? '')?.[1];
+          const chain = [rFontsIn(rPr), rStyle && styleRFonts(rStyle), styleRFonts(pStyle), styleRFonts('Normal'), defaults];
+          const attribute = (name: string) => chain.map(rFonts => rFonts && new RegExp(' w:' + name + '="([^"]*)"').exec(rFonts)?.[1]).find(value => value !== undefined);
+          const font = (slot: string) => {
+            for (const rFonts of chain) {
+              const theme = rFonts && new RegExp(' w:' + (slot === 'cs' ? 'cstheme' : slot + 'Theme') + '="([^"]*)"').exec(rFonts)?.[1];
+              if (theme !== undefined) return 'theme ' + theme;
+              const name = rFonts && new RegExp(' w:' + slot + '="([^"]*)"').exec(rFonts)?.[1];
+              if (name !== undefined) return name;
+            }
+            return 'none';
+          };
+          const marked = /<w:(?:rtl|cs)\/>/.test(rPr ?? '');
+          for (const character of text) {
+            const slots = marked ? ['cs'] : characterFontSlots(character, attribute('hint') === 'eastAsia');
+            expect(slots).toHaveLength(1);
+            const asAscii = slots[0] === 'eastAsia' && font('eastAsia').toLowerCase() === 'times new roman' && font('ascii') === font('hAnsi');
+            shown.push(character + ': ' + font(asAscii ? 'ascii' : slots[0]));
+          }
+        }
+        expect(shown).not.toEqual([]);
+        return shown;
+      };
+      const MIXED = '| A | 中 |\n| --- | --- |\n| 1 | 文 |\n';
+
+      it.each([
+        ['an East Asian font on its Chinese text', CHINESE, '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia" w:eastAsia="MS Mincho"/>'],
+        ['one font on all its Chinese text', CHINESE, '<w:rFonts w:ascii="MS Mincho" w:hAnsi="MS Mincho" w:eastAsia="MS Mincho"/>'],
+        ['one font on its text, Latin and Chinese', MIXED, '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial"/>'],
+        ['its ASCII font on its Chinese text, by an East Asian font of Times New Roman', CHINESE,
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Times New Roman"/>'],
+      ])('keeps the font of its own where Word set %s, which export can\'t show the table\'s East Asian text in', async (_name, table, rFonts) => {
+        // Export sets a table's font as its font for ASCII and the rest
+        // only, so its directive for the font Word showed East Asian text in,
+        // which import wrote, showed that text in the document's East Asian
+        // font
+        const { convertDocx } = await import('./converter');
+        const set = await rFontsInWord(table, rFonts);
+        const shown = await shownFonts(set);
+        const font = shown[0].replace(/^.*?: /, '');
+        expect(shown.every(character => character.endsWith(': ' + font))).toBe(true);
+        expect(await shownFonts((await convertMdToDocx('<!-- table-font: ' + font + ' -->\n' + table)).docx)).not.toEqual(shown);
+        const converted = (await convertDocx(set)).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: Georgia -->\n' + table);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['Greek, in its East Asian font, by an East Asian hint, which export shows it in as its font for the rest', ALL('α'), HINTED, 'MS Mincho'],
+        ['Latin, with an East Asian font no character takes', TABLE, '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="MS Mincho"/>', 'Arial'],
+        ['Hebrew marked right-to-left, in its complex script font, which export shows it in as its ASCII font', HEBREW,
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Times New Roman"/><w:rtl/>', 'Times New Roman'],
+      ])('writes the font Word set on a table of %s, which export shows each character in again', async (_name, table, rFonts, font) => {
+        const { convertDocx } = await import('./converter');
+        const set = await rFontsInWord(table, rFonts);
+        const converted = (await convertDocx(set)).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: ' + font + ' -->\n' + table);
+        const exported = (await convertMdToDocx(converted)).docx;
+        expect(await shownFonts(exported)).toEqual(await shownFonts(set));
+        expect((await convertDocx(exported)).markdown).toBe(converted);
+      });
+
+      const CODE = '| A | `code` |\n| --- | --- |\n| 1 | 2 |\n';
+      it.each([
+        ['the document\'s font for tables', '---\ntable-font: Arial\n---\n\n', 'Arial'],
+        ['the document\'s font for tables and code', '---\ntable-font: Courier New\ncode-font: Arial\n---\n\n', 'Courier New'],
+      ])('keeps the font of its own where Word set %s on a table with inline code, which export shows in the code font', async (_name, frontmatter, font) => {
+        // Export leaves the document's font for tables to the table
+        // paragraph style, which inline code doesn't show, as CodeChar's
+        // font goes over it, so the directive for that font, which import
+        // wrote, showed the code in the code font
+        const { convertDocx } = await import('./converter');
+        const set = await rFontsInWord(CODE, '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '"/>', frontmatter);
+        const shown = await shownFonts(set);
+        expect(shown.every(character => character.endsWith(': ' + font))).toBe(true);
+        expect(await shownFonts((await convertMdToDocx(frontmatter + '<!-- table-font: ' + font + ' -->\n' + CODE)).docx)).not.toEqual(shown);
+        const converted = (await convertDocx(set)).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: Georgia -->\n' + CODE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the code font Word set on a table with inline code, where it\'s the document\'s font for tables', async () => {
+        // Export shows all of the table's text in the code font, its own and
+        // CodeChar's
+        const { convertDocx } = await import('./converter');
+        const frontmatter = '---\ntable-font: Consolas\n---\n\n';
+        const set = await rFontsInWord(CODE, '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>', frontmatter);
+        const converted = (await convertDocx(set)).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: Consolas -->\n' + CODE);
+        const exported = (await convertMdToDocx(converted)).docx;
+        expect(await shownFonts(exported)).toEqual(await shownFonts(set));
+        expect((await convertDocx(exported)).markdown).toBe(converted);
+      });
+
+      it('writes the font Word set on a table of inline code, links and notes\' references only where export shows all its text in it again', async () => {
+        // Import wrote a directive for the font Word showed, whatever the
+        // runs export would leave to their character style's font
+        const fc = (await import('fast-check')).default;
+        const { convertDocx } = await import('./converter');
+        const FONTS = ['Arial', 'Georgia', 'Consolas', 'Courier New'];
+        const CELLS = ['a', '`c`', '[l](https://example.com)', '**b**', 'n[^n]'];
+        /** The table directive of Markdown import wrote, or none */
+        const directiveOf = (markdown: string) => /<!-- table-font: (.*?) -->/.exec(markdown)?.[1];
+        await fc.assert(fc.asyncProperty(
+          fc.option(fc.constantFrom(...FONTS), { nil: undefined }), fc.option(fc.constantFrom(...FONTS), { nil: undefined }),
+          fc.option(fc.constantFrom(...FONTS), { nil: undefined }), fc.array(fc.constantFrom(...CELLS), { minLength: 4, maxLength: 4 }),
+          fc.constantFrom(...FONTS),
+          async (tableFont, codeFont, directive, cells, font) => {
+            const frontmatter = tableFont || codeFont ? '---\n' + (tableFont ? 'table-font: ' + tableFont + '\n' : '')
+              + (codeFont ? 'code-font: ' + codeFont + '\n' : '') + '---\n\n' : '';
+            let notes = 0;
+            const row = (texts: string[]) => '| ' + texts.map(text => text === 'n[^n]' ? 'n[^' + ++notes + ']' : text).join(' | ') + ' |\n';
+            const table = row(cells.slice(0, 2)) + '| --- | --- |\n' + row(cells.slice(2));
+            const definitions = Array.from({ length: notes }, (_, i) => '\n[^' + (i + 1) + ']: Note.\n').join('');
+            const markdown = (directive: string | undefined) => frontmatter + (directive ? '<!-- table-font: ' + directive + ' -->\n' : '') + table + definitions;
+            // Word sets the font on each of the table's runs
+            const zip = await JSZip.loadAsync((await convertMdToDocx(markdown(directive))).docx);
+            const xml = await zip.file('word/document.xml')!.async('string');
+            const rFonts = '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '" w:eastAsia="' + font + '" w:cs="' + font + '"/>';
+            zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, found => found
+              .replace(/<w:r>(?:<w:rPr>([\s\S]*?)<\/w:rPr>)?/g, (_run, rPr: string | undefined) => '<w:r><w:rPr>' + rFonts + (rPr ?? '').replace(/<w:rFonts [^>]*\/>/, '') + '</w:rPr>')));
+            const set = await zip.generateAsync({ type: 'uint8array' });
+            const shown = await shownFonts(set);
+            expect(shown.every(character => character.endsWith(': ' + font))).toBe(true);
+            const converted = (await convertDocx(set)).markdown;
+            const exported = (await convertMdToDocx(converted)).docx;
+            // A directive import changed shows the text as Word did
+            if (directiveOf(converted) !== directive) expect(await shownFonts(exported)).toEqual(shown);
+            // And import changes it where one for Word's font would
+            if ((await shownFonts((await convertMdToDocx(markdown(font))).docx)).join('\n') === shown.join('\n')) expect(directiveOf(converted)).toBe(font);
+            expect((await convertDocx(exported)).markdown).toBe(converted);
+          }), { numRuns: 40 });
+      });
+
+      it('gives each character the font the table of MS-OI29500 gives its range, by the run\'s hint, and the font for the rest where it lists none', async () => {
+        // A row of the table import reads it by joined ranges with a gap
+        // between them, 31A0-31FF, as Bopomofo Extended, so a table of such
+        // text read as in its East Asian font. Each row of the table, as the
+        // spec has it (MS-OI29500, Part 1 17.3.2.26, rFonts, note b), by its
+        // first and last code point, and the font Word shows its characters
+        // in: one of a w:rFonts' fonts, or `hint`, its font for the rest but
+        // its East Asian font where the run's hint is eastAsia, or
+        // `language`, the same, but only where the run's language, or for
+        // some ranges the East Asian font's character set, is Chinese too
+        const { characterFontSlots } = await import('./converter');
+        type Rule = 'ascii' | 'hAnsi' | 'eastAsia' | 'hint' | 'language';
+        const spec: [number, number, Rule][] = [
+          [0x0000, 0x007F, 'ascii'], // Basic Latin
+          // Latin-1 Supplement, 00A0-00FF, in its font for the rest but these
+          [0x00A1, 0x00A1, 'hint'], [0x00A4, 0x00A4, 'hint'], [0x00A7, 0x00A8, 'hint'], [0x00AA, 0x00AA, 'hint'], [0x00AD, 0x00AD, 'hint'],
+          [0x00AF, 0x00AF, 'hint'], [0x00B0, 0x00B4, 'hint'], [0x00B6, 0x00BA, 'hint'], [0x00BC, 0x00BF, 'hint'], [0x00D7, 0x00D7, 'hint'],
+          [0x00F7, 0x00F7, 'hint'], [0x00E0, 0x00E1, 'language'], [0x00E8, 0x00EA, 'language'], [0x00EC, 0x00ED, 'language'],
+          [0x00F2, 0x00F3, 'language'], [0x00F9, 0x00FA, 'language'], [0x00FC, 0x00FC, 'language'],
+          [0x0100, 0x017F, 'language'], // Latin Extended-A
+          [0x0180, 0x024F, 'language'], // Latin Extended-B
+          [0x0250, 0x02AF, 'language'], // IPA Extensions
+          [0x02B0, 0x02FF, 'hint'], // Spacing Modifier Letters
+          [0x0300, 0x036F, 'hint'], // Combining Diacritical Marks
+          [0x0370, 0x03CF, 'hint'], // Greek
+          [0x0400, 0x04FF, 'hint'], // Cyrillic
+          [0x0590, 0x05FF, 'ascii'], // Hebrew
+          [0x0600, 0x06FF, 'ascii'], // Arabic
+          [0x0700, 0x074F, 'ascii'], // Syriac
+          [0x0750, 0x077F, 'ascii'], // Arabic Supplement
+          [0x0780, 0x07BF, 'ascii'], // Thaana
+          [0x1100, 0x11FF, 'eastAsia'], // Hangul Jamo
+          [0x1E00, 0x1EFF, 'language'], // Latin Extended Additional
+          [0x2000, 0x206F, 'hint'], // General Punctuation
+          [0x2070, 0x209F, 'hint'], // Superscripts and Subscripts
+          [0x20A0, 0x20CF, 'hint'], // Currency Symbols
+          [0x20D0, 0x20FF, 'hint'], // Combining Diacritical Marks for Symbols
+          [0x2100, 0x214F, 'hint'], // Letter-like Symbols
+          [0x2150, 0x218F, 'hint'], // Number Forms
+          [0x2190, 0x21FF, 'hint'], // Arrows
+          [0x2200, 0x22FF, 'hint'], // Mathematical Operators
+          [0x2300, 0x23FF, 'hint'], // Miscellaneous Technical
+          [0x2400, 0x243F, 'hint'], // Control Pictures
+          [0x2440, 0x245F, 'hint'], // Optical Character Recognition
+          [0x2460, 0x24FF, 'hint'], // Enclosed Alphanumerics
+          [0x2500, 0x257F, 'hint'], // Box Drawing
+          [0x2580, 0x259F, 'hint'], // Block Elements
+          [0x25A0, 0x25FF, 'hint'], // Geometric Shapes
+          [0x2600, 0x26FF, 'hint'], // Miscellaneous Symbols
+          [0x2700, 0x27BF, 'hint'], // Dingbats
+          [0x2E80, 0x2EFF, 'hint'], // CJK Radicals Supplement
+          [0x2F00, 0x2FDF, 'eastAsia'], // Kangxi Radicals
+          [0x2FF0, 0x2FFF, 'eastAsia'], // Ideographic Description Characters
+          [0x3000, 0x303F, 'eastAsia'], // CJK Symbols and Punctuation
+          [0x3040, 0x309F, 'eastAsia'], // Hiragana
+          [0x30A0, 0x30FF, 'eastAsia'], // Katakana
+          [0x3100, 0x312F, 'eastAsia'], // Bopomofo
+          [0x3130, 0x318F, 'eastAsia'], // Hangul Compatibility Jamo
+          [0x3190, 0x319F, 'eastAsia'], // Kanbun
+          [0x3200, 0x32FF, 'eastAsia'], // Enclosed CJK Letters and Months
+          [0x3300, 0x33FF, 'eastAsia'], // CJK Compatibility
+          [0x3400, 0x4DBF, 'eastAsia'], // CJK Unified Ideographs Extension A
+          [0x4E00, 0x9FAF, 'eastAsia'], // CJK Unified Ideographs
+          [0xA000, 0xA48F, 'eastAsia'], // Yi Syllables
+          [0xA490, 0xA4CF, 'eastAsia'], // Yi Radicals
+          [0xAC00, 0xD7AF, 'eastAsia'], // Hangul Syllables
+          [0xD800, 0xDB7F, 'eastAsia'], // High Surrogates
+          [0xDB80, 0xDBFF, 'eastAsia'], // High Private Use Surrogates
+          [0xDC00, 0xDFFF, 'eastAsia'], // Low Surrogates
+          [0xE000, 0xF8FF, 'hint'], // Private Use Area
+          [0xF900, 0xFAFF, 'eastAsia'], // CJK Compatibility Ideographs
+          // Alphabetic Presentation Forms, FB00-FB4F
+          [0xFB00, 0xFB1C, 'hint'], [0xFB1D, 0xFB4F, 'ascii'],
+          [0xFB50, 0xFDFF, 'ascii'], // Arabic Presentation Forms-A
+          [0xFE30, 0xFE4F, 'eastAsia'], // CJK Compatibility Forms
+          [0xFE50, 0xFE6F, 'eastAsia'], // Small Form Variants
+          [0xFE70, 0xFEFE, 'ascii'], // Arabic Presentation Forms-B
+          [0xFF00, 0xFFEF, 'eastAsia'], // Halfwidth and Fullwidth Forms
+        ];
+        const slots = (rule: Rule, hint: boolean | undefined) => rule === 'hint' ? (hint === undefined ? ['hAnsi', 'eastAsia'] : hint ? ['eastAsia'] : ['hAnsi'])
+          : rule === 'language' ? (hint === false ? ['hAnsi'] : ['hAnsi', 'eastAsia']) : [rule];
+        // Each row's first and last code point, and those around it, where
+        // a gap between rows starts or ends
+        const codes = new Set(spec.flatMap(([first, last]) => [first - 1, first, last, last + 1]).filter(code => code >= 0 && code <= 0xFFFF));
+        const drift: string[] = [];
+        for (const code of codes) {
+          const rule = spec.find(([first, last]) => first <= code && code <= last)?.[2] ?? 'hAnsi';
+          for (const hint of [false, true, undefined]) {
+            const read = characterFontSlots(String.fromCharCode(code), hint);
+            if (read.join() !== slots(rule, hint).join()) drift.push(code.toString(16).toUpperCase().padStart(4, '0') + ' with hint ' + hint + ': ' + read.join() + ', not ' + slots(rule, hint).join());
+          }
+        }
+        expect(codes.size).toBeGreaterThan(spec.length * 2);
+        expect(drift).toEqual([]);
+      });
+
+      it.each([
+        ['Latin-1 Supplement that an East Asian hint takes in Chinese', '\u00e9'],
+        ['Latin Extended-A, which an East Asian hint takes in Chinese or with a Chinese East Asian font', '\u0101'],
+        ['Latin Extended Additional, which an East Asian hint takes in Chinese', '\u1ea1'],
+      ])('keeps the font of its own on a table all of %s, with the hint, where its font for the rest and its East Asian font differ', async (_name, character) => {
+        // Word shows it in either, by the run's language or the East Asian
+        // font's character set, which import doesn't read
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await rFontsInWord(ALL(character), HINTED))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: Georgia -->\n' + ALL(character));
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      const NOTE = '| A | B |\n| --- | --- |\n| 1[^n] | 2 |\n\n[^n]: Note.\n';
+      it.each([
+        ['writes the font Word set on a table with a note\'s reference, on its mark too, for all its kinds of text',
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial"/>', 'Arial'],
+        ['keeps the font of its own on a table with a note\'s reference where Word set another for ASCII and the rest only',
+          '<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>', 'Georgia'],
+      ])('%s', async (_name, rFonts, font) => {
+        // The mark's characters, which import doesn't read, as it doesn't
+        // the notes' numbering, may show in any of the fonts, though a run
+        // with none went unread
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await rFontsInWord(NOTE, rFonts))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font: ' + font + ' -->\n' + NOTE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['one font for ASCII and another for the rest', '<w:rFonts w:ascii="Arial" w:hAnsi="Georgia"/>'],
+        ['a theme\'s font', '<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>'],
+      ])('keeps the font of its own, the document\'s, where the table paragraph style its text takes sets %s', async (_name, rFonts) => {
+        // Text that takes the style's font was read as in the document's
+        // font for tables, by the style's ASCII font or none, so the table's
+        // seemed another
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const table = '| A | B |\n| --- | --- |\n| 1 | \u03b1 |\n';
+        const zip = await JSZip.loadAsync((await convertMdToDocx('---\ntable-font: Georgia\n---\n\n<!-- table-font: Georgia -->\n' + table)).docx);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const set = styles.replace(/(<w:style\b[^>]*w:styleId="TableParagraph"[\s\S]*?)<w:rFonts [^>]*\/>/, (_style, before: string) => before + rFonts);
+        expect(set).not.toBe(styles);
+        zip.file('word/styles.xml', set);
+        expect(await zip.file('word/document.xml')!.async('string')).not.toMatch(/<w:r><w:rPr>(?:(?!<\/w:rPr>)[\s\S])*?<w:rFonts/);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: Georgia -->\n' + table);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['a paragraph style', '<!-- table-font: Georgia -->\n', ['Georgia'],
+          (table: string) => table.replace(/<w:pStyle w:val="TableParagraph"\/>/g, '<w:pStyle w:val="GeorgiaTable"/>')],
+        ['a character style', '<!-- table-font: Georgia -->\n', ['Georgia'],
+          (table: string) => table.replace(/<w:r><w:rPr>/g, '$&<w:rStyle w:val="GeorgiaText"/>')],
+        ['a character style that sets none, the document\'s', '', [],
+          (table: string) => table.replace(/<w:r><w:rPr>/g, '$&<w:rStyle w:val="Plain"/>')],
+      ])('writes the font of a table whose text takes it from %s', async (_name, directive, fonts, edit) => {
+        // Text with no font of its own in another style than the table
+        // paragraph style's isn't in the document's
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx(DOCUMENT + '<!-- table-font: Georgia -->\n' + TABLE)).docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        const edited = xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, table => edit(table.replace(/<w:rFonts [^>]*\/>/g, '')));
+        expect(edited).not.toContain('<w:rFonts');
+        zip.file('word/document.xml', edited);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const georgia = '<w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/></w:rPr>';
+        zip.file('word/styles.xml', styles.replace('</w:styles>', '<w:style w:type="paragraph" w:customStyle="1" w:styleId="GeorgiaTable">'
+          + '<w:name w:val="Georgia Table"/><w:basedOn w:val="TableParagraph"/>' + georgia + '</w:style>'
+          + '<w:style w:type="character" w:customStyle="1" w:styleId="GeorgiaText"><w:name w:val="Georgia Text"/>' + georgia + '</w:style>'
+          + '<w:style w:type="character" w:customStyle="1" w:styleId="Plain"><w:name w:val="Plain"/><w:rPr><w:i w:val="0"/></w:rPr></w:style></w:styles>'));
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe(directive + TABLE);
+        expect(await tableFonts(converted)).toEqual(fonts);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps a font of its own, the document\'s, whose name has a character XML escapes', async () => {
+        // The document's, in styles.xml as A &amp; B, didn't match the table's
+        const { convertDocx } = await import('./converter');
+        const markdown = '---\ntable-font: A & B\n---\n\n<!-- table-font: A & B -->\n' + TABLE;
+        const converted = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+        expect(parseFrontmatter(converted).body.replace(/^\n/, '')).toBe('<!-- table-font: A & B -->\n' + TABLE);
+      });
+    });
   });
 
   // ---------------------------------------------------------------
