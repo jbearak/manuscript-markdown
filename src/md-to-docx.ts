@@ -120,6 +120,7 @@ export interface MdToken {
   bulletMarker?: '-' | '*' | '+'; // authored unordered-list marker for round-trip
   listContinuation?: ListContinuation; // parent list context for continuation paragraphs/blocks
   sourceRange?: [number, number]; // lines [start, end) of the text parseMd parses that the token came from
+  splitPart?: true;         // one of the blocks parseMd split a block of the Markdown into, which share its lines (see criticBlockSegment)
   droppedRange?: [number, number]; // lines of the blocks next to it its quote dropped (see blockquote_open)
   blockquoteSpacing?: BlockquoteSpacing; // on a quote group's first token (see annotateBlockquoteSpacing)
   startNumber?: number;     // for ordered lists: first item's start number (when ≠ 1)
@@ -164,7 +165,7 @@ export interface MdToken {
   itemCustomStyle?: string;   // a paragraph in a list item in a style block in that item (see extractListItems)
   itemStyleOpen?: string;     // a style block opens in a list item here, which closes one open at the top level (see applyCustomStyleSentinels)
   closesItemStyle?: string;   // the style of a block open in the item where itemStyleOpen's opens, which it closes
-  itemFence?: string;         // the text of a style block's fence in a list item here, which has no comment's token, for parseMd's search of the source for the comments after it; with no itemStyleOpen, a closing one, which applyCustomStyleSentinels drops
+  itemFence?: string;         // the text of a style block's fence in a list item here, which has no comment's token; with no itemStyleOpen, a closing one, which applyCustomStyleSentinels drops
   closesImplicitly?: true;    // sentinel: end of a custom style block where one opens in a list item, with no fence of its own
   indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override from <!-- indent --> / <!-- no-indent -->
   listDirective?: 'indent' | 'no-indent'; // a list item right after a directive that comes right after an item, which ends that item's list (see listItemIndentOverrideProps)
@@ -346,6 +347,7 @@ import { findDollarMathAt } from './math-delimiters';
 import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from './citation-syntax';
 import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments } from './latex-env-preprocess';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines, withEnd } from './line-map';
+import { normalizeNewlines } from './newlines';
 export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
@@ -2278,8 +2280,18 @@ function splitCriticParagraphs(tokens: MdToken[]): MdToken[] {
         criticParaMarkRun: mark,
       });
     });
-    return segments.length > 0 ? segments : [token];
+    return segments.length > 0 ? segments.map(segment => splitPart(segment, segments.length)) : [token];
   });
+}
+
+/** `segment`, one of `parts` blocks a block of the Markdown was split into,
+ *  marked as a part where there's more than one. Each keeps the block's
+ *  lines, which it shares with the others, so none of them is alone on its
+ *  lines, as a comment's spacing reads one (see parseMd). A quote's group
+ *  holds all the parts of its paragraph, whose lines are the group's (see
+ *  annotateBlockquoteSpacing) */
+function splitPart(segment: MdToken, parts: number): MdToken {
+  return parts > 1 ? { ...segment, splitPart: true } : segment;
 }
 
 interface DisplayRunSegment {
@@ -2414,7 +2426,7 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
       continue;
     }
     for (let index = 0; index < splitRuns.length; index++) {
-      output.push(criticBlockSegment(token, splitRuns[index], index));
+      output.push(splitPart(criticBlockSegment(token, splitRuns[index], index), splitRuns.length));
     }
   }
   return output;
@@ -2461,7 +2473,15 @@ function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number
  * resolves its reference links and images with, after its own definitions.
  */
 export function parseMd(markdown: string, warnings?: string[], breaks = false, source?: { text: string; lines: LineMap }, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false, bodyStartLine = 0): MdToken[] {
-  const originalText = source?.text;
+  // Each line end as markdown-it reads it, a \r alone too, so the steps
+  // before it, and the lines quotes' and comments' spacing reads, split
+  // lines where its token maps do (see newlines.ts): the source's, where
+  // there is one, whose lines the map counts so (see line-map.ts)
+  if (source) source = { ...source, text: normalizeNewlines(source.text) };
+  else {
+    markdown = normalizeNewlines(markdown);
+    if (unformatted !== undefined) unformatted = normalizeNewlines(unformatted);
+  }
   const md = createMarkdownIt();
   // Grid tables, quotes without lazy continuation, and bare LaTeX
   // environments, as the orientation scan reads them too
@@ -2483,11 +2503,13 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
   const sourceLines = unformattedLines?.length === processedLines.length ? unformattedLines : processedLines;
   const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, sourceLines)));
   annotateBlockquoteBoundaries(result);
-  // For each line markdown-it read, the line of `markdown` it comes from,
-  // and of the source's, where there is one
+  // For each line markdown-it read, the line of the source it comes from,
+  // the source's where there is one, and the source's lines, which quotes'
+  // and comments' spacing reads the blank lines around them in
   const markdownLines = throughLines(critic.lines, withEnd(blocks.lines, markdown.split('\n').length));
-  if (!source) annotateBlockquoteSpacing(result, markdownLines, markdown.split('\n'), processedLines);
-  else annotateBlockquoteSpacing(result, throughLines(markdownLines, source.lines), source.text.split(/\r\n|\r|\n/), processedLines);
+  const toSource = source ? throughLines(markdownLines, source.lines) : markdownLines;
+  const spacingLines = (source?.text ?? markdown).split('\n');
+  annotateBlockquoteSpacing(result, toSource, spacingLines, processedLines);
 
   // When breaks mode is enabled, treat all bare newlines as hard breaks
   if (breaks) {
@@ -2504,76 +2526,41 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
   }
 
   // Post-process: recompute HTML comment blankLinesBefore/After from the
-  // ORIGINAL markdown lines.  preprocessGridTables inserts blank lines around
+  // source's lines.  preprocessGridTables inserts blank lines around
   // grid-table placeholders which inflates the gaps computed from markdown-it
-  // token maps.  Using the original source gives correct values.
+  // token maps.  Using the source gives correct values. Each comment's
+  // lines there are where preprocessing says its lines in the parsed text
+  // come from (see line-map.ts), and not where a search for its text found
+  // it first, as in a code block that held the same line
   {
-    const origLines = (originalText ?? markdown).split('\n');
-    let searchFrom = 0; // track position to handle duplicate comment text
+    const sourceLine = (line: number) => toSource[Math.min(line, toSource.length - 1)];
     for (const tok of result) {
-      // A style block's fence in a list item, which has no comment's token,
-      // so a comment of its text after it would be found at its line
-      if (tok.itemFence !== undefined) {
-        let at = searchFrom;
-        while (at < origLines.length && origLines[at].trim() !== tok.itemFence) at++;
-        if (at < origLines.length) searchFrom = at + 1;
-        continue;
-      }
       const withIds = isCommentsWithIds(tok);
       if (!withIds && (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment')) continue;
-      if (withIds && !tok.sourceRange) continue;
-      // One with the ID syntax of a Word comment on its comments is its
-      // paragraph's lines as parsed, which a span with a blank line in it
-      // changes, so it isn't found
-      const commentText = withIds ? processedLines.slice(tok.sourceRange![0], tok.sourceRange![1]).join('\n').trim() : tok.runs[0].text.trim();
-      const commentLines = commentText.split('\n');
-      // Find this comment's line in the original markdown (starting after previous match)
-      let commentLine = -1;
-      for (let li = searchFrom; li < origLines.length; li++) {
-        if (origLines[li].trim() === commentLines[0].trim()) {
-          if (commentLines.length === 1) {
-            commentLine = li;
-            searchFrom = li + 1;
-            break;
-          }
-          // For multi-line: verify all subsequent lines match, but for the
-          // indent of a list item's lines, which its comment's text doesn't
-          // have, so it doesn't match a later one alike instead
-          const line = (text: string) => tok.listContinuation ? text.trim() : text;
-          let allMatch = li + commentLines.length <= origLines.length;
-          if (allMatch) {
-            for (let ci = 1; ci < commentLines.length; ci++) {
-              if (line(origLines[li + ci]) !== line(commentLines[ci])) {
-                allMatch = false;
-                break;
-              }
-            }
-          }
-          if (allMatch) {
-            commentLine = li;
-            searchFrom = li + commentLines.length;
-            break;
-          }
-        }
-      }
-      if (commentLine < 0) continue;
-      const commentEndLine = commentLine + commentLines.length - 1;
+      // Nor one split from a block, as from a revised equation on its line,
+      // whose lines are the block's (see splitPart)
+      if (!tok.sourceRange || tok.splitPart) continue;
+      const commentLine = sourceLine(tok.sourceRange[0]);
+      const commentEndLine = Math.min(sourceLine(tok.sourceRange[1]), spacingLines.length) - 1;
+      // A comment that holds no character of the source's, whose lines
+      // preprocessing wrote (see line-map.ts)
+      if (commentEndLine < commentLine) continue;
       // Count blank lines before: scan backwards from commentLine, to the
       // body's start (see bodyStartLine)
       let beforeCount = 0;
       for (let li = commentLine - 1; li >= bodyStartLine; li--) {
-        if (origLines[li].trim() === '') beforeCount++;
+        if (spacingLines[li].trim() === '') beforeCount++;
         else break;
       }
       // Count blank lines after: scan forward from end of comment
       let afterCount = 0;
-      for (let li = commentEndLine + 1; li < origLines.length; li++) {
-        if (origLines[li].trim() === '') afterCount++;
+      for (let li = commentEndLine + 1; li < spacingLines.length; li++) {
+        if (spacingLines[li].trim() === '') afterCount++;
         else break;
       }
       // Ignore a single trailing empty-string element produced by splitting a
       // string that ends with '\n' — it is not a real blank line.
-      if (afterCount > 0 && commentEndLine + afterCount === origLines.length - 1 && origLines[origLines.length - 1] === '') {
+      if (afterCount > 0 && commentEndLine + afterCount === spacingLines.length - 1 && spacingLines[spacingLines.length - 1] === '') {
         afterCount--;
       }
       tok.blankLinesBefore = beforeCount;
@@ -2701,12 +2688,12 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
   }
 
   // Pre-scan: warn on unclosed/orphaned/nested/crossed orientation directives with line numbers.
-  // When originalText is provided (from convertMdToDocx), scan that so line numbers match the
+  // When the source is given (from convertMdToDocx), scan that so line numbers match the
   // user's file rather than the stripped body passed to parseMd. Not in a note's body, whose
   // directives the document's scan reads as the note's, which pair with none, and whose
   // lines it counted from the note's start.
   if (warnings && !inNote) {
-    const scanText = originalText ?? markdown;
+    const scanText = source?.text ?? markdown;
     const findings = scanOrientationDirectives(scanText);
     if (findings.length > 0) {
       let lineEnds: number[] | undefined;
@@ -2889,7 +2876,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
       const before = result[last];
       if (scan.kept === 0 && before && (before.type === 'list_item' || before.listContinuation)) {
         result[target].listDirective = result[target].indentOverride ?? override;
-        const line = result[i].sourceRange?.[0];
+        const line = result[i].splitPart ? undefined : result[i].sourceRange?.[0];
         if (line !== undefined && line > 0 && /^[ \t]*\r?$/.test(sourceLines[line - 1] ?? 'x')) result[target].blankLineBefore = true;
       }
       // Apply to all consecutive list items in this list block, past the
