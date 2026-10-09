@@ -57,13 +57,13 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 		zones.push({ start: r.start, end: r.end });
 	}
 
-	// 2. HTML comments <!-- ... -->
-	{
-		const re = /<!--[\s\S]*?-->/g;
-		let m: RegExpExecArray | null;
-		while ((m = re.exec(text)) !== null) {
-			zones.push({ start: m.index, end: m.index + m[0].length });
-		}
+	// 2. HTML comments <!-- ... -->, each to the first --> after it. Where
+	// none is, none is after a later <!-- either
+	for (let open = text.indexOf('<!--'); open !== -1;) {
+		const close = text.indexOf('-->', open + 4);
+		if (close === -1) break;
+		zones.push({ start: open, end: close + 3 });
+		open = text.indexOf('<!--', close + 3);
 	}
 
 	// 3. CriticMarkup spans
@@ -87,6 +87,9 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 				closeIdx = text.indexOf(close, contentStart);
 			}
 			if (closeIdx === -1) {
+				// No closer after this opener, nor after a later one, but
+				// for a comment's, as one nested in it needs its own
+				if (!nested) break;
 				searchFrom = contentStart;
 				continue;
 			}
@@ -145,12 +148,18 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	return { zones: merged, literalHtml: literalHtmlRegions };
 }
 
+/** Whether [start, end) overlaps a zone of `zones`, sorted and merged: the
+ *  first that ends after `start`, found by binary search, as each
+ *  environment asks, starts before `end` */
 function overlapsAnyZone(start: number, end: number, zones: Zone[]): boolean {
-	for (const z of zones) {
-		if (z.start >= end) break;
-		if (start < z.end && end > z.start) return true;
+	let lo = 0;
+	let hi = zones.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (zones[mid].end <= start) lo = mid + 1;
+		else hi = mid;
 	}
-	return false;
+	return lo < zones.length && zones[lo].start < end;
 }
 
 /**
@@ -164,17 +173,22 @@ function overlapsAnyZone(start: number, end: number, zones: Zone[]): boolean {
  * markdown-it doesn't split them into separate paragraphs.
  */
 export function wrapBareLatexEnvironments(text: string, mark = ''): string {
-	const replacements = latexReplacements(text);
+	return withReplacements(text, latexReplacements(text), mark);
+}
+
+/** `text` with each of `replacements`, in order, and `mark` before each,
+ *  joined from its slices once, as a text built again for each would take
+ *  time in their number times its length */
+function withReplacements(text: string, replacements: Replacement[], mark = ''): string {
 	if (replacements.length === 0) return text;
-
-	// Apply right-to-left to preserve offsets
-	let result = text;
-	for (let i = replacements.length - 1; i >= 0; i--) {
-		const r = replacements[i];
-		result = result.slice(0, r.start) + mark + r.replacement + result.slice(r.end);
+	const parts: string[] = [];
+	let from = 0;
+	for (const r of replacements) {
+		parts.push(text.slice(from, r.start), mark, r.replacement);
+		from = r.end;
 	}
-
-	return result;
+	parts.push(text.slice(from));
+	return parts.join('');
 }
 
 /**
@@ -194,7 +208,7 @@ export function wrapBareLatexEnvironmentsWithLines(text: string): { output: stri
 		if (start === end && k < replacements.length && start > replacements[k].start && end < replacements[k].end) continue;
 		lines.push(line);
 	}
-	return { output: wrapBareLatexEnvironments(text), lines };
+	return { output: withReplacements(text, replacements), lines };
 }
 
 interface Replacement {
@@ -236,6 +250,17 @@ function latexReplacements(text: string): Replacement[] {
 	const beginRe = /^([ ]{0,3})\\begin\{([a-zA-Z*]+)\}/gm;
 	let match: RegExpExecArray | null;
 	const replacements: Replacement[] = [];
+	// For each environment, where the last search for its end went from and
+	// what it found, -1 for none, which a search from a later start before
+	// it finds again, so that no part of the text is searched twice for one
+	const ends = new Map<string, { from: number; at: number }>();
+	const endOf = (endMarker: string, from: number): number => {
+		const last = ends.get(endMarker);
+		if (last && from >= last.from && (last.at === -1 || from <= last.at)) return last.at;
+		const at = text.indexOf(endMarker, from);
+		ends.set(endMarker, { from, at });
+		return at;
+	};
 
 	while ((match = beginRe.exec(text)) !== null) {
 		const envName = match[2];
@@ -251,7 +276,7 @@ function latexReplacements(text: string): Replacement[] {
 
 		// Find matching \end{envName}
 		const endMarker = '\\end{' + envName + '}';
-		const endIdx = text.indexOf(endMarker, blockStart + match[0].length);
+		const endIdx = endOf(endMarker, blockStart + match[0].length);
 		if (endIdx === -1) continue;
 		const blockEnd = endIdx + endMarker.length;
 
