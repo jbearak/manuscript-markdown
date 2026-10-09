@@ -4,6 +4,7 @@ import { convertDocx, extractZoteroPrefs } from './converter';
 import { convertMdToDocx } from './md-to-docx';
 import { escapeXmlAttribute, xmlBuilder, xmlParser } from './xml-parser';
 import { fastestRun } from './test-timing';
+import { xmlAttribute } from './xml-elements';
 
 // More than fast-xml-parser's default limit of a thousand references to
 // entities, of which every &lt;, &gt;, &quot; and &apos; counts
@@ -40,6 +41,19 @@ describe('a parser xmlParser builds', () => {
     const [a] = xmlParser(OPTIONS).parse('<a b="1\t2\n3\r\n4\r5&#9;6">1\t2\n3\r\n4</a>');
     expect(a[':@']['@_b']).toBe('1 2 3 4 5\t6');
     expect(a.a[0]['#text']).toBe('1\t2\n3\n4');
+  });
+
+  // xmlAttribute, which reads a template's styles, reads a value as the
+  // parser does, so export writes back the value Word reads
+  it.each([
+    ['a tab, line feed and carriage return written as themselves', '1\t2\n3\r4'],
+    ['a line end of a carriage return and a line feed', '1\r\n2'],
+    ['each written as a reference', '1&#9;2&#xA;3&#13;4'],
+    ['references that are no character of XML\'s, or to no entity XML declares', '&#0;&#xFFFE;&nbsp;&#X43;'],
+    ['an escaped reference', '&amp;#65;&amp;amp;'],
+  ])('reads %s in an attribute as xmlAttribute does', (_name, value) => {
+    const [a] = xmlParser(OPTIONS).parse('<a b="' + value + '"/>');
+    expect(xmlAttribute('<a b="' + value + '"/>', 'b')).toBe(a[':@']['@_b']);
   });
 
   it('reads more than a thousand references to entities, which fast-xml-parser\'s default limit refuses', () => {

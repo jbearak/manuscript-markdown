@@ -986,10 +986,20 @@ describe('orderRPr', () => {
     expect(orderRPr('<w:lang w:val="en-US"/><w14:ligatures w14:val="standard"/><w:b/>')).toBe('<w:b/><w14:ligatures w14:val="standard"/><w:lang w:val="en-US"/>');
   });
 
-  it('leaves properties with text, a comment or a tag left open among them as they were', () => {
-    for (const children of ['<w:u w:val="single"/>text<w:b/>', '<w:u w:val="single"/><!-- note --><w:b/>', '<w:u w:val="single"/><w:rPrChange><w:b/>', '<w:u w:val="single"/></w:rPr><w:b/>']) {
+  it('leaves properties with text or a tag left open among them as they were', () => {
+    for (const children of ['<w:u w:val="single"/>text<w:b/>', '<w:u w:val="single"/><w:rPrChange><w:b/>', '<w:u w:val="single"/></w:rPr><w:b/>']) {
       expect(orderRPr(children)).toBe(children);
     }
+  });
+
+  // As an element it doesn't know, which stays in its place, whatever looks
+  // like elements in it, and the order of the others doesn't depend on it
+  it.each([
+    ['a comment', '<!-- <w:i/></w:rPr> -->'],
+    ['a CDATA section', '<![CDATA[<w:i/></w:rPr>]]>'],
+    ['a processing instruction', '<?note <w:i/></w:rPr>?>'],
+  ])('puts properties in order around %s among them', (_name, other) => {
+    expect(orderRPr('<w:u w:val="single"/>' + other + '<w:b/>')).toBe('<w:b/>' + other + '<w:u w:val="single"/>');
   });
 
   // CT_RPr's children, in the order ECMA-376 Part 1 §17.3.2.28 gives them

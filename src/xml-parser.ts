@@ -1,6 +1,6 @@
 // One way to read XML into fast-xml-parser's nodes and to write them back,
 // for every parser and builder in src to read and write text and values as
-// XML 1.0 does. Four exports:
+// XML 1.0 does. Five exports:
 //
 // - xmlParser(options): a parser of XML as text, XmlTextParser, not bytes,
 //   that reads each reference to a character, &#9; or &#x2019;, and to one
@@ -19,6 +19,8 @@
 //   white space.
 // - escapeXmlAttribute(value): an attribute's value written so, between
 //   double quotes, for XML built as text.
+// - xmlAttributeValue(value): an attribute's value as xmlParser reads it,
+//   for a reader of tags as text (see xmlAttribute in xml-elements.ts).
 // - XML_ENTITIES: how many entities fast-xml-parser reads, and how long one
 //   a DOCTYPE declares can be.
 //
@@ -30,16 +32,12 @@
 // long document, valid as it is. So the parser replaces no entity itself,
 // and its processors read each text and value as the document has it.
 //
-// Every parser in src is built with xmlParser but two of md-to-docx.ts's,
-// which fix/respelled-templates changes: that of a template's numbering,
-// which has fast-xml-parser's default, and that of a template's styles,
-// which reads no entities, so that the style IDs it reads are as styles.xml
-// writes them, for export to write back, but reads a name written with a
-// character reference, as heading&#32;1, otherwise than Word does. That
-// branch reads both parts another way. Of the builders, buildOrdered's
-// (see scoped-xml.ts) and a template's sections' are built with
-// xmlBuilder; converter.ts's of a title paragraph and md-to-docx.ts's of a
-// template's numbering aren't yet.
+// Every parser in src is built with xmlParser: md-to-docx.ts reads a
+// template's numbering with parseOrdered (see scoped-xml.ts), and its
+// styles with xml-elements.ts's readers, whose values are read as
+// xmlAttributeValue reads them. Of the builders, buildOrdered's, which
+// writes a template's numbering again, and a template's sections' are
+// built with xmlBuilder; converter.ts's of a title paragraph isn't yet.
 
 import { XMLBuilder, XMLParser, type X2jOptions, type XmlBuilderOptions } from 'fast-xml-parser';
 
@@ -88,6 +86,14 @@ function decoded(text: string): string {
   });
 }
 
+/** An attribute's value, as written between its quotes, as XML reads it: a
+ *  tab or line end written as itself a space (XML 1.0 §3.3.3), a carriage
+ *  return and line feed one line end (§2.11), and then each reference read
+ *  (see decoded), so one to a tab or line end stays what it is. The parser
+ *  reads each value so, and xmlAttribute (see xml-elements.ts) each value
+ *  of a tag it reads, so that both read a template's the same */
+export const xmlAttributeValue = (value: string): string => decoded(value.replace(/\r\n?|[\t\n]/g, ' '));
+
 // What holds no markup, each by how it starts and ends: a comment, an
 // instruction and a character data section
 const NO_MARKUP = [['<!--', '-->'], ['<?', '?>'], ['<![CDATA[', ']]>']] as const;
@@ -125,9 +131,7 @@ class ReferenceParser extends XMLParser {
       // No entity replaced where the processors would read it again
       processEntities: { ...XML_ENTITIES, tagFilter: () => false },
       htmlEntities: false,
-      // A line end is a line feed already, as the parser reads the whole
-      // document (XML 1.0 §2.11)
-      attributeValueProcessor: (_name, value) => decoded(value.replace(/[\t\n\r]/g, ' ')),
+      attributeValueProcessor: (_name, value) => xmlAttributeValue(value),
       tagValueProcessor: (_name, value) => decoded(value),
     });
     // A section kept apart is given no processor

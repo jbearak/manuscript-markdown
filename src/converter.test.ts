@@ -1478,6 +1478,21 @@ describe('Ordered list numbering', () => {
     expect(instance).toBe('<w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/>' + lvl + '</w:lvlOverride>');
   });
 
+  // The level override's font as an XML parser reads it: a line feed written
+  // as itself a space (XML 1.0 §3.3.3), and one written as a reference a line
+  // feed, each written so that Word reads it the same
+  test('keeps the font of a level override in the template\'s instance as Word reads it', async () => {
+    const lvl = (ascii: string, hAnsi: string) => '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1)"/><w:lvlJc w:val="left"/>' +
+      '<w:rPr><w:rFonts w:ascii="' + ascii + '" w:hAnsi="' + hAnsi + '"/></w:rPr></w:lvl>';
+    const templateDocx = await templateWithNumbering(numbering => numbering.replace(
+      /(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/, (_match, num: string) => num + '<w:lvlOverride w:ilvl="0">' + lvl('Times\nNew Roman', 'Times&#10;New Roman') + '</w:lvlOverride>'));
+    const { docx } = await convertMdToDocx('1. a\n\nP.\n\n3. b', { templateDocx });
+    const [, b] = numIdsOf(await documentXml(docx));
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    const instance = new RegExp('<w:num w:numId="' + b + '"[^>]*>([^]*?)</w:num>').exec(numbering)?.[1];
+    expect(instance).toBe('<w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="3"/>' + lvl('Times New Roman', 'Times&#xA;New Roman') + '</w:lvlOverride>');
+  });
+
   test('counts on a level that a second instance doesn\'t override', async () => {
     const { docx } = await convertMdToDocx('1. a\n2. b');
     const zip = await JSZip.loadAsync(docx);
