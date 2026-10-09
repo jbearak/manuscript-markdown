@@ -8049,6 +8049,22 @@ function revisionsEqual(a: RevisionInfo | undefined, b: RevisionInfo | undefined
 // Avoid literal '$$' — tool text-replacement corrupts '$' in replacement
 // strings. See CLAUDE.md "Template literal corruption" rule.
 const MATH_FENCE = '$'.repeat(2);
+/** Display math of `latex` between its fences, as its own lines. */
+function displayMathBlock(latex: string): string {
+  return MATH_FENCE + '\n' + keepLinesInEquation(canonicalizeDisplayMathLatex(latex)) + '\n' + MATH_FENCE;
+}
+
+/** `latex`, display math's lines, with each that would start a Markdown
+ *  block indented by four spaces, as a row of ~~~ that would open a code
+ *  block, or one that starts with - that would start a list (see
+ *  breaksParagraph). Such a line ends the paragraph, and so the equation, on
+ *  export, where indented, it goes on the paragraph, as code can't interrupt
+ *  one, and LaTeX ignores the indent. A LaTeX environment's line is the
+ *  equation's own there. */
+function keepLinesInEquation(latex: string): string {
+  return latex.split('\n').map(line => breaksParagraph(line) && !/^[ \t]*\\begin\{/.test(line) ? '    ' + line : line).join('\n');
+}
+
 function canonicalizeDisplayMathLatex(latex: string): string {
   const trimmed = latex.trim();
   const envMatch = trimmed.match(/^\\begin\{([a-zA-Z*]+)\}\s*([\s\S]*?)\s*\\end\{\1\}$/);
@@ -8967,7 +8983,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   }
   if (item.type === 'citation') return citationSeparator(precedingText, item) + citationText(item);
   return item.display
-    ? MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE
+    ? displayMathBlock(item.latex)
     : '$' + item.latex + '$';
 }
 
@@ -16029,7 +16045,7 @@ function buildMarkdownOnce(
         // Ensure blank line before display math
         output.push('\n\n');
       }
-      const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
+      const mathBlock = displayMathBlock(item.latex);
       const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
       // Text after the equation in its paragraph goes on from the closing
       // fence, so a body there would come before it
@@ -16683,7 +16699,7 @@ function buildMarkdownOnce(
             pushInline(inlinePart(part.text, !!item.inParagraph));
             pushAll(paragraphBodies, part.deferredComments);
           }
-          const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
+          const mathBlock = displayMathBlock(item.latex);
           const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
           if (item.inParagraph && paragraphPart !== undefined) {
             // In place of the space export wrote for the line's end, or after

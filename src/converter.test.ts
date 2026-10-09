@@ -15588,6 +15588,54 @@ describe('Display math in a paragraph\'s text', () => {
   });
 });
 
+// A line of display math that would start a Markdown block, as a fence or a
+// list marker, ends the paragraph, and so the equation, on export, unless
+// it's indented by four spaces, which LaTeX ignores
+describe('a line of display math that would start a Markdown block', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const fence = '$' + '$';
+  const equations = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return xml.match(/<m:oMathPara>/g)?.length ?? 0;
+  };
+
+  test.each([
+    ['a row of nonbreaking spaces', '\\begin{aligned}\nx &= 1 \\\\\n    ~~~ &= 2\n\\end{aligned}'],
+    ['a row starting with >', '\\begin{gathered}\na \\\\\n    > b\n\\end{gathered}'],
+    ['rows starting with list markers and #', '\\begin{gathered}\na \\\\\n    - b \\\\\n    + c \\\\\n    # d \\\\\n    1. e\n\\end{gathered}'],
+    ['a row of bars', '\\begin{aligned}\nx &= 1 \\\\\n    |y| &= 2\n\\end{aligned}'],
+  ])('comes back indented, so it stays in the equation: %s', async (_name, latex) => {
+    const md = fence + '\n' + latex + '\n' + fence + '\n\nAfter.\n';
+    expect(await equations(md)).toBe(1);
+    const back = await roundTrip(md);
+    expect(back).toBe(md);
+    expect(await equations(back)).toBe(1);
+  });
+
+  test.each([
+    ['in a quote', '> ', '> ' + fence + '\n> \\begin{gathered}\n> a \\\\\n>     > b\n> \\end{gathered}\n> ' + fence + '\n'],
+    ['in a list item', '  ', '- a\n\n  ' + fence + '\n  \\begin{gathered}\n  a \\\\\n      - b\n  \\end{gathered}\n  ' + fence + '\n'],
+  ])('comes back indented %s', async (_name, _prefix, md) => {
+    expect(await equations(md)).toBe(1);
+    const back = await roundTrip(md);
+    expect(back).toBe(md);
+  });
+
+  // Rows of an equation from Word that start as Markdown blocks do, among
+  // others, each indented in the Markdown it starts from
+  test('of any rows stays one equation through Word and back', async () => {
+    const row = fc.constantFrom('a', '~~~ b', '~~~', '- b', '+ b', '* b', '# b', '> b', '1. b', '|b|', '<b', '---', '===');
+    await fc.assert(fc.asyncProperty(fc.array(row, { minLength: 1, maxLength: 4 }), async rows => {
+      const md = fence + '\n\\begin{gathered}\n' + rows.map(text => '    ' + text).join(' \\\\\n') + '\n\\end{gathered}\n' + fence + '\n\nAfter.\n';
+      const back = await roundTrip(md);
+      expect(await equations(back)).toBe(1);
+      expect(back).toEndWith(fence + '\n\nAfter.\n');
+      expect(await roundTrip(back)).toBe(back);
+    }), { numRuns: 30 });
+  });
+});
+
 describe('parseCodeBlockStyle', () => {
   test('returns true for CodeBlock style', () => {
     const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'CodeBlock' } }];
