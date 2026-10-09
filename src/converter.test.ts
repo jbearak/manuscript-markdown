@@ -1981,6 +1981,12 @@ describe('Where Word list numbering comes from', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test('numbers a paragraph whose style is based on one based on it as the other has it', async () => {
+    const md = '1. a\n2. b';
+    const loop = withStyles(paragraphStyle('LoopA', numPr(2), 'LoopB'), paragraphStyle('LoopB', '', 'LoopA'));
+    expect(await imported([[pStyle('LoopB'), 'a'], [pStyle('LoopB'), 'b']], { styles: loop })).toBe(md);
+  });
+
   test('counts a paragraph its style numbers with the others of its list, as Word shows them', async () => {
     const md = '1. a\n2. b\n\nP.\n\n3. c';
     expect(await imported([[pStyle('ListNumber'), 'a'], [numPr(2, 0), 'b'], ['', 'P.'], [pStyle('ListNumber'), 'c']], { styles: listStyles })).toBe(md);
@@ -12095,6 +12101,26 @@ describe('Table alignment', () => {
     expect(markdown).toBe('| a | b | c |\n' + separator + '\n| 1 | 2 | 3 |\n');
   });
 
+  // Word doesn't write styles based on each other, but a document can hold
+  // them: each shows those from its base around to the one based on it
+  test('reads a column\'s alignment from paragraph styles based on each other, each from where it starts', async () => {
+    const markdown = await withStyles('| a | b | c | d |\n| --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 |',
+      '<w:style w:type="paragraph" w:styleId="X"><w:name w:val="X"/><w:basedOn w:val="Y"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="Y"><w:name w:val="Y"/><w:basedOn w:val="Z"/></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="Z"><w:name w:val="Z"/><w:basedOn w:val="X"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="T"><w:name w:val="T"/><w:basedOn w:val="Y"/></w:style>',
+      xml => xml, column => '<w:pStyle w:val="' + ['X', 'Y', 'Z', 'T'][column] + '"/>');
+    expect(markdown).toBe('| a | b | c | d |\n| :---: | ---: | ---: | ---: |\n| 1 | 2 | 3 | 4 |\n');
+  });
+
+  test('reads a column\'s alignment from table styles based on each other', async () => {
+    const markdown = await withStyles('| a | b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |',
+      '<w:style w:type="table" w:styleId="Parts"><w:name w:val="Parts"/><w:basedOn w:val="Base"/><w:tblStylePr w:type="lastCol"><w:pPr><w:jc w:val="right"/></w:pPr></w:tblStylePr></w:style>'
+      + '<w:style w:type="table" w:styleId="Base"><w:name w:val="Base"/><w:basedOn w:val="Parts"/><w:tblStylePr w:type="firstCol"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr></w:style>',
+      xml => xml.replace(/<w:tblLook [^>]*\/>/, '<w:tblStyle w:val="Parts"/><w:tblLook w:val="0580"/>'), () => '');
+    expect(markdown).toBe('| a | b | c |\n| :---: | --- | ---: |\n| 1 | 2 | 3 |\n');
+  });
+
   test('reads the alignment of a table of one row from its first row\'s part of the table style', async () => {
     const markdown = await withStyles('| a | b |\n| --- | --- |',
       '<w:style w:type="table" w:styleId="Parts"><w:name w:val="Parts"/><w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr></w:style>',
@@ -21710,4 +21736,36 @@ describe('Parts in the encoding they declare', () => {
     const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
     expect(markdown).toBe(expected);
   });
+});
+
+describe('Documents of many styles', () => {
+  /** The fastest import of export's own Word file of `md`, with `styles`'
+   *  XML of a count added to its styles.xml, and `edit` made to it */
+  const timed = async (md: string, count: number, styles: (count: number) => string, edit: (xml: string, count: number) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/styles.xml')!.async('string');
+    zip.file('word/styles.xml', edit(xml.replace('</w:styles>', () => styles(count) + '</w:styles>'), count));
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    return fastestRunAsync(async () => expect((await convertDocx(docx)).markdown).toContain('One'));
+  };
+  const each = (count: number, style: (k: number) => string) => Array.from({ length: count }, (_, k) => style(k)).join('');
+
+  test.each([
+    // Each style's layout, numbering and font style read along its chain,
+    // and a heading's along the chain it's based on, read each base again
+    ['paragraph styles, each based on the one before, and a heading on the last', '# One\n\n- Two\n',
+      (count: number) => each(count, k => '<w:style w:type="paragraph" w:styleId="S' + k + '"><w:name w:val="s' + k + '"/><w:basedOn w:val="' + (k === 0 ? 'Normal' : 'S' + (k - 1)) + '"/><w:pPr><w:jc w:val="left"/></w:pPr></w:style>'),
+      (xml: string, count: number) => xml.replace(/(w:styleId="Heading1"[^>]*>[\s\S]*?<w:basedOn w:val=")Normal"/, (_match, before: string) => before + 'S' + (count - 1) + '"')],
+    ['table styles, each based on the one before', '| One |\n| --- |\n| 1 |\n',
+      (count: number) => each(count, k => '<w:style w:type="table" w:styleId="T' + k + '"><w:name w:val="t' + k + '"/><w:basedOn w:val="' + (k === 0 ? 'TableNormal' : 'T' + (k - 1)) + '"/><w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr></w:style>'),
+      (xml: string) => xml],
+    // Each custom style found by a search of all of them
+    ['custom styles', '# One\n',
+      (count: number) => each(count, k => '<w:style w:type="paragraph" w:customStyle="1" w:styleId="MsCustomS' + k + '"><w:name w:val="Custom: s' + k + '"/><w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style>'),
+      (xml: string) => xml],
+  ] as Array<[string, string, (count: number) => string, (xml: string, count: number) => string]>)('imports a document of many %s in linear time', async (_name, md, styles, edit) => {
+    await timed(md, 250, styles, edit);
+    const small = await timed(md, 1000, styles, edit);
+    expect(await timed(md, 4000, styles, edit) / small).toBeLessThan(8);
+  }, 30000);
 });
