@@ -485,6 +485,96 @@ describe('mergeBibtex line endings', () => {
 });
 
 describe('mergeBibtex', () => {
+  // Which copied a field as far as a reader that lets a backslash escape any
+  // character reads it, where the parser, as BibTeX, counts an escaped brace
+  // as a brace: so the note ended at its first ", in the group \{ opens, and
+  // in the entry written, the parser read on past it, into the fields after
+  it('copies a field the produced entry lacks as the parser reads it', () => {
+    const existing = '@article{k,\n  note = "a \\{ b",\n  x = "c \\} d",\n  year = {2020}\n}';
+    const produced = '@article{k,\n  title = {T},\n  year = {2020}\n}';
+    const before = parseBibtex(existing).get('k')!.fields;
+    // One value, to the last ", which holds x's text
+    expect(before.get('note')).toContain('x = ');
+    expect(before.has('x')).toBe(false);
+    const merged = parseBibtex(mergeBibtex(existing, produced)).get('k')!.fields;
+    expect(merged.get('note')).toBe(before.get('note'));
+    expect(merged.get('title')).toBe('T');
+    expect(merged.get('year')).toBe('2020');
+  });
+
+  // Which cut each field out of the existing entry: a field last there,
+  // with no comma after it, which went before another, as a repeated name
+  // keeps its first place among the fields, with no comma between them; a
+  // macro on a line after another field, which it wrote in braces, as the
+  // text, not the month, and a concatenation, of which it took the first
+  // part. Each is written as the parser read it, and the splice adds the
+  // commas.
+  it.each([
+    ['a field last in its entry, before another', '  note = {N1},\n  url = {U},\n  note = {N2}', '  note = {N2},\n  url = {U}'],
+    ['a macro on a line after another field', '  month = jan,\n  year = {2020}, month = feb', '  month = feb,\n  year = {2020}'],
+    ['a concatenation', '  note = "a " # b #\n    {c},\n  year = 2020', '  note = "a " # b # {c},\n  year = 2020'],
+    ['a concatenation last in its entry, on a line after another field', '  year = 2020, note = jan # "~1"', '  year = 2020,\n  note = jan # "~1"'],
+  ])('copies %s the produced entry lacks as BibTeX reads it', (_name, body, copied) => {
+    const merged = mergeBibtex('@article{k,\n' + body + '\n}', '@article{k,\n  title = {T}\n}');
+    expect(merged).toBe('@article{k,\n  title = {T},\n' + copied + '\n}');
+  });
+
+  // Which copied a field that uses a macro an @string declares, as
+  // note = extra, but none of the file's declarations, so BibTeX warned the
+  // macro was undefined and dropped the field's text. The existing file's
+  // declarations stay, as written, each before the first entry that came
+  // after it there, so BibTeX reads each macro where it read it before
+  it.each([
+    ['a field that uses a macro an @string declares', '@string{extra = {Custom text}}\n\n@article{k, title = {Title}, note = extra}',
+      '@string{extra = {Custom text}}\n\n@article{k,\n  title = {Title},\n  note = extra\n}'],
+    ['declarations that use each other, in braces and parens', '@string{a = {A}}\n@string(b = a # {B})\n@article{k, title = {Title}, note = {x} # b}',
+      '@string{a = {A}}\n\n@string(b = a # {B})\n\n@article{k,\n  title = {Title},\n  note = {x} # b\n}'],
+    ['an entry only in the existing file that uses a macro', '@string{extra = {E}}\n@book{b, note = Extra}\n@article{k, title = {Title}}',
+      '@string{extra = {E}}\n\n@book{b, note = Extra}\n\n@article{k,\n  title = {Title}\n}'],
+    ['a declaration between entries, and one after them', '@book{b, note = {N}}\n@STRING{x = {X}}\n@article{k, title = {Title}, note = x}\n@string{y = {Y}}',
+      '@book{b, note = {N}}\n\n@STRING{x = {X}}\n\n@article{k,\n  title = {Title},\n  note = x\n}\n\n@string{y = {Y}}'],
+    ['a macro declared again between entries', '@string{x = {1}}\n@book{b, note = x}\n@string{x = {2}}\n@article{k, title = {Title}, note = x}',
+      '@string{x = {1}}\n\n@book{b, note = x}\n\n@string{x = {2}}\n\n@article{k,\n  title = {Title},\n  note = x\n}'],
+    // Guards: a declaration's text in a comment and in a field, which
+    // BibTeX reads none in
+    ['a declaration\'s text in a comment and in a field', '@comment{@string{x = {X}}}\n@article{k, title = {Title}, note = {@string{y = {Y}}}}',
+      '@article{k,\n  title = {Title},\n  note = {@string{y = {Y}}}\n}'],
+  ])('merges %s, with the file\'s declarations where they were', (_name, existing, merged) => {
+    expect(mergeBibtex(existing, '@article{k,\n  title = {Title}\n}')).toBe(merged);
+  });
+
+  it('keeps the declarations between many entries in linear time', () => {
+    const time = (n: number) => {
+      const text = Array.from({ length: n }, (_, k) => '@string{m' + k + ' = {x}}\n@article{e' + k + ', note = m' + k + '}').join('\n');
+      return fastestRun(() => mergeBibtex(text, '@article{e0,\n  title = {T}\n}'));
+    };
+    time(4000);
+    expect(time(16000) / time(4000)).toBeLessThan(8);
+  }, 30000);
+
+  // Which read a field in a braced part of a concatenation, as the doi here,
+  // which BibTeX reads as the note's text, and copied it
+  it('reads no field in a part of a concatenation', () => {
+    const existing = '@article{k,\n  note = 2020 # {doi = a},\n  year = 2021\n}';
+    expect([...parseBibtex(existing).get('k')!.fields.keys()]).toEqual(['note', 'year']);
+    expect(mergeBibtex(existing, '@article{k,\n  title = {T}\n}')).toBe('@article{k,\n  title = {T},\n  note = 2020 # {doi = a},\n  year = 2021\n}');
+  });
+
+  // Each part of a concatenation read once, as the field's, and each field
+  // copied once, however many parts or fields there are
+  it.each([
+    ['many parts', (n: number) => '  note = "a"' + ' # b # {c}'.repeat(n)],
+    ['many fields with parts', (n: number) => Array.from({ length: n }, (_, k) => '  f' + k + ' = "a" # b # {c = d}').join(',\n')],
+    ['many fields in a part', (n: number) => '  note = 1 # {' + ' x = y,'.repeat(n) + '}'],
+  ])('copies a concatenation with %s in linear time', (_name, body) => {
+    const time = (n: number) => {
+      const existing = '@article{k,\n' + body(n) + '\n}';
+      return fastestRun(() => mergeBibtex(existing, '@article{k,\n  title = {T}\n}'));
+    };
+    time(4000);
+    expect(time(16000) / time(4000)).toBeLessThan(8);
+  }, 30000);
+
   it('preserves existing-only entries verbatim', () => {
     const existing = '@article{onlyExisting,\n  title = {{Only Existing}},\n  year = {2020}\n}';
     const produced = '@article{onlyProduced,\n  title = {Only Produced},\n  year = {2021}\n}';
@@ -574,6 +664,23 @@ describe('extractRawField', () => {
     const entry = '@article{k,\n  title = {A \\{special\\} title},\n  year = {2020}\n}';
     const result = extractRawField(entry, 'title');
     expect(result).toBe('  title = {A \\{special\\} title},');
+  });
+
+  // Which it read otherwise than the parser: the first of a repeated name,
+  // where the parser keeps the last; a quoted value to its first ", in a
+  // group, which BibTeX reads on past; and one to a " that an escaped brace,
+  // which BibTeX counts, put in a group
+  it.each([
+    ['a repeated name, the last', '  doi = {a},\n  doi = {b}', 'doi', '  doi = {b},'],
+    ['a quoted value with a " in a group', '  title = "a {"} b",\n  year = {2020}', 'title', '  title = "a {"} b",'],
+    ['a quoted value with an escaped brace', '  note = "a \\{ b",\n  x = "c \\} d",\n  year = {2020}', 'note', '  note = "a \\{ b",\n  x = "c \\} d",'],
+    // And one on a line after another, which it found none of, on a line of
+    // its own
+    ['a field after another on its line', '  year = {2020}, title = {T}', 'title', '  title = {T},'],
+    // Guard: a macro, as written, not in braces
+    ['a macro', '  month = jan,\n  year = {2020}', 'month', '  month = jan,'],
+  ])('extracts %s as the parser reads it', (_name, body, field, expected) => {
+    expect(extractRawField('@article{k,\n' + body + '\n}', field)).toBe(expected);
   });
 });
 
@@ -1500,6 +1607,33 @@ describe('scanBibtexEntryBody', () => {
     expect(entryType!.raw).toBe('Article');
     expect(raw.slice(entryType!.start, entryType!.end)).toBe('Article');
     expect(scan('not an entry').entryType).toBeUndefined();
+  });
+
+  // Which the walk read otherwise than the parser, whose fields a citation
+  // shows, and said nothing, so an edit by offset changed text the parser
+  // read as another field, or none: a quoted value whose \{ BibTeX counts as
+  // a brace, so its " is in a group and the value reads on, to y's last ";
+  // a name the parser reads in part, as doi of :doi; a field in what the
+  // walk took for a stray value; and a bare value the parser reads in part
+  it.each([
+    ['an escaped brace in a quoted value', '  note = "a \\{ b",\n  doi = {10.1/a},\n  y = "c \\} d"'],
+    ['a name the parser reads in part', '  :doi = {10.1/a}'],
+    ['a field in a stray value', '  title = {T} "x,\n  doi = {10.1/a},\n  note = "'],
+    ['a bare value the parser reads in part', '  doi = 10.1000/abc'],
+  ])('refuses to edit an entry with %s', (_name, body) => {
+    expect(scan('@article{k,\n' + body + '\n}').unbalanced).toBe(true);
+  });
+
+  // Guards: values every reader ends in the same place
+  it.each([
+    ['an escaped quote', '  note = "a \\" b",\n  doi = {10.1/a}'],
+    ['a quote in a group', '  note = "a {"} b",\n  doi = {10.1/a}'],
+    ['escaped braces that pair', '  note = "a \\{ b \\}",\n  doi = {10.1/a}'],
+    ['a concatenation', '  doi = "10.1/" # "a"'],
+  ])('edits an entry with %s', (_name, body) => {
+    const raw = '@article{k,\n' + body + '\n}';
+    expect(scan(raw).unbalanced).toBe(false);
+    expect(scan(raw).fieldNames).toContain('doi');
   });
 });
 

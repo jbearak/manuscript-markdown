@@ -391,7 +391,9 @@ export function quotedValueEnds(text: string): Int32Array {
  *  once for all the input's entries.
  *
  *  It counts `\{`/`\}` escapes as real braces, as BibTeX does, and as
- *  readBibtexFields does. */
+ *  the field reader (readBibtexFields) and extractRawField, which follows
+ *  it, do.  scanBibtexEntryBody reads them as escapes, and finds an entry
+ *  whose fields that reading reads otherwise unbalanced. */
 function findEntryEnd(
   input: string,
   startPos: number,
@@ -790,6 +792,9 @@ export interface ParsedBibtexWithRaw {
  *  not the document's layout. */
 interface ScannedBibtex extends ParsedBibtexWithRaw {
   constructEnds: number[];
+  /** Where each @string declaration is, in source order, of those read
+   *  while the scan is in sync, so none is text in another construct */
+  strings: Array<{ start: number; end: number }>;
 }
 
 /** Citation keys that occur more than once.  Entries with a duplicated key
@@ -845,10 +850,44 @@ const BARE_VALUE_AT = /\w+/y;
  * up on, so the entry lost the rest of the field, or all its fields.
  */
 export function readBibtexFields(body: string): Array<{ name: string; value: string; braced: boolean }> {
-  const fields: Array<{ name: string; value: string; braced: boolean }> = [];
+  return readBibtexFieldRanges(body).map(({ name, value, braced }) => ({ name, value, braced }));
+}
+
+/** A field readBibtexFields reads, with where its name starts in the body
+ *  (`nameStart`) and the index of its value's last character (`end`), its }
+ *  or ", or a bare value's last; and its value as BibTeX reads it, each part
+ *  of a concatenation, as "a" # b, as written (`parts`), its braces or
+ *  quotes too, of which the parser's value is the first */
+interface BibtexFieldRange {
+  name: string;
+  value: string;
+  braced: boolean;
+  nameStart: number;
+  end: number;
+  parts: string[];
+}
+
+// The # between the parts of a concatenation, with the whitespace around it
+const CONCATENATION_AT = /\s*#\s*/y;
+
+/** readBibtexFields' fields, with where each is in the body */
+function readBibtexFieldRanges(body: string): BibtexFieldRange[] {
+  const fields: BibtexFieldRange[] = [];
   // The } that pairs with each {, or -1
   const closes = delimiterCloses(body, '{', '}');
   let quoteEnds: Int32Array | undefined;
+  // The index of the last character of the value that starts at `start`,
+  // its } or ", or a bare value's last, or -1 where none does
+  const valueEnd = (start: number): number => {
+    if (body[start] === '{') return closes[start];
+    if (body[start] === '"') {
+      quoteEnds ??= quotedValueEnds(body);
+      return quoteEnds[start];
+    }
+    BARE_VALUE_AT.lastIndex = start;
+    const bare = BARE_VALUE_AT.exec(body);
+    return bare ? start + bare[0].length - 1 : -1;
+  };
   let i = 0;
   while (i < body.length) {
     FIELD_NAME_AT.lastIndex = i;
@@ -863,35 +902,29 @@ export function readBibtexFields(body: string): Array<{ name: string; value: str
     FIELD_EQUALS_AT.lastIndex = nameEnd;
     const equals = FIELD_EQUALS_AT.exec(body);
     const start = nameEnd + (equals?.[0].length ?? 0);
-    let end = -1;
-    let value: string | undefined;
-    let braced = false;
-    if (!equals) {
-      // No field
-    } else if (body[start] === '{') {
-      end = closes[start];
-      if (end >= 0) {
-        value = body.slice(start + 1, end);
-        braced = true;
-      }
-    } else if (body[start] === '"') {
-      quoteEnds ??= quotedValueEnds(body);
-      end = quoteEnds[start];
-      if (end >= 0) value = body.slice(start + 1, end);
-    } else {
-      BARE_VALUE_AT.lastIndex = start;
-      const bare = BARE_VALUE_AT.exec(body);
-      if (bare) {
-        end = start + bare[0].length - 1;
-        value = bare[0];
-      }
-    }
-    if (value === undefined) {
+    const end = equals ? valueEnd(start) : -1;
+    if (end < 0) {
       i = nameEnd;
       continue;
     }
-    fields.push({ name, value, braced });
-    i = end + 1;
+    const delimited = body[start] === '{' || body[start] === '"';
+    const value = delimited ? body.slice(start + 1, end) : body.slice(start, end + 1);
+    // The parts after the first, which BibTeX reads as the value's, so the
+    // parser goes on after them, and takes nothing in them for a field, as
+    // the doi in note = 2020 # {doi = a}
+    const parts = [body.slice(start, end + 1)];
+    let last = end;
+    for (;;) {
+      CONCATENATION_AT.lastIndex = last + 1;
+      const hash = CONCATENATION_AT.exec(body);
+      const next = hash ? last + 1 + hash[0].length : -1;
+      const nextEnd = hash && next < body.length ? valueEnd(next) : -1;
+      if (nextEnd < 0) break;
+      parts.push(body.slice(next, nextEnd + 1));
+      last = nextEnd;
+    }
+    fields.push({ name, value, braced: body[start] === '{', nameStart: i, end, parts });
+    i = last + 1;
   }
   return fields;
 }
@@ -906,6 +939,7 @@ function scanBibtex(input: string): ScannedBibtex {
   const parsed = new Map<string, BibtexEntry>();
   const raw = new Map<string, string>();
   const ranges: BibtexSourceRange[] = [];
+  const strings: ScannedBibtex['strings'] = [];
 
   // Scan sequentially rather than pre-collecting every `@type{key,` match:
   // only a scan that has consumed everything before a given `@` knows whether
@@ -974,6 +1008,7 @@ function scanBibtex(input: string): ScannedBibtex {
         pos = close + 1;
         requireLineStart = false;
         if (synced) constructEnds.push(pos);
+        if (synced && lowerType === 'string') strings.push({ start: entryStart, end: close + 1 });
       }
       continue;
     }
@@ -1044,7 +1079,7 @@ function scanBibtex(input: string): ScannedBibtex {
     }
   }
 
-  return { parsed, raw, ranges, rangesTrusted: synced, constructEnds };
+  return { parsed, raw, ranges, rangesTrusted: synced, constructEnds, strings };
 }
 
 export function parseBibtex(input: string): Map<string, BibtexEntry> {
@@ -1083,48 +1118,44 @@ export function serializeBibtex(entries: Map<string, BibtexEntry>): string {
 // Amend-only .bib merging helpers
 // ---------------------------------------------------------------------------
 
-/** Extract a single field's raw text from an entry string.
- *  Returns the full line including indentation and trailing comma, e.g.
- *  `  title = {{My Title}},`  — or null if the field is not found. */
-export function extractRawField(rawEntry: string, fieldName: string): string | null {
-  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp('(^|\\n)([ \\t]*' + escaped + '\\s*=\\s*)', 'i');
-  const match = regex.exec(rawEntry);
-  if (!match) return null;
+// An entry's header, its type and its key, to the comma after the key, as
+// the parser reads it, after which its fields start
+const ENTRY_KEY_HEADER_RE = /^@\w+\s*[{(]\s*[^,\s]+\s*,/;
 
-  const lineStart = match.index + (match[1] === '\n' ? 1 : 0);
-  const valueStart = match.index + match[0].length;
-  const firstChar = rawEntry[valueStart];
+/** A single field of an entry as a line of its own, in the form
+ *  `spliceFieldsIntoEntry` expects, e.g. `  title = {{My Title}},`, at
+ *  `indent` — or null if the field is not found.
+ *
+ *  The field is the one the parser reads, the last of a repeated name, as
+ *  the parser keeps the last, written again from the parser's reading of
+ *  it, wherever it is in the entry, on a line of its own or not: its name as
+ *  written, and its value as BibTeX reads it, in braces or quotes as it was,
+ *  to the } or " the parser ends it at (see readBibtexFields), every brace
+ *  counted, an escaped one too, and a " in a group kept, as BibTeX reads
+ *  them; or a number or a macro, as `month = jan`, as it was, not braced,
+ *  which would make the macro text; and each part of a concatenation, as
+ *  `"a" # b`. So mergeBibtex, which copies the field into another entry,
+ *  copies the value BibTeX read, which reads the same there. `rawEntry`
+ *  must be an exact parsed entry range, as `raw.get(key)`. */
+export function extractRawField(rawEntry: string, fieldName: string, indent = detectBibtexFieldIndent(rawEntry)): string | null {
+  const field = readEntryFields(rawEntry)?.get(fieldName.toLowerCase());
+  return field ? bibtexFieldLine(field, indent) : null;
+}
 
-  let valueEnd: number;
-  if (firstChar === '{') {
-    let depth = 1;
-    let pos = valueStart + 1;
-    while (pos < rawEntry.length && depth > 0) {
-      if (rawEntry[pos] === '\\') { pos += 2; continue; }
-      if (rawEntry[pos] === '{') depth++;
-      else if (rawEntry[pos] === '}') depth--;
-      pos++;
-    }
-    valueEnd = pos;
-  } else if (firstChar === '"') {
-    let pos = valueStart + 1;
-    while (pos < rawEntry.length) {
-      if (rawEntry[pos] === '\\') { pos += 2; continue; }
-      if (rawEntry[pos] === '"') { pos++; break; }
-      pos++;
-    }
-    valueEnd = pos;
-  } else {
-    const bareMatch = rawEntry.slice(valueStart).match(/^\w+/);
-    valueEnd = valueStart + (bareMatch ? bareMatch[0].length : 0);
-  }
+/** An entry's fields as the parser reads them (see extractRawField), by
+ *  name, lowercased, each the last of a repeated name, read once for all of
+ *  them; or undefined where the parser reads no header */
+function readEntryFields(rawEntry: string): Map<string, BibtexFieldRange> | undefined {
+  const header = ENTRY_KEY_HEADER_RE.exec(rawEntry);
+  if (!header) return undefined;
+  const fields = new Map<string, BibtexFieldRange>();
+  for (const read of readBibtexFieldRanges(rawEntry.slice(header[0].length, -1))) fields.set(read.name.toLowerCase(), read);
+  return fields;
+}
 
-  // Include trailing comma if present
-  let end = valueEnd;
-  if (end < rawEntry.length && rawEntry[end] === ',') end++;
-
-  return rawEntry.slice(lineStart, end);
+/** A field, as the parser read it, written again (see extractRawField) */
+function bibtexFieldLine(field: BibtexFieldRange, indent: string): string {
+  return indent + field.name + ' = ' + field.parts.join(' # ') + ',';
 }
 
 /** What a walk of an entry's body found at the entry's *own* lexical level —
@@ -1151,8 +1182,12 @@ export interface BibtexEntryBodyScan {
    *  inside a multi-line note. */
   readonly fields: readonly BibtexEntryFieldOccurrence[];
   /** True if the walk did not end at the entry's own level — an escaped or
-   *  stray delimiter left brace depth or a quote open.  The range's boundaries
-   *  then do not mean what they appear to, and nothing may be spliced into it. */
+   *  stray delimiter left brace depth or a quote open — or if the parser, whose
+   *  fields a citation shows, reads the entry's fields otherwise: a value that
+   *  ends elsewhere, a name read in part, as `doi` of `:doi`, or a field in
+   *  what the walk took for a stray value.  The range's boundaries then do not
+   *  mean what they appear to, or an edit by offset changes another field than
+   *  the one the parser reads, and nothing may be spliced into it. */
   readonly unbalanced: boolean;
   /** The entry-type token (`article` in `@article{...`), with its half-open
    *  offsets within the scanned text, so a caller rewriting the type replaces
@@ -1274,11 +1309,12 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     return escaped === braceEnd(at, false) ? escaped : -1;
   };
 
-  /** Consume a `"…"` value from `at`.  A `{…}` group inside protects a literal
+  /** End of the `"…"` value at `at` as a reader that lets a backslash escape
+   *  any character reads it, or -1.  A `{…}` group inside protects a literal
    *  quote, so its braces belong to the value, not to the entry — but a `}`
    *  with no `{` open is unbalanced to every reader, and BibTeX itself reports
    *  it, so the value has no agreed end. */
-  const skipQuoted = (at: number): number => {
+  const quoteEnd = (at: number): number => {
     let depth = 0;
     for (let k = at + 1; k < end; k++) {
       if (rawEntry[k] === '\\') {
@@ -1292,6 +1328,20 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
       } else if (rawEntry[k] === '"' && depth === 0) return k + 1;
     }
     return -1;
+  };
+
+  // Where each quoted value ends as BibTeX and the parser read it
+  let bibtexQuoteEnds: Int32Array | undefined;
+
+  /** Consume a `"…"` value from `at`, returning the offset just past its
+   *  closing quote, or -1 if the readings of it disagree, as for a braced
+   *  value: the one above, and BibTeX's (see quotedValueEnds), which counts
+   *  an escaped brace as a brace, so `"a \{ b"` doesn't end at its last `"`,
+   *  which is in the group `\{` opens. */
+  const skipQuoted = (at: number): number => {
+    const escaped = quoteEnd(at);
+    bibtexQuoteEnds ??= quotedValueEnds(rawEntry);
+    return escaped === bibtexQuoteEnds[at] + 1 ? escaped : -1;
   };
 
   /** Consume whatever value begins at `at`, recording it under `name`.
@@ -1383,7 +1433,22 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     i++;
   }
 
+  if (!unbalanced && !readsAsParserDoes(rawEntry, fields)) unbalanced = true;
   return result();
+}
+
+/** Whether the parser reads an entry's fields as the body walk read them
+ *  (`fields`): the same names, as the walk lowercases them, and values, at
+ *  the same offsets (see readBibtexFields) */
+function readsAsParserDoes(rawEntry: string, fields: readonly BibtexEntryFieldOccurrence[]): boolean {
+  const header = ENTRY_KEY_HEADER_RE.exec(rawEntry);
+  if (!header) return fields.length === 0;
+  const bodyStart = header[0].length;
+  const parsed = readBibtexFieldRanges(rawEntry.slice(bodyStart, -1));
+  return parsed.length === fields.length && parsed.every((field, k) =>
+    field.name.toLowerCase() === fields[k].name
+    && field.value === fields[k].value
+    && bodyStart + field.end + 1 === fields[k].valueEnd);
 }
 
 /** Indentation of an entry's existing field lines, so an inserted field sits
@@ -1408,7 +1473,8 @@ export function formatBibtexFieldLine(name: string, value: string, indent = '  '
 
 /** Splice additional raw field lines into a produced entry's raw text,
  *  inserting them before the closing `}`. Ensures a trailing comma on the
- *  last existing field so the result remains valid BibTeX.
+ *  last existing field, and a comma between the lines spliced, whether a
+ *  line ends in one or not, so the result remains valid BibTeX.
  *
  *  Line endings: inserted lines use `eol`, which defaults to whatever
  *  `producedRaw` itself uses.  Pass the enclosing document's convention when
@@ -1447,14 +1513,11 @@ export function spliceFieldsIntoEntry(
   const body = needsComma ? trimmed + ',' + head.slice(trimmed.length) : head;
   const before = body + (body.endsWith('\n') ? '' : eol);
 
-  // Strip trailing comma from last spliced field for consistency with serializeBibtex
-  const lastIdx = fieldTexts.length - 1;
-  const cleaned = fieldTexts.map((ft, i) => {
-    const t = ft.trimEnd();
-    return i === lastIdx ? t.replace(/,$/, '') : t;
-  });
+  // Each line's own comma off, and one between each two, so the last has
+  // none, for consistency with serializeBibtex
+  const cleaned = fieldTexts.map(ft => ft.trimEnd().replace(/,$/, ''));
 
-  return before + cleaned.join(eol) + eol + closer;
+  return before + cleaned.join(',' + eol) + eol + closer;
 }
 
 /** Merge an existing .bib (from disk) with a produced .bib (from conversion).
@@ -1474,7 +1537,7 @@ export function mergeBibtex(existing: string, produced: string): string {
   // document, so resolve it at most once and only on demand.
   let producedEolCache: BibtexEol | null = null;
   const producedEol = () => (producedEolCache ??= detectBibtexEol(produced));
-  const existingResult = parseBibtexWithRaw(existing);
+  const existingResult = scanBibtex(existing);
   const producedResult = parseBibtexWithRaw(produced);
   const existingParsed = existingResult.parsed;
   const producedParsed = producedResult.parsed;
@@ -1484,9 +1547,25 @@ export function mergeBibtex(existing: string, produced: string): string {
   const result: string[] = [];
   const emittedKeys = new Set<string>();
 
+  // The existing file's @string declarations, as written, each before the
+  // first entry that came after it there, so BibTeX reads each macro an
+  // entry uses, a field copied into a merged entry too, as the existing
+  // file declared it where it read that entry. Without them, it warns that
+  // the macro is undefined and drops the field's text.
+  const declarations = existingResult.strings;
+  const entryStarts = new Map<string, number>();
+  for (const range of existingResult.ranges) if (!entryStarts.has(range.key)) entryStarts.set(range.key, range.start);
+  let declared = 0;
+  const declareBefore = (at: number) => {
+    for (; declared < declarations.length && declarations[declared].start < at; declared++) {
+      result.push(existing.slice(declarations[declared].start, declarations[declared].end));
+    }
+  };
+
   // Iterate existing entries in their original order
   for (const [key, existingEntry] of existingParsed) {
     emittedKeys.add(key);
+    declareBefore(entryStarts.get(key) ?? existing.length);
 
     const producedEntry = producedParsed.get(key);
     if (!producedEntry) {
@@ -1516,24 +1595,25 @@ export function mergeBibtex(existing: string, produced: string): string {
       // No missing fields → emit produced raw text (fields may have been updated)
       result.push(producedText);
     } else {
-      // Splice missing fields from existing into produced
+      // Splice missing fields from existing into produced, each at the
+      // produced entry's indentation
       const existingText = existingRaw.get(key);
       const fieldTexts: string[] = [];
+      const indent = detectBibtexFieldIndent(producedText);
+      const existingFields = existingText === undefined ? undefined : readEntryFields(existingText);
 
       for (const fName of missingFields) {
-        if (existingText) {
-          const rawField = extractRawField(existingText, fName);
-          if (rawField) {
-            fieldTexts.push(rawField);
-            continue;
-          }
+        const field = existingFields?.get(fName.toLowerCase());
+        if (field) {
+          fieldTexts.push(bibtexFieldLine(field, indent));
+          continue;
         }
         // Fallback: re-serialize with escapeBibtex + single braces
         const value = existingEntry.fields.get(fName) ?? '';
         const escapedValue = VERBATIM_BIBTEX_FIELDS.has(fName)
           ? value
           : escapeBibtex(value);
-        fieldTexts.push(formatBibtexFieldLine(fName, escapedValue));
+        fieldTexts.push(formatBibtexFieldLine(fName, escapedValue, indent));
       }
 
       // Keep each entry internally consistent: a mixed-ending file must not
@@ -1544,6 +1624,8 @@ export function mergeBibtex(existing: string, produced: string): string {
       result.push(spliceFieldsIntoEntry(producedText, fieldTexts, entryEol));
     }
   }
+
+  declareBefore(existing.length);
 
   // Append entries only in produced
   for (const key of producedParsed.keys()) {

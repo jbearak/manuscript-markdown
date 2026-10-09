@@ -1,6 +1,6 @@
 import { describe, it } from 'bun:test';
 import * as fc from 'fast-check';
-import { parseBibtex, serializeBibtex, readBibtexFields, quotedValueEnds, readEntryEnds, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw, serializeBibtex, readBibtexFields, quotedValueEnds, readEntryEnds, scanBibtexEntryBody, extractRawField, mergeBibtex, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser Property Tests', () => {
   // A field's whitespace as BibTeX reads it: a run of it one space, and
@@ -267,6 +267,161 @@ describe('BibTeX field reader parity', () => {
         return true;
       }),
       { numRuns: 5000 }
+    );
+  });
+
+  /**
+   * All readers agree, or the editor refuses: an entry's fields, as
+   * scanBibtexEntryBody reads them for Zotero link's edits, are the
+   * parser's, unless it finds the entry unbalanced, which Zotero link
+   * refuses to edit, or finds a comment or a concatenation in it, which it
+   * refuses too; and each field extractRawField copies for mergeBibtex reads
+   * as the parser read it in the entry, with its escaped braces and quotes,
+   * a backslash before a line end, and a field repeated.
+   */
+  it('reads an entry\'s fields as the parser does in each reader, or the editor refuses the entry', () => {
+    const content = fc.array(fc.constantFrom('a', ' ', '{', '}', '\\{', '\\}', '"', '\\"', '\\\\', '\\', '{"}', '\n', ',', '=', 'doi = ', '{x}', '%', '#'), { maxLength: 6, size: 'max' })
+      .map(atoms => atoms.join(''));
+    const value = fc.oneof(content.map(c => '{' + c + '}'), content.map(c => '"' + c + '"'), fc.constantFrom('2020', 'jan'));
+    const field = fc.tuple(fc.constantFrom('title', 'doi', 'note', 'x-y'), value).map(([name, v]) => name + ' = ' + v);
+    const body = fc.array(field, { minLength: 1, maxLength: 4, size: 'max' }).map(fields => fields.join(',\n  '));
+    fc.assert(
+      fc.property(body, fields => {
+        const result = parseBibtexWithRaw('@article{k,\n  ' + fields + '\n}');
+        const entry = result.parsed.get('k');
+        const raw = result.raw.get('k');
+        if (!entry || !raw) return true;
+        const header = /^@\w+\s*[{(]\s*[^,\s]+\s*,/.exec(raw)!;
+        const parsed = readBibtexFields(raw.slice(header[0].length, -1)).map(read => [read.name.toLowerCase(), read.value]);
+        const scan = scanBibtexEntryBody(raw);
+        if (!scan.unbalanced && !scan.hasTopLevelComment && !scan.hasConcatenation) {
+          const scanned = scan.fields.map(read => [read.name, read.value]);
+          if (JSON.stringify(scanned) !== JSON.stringify(parsed)) throw new Error(JSON.stringify(raw) + ' scanned as ' + JSON.stringify(scanned) + ', parsed as ' + JSON.stringify(parsed));
+        }
+        for (const [name] of parsed) {
+          const rawField = extractRawField(raw, name);
+          if (rawField === null) continue;
+          const again = parseBibtex('@article{k,\n' + rawField.replace(/,$/, '') + '\n}').get('k')?.fields.get(name);
+          if (again !== entry.fields.get(name)) throw new Error(JSON.stringify(raw) + "'s " + name + ' extracted as ' + JSON.stringify(rawField) + ' reads as ' + JSON.stringify(again) + ', not ' + JSON.stringify(entry.fields.get(name)));
+        }
+        return true;
+      }),
+      { numRuns: 5000 }
+    );
+  });
+
+  /** An entry's fields as BibTeX reads them (bibtex.web's get_bib_command_or_entry_and_process):
+   *  its name, and each part of its value, as written, in braces, each
+   *  brace counted, an escaped one too, in quotes, to the first " in no
+   *  group, a number or a macro, with a # between each two; a comma after
+   *  each but the last, which may have one too, and nothing else. Throws
+   *  where BibTeX would report an error. */
+  const readAsBibtex = (entry: string): Array<[string, string[]]> => {
+    const header = /^@\w+\{[^,\s{}]+,/.exec(entry);
+    if (!header) throw new Error('no header');
+    let i = header[0].length;
+    const white = () => { while (/\s/.test(entry[i] ?? '')) i++; };
+    const part = (): string => {
+      const start = i;
+      if (entry[i] === '{' || entry[i] === '"') {
+        let depth = 0;
+        for (i++; i < entry.length; i++) {
+          if (entry[i] === '{') depth++;
+          else if (entry[i] === '}' && depth > 0) depth--;
+          else if (depth === 0 && entry[i] === (entry[start] === '{' ? '}' : '"')) return entry.slice(start, ++i);
+        }
+        throw new Error('unclosed value at ' + start);
+      }
+      const bare = /^(?:\d+|[^\d\s"#%'(),={}][^\s"#%'(),={}]*)/.exec(entry.slice(i));
+      if (!bare) throw new Error('no value at ' + i);
+      i += bare[0].length;
+      return bare[0];
+    };
+    const fields: Array<[string, string[]]> = [];
+    for (;;) {
+      white();
+      if (entry[i] === '}' && i === entry.length - 1) return fields;
+      const name = /^[^\d\s"#%'(),={}][^\s"#%'(),={}]*/.exec(entry.slice(i));
+      if (!name) throw new Error('no field name at ' + i);
+      i += name[0].length;
+      white();
+      if (entry[i++] !== '=') throw new Error('no = at ' + (i - 1));
+      white();
+      const parts = [part()];
+      for (white(); entry[i] === '#'; white()) {
+        i++;
+        white();
+        parts.push(part());
+      }
+      fields.push([name[0], parts]);
+      if (entry[i] === ',') i++;
+      else if (!(entry[i] === '}' && i === entry.length - 1)) throw new Error('no comma at ' + i);
+    }
+  };
+
+  /**
+   * mergeBibtex copies each field the produced entry lacks from the
+   * existing entry, wherever it is there, on a line of its own or after
+   * another field, repeated or not, with a comma after it or not, braced,
+   * quoted, a number, a macro or a concatenation of them: the entry it
+   * writes is one BibTeX reads with no error, and each field copied reads
+   * as BibTeX read it in the existing entry, the last of a repeated name,
+   * as the parser keeps the last, each of the produced entry's as it was.
+   * The existing file's @string declarations stay, as written, those
+   * before the entry before it and those after it after it, so BibTeX
+   * reads each macro the entry uses as the existing file declared it.
+   */
+  it('copies each field the produced entry lacks into an entry BibTeX reads, as BibTeX read it', () => {
+    const content = fc.array(fc.constantFrom('a', ' ', ',', '=', '#', '%', '{x}', '{"}', '\n', '\\&', 'doi = ', '{a {b} c}'), { maxLength: 4 })
+      .map(atoms => atoms.join(''));
+    const part = fc.oneof(content.map(c => '{' + c + '}'), content.map(c => '"' + c + '"'), fc.constantFrom('2020', 'jan', 'feb', 'extra', 'Other', 'none'));
+    // Declarations before the entry, each after those it uses: other uses
+    // extra, and jan is declared again, which the entry then reads; and
+    // after it
+    const declarations = fc.subarray(['@string{extra = {Custom text}}', '@string(other = "x" # Extra)', '@string{unused = {u}}', '@STRING{jan = {January}}']);
+    const declarationsAfter = fc.subarray(['@string{none = {N}}', '@string(late = "l")']);
+    const value = fc.array(part, { minLength: 1, maxLength: 3 }).chain(parts => fc.array(fc.constantFrom(' # ', '#', ' #\n    '), { minLength: parts.length - 1, maxLength: parts.length - 1 })
+      .map(hashes => parts.map((p, k) => (k === 0 ? '' : hashes[k - 1]) + p).join('')));
+    const name = fc.constantFrom('note', 'url', 'month', 'title', 'Note', 'x-y', 'year');
+    const existingFields = fc.array(fc.tuple(name, value, fc.constantFrom(',\n  ', ', ', ',', ' ,\n\t')), { minLength: 1, maxLength: 5 });
+    const producedNames = fc.subarray(['note', 'url', 'month', 'title', 'year']);
+    fc.assert(
+      fc.property(existingFields, fc.boolean(), producedNames, fc.boolean(), declarations, declarationsAfter, (fields, lastComma, produced, oneLine, declared, declaredAfter) => {
+        const body = fields.map(([n, v, sep], k) => n + ' = ' + v + (k < fields.length - 1 ? sep : lastComma ? ',' : '')).join('');
+        const entry = '@article{k,\n  ' + body + '\n}';
+        const existing = declared.map(d => d + '\n').join('') + entry + declaredAfter.map(d => '\n' + d).join('');
+        const producedEntry = oneLine
+          ? '@article{k, ' + produced.map(n => n + ' = {P}').join(', ') + '}'
+          : '@article{k,\n' + produced.map(n => '  ' + n + ' = {P}').join(',\n') + '\n}';
+        const before = readAsBibtex(entry);
+        const merged = mergeBibtex(existing, producedEntry);
+        const at = merged.indexOf('@article{k,');
+        const tail = declaredAfter.map(d => '\n\n' + d).join('');
+        let after: Array<[string, string[]]>;
+        try {
+          after = readAsBibtex(merged.slice(at, merged.length - tail.length));
+        } catch (error) {
+          throw new Error(JSON.stringify(existing) + ' merged into ' + JSON.stringify(producedEntry) + ' as ' + JSON.stringify(merged) + ', which BibTeX reads with an error: ' + (error as Error).message);
+        }
+        const failure = JSON.stringify(existing) + ' merged into ' + JSON.stringify(producedEntry) + ' as ' + JSON.stringify(merged);
+        const lower = (fieldName: string) => fieldName.toLowerCase();
+        const kept = after.slice(0, produced.length);
+        if (JSON.stringify(kept) !== JSON.stringify(produced.map(n => [n, ['{P}']]))) throw new Error(failure);
+        const copied = after.slice(produced.length);
+        const expected = new Map<string, [string, string[]]>();
+        for (const field of before) {
+          if (produced.includes(lower(field[0]))) continue;
+          // The parser's order, of each name's first, and its value, the last's
+          const first = expected.get(lower(field[0]));
+          expected.set(lower(field[0]), first ? [field[0], field[1]] : field);
+        }
+        if (JSON.stringify(copied) !== JSON.stringify([...expected.values()])) throw new Error(failure + ', copied ' + JSON.stringify(copied) + ', not ' + JSON.stringify([...expected.values()]));
+        // The existing file's declarations, where they were
+        const declaring = declared.map(d => d + '\n\n').join('');
+        if (merged.slice(0, at) !== declaring || !merged.endsWith(tail)) throw new Error(failure + ', not with ' + JSON.stringify(declaring) + ' before and ' + JSON.stringify(tail) + ' after');
+        return true;
+      }),
+      { numRuns: 2000 }
     );
   });
 });
