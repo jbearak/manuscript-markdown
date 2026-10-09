@@ -4,6 +4,8 @@ The DOCX converter transforms Microsoft Word documents into Manuscript Markdown 
 
 Import reads each XML part of a `.docx` in the encoding its byte-order mark or XML declaration names, as UTF-16, which some tools write, and in UTF-8 where neither names one.
 
+Import reads a number in an attribute by its value, as Word does, so one written with leading zeros, a plus sign or whitespace around it, as `07`, `+7` or ` 7 `, is the number it would be without them: a list's `w:numId` and `w:ilvl` match its numbering's, a note's or comment's `w:id` matches its reference's and its range's, and the measures export writes, as a task item's hanging indent or a quote's spacer paragraph's line height, still read as export's. A measure, as a page's size, an indent, a paragraph's spacing or a font's size, may be written in a unit too, as `11in`, `18pt` or `0.635cm`, and reads as the twips or half-points it is, as Word reads it: a length in inches, points, picas, centimeters or millimeters, rounded to the nearest twip from centimeters and millimeters and down from the others, and a size in points, rounded down to a half-point, but not in another unit, which Word ignores or isn't known to read. So a section whose page is `11in` wide and `8.5in` high is landscape, as Word shows it, though it has no `w:orient`. A comment's `w14:paraId` and `w15:paraId`, hex numbers, match in either case.
+
 ## Round-Trip Features
 
 The converter supports DOCX → Markdown → DOCX round-tripping. The following features are preserved in both directions:
