@@ -231,7 +231,11 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
   const runs: { text: string; format: HtmlRunFormat; lineBreak?: true }[] = [];
   // The elements open, each with what it sets, the inner over the outer
   const open: { name: string; format: HtmlRunFormat }[] = [];
-  const format = (): HtmlRunFormat => Object.assign({}, ...open.map(element => element.format));
+  const format = (): HtmlRunFormat => {
+    const merged: HtmlRunFormat = {};
+    for (const element of open) Object.assign(merged, element.format);
+    return merged;
+  };
 
   let pos = 0;
   let currentText = '';

@@ -1,7 +1,7 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
-import { pushAll } from './arrays';
+import { maxOf, pushAll } from './arrays';
 import type { LineEdit } from './line-map';
 import { decodeHtmlAttribute, decodeHtmlCharacterReferences, HTML_CHARACTER_REFERENCE } from './html-entities';
 import { isGfmDisallowedRawHtml } from './gfm';
@@ -972,7 +972,7 @@ function planHtmlVisibleChange(segment: HtmlVisibleSegment, formatted: string,
 			for (const edit of diffCharacterEdits(beforeToken[0], afterToken)) {
 				const start = (beforeToken.index ?? 0) + edit.start;
 				const affinity = edit.deleteCount === 0 && edit.start === 0 ? 'right' : 'left';
-				edits.push(...visibleRangeEdits(segment, start, start + edit.deleteCount, edit.insert, stats, affinity));
+				pushAll(edits, visibleRangeEdits(segment, start, start + edit.deleteCount, edit.insert, stats, affinity));
 			}
 		}
 		return edits;
@@ -1016,7 +1016,7 @@ function terminateReferencesBefore(source: string, segment: HtmlVisibleSegment, 
 		const at = editsAt.get(position);
 		if (!at) return source[position];
 		const insert = at.map(edit => edit.insert).join('');
-		const end = Math.max(...at.map(edit => edit.end));
+		const end = maxOf(at.map(edit => edit.end));
 		return insert ? insert[0] : end > position ? characterAt(end) : source[position];
 	};
 	const terminations: SourceEdit[] = [];

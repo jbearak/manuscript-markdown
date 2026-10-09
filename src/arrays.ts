@@ -3,7 +3,9 @@
 // Math.max(...values) or splice(i, n, ...items), passes each item as an
 // argument, which Node, the extension's runtime, holds on its stack: past
 // about 120,000 it throws RangeError: Maximum call stack size exceeded.
-// These take the items one at a time instead.
+// These take the items one at a time instead. A lint rule (see
+// eslint.config.mjs) finds each such spread, and one a constant or
+// something small bounds says what in the comment that allows it.
 
 /** Appends `items` to `target`, as target.push(...items) would */
 export function pushAll<T>(target: T[], items: Iterable<T>): void {
@@ -26,6 +28,7 @@ const ARGUMENTS_AT_ONCE = 4096;
  *  them fastest, as callers that replace a few tokens of a document's do
  *  for each of many; more move those items one at a time. */
 export function spliceAll<T>(target: T[], start: number, deleteCount: number, items: readonly T[]): T[] {
+  // eslint-disable-next-line no-restricted-syntax -- ARGUMENTS_AT_ONCE items at most
   if (items.length <= ARGUMENTS_AT_ONCE) return target.splice(start, deleteCount, ...items);
   // Where splice puts them, from the end for a negative start
   const at = start < 0 ? Math.max(target.length + start, 0) : Math.min(start, target.length);

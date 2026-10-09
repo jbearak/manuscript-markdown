@@ -820,6 +820,7 @@ class Parser {
           operand[operand.length - 1].value = operand[operand.length - 1].value.slice(0, inner ? j : j + 1);
           operand[0].value = operand[0].value.slice(inner ? lead + 1 : lead);
           const rest = token.value.slice(j + 1);
+          // eslint-disable-next-line no-restricted-syntax -- one token at most
           this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
           return new Parser(operand, this.onUnknownCommand, this.mode, this.track).parseExpression(false);
         }

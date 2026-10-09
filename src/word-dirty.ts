@@ -376,6 +376,7 @@ export async function discoverWordDirtyFrontier(
     if (result.status === 'serialized-dirty') {
       actualFrontierFixtureId = fixture.id;
       if (!options.fixtureId) {
+        // eslint-disable-next-line no-restricted-syntax -- the fixtures, a fixed list
         results.push(...markDeferredResults(fixtures, i + 1));
       }
       break;
@@ -456,6 +457,7 @@ export async function verifyWordDirtyBaseline(
     }
   }
 
+  // eslint-disable-next-line no-restricted-syntax -- the fixtures, a fixed list
   results.push(...markDeferredResults(WORD_DIRTY_FIXTURES, expectedFrontierIndex + 1));
   const summary: WordDirtyRunSummary = {
     mode: 'verify',
