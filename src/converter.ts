@@ -1786,7 +1786,7 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
     const tblPr = childrenOf(children, 'w:tblPr');
     const band = (tag: string) => {
       const size = tblPr.find(c => c[tag] !== undefined);
-      return size ? parseInt(getAttr(size, 'val'), 10) || undefined : undefined;
+      return size ? xmlInteger(getAttr(size, 'val')) || undefined : undefined;
     };
     const style: StyleProperties = {
       pPr: childrenOf(children, 'w:pPr'), rPr: childrenOf(children, 'w:rPr'),
@@ -1848,7 +1848,7 @@ function tableColumnCount(tblChildren: XmlNode[]): number {
     .filter(c => c['w:tc'] !== undefined).reduce((n, tc) => {
       const tcPr = asXmlNodes(tc['w:tc']).find(c => c['w:tcPr'] !== undefined);
       const span = tcPr && asXmlNodes(tcPr['w:tcPr']).find(c => c['w:gridSpan'] !== undefined);
-      return n + (span ? parseInt(getAttr(span, 'val'), 10) || 1 : 1);
+      return n + (span ? xmlInteger(getAttr(span, 'val')) || 1 : 1);
     }, 0)), 0);
 }
 
@@ -2251,8 +2251,8 @@ function numberingReference(pPrChildren: XmlNode[]): NumberingReference | undefi
   if (!numPr) return undefined;
   const reference: NumberingReference = {};
   for (const child of asXmlNodes(numPr['w:numPr'])) {
-    if (child['w:numId'] !== undefined) reference.numId = getAttr(child, 'val');
-    if (child['w:ilvl'] !== undefined) reference.ilvl = getAttr(child, 'val');
+    if (child['w:numId'] !== undefined) reference.numId = xmlNumberId(getAttr(child, 'val'));
+    if (child['w:ilvl'] !== undefined) reference.ilvl = xmlNumberId(getAttr(child, 'val'));
   }
   return reference;
 }
@@ -2301,7 +2301,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
     const abstractNum = asXmlNodes(node['w:abstractNum']);
     if (abstractNum.length === 0) continue;
 
-    const abstractNumId = getAttr(node, 'abstractNumId');
+    const abstractNumId = xmlNumberId(getAttr(node, 'abstractNumId'));
     if (xmlOn(String(node[':@']?.['@_w15:restartNumberingAfterBreak'] ?? ''))) restartingAfterBreak.add(abstractNumId);
     const numStyleLink = abstractNum.find(child => child['w:numStyleLink'] !== undefined);
     if (numStyleLink) numStyleLinks.set(abstractNumId, getAttr(numStyleLink, 'val'));
@@ -2313,17 +2313,17 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
       const lvl = asXmlNodes(lvlNode['w:lvl']);
       if (lvl.length === 0) continue;
 
-      const ilvl = getAttr(lvlNode, 'ilvl');
+      const ilvl = xmlNumberId(getAttr(lvlNode, 'ilvl'));
       // A level with no w:numFmt is decimal (ECMA-376 17.9.17), as Word
       // numbers it
       const numFmtNodes = findAllDeep(lvl, 'w:numFmt');
       const val = numFmtNodes.length > 0 ? getAttr(numFmtNodes[0], 'val') : 'decimal';
       const startNodes = findAllDeep(lvl, 'w:start');
-      const start = startNodes.length > 0 ? parseInt(getAttr(startNodes[0], 'val'), 10) : NaN;
+      const start = startNodes.length > 0 ? xmlInteger(getAttr(startNodes[0], 'val')) ?? NaN : NaN;
       // Word ignores one in an instance's level override ([MS-OI29500]
       // 2.1.282 b), so only the abstract numbering's counts
       const restartNodes = findAllDeep(lvl, 'w:lvlRestart');
-      const restart = restartNodes.length > 0 ? parseInt(getAttr(restartNodes[0], 'val'), 10) : NaN;
+      const restart = restartNodes.length > 0 ? xmlInteger(getAttr(restartNodes[0], 'val')) ?? NaN : NaN;
       // The level's own, not one in its w:pPr, which Word ignores
       const style = lvl.find(child => child['w:pStyle'] !== undefined);
       levels.set(ilvl, {
@@ -2338,7 +2338,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
   const nums = findAllDeep(parsed, 'w:num').map(node => {
     const num = asXmlNodes(node['w:num']);
     const abstractNumIdNode = findAllDeep(num, 'w:abstractNumId')[0];
-    return { numId: getAttr(node, 'numId'), num, abstractNumId: abstractNumIdNode ? getAttr(abstractNumIdNode, 'val') : undefined };
+    return { numId: xmlNumberId(getAttr(node, 'numId')), num, abstractNumId: abstractNumIdNode ? xmlNumberId(getAttr(abstractNumIdNode, 'val')) : undefined };
   });
 
   // An abstract numbering that links to a list style (w:numStyleLink), as
@@ -2375,10 +2375,10 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
     // its level at 0, as Word numbers it (tdf#153104), and as export reads
     // a template's (see templateListLevels in md-to-docx.ts)
     for (const lvlOverrideNode of findAllDeep(num, 'w:lvlOverride')) {
-      const ilvl = getAttr(lvlOverrideNode, 'ilvl');
+      const ilvl = xmlNumberId(getAttr(lvlOverrideNode, 'ilvl'));
       const lvlOverride = asXmlNodes(lvlOverrideNode['w:lvlOverride']);
       const starts = lvlOverride.every(node => '#text' in node) ? [0]
-        : findAllDeep(lvlOverride, 'w:startOverride').map(startNode => parseInt(getAttr(startNode, 'val'), 10));
+        : findAllDeep(lvlOverride, 'w:startOverride').map(startNode => xmlInteger(getAttr(startNode, 'val')) ?? NaN);
       for (const startVal of starts) {
         if (!isNaN(startVal)) instance.overrides.set(ilvl, startVal);
         if (!isNaN(startVal) && startVal !== 1) {
@@ -2464,15 +2464,15 @@ function hasOnlyBottomBorder(pPrChildren: XmlNode[]): boolean {
  *  task item: a left indent in steps of 720 twips with a 360 hanging indent. */
 function parseTaskIndentLevel(pPrChildren: XmlNode[]): number | undefined {
   const indElement = pPrChildren.find(child => child['w:ind'] !== undefined);
-  if (!indElement || getAttr(indElement, 'hanging') !== '360') return undefined;
-  const left = parseInt(getAttr(indElement, 'left'), 10);
+  if (!indElement || xmlTwips(getAttr(indElement, 'hanging')) !== 360) return undefined;
+  const left = xmlTwips(getAttr(indElement, 'left'), true) ?? NaN;
   return left > 0 && left % 720 === 0 ? left / 720 - 1 : undefined;
 }
 
 function parseParagraphLeftIndentTwips(pPrChildren: XmlNode[]): number | undefined {
   const indElement = pPrChildren.find(child => child['w:ind'] !== undefined);
   if (!indElement) return undefined;
-  const left = parseInt(getAttr(indElement, 'left'), 10);
+  const left = xmlTwips(getAttr(indElement, 'left'), true) ?? NaN;
   return !isNaN(left) && left > 0 ? left : undefined;
 }
 
@@ -2567,7 +2567,7 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
   // Word won't open a file that defines a level above 8 ([MS-OI29500] on
   // Part 1 §17.9.6), so a paragraph at one has none it numbers by, and
   // counting the levels up to it would take as long as the level is high
-  const level = parseInt(ilvl, 10);
+  const level = xmlInteger(ilvl) ?? NaN;
   if (isNaN(level) || level < 0 || level > 8) return undefined;
 
   const startNumber = numberingStartOverrides?.get(numId)?.get(ilvl);
@@ -3930,7 +3930,7 @@ export async function extractComments(data: Uint8Array | JSZip): Promise<Map<str
   readLineEnds(parsed);
 
   for (const node of findAllDeep(parsed, 'w:comment')) {
-    const id = getAttr(node, 'id');
+    const id = xmlNumberId(getAttr(node, 'id'));
     const author = getAttr(node, 'author');
     const date = getAttr(node, 'date') || '';
     // The comment's paragraphs, with a blank line between them, where
@@ -3946,12 +3946,13 @@ export async function extractComments(data: Uint8Array | JSZip): Promise<Map<str
     for (let i = pNodes.length - 1; i >= 0; i--) {
       const candidate = pNodes[i]?.[':@']?.['@_w14:paraId'];
       if (candidate) {
-        paraId = candidate;
+        paraId = xmlHexId(candidate);
         break;
       }
     }
     if (!paraId) {
-      paraId = pNodes[0]?.[':@']?.['@_w14:paraId'];
+      const first = pNodes[0]?.[':@']?.['@_w14:paraId'];
+      paraId = first === undefined ? undefined : xmlHexId(first);
     }
     comments.set(id, { author, text, date, paraId });
   }
@@ -3966,8 +3967,8 @@ export async function extractCommentThreads(data: Uint8Array | JSZip): Promise<M
   if (!parsed) { return threads; }
 
   for (const node of findAllDeep(parsed, 'w15:commentEx')) {
-    const paraId = node?.[':@']?.['@_w15:paraId'] ?? '';
-    const parentParaId = node?.[':@']?.['@_w15:paraIdParent'] ?? '';
+    const paraId = xmlHexId(node?.[':@']?.['@_w15:paraId'] ?? '');
+    const parentParaId = xmlHexId(node?.[':@']?.['@_w15:paraIdParent'] ?? '');
     if (paraId && parentParaId) {
       threads.set(paraId, parentParaId);
     }
@@ -4455,7 +4456,7 @@ export async function extractConsecutiveReplyParaIds(data: Uint8Array | JSZip): 
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
         const raw = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
-        if (raw) return new Set(raw.split(',').map(id => id.trim()).filter(Boolean));
+        if (raw) return new Set(raw.split(',').map(xmlHexId).filter(Boolean));
       }
     }
   }
@@ -4851,7 +4852,7 @@ async function extractNotes(
   const withoutImages = context && { ...context, images: undefined };
 
   for (const node of findAllDeep(parsed, tagName)) {
-    const id = getAttr(node, 'id');
+    const id = xmlNumberId(getAttr(node, 'id'));
     if (!id || id === '-1' || id === '0') continue;
 
     // Skip separator and continuationSeparator types
@@ -5552,13 +5553,13 @@ function parseNoteBody(
           passMark(target);
           continue;
         } else if (key === 'w:commentRangeStart') {
-          const id = getAttr(node, 'id');
+          const id = xmlNumberId(getAttr(node, 'id'));
           if (hasRange(id)) {
             activeComments.add(id);
             commentStartTargetIndex.set(id, { target, index: target.length });
           }
         } else if (key === 'w:commentRangeEnd') {
-          const id = getAttr(node, 'id');
+          const id = xmlNumberId(getAttr(node, 'id'));
           if (hasRange(id)) {
             if ((inCitationField && currentCitation) || noterefInfo) resultEnds.push(id);
             else endComment(id, target);
@@ -5642,7 +5643,7 @@ function parseNoteBody(
         } else if (key === 'w:footnoteReference' || key === 'w:endnoteReference') {
           // A reference to another note, as export writes one only notes
           // refer to (see convertDocx)
-          const noteId = getAttr(node, 'id');
+          const noteId = xmlNumberId(getAttr(node, 'id'));
           if (noteId && noteId !== '0' && noteId !== '-1') {
             target.push({ type: 'footnote_ref', noteId, noteKind: key === 'w:footnoteReference' ? 'footnote' : 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
           }
@@ -5684,7 +5685,7 @@ function parseNoteBody(
                 const tcPrChildren = asXmlNodes(tcPrNode['w:tcPr']);
                 const gridSpanNode = tcPrChildren.find((c) => c['w:gridSpan'] !== undefined);
                 if (gridSpanNode) {
-                  const val = parseInt(getAttr(gridSpanNode, 'val'), 10);
+                  const val = xmlInteger(getAttr(gridSpanNode, 'val')) ?? NaN;
                   if (val > 1) colspan = val;
                 }
                 const vMergeNode = tcPrChildren.find((c) => c['w:vMerge'] !== undefined);
@@ -6315,8 +6316,8 @@ function drawingImages(
     let cx = 0, cy = 0, alt = '', docPrName = '', blipRId = '', clickRId = '';
     for (const el of elements) {
       if (el['wp:extent'] !== undefined) {
-        cx = parseInt(getAttr(el, 'cx') || '0', 10);
-        cy = parseInt(getAttr(el, 'cy') || '0', 10);
+        cx = xmlInteger(getAttr(el, 'cx')) ?? 0;
+        cy = xmlInteger(getAttr(el, 'cy')) ?? 0;
       } else if (el['wp:docPr'] !== undefined) {
         alt = getAttr(el, 'descr') || '';
         docPrName = getAttr(el, 'name') || '';
@@ -7096,8 +7097,8 @@ export async function extractDocumentContent(
     let isLandscapeSect = false;
     if (pgSzNode) {
       const orient = getAttr(pgSzNode, 'orient');
-      const w = parseInt(getAttr(pgSzNode, 'w') || '0', 10);
-      const h = parseInt(getAttr(pgSzNode, 'h') || '0', 10);
+      const w = xmlTwips(getAttr(pgSzNode, 'w')) ?? 0;
+      const h = xmlTwips(getAttr(pgSzNode, 'h')) ?? 0;
       isLandscapeSect = orient === 'landscape' || (w > 0 && h > 0 && w > h);
     }
     return isLandscapeSect ? 'landscape' : portraitBreakOrdinals?.has(ordinal) ? 'portrait' : undefined;
@@ -7233,24 +7234,24 @@ export async function extractDocumentContent(
           const rev = { type: REVISION_ELEMENTS[key], author, date };
           if (Array.isArray(node[key])) walk(node[key], currentFormatting, target, inTableCell, rev);
         } else if (key === 'w:commentRangeStart') {
-          const id = getAttr(node, 'id');
+          const id = xmlNumberId(getAttr(node, 'id'));
           if (hasRange(id)) {
             activeComments.add(id);
             commentStartTargetIndex.set(id, { target, index: target.length });
           }
         } else if (key === 'w:commentRangeEnd') {
-          const id = getAttr(node, 'id');
+          const id = xmlNumberId(getAttr(node, 'id'));
           if (hasRange(id)) {
             if ((inCitationField && currentCitation) || (inNoterefField && noterefInfo)) resultEnds.push(id);
             else endComment(id, target);
           }
         } else if (key === 'w:footnoteReference') {
-          const noteId = getAttr(node, 'id');
+          const noteId = xmlNumberId(getAttr(node, 'id'));
           if (noteId && noteId !== '0' && noteId !== '-1') {
             target.push({ type: 'footnote_ref', noteId, noteKind: 'footnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
           }
         } else if (key === 'w:endnoteReference') {
-          const noteId = getAttr(node, 'id');
+          const noteId = xmlNumberId(getAttr(node, 'id'));
           if (noteId && noteId !== '0' && noteId !== '-1') {
             target.push({ type: 'footnote_ref', noteId, noteKind: 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
           }
@@ -7289,7 +7290,7 @@ export async function extractDocumentContent(
                 const tcPrChildren = asXmlNodes(tcPrNode['w:tcPr']);
                 const gridSpanNode = tcPrChildren.find((c) => c['w:gridSpan'] !== undefined);
                 if (gridSpanNode) {
-                  const val = parseInt(getAttr(gridSpanNode, 'val'), 10);
+                  const val = xmlInteger(getAttr(gridSpanNode, 'val')) ?? NaN;
                   if (val > 1) colspan = val;
                 }
                 const vMergeNode = tcPrChildren.find((c) => c['w:vMerge'] !== undefined);
@@ -7433,7 +7434,7 @@ export async function extractDocumentContent(
                   const lineRule = getAttr(spacingNode, 'lineRule');
                   const pBdrChildren = asXmlNodes(pBdrNode['w:pBdr']);
                   const hasLeftBorder = pBdrChildren.some((c) => c['w:left'] !== undefined);
-                  if (lineVal === '1' && lineRule === 'exact' && hasLeftBorder) {
+                  if (xmlTwips(lineVal, true) === 1 && lineRule === 'exact' && hasLeftBorder) {
                     isSpacerParagraph = true;
                     break;
                   }
@@ -7486,7 +7487,7 @@ export async function extractDocumentContent(
               customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined);
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
               spacerShaped = pPrChildren.length === 1 && pPrChildren[0]['w:spacing'] !== undefined
-                && Object.keys(pPrChildren[0][':@'] ?? {}).join() === '@_w:after' && getAttr(pPrChildren[0], 'after') === '0';
+                && Object.keys(pPrChildren[0][':@'] ?? {}).join() === '@_w:after' && xmlTwips(getAttr(pPrChildren[0], 'after')) === 0;
               // Taken back below if the paragraph has content
               horizontalRule = !headingLevel && !listMeta && !isTitle && !blockquoteLevel && !isCodeBlock
                 && !generatedListContinuation && !customStyle && hasOnlyBottomBorder(pPrChildren);
@@ -16230,19 +16231,103 @@ function xmlElementAttribute(xml: string, name: string, attribute: string): stri
   return element && xmlAttribute(element.tag, attribute);
 }
 
-/** A whole number an attribute holds, as an xsd:unsignedLong's, as twips:
- *  digits, with leading zeros, a plus sign before them and whitespace
- *  around them, as a schema's number may have */
+/** A whole number an attribute holds, as an xsd:unsignedLong's: digits,
+ *  with leading zeros, a plus sign before them and whitespace around them,
+ *  as a schema's number may have */
 function xmlNumber(value: string | undefined): number | undefined {
   return value !== undefined && /^[ \t\r\n]*\+?\d+[ \t\r\n]*$/.test(value) ? Number(value) : undefined;
 }
 
+// An integer as an xsd:integer is written (see xmlInteger)
+const XML_INTEGER = /^[ \t\r\n]*[+-]?\d+[ \t\r\n]*$/;
+
+/** An integer an attribute holds, as an xsd:integer's or an
+ *  ST_DecimalNumber's: digits, with leading zeros, a sign before them and
+ *  whitespace around them (see xmlNumber) */
+function xmlInteger(value: string | undefined): number | undefined {
+  return value !== undefined && XML_INTEGER.test(value) ? Number(value) : undefined;
+}
+
+// A universal measure (ST_UniversalMeasure): a decimal number and its unit,
+// as 8.5in, with digits before any point, a minus sign where it may have
+// one, and no whitespace around it, as it's a string's pattern
+const UNIVERSAL_MEASURE = /^(-?)(\d+)(?:\.(\d+))?(mm|cm|in|pt|pc|pi)$/;
+
+// Twips in each unit of a universal measure, as a fraction: a pica, pc or
+// pi, is 12 points, an inch 72, and a centimeter 1/2.54 of an inch
+const TWIPS_PER_UNIT: Record<string, readonly [bigint, bigint]> = {
+  in: [1440n, 1n], pt: [20n, 1n], pc: [240n, 1n], pi: [240n, 1n], cm: [144000n, 254n], mm: [14400n, 254n],
+};
+
+// Half-points in each unit of a universal measure Word reads a size in: a
+// point, but not an inch, a centimeter or a millimeter, whose size Word
+// ignores, nor a pica, which it isn't known to read (see xmlHalfPoints)
+const HALF_POINTS_PER_UNIT: Record<string, readonly [bigint, bigint]> = { pt: [2n, 1n] };
+
+/**
+ * A universal measure's size in `perUnit`'s units, as twips, from a unit
+ * `perUnit` has, or undefined from another, or with a minus sign where it's
+ * not `signed`, as an ST_PositiveUniversalMeasure has none. Word rounds a
+ * size in centimeters or millimeters to the nearest twip, and in the other
+ * units down, as 0.99pt to 19 twips, so this does too, by its digits'
+ * value, not a float's, so 0.3in is 432 twips, not 431. A negative one is
+ * the negative of the one without its minus sign, as the schema means it.
+ */
+function universalMeasure(value: string, signed: boolean, perUnit: Record<string, readonly [bigint, bigint]>): number | undefined {
+  const match = UNIVERSAL_MEASURE.exec(value);
+  const ratio = match ? perUnit[match[4]] : undefined;
+  if (!match || !ratio || match[1] && !signed) return undefined;
+  const fraction = match[3] ?? '';
+  const numerator = BigInt(match[2] + fraction) * ratio[0];
+  const denominator = 10n ** BigInt(fraction.length) * ratio[1];
+  const nearest = match[4] === 'cm' || match[4] === 'mm';
+  const size = Number(nearest ? (2n * numerator + denominator) / (2n * denominator) : numerator / denominator);
+  return match[1] && size ? -size : size;
+}
+
+/** A length in twips an attribute holds, as an ST_TwipsMeasure's: a whole
+ *  number of twips (see xmlNumber), as 360, or a universal measure, as 18pt
+ *  or 0.25in, the twips it is (see universalMeasure), or, `signed`, as an
+ *  ST_SignedTwipsMeasure's, either with a minus sign (see xmlInteger). Every
+ *  reader of a page's size, an indent or a paragraph's spacing goes through
+ *  this, so a length reads as one in any unit, as Word reads it. */
+function xmlTwips(value: string | undefined, signed = false): number | undefined {
+  if (value === undefined) return undefined;
+  return (signed ? xmlInteger(value) : xmlNumber(value)) ?? universalMeasure(value, signed, TWIPS_PER_UNIT);
+}
+
+/** An ID an attribute holds as hex digits, as a paragraph's w14:paraId,
+ *  which a comment's reply finds its parent by in commentsExtended.xml, in
+ *  one spelling: its digits in uppercase, with no whitespace around them,
+ *  as Word reads them as one number (ST_LongHexNumber, an xsd:hexBinary,
+ *  which may be in either case) */
+function xmlHexId(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+/**
+ * An ID or index an attribute holds as an integer (see xmlInteger), as a
+ * list's w:numId, w:abstractNumId and w:ilvl, or a note's or a comment's
+ * w:id, in one spelling for each number: its digits, with no leading
+ * zeros, plus sign or whitespace, as `12` for ` +012 `, as Word reads them
+ * as numbers. One that's no integer stays as it is. Every such ID import
+ * matches, looks up or compares, on both sides, goes through this, so the
+ * numbers that are one match whatever their spelling, and the IDs export
+ * stores, which it writes so, match them too.
+ */
+function xmlNumberId(value: string): string {
+  return XML_INTEGER.test(value) ? String(BigInt(value.trim())) : value;
+}
+
 /** A size in half-points, as an ST_HpsMeasure, a w:sz's or w:szCs's, holds
- *  it: a whole number (see xmlNumber), as 14 or 014, but not a universal
- *  measure, as 7pt, which import doesn't read. Every reader of a run's or
- *  a style's size goes through this, so equal sizes read as one. */
+ *  it: a whole number (see xmlNumber), as 14 or 014, or a universal measure
+ *  in points, as 7pt, rounded down to a half-point, as Word reads it, so
+ *  7.4pt is 14 (see universalMeasure), but not one in another unit, which
+ *  Word ignores or isn't known to read. Every reader of a run's or a
+ *  style's size goes through this, so equal sizes read as one. */
 function xmlHalfPoints(value: string | undefined): number | undefined {
-  return xmlNumber(value);
+  if (value === undefined) return undefined;
+  return xmlNumber(value) ?? universalMeasure(value, false, HALF_POINTS_PER_UNIT);
 }
 
 /**
@@ -16531,11 +16616,11 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     }
     const csPpr = getStylePPr(csStyleId, true);
     if (csPpr) {
-      const before = xmlNumber(xmlElementAttribute(csPpr, 'w:spacing', 'w:before'));
+      const before = xmlTwips(xmlElementAttribute(csPpr, 'w:spacing', 'w:before'));
       if (before !== undefined) def.spacingBefore = before / 20;
-      const after = xmlNumber(xmlElementAttribute(csPpr, 'w:spacing', 'w:after'));
+      const after = xmlTwips(xmlElementAttribute(csPpr, 'w:spacing', 'w:after'));
       if (after !== undefined) def.spacingAfter = after / 20;
-      const firstLineTwips = xmlNumber(xmlElementAttribute(csPpr, 'w:ind', 'w:firstLine'));
+      const firstLineTwips = xmlTwips(xmlElementAttribute(csPpr, 'w:ind', 'w:firstLine'));
       if (firstLineTwips !== undefined) def.paragraphIndent = firstLineTwips === 0 ? 'none' : firstLineTwips / 1440;
     }
     extractedCustomStyles[styleName] = def;

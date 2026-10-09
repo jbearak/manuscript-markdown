@@ -820,9 +820,12 @@ describe('Font customization unit tests', () => {
         ['with a leading zero', '014'],
         ['with whitespace around it', ' 14 '],
         ['with a plus sign', '+14'],
+        ['as a universal measure in points', '7pt'],
+        ['in points that Word rounds down to a half-point', '7.4pt'],
       ])('writes the size Word set on a table where a run spells it %s', async (_name, spelled) => {
         // Each run's size compared as text, so 14 and 014, both 7 points,
-        // read as two sizes, and the table kept the size Word took off
+        // read as two sizes, and 7pt as none, and the table kept the size
+        // Word took off
         const { convertDocx } = await import('./converter');
         const converted = (await convertDocx(await sizedInWord('<!-- table-font-size: 11 -->\n' + TABLE, 14, Infinity, table => {
           const edited = table.replace('<w:sz w:val="14"/><w:szCs w:val="14"/>', '<w:sz w:val="' + spelled + '"/><w:szCs w:val="' + spelled + '"/>');
@@ -834,7 +837,7 @@ describe('Font customization unit tests', () => {
       });
 
       it.each([
-        ['as a universal measure, which import doesn\'t read', '7pt'],
+        ['as a universal measure in inches, which Word ignores', '0.1in'],
         ['as no number', 'x'],
       ])('keeps the size of its own where a run of a table Word set another on has its size %s', async (_name, spelled) => {
         // What the size Word shows is can't be told
