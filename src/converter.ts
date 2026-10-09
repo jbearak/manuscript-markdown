@@ -5739,7 +5739,7 @@ function parseNoteBody(
         } else if (key === 'w:drawing' && context?.images) {
           // As in extractDocumentContent, from the notes' relationships
           const { relationships, folder, files } = context.images;
-          target.push(...drawingImages(asXmlNodes(node[key]), relationships, folder, files,
+          pushAll(target, drawingImages(asXmlNodes(node[key]), relationships, folder, files,
             { commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...(currentHref ? { href: currentHref, link: currentLink } : {}) },
             { relationships: context.relationshipMap, next: () => ++linkCount }));
 
@@ -7059,9 +7059,10 @@ export async function extractDocumentContent(
       }
       const first = target[at];
       const opener: ContentItem = { type: fence === 'landscape' ? 'landscape_open' : 'portrait_open' };
-      target.splice(at, 0,
-        ...(first && !isStructuralBoundaryItem(first) && !(first.type === 'math' && first.display) && first.type !== 'html_comment'
-          ? [opener, { type: 'para' } as ContentItem] : [opener]));
+      const opening = first && !isStructuralBoundaryItem(first) && !(first.type === 'math' && first.display) && first.type !== 'html_comment'
+        ? [opener, { type: 'para' } as ContentItem] : [opener];
+      // eslint-disable-next-line no-restricted-syntax -- the opener and a paragraph at most
+      target.splice(at, 0, ...opening);
       if (markBefore) target.splice(sectionStartIndex, 0, { type: 'para', breakRevision: markBefore });
       // Back past the hidden paragraphs at the end, each its para item and
       // its comments
@@ -7764,7 +7765,7 @@ export async function extractDocumentContent(
             target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
           }
         } else if (key === 'w:drawing') {
-          target.push(...drawingImages(asXmlNodes(node[key]), imageRelMap, imageFolder, imageFiles,
+          pushAll(target, drawingImages(asXmlNodes(node[key]), imageRelMap, imageFolder, imageFiles,
             { commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...(currentHref ? { href: currentHref, link: currentLink } : {}) },
             { relationships: relationshipMap, next: () => ++linkCount }));
         } else if (Array.isArray(node[key])) {
@@ -11165,7 +11166,7 @@ function tryRenderGridTable(
     for (let ri = 0; ri < rendered.length; ri++) {
       const rowCells = rendered[ri];
       // Number of content lines in this row
-      const rowHeight = Math.max(...rowCells.map(c => c.lines.length));
+      const rowHeight = maxOf(rowCells.map(c => c.lines.length));
 
       for (let li = 0; li < rowHeight; li++) {
         let line = '|';
@@ -11681,7 +11682,7 @@ function detachedTableHtml(html: string): string | undefined | null {
   const push = (lines: string[], kind: 'text' | 'html' | 'comment') => {
     if (lines.length === 0) return;
     if (kind !== 'comment' && last !== undefined && last !== 'comment' && out[out.length - 1] !== '') out.push('');
-    out.push(...lines);
+    pushAll(out, lines);
     last = kind;
   };
   const endTexts = () => {
@@ -11749,7 +11750,7 @@ function detachedTableHtml(html: string): string | undefined | null {
       inParagraph = false;
     } else if (/\S/.test(rest)) {
       // Text, as the lines of text after it in its paragraph are
-      texts.push(...rest.split('\n'));
+      pushAll(texts, rest.split('\n'));
       inParagraph = true;
     }
     k = end - 1;
@@ -12899,6 +12900,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[], blockquoteP
       // buildMarkdown writes as a blank line, still ends the items under
       // that one, as Word does, and with no item above it, every item
       if (item.unnumberedListLevel !== undefined) {
+        // eslint-disable-next-line no-restricted-syntax -- the list levels open, as deep as the list
         const parent = Math.max(-1, ...[...listContexts.keys()].filter(level => level < item.unnumberedListLevel!));
         if (parent >= 0 && paragraphHasContent(content, i)) item.listContinuation = continuationOf(listContexts.get(parent)!, listContexts);
         else endItemsUnder(parent);

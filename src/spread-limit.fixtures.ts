@@ -7,6 +7,7 @@ import JSZip from 'jszip';
 import MarkdownIt from 'markdown-it';
 import { convertDocx } from './converter';
 import { convertMdToDocx, parseMd } from './md-to-docx';
+import { htmlToOoxmlRuns } from './md-to-docx-citations';
 import { parseTable } from './formatting';
 import { scanOrientationDirectives } from './orientation-scan';
 import { formatTableNumbers } from './table-number-format';
@@ -80,6 +81,13 @@ export const SPREAD_LIMIT_CASES: Record<string, (n: number) => Promise<string> |
   'a document\'s links': async n => String(count(await roundTrip(repeat(n, i => '[a](http://e.com/' + i + ')', ' ') + '\n'), /\]\(http/g)),
   'a pipe table\'s rows': async n => String(count(await roundTrip('| a |\n|---|\n' + '| b |\n'.repeat(n)), /\| b \|/g)),
   'a grid table\'s rows': async n => String(count(await roundTrip('+---+\n| a |\n+===+\n' + '| b |\n+---+\n'.repeat(n)), /\| b +\|/g)),
+  // Each column's lines, of which import writes as many as the cell with
+  // the most has
+  'a grid table\'s columns': async n =>
+    String(count(await roundTrip('+' + '---+'.repeat(n) + '\n|' + ' a |'.repeat(n) + '\n+' + '---+'.repeat(n) + '\n'), /\| a/g)),
+  // Each formatting what's open in a citation's text, as a style's HTML
+  // writes it, sets for the text inside
+  'the HTML elements open in a citation\'s text': n => String(count(htmlToOoxmlRuns('<i>'.repeat(n) + 'a' + '</i>'.repeat(n)), /<w:t[ >]/g)),
   'a grid table\'s cell\'s lines': async n => String(count(await roundTrip('+---+\n| a |\n+===+\n' + '| b\\\\ |\n'.repeat(n) + '| c |\n+---+\n'), /\| b/g)),
   'the comments in a pipe table\'s header cell': async n => String(count(await roundTrip('| ' + comments(n) + '|\n|---|\n| b |\n', true), /\{#\d+>>/g)),
   'the comments in a pipe table\'s cell': async n => String(count(await roundTrip('| a |\n|---|\n| ' + comments(n) + '|\n', true), /\{#\d+>>/g)),
@@ -121,6 +129,13 @@ export const SPREAD_LIMIT_CASES: Record<string, (n: number) => Promise<string> |
   'the directives in a note': n => String(scanOrientationDirectives('T.[^1]\n\n[^1]: N.\n\n' + '    <!-- landscape -->\n\n'.repeat(n)).length),
   'the numbers in an HTML table\'s cell': n =>
     String(count(formatTableNumbers('<table><tr><td>' + '1000.5 '.repeat(n) + '</td></tr></table>\n', { digits: 2 }).output, /1000\.50/g)),
+  // Which close inside the one the strong emphasis ends, and open again
+  // after it
+  'the elements open where an element ends in the preview': n => {
+    const md = new MarkdownIt({ html: true });
+    md.use(manuscriptMarkdownPlugin);
+    return String(count(md.render('**a ' + '<sup>'.repeat(n) + 'b** c\n'), /<sup>/g));
+  },
   'the alerts in a quote\'s paragraph': n => {
     const md = new MarkdownIt();
     md.use(manuscriptMarkdownPlugin);

@@ -59,6 +59,7 @@ export function bibtexEntryCommand(type: string): string {
  * padded so the `=` signs align, matching hand-written .bib style.
  */
 export function bibtexEntrySnippet(template: BibtexEntryTemplate, eol: string): string {
+  // eslint-disable-next-line no-restricted-syntax -- an entry type's fields, a fixed list
   const width = Math.max(...template.fields.map(f => f.length));
   const lines = template.fields.map((field, i) =>
     formatBibtexFieldLine(field.padEnd(width), '$' + String(i + 2))

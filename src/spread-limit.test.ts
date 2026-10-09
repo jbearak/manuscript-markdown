@@ -37,6 +37,8 @@ const expected: Record<string, string> = {
   'a document\'s links': String(N),
   'a pipe table\'s rows': String(N),
   'a grid table\'s rows': String(N),
+  'a grid table\'s columns': String(N),
+  'the HTML elements open in a citation\'s text': '1',
   'a grid table\'s cell\'s lines': String(N),
   'the comments in a pipe table\'s header cell': String(N),
   'the comments in a pipe table\'s cell': String(N),
@@ -56,6 +58,7 @@ const expected: Record<string, string> = {
   'the ranges outside code to decorate': String(N),
   'the directives in a note': String(N),
   'the numbers in an HTML table\'s cell': String(N),
+  'the elements open where an element ends in the preview': String(N),
   'the alerts in a quote\'s paragraph': String(N + 1),
 };
 

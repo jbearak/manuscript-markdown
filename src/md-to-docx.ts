@@ -29,7 +29,7 @@ import { commentsEnd, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
 import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
-import { pushAll } from './arrays';
+import { maxOf, pushAll } from './arrays';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
@@ -2140,6 +2140,7 @@ function splitRunsAtCriticParagraphs(runs: MdRun[]): CriticParagraphSplit | unde
     }
     const sides = splitSubstitution(run);
     if (sides) {
+      // eslint-disable-next-line no-restricted-syntax -- a substitution's two sides at most
       queue.splice(index, 1, ...sides);
       index--;
       continue;
@@ -3798,8 +3799,7 @@ function convertInlineTokens(tokens: ManuscriptToken[]): MdRun[] {
       pushAll(runs, processInlineChildren(token.children));
     } else {
       // Single token processing
-      const tokenRuns = processInlineChildren([token]);
-      runs.push(...tokenRuns);
+      pushAll(runs, processInlineChildren([token]));
     }
   }
   
@@ -6681,7 +6681,7 @@ function withOwnNums(xml: string, own: Map<number, ListKind>): string {
   const numbering = parseTemplateNumbering(xml);
   if (!numbering) return xml;
   const abstractNumIds = childNodes(numbering.root, 'w:numbering').filter(n => 'w:abstractNum' in n).map(n => intAttr(n, 'w:abstractNumId'));
-  let next = Math.max(-1, ...abstractNumIds.filter(Number.isInteger)) + 1;
+  let next = maxOf(abstractNumIds.filter(Number.isInteger), -1) + 1;
   const declares = (prefix: string) => numbering.root[':@']?.['@_xmlns:' + prefix] !== undefined;
   let abstractNums = '', nums = '';
   for (const [numId, kind] of own) {
@@ -10084,7 +10084,7 @@ export async function convertMdToDocx(
       const noteResult = preprocessEmbedsTracked(noteBody, options.embedResolver, options.documentPath, embedDirectives.length, embedOpts);
       if (noteResult.output !== noteBody) {
         footnoteDefs.set(label, noteResult.output);
-        embedDirectives.push(...noteResult.embedDirectives);
+        pushAll(embedDirectives, noteResult.embedDirectives);
       }
     }
   }
@@ -10288,7 +10288,7 @@ export async function convertMdToDocx(
     listStartOverrides: [],
     bulletNumId: listNumbering.bullet,
     decimalNumId: listNumbering.decimal,
-    firstOverrideNumId: Math.max(2, ...numIdsInUse, listNumbering.bullet, listNumbering.decimal) + 1,
+    firstOverrideNumId: Math.max(maxOf(numIdsInUse, 2), listNumbering.bullet, listNumbering.decimal) + 1,
     usedOrderedNumId: false,
     templateListLevels: templateListLevels(listTemplateNumbering, listNumbering.decimal, styleNumIds(templateStyles),
       listNumbering.own.has(listNumbering.bullet) ? undefined : listNumbering.bullet),
@@ -10827,74 +10827,74 @@ export async function convertMdToDocx(
   const customPropsOf = (): CustomPropEntry[] => {
     const customProps: CustomPropEntry[] = [];
     if (frontmatter.csl) {
-      customProps.push(...zoteroCustomProps(frontmatter));
+      pushAll(customProps, zoteroCustomProps(frontmatter));
     }
-    customProps.push(...defaultCslProps(defaultCsl));
-    customProps.push(...commentIdMappingProps(state.commentIdMap));
-    customProps.push(...footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
-    customProps.push(...footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));
-    customProps.push(...codeBlockLanguageProps(state.codeBlockLanguages));
-    customProps.push(...noteCodeBlockProps(state.noteCodeBlockStarts));
-    customProps.push(...codeBlockStylingProps(frontmatter));
-    customProps.push(...pipeTableMaxLineWidthProps(frontmatter));
-    customProps.push(...gridTableMaxLineWidthProps(frontmatter));
-    customProps.push(...lineSpacingProps(frontmatter));
-    customProps.push(...paragraphIndentProps(frontmatter));
-    customProps.push(...bibliographyHangingIndentProps(frontmatter));
-    customProps.push(...indentOverrideProps(state.indentOverrides));
-    customProps.push(...listIndentOverrideProps(state.listIndentOverrides));
-    customProps.push(...listItemIndentOverrideProps(state.listItemIndentOverrides));
-    customProps.push(...listBlankLineProps(state.listBlankLines));
-    customProps.push(...blockquoteGapProps(state.blockquoteGaps));
-    customProps.push(...blockquotePreContentBlankLineProps(state.blockquotePreContentBlankLines));
-    customProps.push(...blockquotePostContentBlankLineProps(state.blockquotePostContentBlankLines));
-    customProps.push(...blockquoteAlertMarkerStyleProps(state.blockquoteAlertMarkerInlineByGroup));
-    customProps.push(...blockquoteListLevelProps(state.blockquotePlaces, state.blockquoteIdentities));
+    pushAll(customProps, defaultCslProps(defaultCsl));
+    pushAll(customProps, commentIdMappingProps(state.commentIdMap));
+    pushAll(customProps, footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
+    pushAll(customProps, footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));
+    pushAll(customProps, codeBlockLanguageProps(state.codeBlockLanguages));
+    pushAll(customProps, noteCodeBlockProps(state.noteCodeBlockStarts));
+    pushAll(customProps, codeBlockStylingProps(frontmatter));
+    pushAll(customProps, pipeTableMaxLineWidthProps(frontmatter));
+    pushAll(customProps, gridTableMaxLineWidthProps(frontmatter));
+    pushAll(customProps, lineSpacingProps(frontmatter));
+    pushAll(customProps, paragraphIndentProps(frontmatter));
+    pushAll(customProps, bibliographyHangingIndentProps(frontmatter));
+    pushAll(customProps, indentOverrideProps(state.indentOverrides));
+    pushAll(customProps, listIndentOverrideProps(state.listIndentOverrides));
+    pushAll(customProps, listItemIndentOverrideProps(state.listItemIndentOverrides));
+    pushAll(customProps, listBlankLineProps(state.listBlankLines));
+    pushAll(customProps, blockquoteGapProps(state.blockquoteGaps));
+    pushAll(customProps, blockquotePreContentBlankLineProps(state.blockquotePreContentBlankLines));
+    pushAll(customProps, blockquotePostContentBlankLineProps(state.blockquotePostContentBlankLines));
+    pushAll(customProps, blockquoteAlertMarkerStyleProps(state.blockquoteAlertMarkerInlineByGroup));
+    pushAll(customProps, blockquoteListLevelProps(state.blockquotePlaces, state.blockquoteIdentities));
     // Word shows the label's paragraph of an alert whose marker is one of its
     // own, and with the label hidden, has none
-    if (!effectiveCalloutLabels) customProps.push(...blockquoteAlertMarkerAloneProps(blockquoteSpacing.alertAlone));
+    if (!effectiveCalloutLabels) pushAll(customProps, blockquoteAlertMarkerAloneProps(blockquoteSpacing.alertAlone));
     if (explicitCalloutLabels !== undefined) {
       customProps.push({ name: 'MANUSCRIPT_CALLOUT_LABELS', value: String(explicitCalloutLabels) });
     }
-    customProps.push(...imageFormatProps(state.imageFormats));
-    customProps.push(...noteImageFormatProps(state.noteImageFormats));
-    customProps.push(...tableFormatProps(state.tableFormats));
-    if (state.tableIdentities.length > 0) customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_IDENTITIES_', JSON.stringify(state.tableIdentities)));
+    pushAll(customProps, imageFormatProps(state.imageFormats));
+    pushAll(customProps, noteImageFormatProps(state.noteImageFormats));
+    pushAll(customProps, tableFormatProps(state.tableFormats));
+    if (state.tableIdentities.length > 0) pushAll(customProps, chunkCustomProps('MANUSCRIPT_TABLE_IDENTITIES_', JSON.stringify(state.tableIdentities)));
     if (state.tableHtmlAround.size > 0) {
       // The count of tables alike export wrote in all, which is known only now
       for (const around of state.tableHtmlAround.values()) around[6] = String(state.tablesAlike.get(around[5] + '\n' + around[2] + '\n' + around[3]) ?? 0);
-      customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_HTML_AROUND_', JSON.stringify(Object.fromEntries(state.tableHtmlAround))));
+      pushAll(customProps, chunkCustomProps('MANUSCRIPT_TABLE_HTML_AROUND_', JSON.stringify(Object.fromEntries(state.tableHtmlAround))));
     }
-    customProps.push(...pipeTableAlignedProps(state.pipeTableAligned));
-    customProps.push(...gridSourceColWidthsProps(state.gridSourceColWidths));
-    customProps.push(...tableFontSizeProps(state.tableFontSizes));
-    customProps.push(...tableFontProps(state.tableFonts));
-    customProps.push(...tableColWidthsProps(state.tableColWidths));
+    pushAll(customProps, pipeTableAlignedProps(state.pipeTableAligned));
+    pushAll(customProps, gridSourceColWidthsProps(state.gridSourceColWidths));
+    pushAll(customProps, tableFontSizeProps(state.tableFontSizes));
+    pushAll(customProps, tableFontProps(state.tableFonts));
+    pushAll(customProps, tableColWidthsProps(state.tableColWidths));
     const defaultColWidthsStr = fontOverrides?.tableColWidths
       ? (typeof fontOverrides.tableColWidths === 'string' ? fontOverrides.tableColWidths : fontOverrides.tableColWidths.join(' '))
       : undefined;
-    customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGITS_', state.tableDigits));
-    customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DECIMAL_MARKS_', state.tableDecimalMarks));
-    customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGIT_GROUPINGS_', state.tableDigitGroupings));
+    pushAll(customProps, tableNumberFormatProps('MANUSCRIPT_TABLE_DIGITS_', state.tableDigits));
+    pushAll(customProps, tableNumberFormatProps('MANUSCRIPT_TABLE_DECIMAL_MARKS_', state.tableDecimalMarks));
+    pushAll(customProps, tableNumberFormatProps('MANUSCRIPT_TABLE_DIGIT_GROUPINGS_', state.tableDigitGroupings));
     if (frontmatter.tableColWidths) {
       customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_COL_WIDTHS', value: defaultColWidthsStr! });
     }
-    customProps.push(...embedDirectiveProps(state.embedDirectiveMap));
-    customProps.push(...landscapeTableProps(state.landscapeTables));
-    customProps.push(...portraitTableProps(state.portraitTables));
-    customProps.push(...portraitBreakProps(state.portraitBreakOrdinals));
-    customProps.push(...referencesBeforeSectionsProps(state.referencesBeforeSections));
-    customProps.push(...hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_BEFORE_SECTIONS_', state.hiddenBeforeSections));
-    customProps.push(...hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_AFTER_SECTIONS_', state.hiddenAfterSections));
+    pushAll(customProps, embedDirectiveProps(state.embedDirectiveMap));
+    pushAll(customProps, landscapeTableProps(state.landscapeTables));
+    pushAll(customProps, portraitTableProps(state.portraitTables));
+    pushAll(customProps, portraitBreakProps(state.portraitBreakOrdinals));
+    pushAll(customProps, referencesBeforeSectionsProps(state.referencesBeforeSections));
+    pushAll(customProps, hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_BEFORE_SECTIONS_', state.hiddenBeforeSections));
+    pushAll(customProps, hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_AFTER_SECTIONS_', state.hiddenAfterSections));
     if (state.templatePageSection !== undefined) {
-      customProps.push(...chunkCustomProps('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_', JSON.stringify([state.templatePageSection])));
+      pushAll(customProps, chunkCustomProps('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_', JSON.stringify([state.templatePageSection])));
     }
-    customProps.push(...listIndentProps(state));
-    customProps.push(...consecutiveReplyProps(state));
-    customProps.push(...htmlCommentGapProps(state.htmlCommentGaps));
-    customProps.push(...htmlCommentAfterGapProps(state.htmlCommentAfterGaps));
+    pushAll(customProps, listIndentProps(state));
+    pushAll(customProps, consecutiveReplyProps(state));
+    pushAll(customProps, htmlCommentGapProps(state.htmlCommentGaps));
+    pushAll(customProps, htmlCommentAfterGapProps(state.htmlCommentAfterGaps));
     if (Object.keys(state.sentinelGaps).length > 0) {
-      customProps.push(...chunkCustomProps('MANUSCRIPT_SENTINEL_GAPS_', JSON.stringify(state.sentinelGaps)));
+      pushAll(customProps, chunkCustomProps('MANUSCRIPT_SENTINEL_GAPS_', JSON.stringify(state.sentinelGaps)));
     }
     if (frontmatter.tableFontSize !== undefined) {
       customProps.push({ name: 'MANUSCRIPT_EXPLICIT_TABLE_FONT_SIZE', value: '1' });
@@ -10906,18 +10906,18 @@ export async function convertMdToDocx(
     if (frontmatter.tableDecimalMark) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DECIMAL_MARK', value: frontmatter.tableDecimalMark });
     if (frontmatter.tableDigitGrouping) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGIT_GROUPING', value: frontmatter.tableDigitGrouping });
     if (frontmatter.styles && Object.keys(frontmatter.styles).length > 0) {
-      customProps.push(...chunkCustomProps('MANUSCRIPT_CUSTOM_STYLES_', JSON.stringify(frontmatter.styles)));
+      pushAll(customProps, chunkCustomProps('MANUSCRIPT_CUSTOM_STYLES_', JSON.stringify(frontmatter.styles)));
     }
-    customProps.push(...frontmatterBlankLineProps(frontmatterBlankLines));
-    customProps.push(...frontmatterSettingsProps(frontmatter));
-    customProps.push(...frontmatterFieldOrderProps(fieldOrder));
-    customProps.push(...bibKeyOrderProps(bibEntries));
-    customProps.push(...bibDataProps(options?.bibtex));
-    customProps.push(...bibliographyPathProps(frontmatter));
+    pushAll(customProps, frontmatterBlankLineProps(frontmatterBlankLines));
+    pushAll(customProps, frontmatterSettingsProps(frontmatter));
+    pushAll(customProps, frontmatterFieldOrderProps(fieldOrder));
+    pushAll(customProps, bibKeyOrderProps(bibEntries));
+    pushAll(customProps, bibDataProps(options?.bibtex));
+    pushAll(customProps, bibliographyPathProps(frontmatter));
     // The template's properties its copied headers' and footers' fields show,
     // after export's own, which keep their pids
     const ownProps = new Set(customProps.map(p => p.name.toLowerCase()));
-    customProps.push(...(templateSections?.customProperties ?? []).filter(p => !ownProps.has(p.name.toLowerCase())));
+    pushAll(customProps, (templateSections?.customProperties ?? []).filter(p => !ownProps.has(p.name.toLowerCase())));
     return customProps;
   };
   const customProps = customPropsOf();

@@ -802,8 +802,8 @@ function keepRangeMarkers(segments: Token[][], kept: boolean[], reopened: number
     const markers = segments.slice(index, after).flat().filter(paired);
     const omitted = new Set(markers);
     const forward = markers.filter(marker => marker.meta.type === 'start' && !omitted.has(marker.meta.end));
-    if (after < segments.length) segments[after].splice(reopened[after], 0, ...(before === -1 ? markers : forward));
-    if (before !== -1) segments[before].push(...(after < segments.length ? markers.filter(marker => !forward.includes(marker)) : markers));
+    if (after < segments.length) spliceAll(segments[after], reopened[after], 0, before === -1 ? markers : forward);
+    if (before !== -1) pushAll(segments[before], after < segments.length ? markers.filter(marker => !forward.includes(marker)) : markers);
     index = after;
   }
 }
@@ -864,6 +864,7 @@ function splitCriticBlocksRule(state: StateCore): void {
         originalStart,
         isHeading && segmentIndex === 0,
       );
+      // eslint-disable-next-line no-restricted-syntax -- a segment's three tokens
       if (segment) rewritten.push(...segment);
     }
     index += 2;
@@ -1858,7 +1859,7 @@ function nestCrossedElements(children: Token[], state: StateCore): Token[] {
     stack.pop();
     if (!isRangeSpan(child) && !inside.some(wrapper => isRangeSpan(wrapper.open))) {
       // As written, the elements inside still open
-      stack.push(...inside);
+      pushAll(stack, inside);
       continue;
     }
     out.pop();

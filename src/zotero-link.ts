@@ -28,6 +28,7 @@
  *  function of its two arguments.
  */
 
+import { pushAll } from './arrays';
 import {
   parseBibtexWithRaw,
   findDuplicateBibtexKeys,
@@ -445,7 +446,7 @@ export function normalizeIsbns(value: string | undefined): string[] {
     // is refused — the same answer an ambiguous whole-run split gets, for the
     // same reason.
     const best = salvage(compacts);
-    if (best) isbns.push(...best);
+    if (best) pushAll(isbns, best);
   }
   return isbns;
 }
