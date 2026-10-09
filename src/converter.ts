@@ -2267,7 +2267,8 @@ async function parseStyleNumbering(zip: JSZip): Promise<StyleNumbering> {
     const pPr = children.find(c => c['w:pPr'] !== undefined);
     const basedOn = children.find(c => c['w:basedOn'] !== undefined);
     own.set(id, { reference: pPr ? numberingReference(asXmlNodes(pPr['w:pPr'])) : undefined, basedOn: basedOn ? getAttr(basedOn, 'val') : '' });
-    if (getAttr(node, 'type') === 'paragraph' && xmlOn(getAttr(node, 'default'))) numbering.defaultStyle ??= id;
+    // A style without a type is a paragraph style
+    if ((getAttr(node, 'type') || 'paragraph') === 'paragraph' && xmlOn(getAttr(node, 'default'))) numbering.defaultStyle ??= id;
   }
   const resolve = (id: string, seen: Set<string>): StyleNumberingEntry => {
     const style = own.get(id);

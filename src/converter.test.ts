@@ -1994,9 +1994,15 @@ describe('Where Word list numbering comes from', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
-  test('numbers a paragraph with no style as the default paragraph style does', async () => {
+  test.each([
+    ['', (tag: string) => tag],
+    // A style without a w:type is a paragraph style, but the default was
+    // read only where its w:type said so, and the paragraphs had no list
+    [', which has no type', (tag: string) => tag.replace(' w:type="paragraph"', '')],
+  ])('numbers a paragraph with no style as the default paragraph style does%s', async (_name, tag) => {
     // As Word numbers them, which docx4j measured
-    const styles = (xml: string) => xml.replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/, (match: string) => match + numPr(2));
+    const styles = (xml: string) => xml.replace(/(<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">)([^]*?<w:pPr>)/,
+      (_match: string, start: string, rest: string) => tag(start) + rest + numPr(2));
     const md = '1. a\n2. b\n3. c';
     expect(await imported([['', 'a'], ['<w:jc w:val="left"/>', 'b'], [pStyle('Missing'), 'c']], { styles })).toBe(md);
     expect(await roundTrip(md)).toBe(md);
