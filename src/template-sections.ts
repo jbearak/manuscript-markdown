@@ -130,10 +130,29 @@ const ORDERED_OPTIONS = {
   suppressEmptyNode: true,
 };
 
+/**
+ * How the parsers read entities: the standard ones and character
+ * references, with no cap on how many. fast-xml-parser counts every &quot;,
+ * &lt;, &gt; and &apos; toward maxTotalExpansions, and a long manuscript
+ * passes any fixed count (Zotero field codes are full of &quot;), as a
+ * part's relationships can (a link's target may hold many &apos;). Leaving
+ * it uncapped is safe because no expansion can grow the text: standard
+ * entities replace 4+ characters with one, and maxEntitySize holds DOCTYPE
+ * entities (which Word never writes) to one character in place of a
+ * reference of at least three.
+ */
+export const XML_ENTITIES = {
+  enabled: true,
+  maxTotalExpansions: Infinity,
+  maxEntitySize: 1,
+  maxExpandedLength: 1000000,
+};
+
 /** A package part (relationships, content types, settings, custom
  *  properties) as data, its prefixes dropped, its text as it is, with
  *  its character references, as &#x2019;, read too */
 const partParser = new XMLParser({
+  processEntities: XML_ENTITIES,
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   removeNSPrefix: true,
@@ -142,6 +161,16 @@ const partParser = new XMLParser({
   trimValues: false,
   htmlEntities: true,
 });
+
+/** A package part as data (see partParser), or undefined where it isn't
+ *  XML the parser reads */
+export function parsePart(xml: string): unknown {
+  try {
+    return partParser.parse(xml);
+  } catch {
+    return undefined;
+  }
+}
 
 /** The attributes of each child of a part's root named `name` */
 function elementsOf(xml: string | undefined, root: string, name: string): Record<string, string>[] {
@@ -228,6 +257,12 @@ async function relsOf(zip: JSZip, path: string): Promise<Rels | undefined> {
   if (!data) return undefined;
   const relationships = relationshipsOf(path, decodeXml(data));
   return { data, relationships, ids: sequentialIds(relationships) };
+}
+
+/** The path of the part that a part's relationship of a type names, as
+ *  `theme` for its theme, by the relationship's target */
+export async function relatedPartPath(zip: JSZip, source: string, type: string): Promise<string | undefined> {
+  return (await relsOf(zip, source))?.relationships.find(r => r.path !== undefined && r.type.endsWith('/relationships/' + type))?.path;
 }
 
 /**
