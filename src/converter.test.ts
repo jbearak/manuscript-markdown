@@ -38,7 +38,8 @@ import {
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
 import { fastestRun, fastestRunAsync } from './test-timing';
-import { annotateHtmlCommentIndices, convertMdToDocx, parseMd, templateStyleIds } from './md-to-docx';
+import { annotateHtmlCommentIndices, convertMdToDocx, directiveRest, holdsDirective, parseMd, templateStyleIds } from './md-to-docx';
+import { parseEmbedDirective } from './embed-preprocess';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractAllDecorationRanges } from './highlight-colors';
@@ -21326,6 +21327,38 @@ describe('HTML comments between Word runs', () => {
     // breakBeforeComment), or doesn't read the paragraph back alone (see
     // plainParagraphs)
     expect(strip((await convertDocx(await withRuns(runs, md))).markdown)).toBe(expected + '\n');
+  });
+
+  /** The sections of a document Word has, as each ends at a w:sectPr */
+  const sections = async (docx: Uint8Array) => ((await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).match(/<w:sectPr\b/g) ?? []).length;
+  test.each([
+    // Which export gave the table after the paragraph
+    ['a table\'s font', 'XX\n\n| a |\n| - |\n| 1 |', '<!-- table-font: Courier New -->', async (docx: Uint8Array) => /<w:tbl>(?:(?!<\/w:tbl>)[\s\S])*Courier New/.test(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))],
+    // Which closed the section the paragraph is in, before the next one
+    ['a section\'s end', '<!-- landscape -->\n\nXX\n\nnext\n\n<!-- /landscape -->', '<!-- /landscape -->', sections],
+    // Which export's preprocessing expands, with a file there
+    ['an embed', 'XX', '<!-- embed: t.csv -->', async (docx: Uint8Array) => (await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).includes('<w:tbl>')],
+  ])('writes a comment with a blank line in it after a line break, before one that is %s directive, as main does', async (_name, md, directive, reads) => {
+    // In a block of its own, export read the comment as a directive, which
+    // the paragraph, read alone, doesn't show
+    const docx = await withRuns(run('Source') + lineBreak + commentLines('<!-- c\n\nd -->' + directive), md);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toContain('Source\\\n<!-- c\n\nd -->' + directive + '\n');
+    const embedResolver = { readFile: () => new TextEncoder().encode('h\n1\n'), resolveRelative: (_base: string, relative: string) => relative };
+    const again = (await convertMdToDocx(markdown, { embedResolver, documentPath: '/doc/paper.md' })).docx;
+    expect(await reads(again)).toBe(await reads(docx));
+  });
+
+  test.each([
+    '<!-- landscape -->', '<!-- /portrait -->', '<!-- style: Title -->', '<!-- /style -->', '<!-- style: Title -->Text<!-- /style -->',
+    '<!-- table-font: Courier New -->', '<!-- table-font-size: 9 -->', '<!-- table-orientation: landscape -->', '<!-- table-col-widths: 1 2 -->',
+    '<!-- table-digits: 2 -->', '<!-- table-decimal-mark: comma -->', '<!-- table-digit-grouping: none -->',
+    '<!-- references -->', '<!-- bibliography -->', '<!-- indent -->', '<!-- no-indent -->', '<!-- embed: t.csv -->',
+  ])('takes %s, which export reads as a directive, for one before writing comments in blocks of their own', directive => {
+    expect(directiveRest(directive) !== undefined || parseEmbedDirective(directive) !== null).toBe(true);
+    // With space in it, and anywhere in a comment, after a blank line
+    expect(holdsDirective(directive.replace('<!-- ', '<!--\t'))).toBe(true);
+    expect(holdsDirective('<!-- a\n\n' + directive)).toBe(true);
   });
 
   /** A paragraph's items: text, and hidden comments, as `<!--` starts */

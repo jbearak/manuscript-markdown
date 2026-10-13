@@ -16,7 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, exportReads, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
+import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -5078,7 +5078,10 @@ function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, op
  *  comment's range and spaces and tabs goes from `from` on, nor where
  *  their runs hold anything but whitespace outside them, or a comment with
  *  no end there, or an empty one, <!--> or <!--->, whose --> a block may
- *  end at */
+ *  end at, nor where one starts as a directive does, which export, or a
+ *  preprocessor of its, may read as one in a block of its own, as by the
+ *  table or section after the paragraph, which reading the paragraph
+ *  alone doesn't show (see holdsDirective) */
 function commentBlocks(segment: ContentItem[], from: number, end: number): { text: string; through: number } | undefined {
   if (!isMarkdownBlockEdge(segment[end])) return undefined;
   const blocks: string[] = [];
@@ -5087,6 +5090,7 @@ function commentBlocks(segment: ContentItem[], from: number, end: number): { tex
     if (isBlankText(item)) continue;
     if (item.type !== 'html_comment' || item.commentIds.size > 0) return undefined;
     const text = markdownComment(item.text, segment[k + 1]?.type === 'html_comment');
+    if (holdsDirective(text)) return undefined;
     let at = 0;
     for (let open = text.indexOf('<!--'); open !== -1; open = text.indexOf('<!--', at)) {
       const close = text.indexOf('-->', open + 4);

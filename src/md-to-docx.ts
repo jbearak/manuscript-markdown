@@ -825,6 +825,19 @@ export function directiveRest(comment: string): string | undefined {
   return reads ? '' : undefined;
 }
 
+// The start of each comment export or a preprocessor of its may read as a
+// directive, valid or not: a section's (see ORIENTATION_OPEN_RE and
+// orientation-scan.ts), a style block's fence (style-fence.ts), a table's,
+// an embed (EMBED_RE in embed-preprocess.ts), references or an indent
+const DIRECTIVE_START_RE = /<!--\s*(?:\/?(?:landscape|portrait|style)|table-|embed:|references|bibliography|indent|no-indent)/i;
+
+/** Whether Markdown `text` holds, anywhere, a comment that starts as a
+ *  directive does, which export may read as one where the comment is a
+ *  block of its own, as it reads any of them (see directiveRest) */
+export function holdsDirective(text: string): boolean {
+  return DIRECTIVE_START_RE.test(text);
+}
+
 /** Whether export reads Markdown `text` as one paragraph over all its lines */
 export function readsAsParagraph(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
