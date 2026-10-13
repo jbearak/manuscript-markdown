@@ -5,6 +5,7 @@ import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, preprocessCriticMarkup } from './cr
 import { htmlBlockKind, listItemHtmlBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { pushAll } from './arrays';
+import { normalizeNewlines } from './newlines';
 
 export interface OrientationDiagnostic {
   /** list-item: in a list item, which export drops it from; note: in a
@@ -71,12 +72,11 @@ function withCriticMarkup(source: string): { parsed: string; starts: number[] } 
  */
 function blockDirectives(source: string, text: string, lineOffset: (line: number) => number, inNote: boolean): Directive[] {
   const tokens: Token[] = [];
-  // The block parser alone, which reads a carriage return as a line end, as
-  // markdown-it's core does, over the lines export reads, after its grid
+  // The block parser alone over the lines export reads, after its grid
   // tables, quotes and LaTeX environments, as a grid table's placeholder,
   // which ends a list it was indented in, with the line of `source` each
-  // comes from
-  const blocks = preprocessBlocks(source.replace(/\r\n?/g, '\n'));
+  // comes from. `source`'s line ends are \n, as directivesOf gives them.
+  const blocks = preprocessBlocks(source);
   const { parsed, starts } = withCriticMarkup(blocks.output);
   blockParser.block.parse(parsed, blockParser, {}, tokens);
   const directives: Directive[] = [];
@@ -125,8 +125,12 @@ function blockDirectives(source: string, text: string, lineOffset: (line: number
  * document of its own, without the indent of its lines.
  */
 function directivesOf(text: string): Directive[] {
+  // Each line end as markdown-it reads it, \r\n or a \r alone as well as
+  // \n, as \n, as export reads them, and where each line starts in `text`,
+  // which counts them the same way
   const lineStarts = computeLineStarts(text);
-  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const normalized = normalizeNewlines(text);
+  const lines = normalized.split('\n');
   // The lines of fenced code and HTML blocks, which hold no definition, as
   // export reads them, past CriticMarkup, a fence's marker in a span of more
   // than one line its text, which starts no code
@@ -171,7 +175,7 @@ function directivesOf(text: string): Directive[] {
   }
   const noteLines = new Set(notes.flat().map(noteLine => noteLine.line));
   // The body, its notes' lines left blank, so that its lines keep their numbers
-  const body = noteLines.size === 0 ? text : lines.map((line, k) => noteLines.has(k) ? '' : line).join('\n');
+  const body = noteLines.size === 0 ? normalized : lines.map((line, k) => noteLines.has(k) ? '' : line).join('\n');
   const directives = blockDirectives(body, text, line => lineStarts[line] ?? text.length, false);
   for (const noteBody of notes) {
     const source = noteBody.map(({ line, skip }) => lines[line].slice(skip)).join('\n');

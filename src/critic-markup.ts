@@ -117,12 +117,9 @@ export function hasCriticBreak(content: string): boolean {
 
 function protectLineBreaks(content: string): string {
   // A visually blank Markdown line may contain indentation or trailing spaces.
-  // Protect CRLF as well because this preprocessor runs before markdown-it's
-  // normalize rule converts line endings. The bare-CR branch must not match
-  // the first half of CRLF when the two-break pattern backtracks.
   return content
-    .replace(/(?:\r\n|\r(?!\n)|\n)[ \t]*(?:\r\n|\r(?!\n)|\n)/g, PARA_PLACEHOLDER)
-    .replace(/\r\n|\r(?!\n)|\n/g, LINE_PLACEHOLDER);
+    .replace(/\n[ \t]*\n/g, PARA_PLACEHOLDER)
+    .replace(/\n/g, LINE_PLACEHOLDER);
 }
 
 export function restoreCriticLineBreaks(content: string): string {
@@ -158,7 +155,7 @@ function computeCriticBlockAnalysis(
   return includeLists ? { ...analysis, listRegions } : analysis;
 }
 
-const LEADING_CRITIC_BREAK_RE = /(?:\{\+\+|\{--|\{~~|\{==|\{>>)(?:\r\n|\r|\n)/;
+const LEADING_CRITIC_BREAK_RE = /(?:\{\+\+|\{--|\{~~|\{==|\{>>)\n/;
 
 /** The analysis of the Markdown with each opener stranded at a line's end
  *  moved, and the edits that moved them */
@@ -175,7 +172,7 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
     return text;
   };
   const transformed = markdown.replace(
-    /(\{\+\+|\{--|\{~~|\{==|\{>>)((?:\r\n|\r|\n)(?:[ \t]*(?:>[ \t]*)?(?:\r\n|\r|\n))?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
+    /(\{\+\+|\{--|\{~~|\{==|\{>>)(\n(?:[ \t]*(?:>[ \t]*)?\n)?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
     (full, open: string, leadingBreak: string, nextPrefix: string, offset: number) => {
       if (isInsideCodeRegion(offset, inertRegions) || isEscapedAt(markdown, offset) ||
           isInsideCodeRegion(offset, mathRegions) || isInsideCodeRegion(offset, listRegions)) return full;
@@ -195,16 +192,13 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
       // > a{--\n>\n> --}b: moved out, it would leave the break untracked
       // and the span empty
       if (/^\s*$/.test(stripQuoteContinuationPrefixes(markdown.slice(contentStart, closePos), quoteDepthAt(markdown, offset)))) return full;
-      const lineStart = Math.max(
-        markdown.lastIndexOf('\n', offset - 1),
-        markdown.lastIndexOf('\r', offset - 1),
-      ) + 1;
+      const lineStart = markdown.lastIndexOf('\n', offset - 1) + 1;
       const linePrefix = markdown.slice(lineStart, offset);
       if (linePrefix.trim().length === 0) return full;
 
       const quoteMatch = linePrefix.match(/^((?:[ \t]{0,3}>[ \t]?)+)/);
-      const lineEndings = leadingBreak.match(/\r\n|\r|\n/g) ?? [];
-      const eol = lineEndings[0] ?? '\n';
+      // The break is a line end, or two around a blank line
+      const blankLine = leadingBreak !== '\n';
 
       if (quoteMatch) {
         // The following line must remain in the same quote depth. Put the
@@ -213,15 +207,15 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
         const quoteDepth = (quoteMatch[1].match(/>/g) ?? []).length;
         const nextQuoteDepth = (nextPrefix.match(/>/g) ?? []).length;
         if (nextQuoteDepth < quoteDepth) return full;
-        const paragraphBreak = lineEndings.length > 1
+        const paragraphBreak = blankLine
           ? leadingBreak
-          : eol + quoteMatch[1].trimEnd() + eol;
+          : '\n' + quoteMatch[1].trimEnd() + '\n';
         return moved(offset, full, paragraphBreak + nextPrefix + open);
       }
 
       // Preserve an existing blank line. For a lone newline, add the second
       // newline needed to form a Markdown paragraph boundary.
-      const paragraphBreak = lineEndings.length > 1 ? leadingBreak : eol + eol;
+      const paragraphBreak = blankLine ? leadingBreak : '\n\n';
       return moved(offset, full, paragraphBreak + open + nextPrefix);
     },
   );
@@ -229,7 +223,7 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
 }
 
 function quoteDepthAt(content: string, offset: number): number {
-  const lineStart = Math.max(content.lastIndexOf('\n', offset - 1), content.lastIndexOf('\r', offset - 1)) + 1;
+  const lineStart = content.lastIndexOf('\n', offset - 1) + 1;
   let prefix = content.slice(lineStart, offset);
   let depth = 0;
   while (true) {
@@ -243,15 +237,15 @@ function quoteDepthAt(content: string, offset: number): number {
 }
 
 function stripQuoteContinuationPrefixes(content: string, depth: number): string {
-  if (depth === 0 || !/[\r\n]/.test(content)) return content;
-  return content.replace(/(\r\n|\r|\n)([^\r\n]*)/g, (_full, eol: string, line: string) => {
+  if (depth === 0 || !content.includes('\n')) return content;
+  return content.replace(/\n([^\n]*)/g, (_full, line: string) => {
     let remainder = line;
     for (let level = 0; level < depth; level++) {
       const match = remainder.match(/^[ \t]*>[ \t]?/);
-      if (!match) return eol + line;
+      if (!match) return '\n' + line;
       remainder = remainder.slice(match[0].length);
     }
-    return eol + remainder;
+    return '\n' + remainder;
   });
 }
 
@@ -395,6 +389,9 @@ export function criticPayloadRanges(markdown: string): Array<[number, number]> {
   return [...criticSpans(markdown, computeCriticBlockAnalysis(markdown).inertRegions)].map(({ contentStart, closeIdx }) => [contentStart, closeIdx]);
 }
 
+/** `markdown` with each CriticMarkup span's line ends in placeholders, so
+ *  markdown-it reads the span as one block. Its line ends are \n alone (see
+ *  normalizeNewlines in newlines.ts), as each caller gives them. */
 export function preprocessCriticMarkup(markdown: string, moveLeadingBreaks = true): string {
   return criticPreprocessed(markdown, moveLeadingBreaks).output;
 }
@@ -434,7 +431,7 @@ function criticPreprocessed(markdown: string, moveLeadingBreaks: boolean): { out
     // Single-line spans need no transformation. Besides avoiding needless
     // allocations, this prevents quoteDepthAt from searching backward through
     // an ever-growing single line for every span.
-    if (/[\r\n]/.test(content)) {
+    if (content.includes('\n')) {
       const withoutQuotePrefixes = stripQuoteContinuationPrefixes(content, quoteDepthAt(result, start));
       const protectedContent = protectLineBreaks(withoutQuotePrefixes);
       segments.push(result.slice(lastPos, contentStart));

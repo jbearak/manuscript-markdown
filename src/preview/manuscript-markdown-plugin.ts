@@ -32,6 +32,7 @@ import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 import { findDollarMathAt } from '../math-delimiters';
 import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from '../citation-syntax';
+import { normalizeNewlines } from '../newlines';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
   manuscriptColors?: ColorScheme;
@@ -2031,6 +2032,14 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // Preprocess source before block parsing to handle multi-paragraph CriticMarkup
   md.core.ruler.before('normalize', 'manuscript_markdown_preprocess', (state: StateCore) => {
+    // The document's path, before its line ends change, as the extension's
+    // fallback finds the document whose text is the source as it is (see
+    // manuscriptGetDocumentPath in extension.ts)
+    const docPath = getEmbedDocumentPath(md, state);
+    // Each line end as markdown-it's normalize rule, after this one, reads
+    // it, as \n, so each step splits lines where markdown-it does. The lines
+    // keep their numbers, so the line map needs no step for it.
+    state.src = normalizeNewlines(state.src);
     // Parse frontmatter to extract color scheme before preprocessing.
     // Priority: frontmatter > md.manuscriptColors (set by extension) > module-level default
     const { metadata } = parseFrontmatter(state.src);
@@ -2043,7 +2052,6 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
     // processed by the subsequent grid table preprocessor.
     const embedResolver = md.manuscriptEmbedResolver;
     const embedOptions = md.manuscriptEmbedOptions;
-    const docPath = getEmbedDocumentPath(md, state);
     const r0 = (embedResolver && docPath)
       ? preprocessEmbedsWithMap(state.src, embedResolver, docPath, embedOptions)
       : { output: state.src, map: LineMap.identity() };

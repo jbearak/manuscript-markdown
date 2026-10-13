@@ -43,10 +43,10 @@ export type LineMap = number[];
 /** Where each edit replaces [start, end) of a text with `text` */
 export interface LineEdit { start: number; end: number; text: string }
 
-/** A line end as markdown-it reads one: a line feed, or a carriage return
- *  alone or before one, which `at` is the last character of */
+/** A line end, which `at` is: a \n, as each line end markdown-it reads is
+ *  in the texts here (see normalizeNewlines in newlines.ts) */
 function endsLine(text: string, at: number): boolean {
-  return text[at] === '\n' || (text[at] === '\r' && text[at + 1] !== '\n');
+  return text[at] === '\n';
 }
 
 /** The number of lines of `text` */
@@ -123,7 +123,7 @@ export function linesAfterEdits(input: string, edits: Iterable<LineEdit>): LineM
       if (endsLine(output, at)) {
         afters.push(afterAtStart);
         firsts.push(first);
-        blanks.push(isBlank(output.slice(lineStart, at + 1).replace(/\r?\n$|\r$/, '')));
+        blanks.push(isBlank(output.slice(lineStart, at)));
         afterAtStart = after;
         first = undefined;
         lineStart = at + 1;

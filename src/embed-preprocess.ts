@@ -7,6 +7,7 @@ import { preprocessGridTables, gridColumnAlign, GRID_TABLE_PLACEHOLDER_PREFIX, G
 import MarkdownIt from 'markdown-it';
 import { computeMarkdownRegions, endsListInPlace, isInsideCodeRegion, regionAt } from './code-regions';
 import { exportsLiterally } from './html-blocks';
+import { normalizeNewlines } from './newlines';
 
 const sharedMarkdownIt = new MarkdownIt({ html: true });
 
@@ -271,7 +272,9 @@ export function preprocessEmbedsTracked(markdown: string, resolver: EmbedResolve
     const where = directive && (literal ??= literalLines(lines)).at(i);
     if (directive && (where === undefined || where === 'alone') && literal!.inPlace(i)) {
       embedDirectives.push(trimmed);
-      let expanded = resolveEmbed(directive, resolver, documentPath, options);
+      // A file's line ends as markdown-it reads them, as \n, as the document
+      // around it has them
+      let expanded = normalizeNewlines(resolveEmbed(directive, resolver, documentPath, options));
 
       // Tag all <table> elements in the expanded content with data-embed-idx for round-trip tracking.
       // .md embeds may produce multiple tables; all must map back to the same directive.
@@ -364,7 +367,9 @@ function resolveXlsx(data: Uint8Array, directive: EmbedDirective): string {
  * Returns a string of directive comments and HTML tables.
  */
 function resolveMd(data: Uint8Array): string {
-  const content = new TextDecoder().decode(data);
+  // Its line ends as markdown-it reads them, as \n, so each line splits
+  // where markdown-it's would
+  const content = normalizeNewlines(new TextDecoder().decode(data));
 
   // Phase 1: Extract table blocks and their preceding directives.
   // A "block" is a sequence of: optional directives, optional blank lines,
