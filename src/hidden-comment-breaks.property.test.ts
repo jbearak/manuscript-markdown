@@ -54,11 +54,12 @@ const bodyOf = async (docx: Uint8Array) => {
 };
 
 /** What Word shows of a document: each paragraph's style and indent, and
- *  the text and line breaks of its runs that aren't hidden, with a
+ *  the text, tabs and line breaks of its runs that aren't hidden, with a
  *  paragraph whose mark is hidden, which Word joins to the next, as part
- *  of the next. Without spaces and tabs, which a hidden run's may show as,
- *  where they keep words apart, but with all else, as a \ that a line
- *  break left as text */
+ *  of the next. With the spaces and tabs of its text, but for those next
+ *  to a hidden run, which a hidden run's whitespace may show as where it
+ *  keeps words apart, and with all else, as a \ that a line break left as
+ *  text */
 async function whatWordShows(docx: Uint8Array): Promise<string> {
   let out = '';
   let joined = '';
@@ -66,25 +67,29 @@ async function whatWordShows(docx: Uint8Array): Promise<string> {
     const pPr = /<w:pPr>[\s\S]*?<\/w:pPr>/.exec(paragraph)?.[0] ?? '';
     let text = '';
     for (const [run] of paragraph.matchAll(/<w:r[ >][\s\S]*?<\/w:r>|<m:r>[\s\S]*?<\/m:r>/g)) {
-      if (hiddenRPr.test(run)) continue;
-      for (const [token, t] of run.matchAll(/<[wm]:t[^>]*>([^<]*)<\/[wm]:t>|<w:br\/>/g)) text += t ?? (token === '<w:br/>' ? '⏎' : '');
+      // Where a hidden run is, as \u0001
+      if (hiddenRPr.test(run)) { text += '\u0001'; continue; }
+      for (const [token, t] of run.matchAll(/<[wm]:t[^>]*>([^<]*)<\/[wm]:t>|<w:br\/>|<w:tab\/>/g)) text += t ?? (token === '<w:br/>' ? '⏎' : '\t');
     }
     if (hiddenRPr.test(pPr)) { joined += text; continue; }
     const style = /<w:pStyle w:val="([^"]*)"/.exec(pPr)?.[1] ?? '';
     out += '[' + style + (pPr.includes('w:firstLine=') ? ' indent' : '') + ']' + joined + text + '¶';
     joined = '';
   }
-  return (out + joined).replace(/[ \t]|<w:tab\/>/g, '');
+  return (out + joined).replace(/[ \t]*\u0001[ \t]*/g, '');
 }
 
-/** The text Word hides, without whitespace, and without the zero-width
- *  spaces export starts each run with */
+/** The text Word hides, with its line breaks as line ends, without the
+ *  zero-width spaces export starts each run with, and without spaces and
+ *  tabs, as the indent import gives a line of a comment that would start
+ *  a block, or the line ends outside the comments, which Word hides around
+ *  them, but with those in each comment */
 async function whatWordHides(docx: Uint8Array): Promise<string> {
   let out = '';
   for (const [run] of (await bodyOf(docx)).matchAll(/<w:r[ >][\s\S]*?<\/w:r>/g)) {
-    if (hiddenRPr.test(run)) for (const [, t] of run.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)) out += t;
+    if (hiddenRPr.test(run)) for (const [, t] of run.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>|<w:br\/>/g)) out += t ?? '\n';
   }
-  return out.replace(/[\s​]/g, '');
+  return out.replace(/[ \t​]/g, '').replace(/\n+(?=&lt;!--)|(?<=--&gt;)\n+/g, '');
 }
 
 /** Text Word shows, with what may start a block, or end a comment */

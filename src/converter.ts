@@ -5044,7 +5044,7 @@ function trailingBreakOf(before: string, piece: string, after: string): Trailing
  *
  *  Where a paragraph takes the forms buildMarkdown reads back (`opts`'s
  *  `forms`), comments its line can't hold that are all the paragraph holds
- *  after the break, but for spaces and tabs (`blocks`, see commentBlocks),
+ *  after the break (`blocks`, see commentBlocks),
  *  go in HTML blocks of their own after it, which keep them hidden. The
  *  blocks end the paragraph, whose break is then at its end, as <br>, as
  *  at any paragraph's end, where a \ would be text, and each starts after
@@ -5075,7 +5075,8 @@ function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, op
  *  whitespace around them, which Word hides, and which, four spaces or a
  *  tab, would keep the first on the paragraph's line, with the index of
  *  the last item they hold. None where anything but comments in no Word
- *  comment's range and spaces and tabs goes from `from` on, nor where
+ *  comment's range goes from `from` on, as a space or tab Word shows,
+ *  which the blocks would lose, nor where
  *  their runs hold anything but whitespace outside them, or a comment with
  *  no end there, or an empty one, <!--> or <!--->, whose --> a block may
  *  end at, nor where one starts as a directive does, which export, or a
@@ -5087,7 +5088,7 @@ function commentBlocks(segment: ContentItem[], from: number, end: number): { tex
   const blocks: string[] = [];
   for (let k = from; k < end; k++) {
     const item = segment[k];
-    if (isBlankText(item)) continue;
+    if (isBlankText(item) && item.text === '') continue;
     if (item.type !== 'html_comment' || item.commentIds.size > 0) return undefined;
     const text = markdownComment(item.text, segment[k + 1]?.type === 'html_comment');
     if (holdsDirective(text)) return undefined;
@@ -5107,7 +5108,8 @@ function commentBlocks(segment: ContentItem[], from: number, end: number): { tex
  *  writes it, as Word has `items`, its text and hidden comments (see
  *  plainParagraphs): as paragraphs, with each comment hidden, as
  *  markdownComment ends it, and none taken as a directive, and the text
- *  all shown, in order, and nothing more, as no \ of a line break. Not
+ *  all shown, in order, with each line break where Word has it, and
+ *  nothing more, as no \ of a line break. Not
  *  where a comment ends in --->, which inline Markdown reads on to the next
  *  -->, as reading many of those would take time in the square of their
  *  number */
@@ -5117,7 +5119,7 @@ function readsAsWord(markdown: string, items: ContentItem[]): boolean {
   let shown = '';
   items.forEach((item, k) => {
     if (item.type === 'html_comment') hidden += markdownComment(item.text, items[k + 1]?.type === 'html_comment');
-    else if (item.type === 'text') shown += item.text.replace(/\\\n/g, '');
+    else if (item.type === 'text') shown += item.text.replace(/\\\n/g, '\0');
   });
   const read = exportReads(markdown);
   return !!read && read.hidden === hidden.replace(/\s+/g, '') && read.shown === shown.replace(/\s+/g, '') + 'z';

@@ -913,11 +913,14 @@ export function readsCommentsInline(text: string, payloads: string[], merge = fa
 
 /** What export reads of Markdown `markdown`, a paragraph's as import may
  *  write it: the text of its HTML comments, which Word hides, and the text
- *  Word shows, both without whitespace, or null where it reads anything
- *  but paragraphs of text, line breaks and comments, as a heading, a list,
- *  code, raw HTML, an equation or a tracked change. Read before a
- *  paragraph of its own, a z, to which a directive before it applies,
- *  which export then takes out, so its comment is in neither */
+ *  Word shows, both without whitespace, with each line break in it as a
+ *  NUL, which no text holds, so where each is goes with the text, or null
+ *  where it reads anything but paragraphs of text, line breaks and
+ *  comments, as a heading, a list, code, raw HTML, an equation or a
+ *  tracked change. A line end in a paragraph, which Word shows as a space,
+ *  is whitespace. Read before a paragraph of its own, a z, to which a
+ *  directive before it applies, which export then takes out, so its
+ *  comment is in neither */
 export function exportReads(markdown: string): { hidden: string; shown: string } | null {
   let hidden = '';
   let shown = '';
@@ -926,7 +929,8 @@ export function exportReads(markdown: string): { hidden: string; shown: string }
     for (const run of token.runs) {
       if (run.type === 'html_comment') hidden += run.text;
       else if (run.type === 'text' && !run.rawHtml) shown += run.text;
-      else if (run.type !== 'softbreak' && run.type !== 'hardbreak') return null;
+      else if (run.type === 'hardbreak') shown += '\0';
+      else if (run.type !== 'softbreak') return null;
     }
   }
   return { hidden: hidden.replace(/\s+/g, ''), shown: shown.replace(/\s+/g, '') };

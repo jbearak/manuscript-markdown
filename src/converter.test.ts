@@ -38,7 +38,7 @@ import {
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
 import { fastestRun, fastestRunAsync } from './test-timing';
-import { annotateHtmlCommentIndices, convertMdToDocx, directiveRest, holdsDirective, parseMd, templateStyleIds } from './md-to-docx';
+import { annotateHtmlCommentIndices, convertMdToDocx, directiveRest, exportReads, holdsDirective, parseMd, templateStyleIds } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { keepParagraphEdgeWhitespace } from './html-entities';
@@ -21318,6 +21318,10 @@ describe('HTML comments between Word runs', () => {
     ['with hidden text before it', 'XX', run('Source') + lineBreak + commentLines('<!-- c -->x<!-- a\n\nb -->'), 'Source\\\n<!-- c -->x<!-- a\n\nb -->'],
     ['after an empty comment', 'XX', run('Source') + lineBreak + commentLines('<!--><!-- a\n\nb -->'), 'Source\\\n<!--><!-- a\n\nb -->'],
     ['after one that ends in --->', 'XX', run('Source') + lineBreak + commentLines('<!-- m ---><!-- a\n\nb -->'), 'Source\\\n<!-- m ---><!-- a\n\nb -->'],
+    // Whitespace Word shows after it, which blocks of their own would lose
+    ['before a tab Word shows and another comment', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->') + run('\t') + comment('<!-- c -->'), 'Source\\\n<!-- a\n\nb -->\t<!-- c -->'],
+    ['before a space Word shows and another comment', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->') + run(' ') + comment('<!-- c -->'), 'Source\\\n<!-- a\n\nb --> <!-- c -->'],
+    ['before a tab Word shows at its paragraph\'s end', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->') + run('\t'), 'Source\\\n<!-- a\n\nb -->\t'],
     ['in a paragraph with an equation', 'XX', run('Source ') + '<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>' + lineBreak + commentLines('<!-- a\n\nb -->'), 'Source $x$\\\n<!-- a\n\nb -->'],
     ['in a heading', '# XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->'), '# Source\\\n<!-- a\n\nb -->'],
     ['in a list item', '- XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->'), '- Source\\\n<!-- a\n\nb -->'],
@@ -21359,6 +21363,17 @@ describe('HTML comments between Word runs', () => {
     // With space in it, and anywhere in a comment, after a blank line
     expect(holdsDirective(directive.replace('<!-- ', '<!--\t'))).toBe(true);
     expect(holdsDirective('<!-- a\n\n' + directive)).toBe(true);
+  });
+
+  test.each([
+    ['a line break', 'Source\\\nmore', 'Source\0more'],
+    ['a <br>', 'Source<br>more', 'Source\0more'],
+    ['a <br> at its paragraph\'s end, before a comment\'s block', 'Source<br>\n\n<!-- a\n\nb -->', 'Source\0'],
+    // Which Word shows as a space
+    ['a line end', 'Source\nmore', 'Sourcemore'],
+  ])('reads where %s is in a paragraph as export reads it back', (_name, md, shown) => {
+    // So a paragraph that loses one Word shows doesn't read as Word has it
+    expect(exportReads(md)?.shown).toBe(shown + 'z');
   });
 
   /** A paragraph's items: text, and hidden comments, as `<!--` starts */
