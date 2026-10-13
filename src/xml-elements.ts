@@ -3,7 +3,8 @@
 // quotes, which may hold a >, and its attributes' character references. For
 // import, which reads a document's styles and runs with them, and for the
 // style lookup import and export share (see style-element.ts). And reading
-// an on/off value, as WordprocessingML's and an equation's OMML spell it.
+// an on/off value, as WordprocessingML's and an equation's OMML spell it,
+// and an integer, as XML Schema spells one.
 
 // An XML start tag's attributes after its name, as an XML parser reads
 // them: each after whitespace, with any whitespace around its =, and its
@@ -21,6 +22,13 @@ export function xmlStartTag(xml: string, name: string, from = 0): { tag: string;
   start.lastIndex = from;
   const match = start.exec(xml);
   return match ? { tag: match[0], start: match.index, end: match.index + match[0].length, empty: match[1] === '/' } : undefined;
+}
+
+/** Each start tag of an element of `names` in `xml`, in order, as
+ *  xmlStartTag reads it, with its name */
+export function xmlStartTags(xml: string, names: string[]): Array<{ name: string; tag: string; start: number; end: number; empty: boolean }> {
+  const start = new RegExp('<(' + names.join('|') + ')' + XML_TAG_ATTRIBUTES + '(/?)>', 'g');
+  return [...xml.matchAll(start)].map(match => ({ name: match[1], tag: match[0], start: match.index, end: match.index + match[0].length, empty: match[2] === '/' }));
 }
 
 /** The first element `name` in `xml` from `from` (see xmlStartTag), with
@@ -56,6 +64,18 @@ export function xmlAttribute(tag: string, name: string): string | undefined {
  *  in omml.ts), or an attribute's, goes through this. */
 export function xmlOn(value: string | undefined): boolean {
   return value === 'true' || value === '1' || value === 'on';
+}
+
+// An integer as an xsd:integer is written (see xmlInteger)
+const XML_INTEGER = /^[ \t\r\n]*[+-]?\d+[ \t\r\n]*$/;
+
+/** An integer an attribute holds, as an xsd:integer's or an
+ *  ST_DecimalNumber's: digits, with leading zeros, a sign before them and
+ *  whitespace around them (see xmlNumber in converter.ts). Import reads
+ *  an integer with this (see xmlTwips and xmlNumberId in converter.ts),
+ *  and export a template's list's numId, so they agree. */
+export function xmlInteger(value: string | undefined): number | undefined {
+  return value !== undefined && XML_INTEGER.test(value) ? Number(value) : undefined;
 }
 
 /** `xml` with each element of `names` (see xmlElement) as `replace` gives

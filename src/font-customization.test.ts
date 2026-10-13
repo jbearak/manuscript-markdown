@@ -3149,13 +3149,7 @@ describe('heading and title styles based on another style', () => {
       const added = Array.from({ length: count }, (_, k) => '<w:style w:type="paragraph" w:styleId="S' + k + '"><w:name w:val="s' + k + '"/><w:basedOn w:val="Normal"/></w:style>').join('');
       zip.file('word/styles.xml', styles.replace('</w:styles>', added + '</w:styles>'));
       const docx = await zip.generateAsync({ type: 'uint8array' });
-      let fastest = Infinity;
-      for (let k = 0; k < 3; k++) {
-        const start = performance.now();
-        expect(parseFrontmatter((await convertDocx(docx)).markdown).metadata.font).toBe('Georgia');
-        fastest = Math.min(fastest, performance.now() - start);
-      }
-      return fastest;
+      return fastestRunAsync(async () => expect(parseFrontmatter((await convertDocx(docx)).markdown).metadata.font).toBe('Georgia'));
     };
     await time(250);
     const small = await time(1000);

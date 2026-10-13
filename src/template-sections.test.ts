@@ -6,6 +6,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
+import { fastestRunAsync } from './test-timing';
 
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
 const WML = 'application/vnd.openxmlformats-officedocument.wordprocessingml.';
@@ -623,6 +624,77 @@ describe('a template\'s numbering', () => {
     const numbering = async (docx: Uint8Array) => (await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!.match(/<w:(abstractNum|num) /g);
     expect(await numbering(second)).toEqual(await numbering(first));
   });
+
+  /** A template whose numbering has `count` instances, numIds 1 up, each of
+   *  an abstract numbering that links (w:numStyleLink) to a numbering style
+   *  whose w:numPr gives the instance `linked(k)`, and the definitions
+   *  `definitions`, the styles' IDs from `prefix` */
+  const linkedTemplate = async (count: number, linked: (k: number) => number, definitions = '', prefix = 'L') => {
+    const nums = (numbering: string) => numbering.replace(/<w:abstractNum\b[\s\S]*<\/w:num>/, () => definitions
+      + Array.from({ length: count }, (_, k) => '<w:abstractNum w:abstractNumId="' + (100 + k) + '"><w:numStyleLink w:val="' + prefix + k + '"/></w:abstractNum>').join('')
+      + Array.from({ length: count }, (_, k) => '<w:num w:numId="' + (k + 1) + '"><w:abstractNumId w:val="' + (100 + k) + '"/></w:num>').join(''));
+    const styles = (xml: string) => xml.replace('</w:styles>', () => Array.from({ length: count }, (_, k) => '<w:style w:type="numbering" w:styleId="' + prefix + k + '"><w:name w:val="l' + k + '"/>'
+      + '<w:pPr><w:numPr><w:numId w:val="' + linked(k) + '"/></w:numPr></w:pPr></w:style>').join('') + '</w:styles>');
+    return editTemplate(await listTemplate(nums), 'word/styles.xml', styles);
+  };
+
+  it.each([
+    // numId 1 links to a style whose instance, numId 2, is of the bullets, so
+    // its lists take numId 1 as the template has it
+    ['an instance whose abstract numbering links to a style of bullets', (k: number) => k === 0 ? 2 : k + 1, '<w:num w:numId="1"><w:abstractNumId w:val="100"/>', '<w:numId w:val="1"/>', 'L'],
+    // Read as an XML parser reads it, in either quotes
+    ['an instance whose abstract numbering links to a style of bullets whose ID holds an apostrophe', (k: number) => k === 0 ? 2 : k + 1, '<w:num w:numId="1"><w:abstractNumId w:val="100"/>', '<w:numId w:val="1"/>', 'O\'Reilly'],
+    // Each style's instance its own, which has no format
+    ['instances whose abstract numberings link back to them', (k: number) => k + 1, undefined, undefined, 'L'],
+  ])('gives bullets the template\'s where it has %s', async (_name, linked, keep, bulletNumId, prefix) => {
+    // numId 2's abstract numbering has bullets; the rest link to styles
+    const bullets = '<w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="\u2022"/></w:lvl></w:abstractNum>';
+    let templateDocx = await linkedTemplate(3, linked, bullets, prefix);
+    templateDocx = await editTemplate(templateDocx, 'word/numbering.xml', numbering => numbering.replace('<w:num w:numId="2"><w:abstractNumId w:val="101"/>', '<w:num w:numId="2"><w:abstractNumId w:val="7"/>'));
+    const md = '- a\n- b';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(body((await convertDocx(docx)).markdown)).toBe(md + '\n');
+    const document = (await textOf(await JSZip.loadAsync(docx), 'word/document.xml'))!;
+    if (bulletNumId) expect(document).toContain(bulletNumId);
+    else expect(document).not.toContain('<w:numId w:val="1"/>');
+    if (keep) expect((await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!).toContain(keep);
+  });
+
+  // A style's numId is read as an XML parser reads it, a character reference
+  // in it too, and as import reads it, by its value, so the instance it
+  // gives stays the template's
+  it.each([
+    ['a character reference', '&#50;'],
+    ['a plus sign and a leading zero', '+02'],
+    ['whitespace around it', ' 2 '],
+  ])('gives bullets the template\'s where a numbering style links to them by a numId written with %s', async (_name, numId) => {
+    const bullets = '<w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="\u2022"/></w:lvl></w:abstractNum>';
+    // Only L0's numId is 2, which nothing else uses
+    let templateDocx = await linkedTemplate(3, k => k === 0 ? 2 : 3, bullets);
+    templateDocx = await editTemplate(templateDocx, 'word/numbering.xml', numbering => numbering.replace('<w:num w:numId="2"><w:abstractNumId w:val="101"/>', '<w:num w:numId="2"><w:abstractNumId w:val="7"/>'));
+    templateDocx = await editTemplate(templateDocx, 'word/styles.xml', styles => styles.replace(/(<w:style w:type="numbering" w:styleId="L0">[\s\S]*?<w:numId w:val=")2"/, (_match, before: string) => before + numId + '"'));
+    expect(await textOf(await JSZip.loadAsync(templateDocx), 'word/styles.xml')).toContain('<w:numId w:val="' + numId + '"/>');
+    const md = '- a\n- b';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(body((await convertDocx(docx)).markdown)).toBe(md + '\n');
+    const zip = await JSZip.loadAsync(docx);
+    expect((await textOf(zip, 'word/document.xml'))!).toContain('<w:numId w:val="1"/>');
+    expect((await textOf(zip, 'word/numbering.xml'))!).toContain('<w:num w:numId="2"><w:abstractNumId w:val="7"/>');
+  });
+
+  // Each instance found by a search of all of them, and each style a link
+  // names by a search of all the styles
+  it('gives lists their own numbering beside a template\'s many that link to numbering styles in linear time', async () => {
+    const time = async (count: number) => {
+      const templateDocx = await linkedTemplate(count, k => k + 1);
+      return fastestRunAsync(async () => expect((await convertMdToDocx('- a\n\n1. b', { templateDocx })).docx.length).toBeGreaterThan(0));
+    };
+    await time(500);
+    const small = await time(2000);
+    expect(await time(8000) / small).toBeLessThan(8);
+  }, 30000);
 });
 
 describe('a template header\'s DOCPROPERTY fields', () => {

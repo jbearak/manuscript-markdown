@@ -21,7 +21,7 @@ import { preprocessGridTables, preprocessGridTablesWithSourceMap, gridColumnAlig
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { styleFinder } from './style-element';
-import { replaceXmlElements, xmlAttribute, xmlElement, xmlStartTag } from './xml-elements';
+import { replaceXmlElements, xmlAttribute, xmlElement, xmlInteger, xmlStartTag, xmlStartTags } from './xml-elements';
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
@@ -6655,10 +6655,16 @@ function templateNumIdsInUse(templateStyles?: string, headerNumIds: Iterable<num
   return new Set([...headerNumIds, ...styleNumIds(templateStyles)]);
 }
 
-/** The numIds a template's styles number their paragraphs with */
+/** The numIds a template's styles number their paragraphs with, each
+ *  read as an XML parser reads it (see xmlStartTag), by its value, as
+ *  import reads it (see xmlInteger), as listNumIds reads the one a
+ *  numbering style gives, so that it stays in use */
 function styleNumIds(templateStyles?: string): Set<number> {
   const used = new Set<number>();
-  for (const m of (templateStyles ?? '').matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
+  for (const { tag } of xmlStartTags(templateStyles ?? '', ['w:numId'])) {
+    const numId = xmlInteger(xmlAttribute(tag, 'w:val'));
+    if (numId !== undefined) used.add(numId);
+  }
   return used;
 }
 
@@ -6685,29 +6691,70 @@ function listNumIds(numberingXml: string | undefined, stylesXml: string | undefi
   const own = new Map<number, ListKind>();
   const numbering = numberingXml === undefined ? undefined : parseTemplateNumbering(numberingXml);
   if (!numbering) return { bullet: 1, decimal: 2, own };
-  const abstractNums = childNodes(numbering.root, 'w:numbering').filter(n => 'w:abstractNum' in n);
-  const instance = (numId: number) => numbering.nums.find(n => intAttr(n, 'w:numId') === numId);
+  // The template's instances and abstract numberings, the first of each
+  // number, and where the body of each style of the styles starts, the
+  // first of each ID, each read once, so that a template of many lists, or
+  // of lists that link to styles, takes time in proportion to them
+  const instances = new Map<number, OrderedXmlNode>();
+  const abstractNums = new Map<number, OrderedXmlNode>();
+  for (const node of childNodes(numbering.root, 'w:numbering')) {
+    const byNumber = 'w:num' in node ? instances : 'w:abstractNum' in node ? abstractNums : undefined;
+    const number = intAttr(node, 'w:num' in node ? 'w:numId' : 'w:abstractNumId');
+    if (byNumber && !Number.isNaN(number) && !byNumber.has(number)) byNumber.set(number, node);
+  }
+  // Each style's content, the first of each ID, read as an XML parser reads
+  // it (see xmlElement), with its ID in either quotes and holding the other
+  const styleBodies = new Map<string, string>();
+  for (let style = xmlElement(stylesXml ?? '', 'w:style'); style; style = xmlElement(stylesXml ?? '', 'w:style', style.end)) {
+    const id = xmlAttribute(style.tag, 'w:styleId');
+    if (id !== undefined && !styleBodies.has(id)) styleBodies.set(id, style.content);
+  }
+  /** The instance a style's w:numPr gives, by the style's ID */
+  const styleNumId = (styleId: string): number | undefined => {
+    const numId = xmlStartTag(styleBodies.get(styleId) ?? '', 'w:numId');
+    return xmlInteger(numId && xmlAttribute(numId.tag, 'w:val'));
+  };
+  const instance = (numId: number) => instances.get(numId);
   const formatOf = (level: OrderedXmlNode | undefined) => level && childNodes(level, 'w:lvl').find(n => 'w:numFmt' in n)?.[':@']?.['@_w:val'];
-  /** An instance's format at its first level: its own, its abstract
-   *  numbering's, or that of the numbering style the abstract one links to */
-  const firstLevelFormat = (numId: number, seen = new Set<number>()): string | undefined => {
-    const num = instance(numId);
-    if (!num || seen.has(numId)) return undefined;
-    seen.add(numId);
+  /** An instance's format at its first level, its own or its abstract
+   *  numbering's, or else the instance its abstract numbering links to
+   *  through a numbering style, whose format it has */
+  const ownFirstLevelFormat = (num: OrderedXmlNode): { format?: string; linked?: number } => {
     const children = childNodes(num, 'w:num');
     for (const o of children.filter(n => 'w:lvlOverride' in n && intAttr(n, 'w:ilvl') === 0)) {
       const format = formatOf(childNodes(o, 'w:lvlOverride').find(n => 'w:lvl' in n));
-      if (format) return format;
+      if (format) return { format };
     }
     const abstractNumId = children.find(n => 'w:abstractNumId' in n);
-    const abstractNum = abstractNumId && abstractNums.find(a => intAttr(a, 'w:abstractNumId') === intAttr(abstractNumId, 'w:val'));
+    const abstractNum = abstractNumId && abstractNums.get(intAttr(abstractNumId, 'w:val'));
     const definition = childNodes(abstractNum, 'w:abstractNum');
     const format = formatOf(definition.find(n => 'w:lvl' in n && intAttr(n, 'w:ilvl') === 0));
-    if (format) return format;
+    if (format) return { format };
     const link = definition.find(n => 'w:numStyleLink' in n)?.[':@']?.['@_w:val'];
-    const style = link && new RegExp('<w:style\\b[^>]*?\\bw:styleId\\s*=\\s*["\']' + link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '["\'][^>]*>([\\s\\S]*?)<\\/w:style\\s*>').exec(stylesXml ?? '');
-    const linked = style && /<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/.exec(style[1]);
-    return linked ? firstLevelFormat(parseInt(linked[1], 10), seen) : undefined;
+    return { linked: link ? styleNumId(link) : undefined };
+  };
+  /** An instance's format at its first level: its own, its abstract
+   *  numbering's, or that of the numbering style the abstract one links to,
+   *  along the links to one that comes back around. Each instance's read
+   *  once */
+  const firstLevelFormats = new Map<number, string | undefined>();
+  const firstLevelFormat = (numId: number): string | undefined => {
+    const path = new Set<number>();
+    let format: string | undefined;
+    for (let id: number | undefined = numId; id !== undefined;) {
+      if (firstLevelFormats.has(id)) {
+        format = firstLevelFormats.get(id);
+        break;
+      }
+      const num = instance(id);
+      if (!num || path.has(id)) break;
+      path.add(id);
+      const own = ownFirstLevelFormat(num);
+      format = own.format;
+      id = own.linked;
+    }
+    for (const id of path) firstLevelFormats.set(id, format);
+    return format;
   };
   const hasFormat = (numId: number, kind: ListKind) => {
     const format = firstLevelFormat(numId);

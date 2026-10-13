@@ -7,7 +7,7 @@ import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { styleFinder } from './style-element';
-import { replaceXmlElements, xmlAttribute, xmlElement, xmlOn, xmlStartTag } from './xml-elements';
+import { replaceXmlElements, xmlAttribute, xmlElement, xmlInteger, xmlOn, xmlStartTag } from './xml-elements';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -1766,6 +1766,62 @@ export function wordIgnoresStyle(element: string): boolean {
   return STYLES_WORD_IGNORES.has((tag === undefined ? '' : xmlAttribute(tag, 'w:styleId') ?? '').toLowerCase());
 }
 
+/**
+ * Each style's value along its w:basedOn chain, as a style shows what it
+ * doesn't set from the style it's based on: `combine(base's, own)`, from
+ * the chain's far end, which `none` starts. A chain ends at a style `styles`
+ * doesn't have, or where it comes back around to a style on it, as Word
+ * doesn't write but a document can hold, so each style of such a loop has
+ * the others from the one it's based on around to the one based on it.
+ * `combine` must group as `{ ...a, ...b }` does, so that its result for a
+ * run of styles is the same however it's taken. Each style is read once,
+ * from its base's value, so that a chain of any length takes time in
+ * proportion to its styles.
+ */
+function resolveBasedOn<S extends { basedOn: string }, T>(styles: Map<string, S>, own: (style: S) => T, combine: (base: T, own: T) => T, none: T): Map<string, T> {
+  const resolved = new Map<string, T>();
+  const ownOf = (id: string) => own(styles.get(id)!);
+  for (const start of styles.keys()) {
+    // The styles from this one to one read already, or to the chain's end
+    const path: string[] = [];
+    const onPath = new Map<string, number>();
+    let base = none;
+    for (let id = start; ;) {
+      const known = resolved.get(id);
+      if (known !== undefined) {
+        base = known;
+        break;
+      }
+      const style = styles.get(id);
+      if (style === undefined) break;
+      const loopsAt = onPath.get(id);
+      if (loopsAt !== undefined) {
+        // A loop, c0 to ck-1, each based on the next and the last on c0:
+        // ci shows ci-1 down to c0, then ck-1 down to ci, each over the last
+        const loop = path.splice(loopsAt);
+        const last = new Array<T>(loop.length + 1);
+        last[loop.length] = none;
+        for (let i = loop.length - 1; i >= 0; i--) last[i] = combine(last[i + 1], ownOf(loop[i]));
+        let first = none;
+        for (let i = 0; i < loop.length; i++) {
+          resolved.set(loop[i], combine(first, last[i]));
+          first = combine(ownOf(loop[i]), first);
+        }
+        base = resolved.get(loop[0])!;
+        break;
+      }
+      onPath.set(id, path.length);
+      path.push(id);
+      id = style.basedOn;
+    }
+    for (let i = path.length - 1; i >= 0; i--) {
+      base = combine(base, ownOf(path[i]));
+      resolved.set(path[i], base);
+    }
+  }
+  return resolved;
+}
+
 /** Read styles.xml's styles' properties, and which are the defaults */
 export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
   const parsed = await readZipXml(zip, 'word/styles.xml');
@@ -2240,11 +2296,31 @@ interface NumberingReference { numId?: string; ilvl?: string }
 
 /** A style's numbering: the numId and ilvl of its w:numPr, each its own or
  *  else its base's, as Word inherits them one by one, and the IDs of the
- *  style and its bases */
-interface StyleNumberingEntry { reference: NumberingReference; lineage: string[] }
+ *  style and its bases, nearest first, read as they're needed, so that each
+ *  style doesn't hold a list of its whole chain */
+interface StyleNumberingEntry { reference: NumberingReference; lineage: Iterable<string> }
 
 /** Each style's numbering, by style ID, and the default paragraph style */
 export interface StyleNumbering { styles: Map<string, StyleNumberingEntry>; defaultStyle?: string }
+
+/** The first of `levels` linked to the nearest style of `lineage` that one
+ *  is linked to (w:pStyle) */
+function nearestLinkedLevel(lineage: Iterable<string> | undefined, levels: Map<string, NumberingLevelDef>): string | undefined {
+  const linked = new Map<string, string>();
+  for (const [ilvl, def] of levels) if (def.style !== undefined && !linked.has(def.style)) linked.set(def.style, ilvl);
+  if (linked.size === 0) return undefined;
+  for (const id of lineage ?? []) {
+    const ilvl = linked.get(id);
+    if (ilvl !== undefined) return ilvl;
+  }
+  return undefined;
+}
+
+/** Whether `id` is a style of `lineage` */
+function inLineage(lineage: Iterable<string> | undefined, id: string): boolean {
+  for (const style of lineage ?? []) if (style === id) return true;
+  return false;
+}
 
 function numberingReference(pPrChildren: XmlNode[]): NumberingReference | undefined {
   const numPr = pPrChildren.find(child => child['w:numPr'] !== undefined);
@@ -2271,14 +2347,19 @@ async function parseStyleNumbering(zip: JSZip): Promise<StyleNumbering> {
     // A style without a type is a paragraph style
     if ((getAttr(node, 'type') || 'paragraph') === 'paragraph' && xmlOn(getAttr(node, 'default'))) numbering.defaultStyle ??= id;
   }
-  const resolve = (id: string, seen: Set<string>): StyleNumberingEntry => {
-    const style = own.get(id);
-    if (!style || seen.has(id)) return { reference: {}, lineage: [] };
-    seen.add(id);
-    const base = resolve(style.basedOn, seen);
-    return { reference: { ...base.reference, ...style.reference }, lineage: [id, ...base.lineage] };
-  };
-  for (const id of own.keys()) numbering.styles.set(id, resolve(id, new Set()));
+  const references = resolveBasedOn(own, style => style.reference ?? {}, (base, reference) => ({ ...base, ...reference }), {});
+  // The style and those along its chain, to one styles.xml doesn't have or
+  // one that comes back around
+  const lineage = (id: string): Iterable<string> => ({
+    *[Symbol.iterator]() {
+      const seen = new Set<string>();
+      for (let at: string | undefined = id; at !== undefined && own.has(at) && !seen.has(at); at = own.get(at)!.basedOn) {
+        seen.add(at);
+        yield at;
+      }
+    },
+  });
+  for (const id of own.keys()) numbering.styles.set(id, { reference: references.get(id)!, lineage: lineage(id) });
   return numbering;
 }
 
@@ -2554,7 +2635,7 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
   // mammoth reads it. Else at level 0, as LibreOffice and docx4j read it,
   // where ECMA-376 gives no default
   const ilvl = reference.ilvl
-    || style?.lineage.flatMap(id => [...levels].filter(([, def]) => def.style === id).map(([linked]) => linked))[0]
+    || nearestLinkedLevel(style?.lineage, levels)
     || '0';
 
   const def = levels.get(ilvl);
@@ -2562,7 +2643,7 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
   // Word neither numbers nor counts a paragraph its style puts at a level
   // linked to another style, one that isn't the paragraph's or a base of it,
   // as docx4j measured Word; its own numId always numbers it
-  if (own?.numId === undefined && def.style !== undefined && !style?.lineage.includes(def.style)) return undefined;
+  if (own?.numId === undefined && def.style !== undefined && !inLineage(style?.lineage, def.style)) return undefined;
 
   // Word won't open a file that defines a level above 8 ([MS-OI29500] on
   // Part 1 §17.9.6), so a paragraph at one has none it numbers by, and
@@ -16225,16 +16306,6 @@ function xmlNumber(value: string | undefined): number | undefined {
   return value !== undefined && /^[ \t\r\n]*\+?\d+[ \t\r\n]*$/.test(value) ? Number(value) : undefined;
 }
 
-// An integer as an xsd:integer is written (see xmlInteger)
-const XML_INTEGER = /^[ \t\r\n]*[+-]?\d+[ \t\r\n]*$/;
-
-/** An integer an attribute holds, as an xsd:integer's or an
- *  ST_DecimalNumber's: digits, with leading zeros, a sign before them and
- *  whitespace around them (see xmlNumber) */
-function xmlInteger(value: string | undefined): number | undefined {
-  return value !== undefined && XML_INTEGER.test(value) ? Number(value) : undefined;
-}
-
 // A universal measure (ST_UniversalMeasure): a decimal number and its unit,
 // as 8.5in, with digits before any point, a minus sign where it may have
 // one, and no whitespace around it, as it's a string's pattern
@@ -16303,7 +16374,7 @@ function xmlHexId(value: string): string {
  * stores, which it writes so, match them too.
  */
 function xmlNumberId(value: string): string {
-  return XML_INTEGER.test(value) ? String(BigInt(value.trim())) : value;
+  return xmlInteger(value) === undefined ? value : String(BigInt(value.trim()));
 }
 
 /** A size in half-points, as an ST_HpsMeasure, a w:sz's or w:szCs's, holds
@@ -16647,16 +16718,34 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptio
    * only one.
    */
   function inheritedStyle(styleId: string, own: { rPr: string; pPr: string } = { rPr: '', pPr: '' }): string {
-    const chain = styleChain(styleId);
+    const shown = styleShows(styleId);
     // The nearest element, a paragraph's own first, self-closing, as
     // <w:b></w:b> means what <w:b/> does
-    const nearest = (ownProperties: string, properties: (block: string) => string, defaults: string, tag: string) => {
-      const found = xmlStartTag(ownProperties, tag) ?? chain.map(block => xmlStartTag(properties(block), tag)).find(m => m !== undefined) ?? xmlStartTag(defaults, tag);
-      return found ? found.tag.replace(/\s*\/?>$/, '/>') : '';
+    const nearest = (ownProperties: string, tag: string) => {
+      const found = xmlStartTag(ownProperties, tag)?.tag ?? shown.get(tag);
+      return found ? found.replace(/\s*\/?>$/, '/>') : '';
     };
-    const rpr = FONT_STYLE_TOGGLES.map(tag => nearest(own.rPr, blockRPr, defaultRPr, tag)).join('');
-    const style = extractStyle(rpr, nearest(own.pPr, block => blockPPr(block) ?? '', defaultPPr, 'w:jc'));
+    const rpr = FONT_STYLE_TOGGLES.map(tag => nearest(own.rPr, tag)).join('');
+    const style = extractStyle(rpr, nearest(own.pPr, 'w:jc'));
     return style.replace('smallcaps-allcaps', 'allcaps');
+  }
+
+  /** The start tag of each font style toggle, and of w:jc, that a style
+   *  shows: the nearest along its w:basedOn chain, or else the document
+   *  defaults', each style's read once, as for each title paragraph */
+  const styleShowsById = new Map<string, Map<string, string | undefined>>();
+  function styleShows(styleId: string): Map<string, string | undefined> {
+    const known = styleShowsById.get(styleId);
+    if (known) return known;
+    const chain = styleChain(styleId);
+    const nearest = (properties: (block: string) => string, defaults: string, tag: string) =>
+      (chain.map(block => xmlStartTag(properties(block), tag)).find(m => m !== undefined) ?? xmlStartTag(defaults, tag))?.tag;
+    const shows = new Map<string, string | undefined>([
+      ...FONT_STYLE_TOGGLES.map((tag): [string, string | undefined] => [tag, nearest(blockRPr, defaultRPr, tag)]),
+      ['w:jc', nearest(block => blockPPr(block) ?? '', defaultPPr, 'w:jc')],
+    ]);
+    styleShowsById.set(styleId, shows);
+    return shows;
   }
 
   /**
