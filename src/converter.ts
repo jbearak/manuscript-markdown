@@ -4577,6 +4577,25 @@ export async function extractHtmlCommentAfterGapMapping(data: Uint8Array | JSZip
   }
 }
 
+/** The counts export records of the blocks Word can't give a style block's
+ *  style at each block's edges, by key (see styleBlock in
+ *  generateDocumentXml in md-to-docx.ts) */
+export async function extractStyleBlockEdges(data: Uint8Array | JSZip): Promise<Record<string, number> | null> {
+  const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_STYLE_BLOCK_EDGES_');
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const result: Record<string, number> = {};
+    for (const [key, val] of Object.entries(parsed)) {
+      if (typeof val === 'number' && Number.isInteger(val) && val >= 0) result[key] = val;
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
 export async function extractSentinelGapMapping(data: Uint8Array | JSZip): Promise<Record<string, number> | null> {
   const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_SENTINEL_GAPS_');
   if (!json) return null;
@@ -14375,6 +14394,40 @@ export function buildMarkdown(
     if (existing < desired) output.push('\n'.repeat(desired - existing));
   }
 
+  // The pieces of output to the end of the last fence of a style block at
+  // the top level, which ends any block before it (see fenceAfterHtmlBlock)
+  let pastFence = 0;
+  /** A blank line before a style block's fence at the top level, where its
+   *  record has none, after an HTML block that only a blank line ends, as
+   *  an HTML table's, which would take the fence in. The record can be
+   *  another fence's, where export closed a block with no fence of its own,
+   *  at one that opens another */
+  function fenceAfterHtmlBlock(): void {
+    if (trailingNewlines() >= 2) return;
+    // The last block's text, from the blank line before it, which the
+    // output ends in none of, or from the last fence, in its pieces from
+    // the end, each read once. Each fence reads only those since the fence
+    // before it, as reading them all took time for the output's length at
+    // each, where no blank line parts the blocks
+    const pieces: string[] = [];
+    for (let k = output.length - 1; k >= pastFence; k--) {
+      const piece = output[k];
+      if (piece === '') continue;
+      const after = pieces[pieces.length - 1];
+      if (after?.startsWith('\n') && piece.endsWith('\n')) {
+        pieces[pieces.length - 1] = after.slice(1);
+        break;
+      }
+      const blank = piece.lastIndexOf('\n\n');
+      if (blank !== -1) {
+        pieces.push(piece.slice(blank + 2));
+        break;
+      }
+      pieces.push(piece);
+    }
+    if (htmlBlockGoesOn(pieces.reverse().join(''), '')) ensureTrailingNewlines(2);
+  }
+
   // The paragraphs' HTML blocks that a blank line ends, as checkedHtmlBlock
   // kept them: where each is in output, its escaped text, which goes in its
   // place where the next block goes on the line after it, in its quote or
@@ -15166,7 +15219,9 @@ export function buildMarkdown(
       } else if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
         output.push('\n\n');
       }
+      fenceAfterHtmlBlock();
       output.push('<!-- style: ' + item.styleName + ' -->');
+      pastFence = output.length;
       lastWasSectionSentinel = true;
       lastSentinelAfterGapKey = gapKey.replace('cso', 'csoa');
       i++;
@@ -15182,7 +15237,9 @@ export function buildMarkdown(
       } else if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
         output.push('\n\n');
       }
+      fenceAfterHtmlBlock();
       output.push('<!-- /style -->');
+      pastFence = output.length;
       lastWasSectionSentinel = true;
       lastSentinelAfterGapKey = gapKey.replace('csc', 'csca');
       i++;
@@ -17015,6 +17072,7 @@ export async function convertDocx(
     storedFieldOrder,
     htmlCommentAfterGapMapping,
     sentinelGapMapping,
+    styleBlockEdges,
     defaultTableColWidths,
     storedTableBorders,
     storedLineSpacing,
@@ -17073,6 +17131,7 @@ export async function convertDocx(
     storedFieldOrder: extractFrontmatterFieldOrder(zip),
     htmlCommentAfterGapMapping: extractHtmlCommentAfterGapMapping(zip),
     sentinelGapMapping: extractSentinelGapMapping(zip),
+    styleBlockEdges: extractStyleBlockEdges(zip),
     defaultTableColWidths: extractDefaultTableColWidths(zip),
     storedTableBorders: extractTableBorders(zip),
     storedLineSpacing: extractLineSpacing(zip),
@@ -17309,6 +17368,75 @@ export async function convertDocx(
       }
       return { host };
     };
+    // A block Word can't give a style block's style, as a heading, a quote,
+    // code, a table or a thematic break, which keeps its own, and so ends
+    // the run of paragraphs in the block's style. Export recorded, for each
+    // block's place among those at the top level Word has a paragraph of,
+    // which this opens one for each of (see styleBlock in
+    // generateDocumentXml in md-to-docx.ts), whether a run of such blocks,
+    // with the empty paragraphs export writes around them, between two
+    // paragraphs of the block's style is in the block. Elsewhere, it
+    // recorded how many the block before the run ends with, and how many the
+    // block after it starts with, and the rest are in no block. Where it
+    // recorded none, the run ends the block, and is in none, as before
+    const edges = styleBlockEdges ?? {};
+    const unstyled = (entry: ContentItem): boolean => entry.type === 'table' || entry.type === 'para' && !entry.customStyleName
+      && !entry.listMeta && !entry.listContinuation && !!(entry.isCodeBlock || entry.blockquoteLevel || entry.headingLevel || entry.horizontalRule);
+    /** The run of such blocks and empty paragraphs from `at`: where each
+     *  block starts, and the next item after it, as a code block's lines are
+     *  one block, and the index past the run */
+    const unstyledRun = (at: number): { units: Array<{ start: number; end: number }>; end: number } => {
+      const units: Array<{ start: number; end: number }> = [];
+      let open: { start: number; end: number } | undefined;
+      let last: ContentItem | undefined;
+      let k = at;
+      for (; k < docContent.length; k++) {
+        const entry = docContent[k];
+        if (!isStructuralBoundaryItem(entry)) continue;
+        const goesOn = open && entry.type === 'para' && entry.isCodeBlock && last?.type === 'para' && last.isCodeBlock && entry.blockquoteLevel === last.blockquoteLevel;
+        last = entry;
+        if (goesOn) continue;
+        if (open) open.end = k;
+        open = undefined;
+        if (unstyled(entry)) units.push(open = { start: k, end: -1 });
+        else if (!separator(k)) break;
+      }
+      if (open) open.end = k;
+      return { units, end: k };
+    };
+    // The blocks opened at the top level so far, the index past the run of
+    // them planned last, and past the last run of empty paragraphs alone,
+    // which no item in needs reading again, and the fences planned, in
+    // order, each before the item at `at`: a block's opening one, of
+    // `style`, or else a closing one
+    let opened = 0;
+    let planned = -1;
+    let read = -1;
+    const fences: Array<{ at: number; style?: string }> = [];
+    let fenced = 0;
+    /** The fences of the run of such blocks from `at`, if it holds one, as
+     *  export recorded them */
+    const planRun = (at: number): void => {
+      const { units, end } = unstyledRun(at);
+      read = end;
+      if (units.length === 0) return;
+      planned = end;
+      const next = docContent[end];
+      const nextStyle = next?.type === 'para' && !next.listContinuation ? next.customStyleName : undefined;
+      const block = opened - 1;
+      if (activeStyle && nextStyle === activeStyle && edges['csi' + block]) return;
+      // Before the unit at `unit`, past the empty paragraphs after the one
+      // before it, which a fence goes before, as after a paragraph
+      const fence = (unit: number, style?: string) => fences.push({ at: unit === 0 ? at : units[unit - 1].end, ...(style ? { style } : {}) });
+      // Those the block open ends with
+      let taken = 0;
+      if (activeStyle) {
+        taken = Math.min(edges['cst' + block] ?? 0, units.length);
+        fence(taken);
+      }
+      const lead = nextStyle ? Math.min(edges['csl' + (block + 1)] ?? 0, units.length - taken) : 0;
+      if (lead > 0) fence(units.length - lead, nextStyle);
+    };
     /** The item at `i`, after the sentinels and marks that go before it,
      *  which this puts in `out` */
     const place = (i: number): ContentItem => {
@@ -17399,22 +17527,39 @@ export async function convertDocx(
           return item;
         }
       }
+      // A run of blocks Word can't give a style block's style, with the
+      // fences planned in it, and at the item after it
+      if (i >= read && !inItem && (unstyled(item) || separator(i))) planRun(i);
       // A tracked mark before a paragraph a style block starts or ends at is
       // the break that ends the paragraph before it, which the block keeps
       // from joining the text after (see joinTrackedParagraphBreaks): it
       // stays before the sentinels, on an empty paragraph, or on the one it
-      // is on where that holds nothing else, which then doesn't end the style
-      if (item.type === 'para' && item.breakRevision && (styleName ? styleName !== activeStyle : activeStyle)) {
+      // is on where that holds nothing else, which then doesn't end the
+      // style. A block starts or ends at a fence planned here, or past a run
+      // planned, where the paragraph's style isn't the block's
+      const fenceHere = fenced < fences.length && fences[fenced].at <= i;
+      if (item.type === 'para' && item.breakRevision && (fenceHere || i >= planned && (styleName ? styleName !== activeStyle : activeStyle))) {
         const { breakRevision, ...para } = item;
         if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) return item;
         out.push({ type: 'para', breakRevision });
         item = para;
       }
+      for (; fenced < fences.length && fences[fenced].at <= i; fenced++) {
+        const { style } = fences[fenced];
+        if (activeStyle) out.push({ type: 'custom_style_close' });
+        activeStyle = style;
+        if (style) {
+          out.push({ type: 'custom_style_open', styleName: style });
+          opened++;
+        }
+      }
+      if (i < planned) return item;
       if (styleName && styleName !== activeStyle) {
         // Close previous style if open
         if (activeStyle) out.push({ type: 'custom_style_close' });
         // Open new style
         out.push({ type: 'custom_style_open', styleName });
+        opened++;
         activeStyle = styleName;
       } else if (!styleName && activeStyle) {
         // Style run ended

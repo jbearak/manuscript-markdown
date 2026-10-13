@@ -9,7 +9,7 @@ import { parseFrontmatter, serializeFrontmatter, type CustomStyleDef } from './f
 import { convertDocx } from './converter';
 import { styleFence } from './style-fence';
 import { renderWithPlugin } from './test-helpers';
-import { fastestRun } from './test-timing';
+import { fastestRun, fastestRunAsync } from './test-timing';
 
 const twoStyles = '---\nstyles:\n  box:\n    font-style: italic\n  note:\n    font-style: bold\n---\n\n';
 /** Each paragraph's style and text in the document of `docx` */
@@ -934,7 +934,7 @@ describe('Custom Styles — Quotes beside fences', () => {
   });
 
   it.each([
-    ['a style block\'s opening fence', '<!-- style: box -->\n\n> q\n\np1\n\np2\n', '> q\n<!-- style: box -->\n\np1\n\np2\n\n<!-- /style -->\n', ['GitHubBlockquote:q', 'MsCustomBox:p1', 'MsCustomBox:p2']],
+    ['a style block\'s opening fence', '> q\n<!-- style: box -->\n\np1\n\np2\n', '> q\n<!-- style: box -->\n\np1\n\np2\n\n<!-- /style -->\n', ['GitHubBlockquote:q', 'MsCustomBox:p1', 'MsCustomBox:p2']],
     ['a section\'s fence', '> q\n<!-- landscape -->\n\np1\n\np2\n\n<!-- /landscape -->\n', '> q\n<!-- landscape -->\n\np1\n\np2\n\n<!-- /landscape -->\n', ['GitHubBlockquote:q', ':p1', ':p2']],
   ])('keeps the blank line between the paragraphs after a quote and %s right after it', async (_name, md, expected, styles) => {
     // The blank lines after the quote, none, are the fence's, but went to
@@ -1115,6 +1115,151 @@ describe('Custom Styles — Quotes beside fences', () => {
     expect(back).toBe('---\ncallout-labels: false\n---\n\n> [!NOTE]\n>     <!-- c -->\n>\n> q\n');
     expect((await convertDocx((await convertMdToDocx(back)).docx)).markdown).toBe(back);
   });
+});
+
+describe('Custom Styles — Blocks Word can\'t style', () => {
+  // Word gives a style block's style to its paragraphs and list items, but
+  // a heading, a quote, code, a table or a thematic break keeps its own, so
+  // import, which reads a block by its paragraphs' style, wrote such a
+  // block outside it, after its closing fence or before its opening one.
+  // A block of only such blocks still loses its fences, as Word has no
+  // paragraph to count it by (see recording in generateDocumentXml)
+  /** Import's Markdown for the export of `md`, after the frontmatter */
+  const trip = async (md: string) => (await convertDocx((await convertMdToDocx(twoStyles + md)).docx)).markdown.slice(twoStyles.length);
+  /** What the first style block of box holds in `md` */
+  const inside = (md: string) => {
+    const start = md.indexOf('<!-- style: box -->\n');
+    const end = md.indexOf('<!-- /style -->', start);
+    return start === -1 || end === -1 ? undefined : md.slice(start, end);
+  };
+
+  it.each([
+    ['fenced code', '```\nk\n```', 'k'],
+    ['indented code', '    k', 'k'],
+    ['a table', '| k |\n|---|\n| 1 |', '| k |'],
+    ['an HTML table', '<table><tr><td>k</td></tr></table>', 'k'],
+    ['a quote', '> k', '> k'],
+    ['an alert', '> [!NOTE]\n> k', '> k'],
+    ['a heading', '## k', '## k'],
+    ['a thematic break', '---', '\n---\n'],
+    ['display math', '$' + '$\nk\n$' + '$', 'k'],
+    ['an HTML block', '<div>k</div>', '<div>k</div>'],
+    ['a list', '- k', '- k'],
+  ])('keeps %s in the block, between its paragraphs, or at its start or end', async (_name, block, shown) => {
+    for (const md of [
+      '<!-- style: box -->\n\np\n\n' + block + '\n\nq\n\n<!-- /style -->\n',
+      'p\n\n<!-- style: box -->\n\n' + block + '\n\nq\n\n<!-- /style -->\n',
+      '<!-- style: box -->\n\np\n\n' + block + '\n\n<!-- /style -->\n\nq\n',
+    ]) {
+      const back = await trip(md);
+      expect([md, inside(back)?.includes(shown)]).toEqual([md, true]);
+      // And the paragraphs where they were
+      expect([md, inside(back)?.includes('\np\n')]).toEqual([md, inside(md)!.includes('\np\n')]);
+      expect([md, inside(back)?.includes('\nq\n')]).toEqual([md, inside(md)!.includes('\nq\n')]);
+      expect(await trip(back)).toBe(back);
+    }
+  });
+
+  it.each([
+    ['a heading before a block that starts with one', '# s\n\n<!-- style: box -->\n\n## t\n\np\n\n<!-- /style -->\n'],
+    ['a quote after a block that ends with a heading', '<!-- style: box -->\n\np\n\n# h\n\n<!-- /style -->\n\n> o\n\nz\n'],
+    ['code between two blocks of the same style that end and start with such blocks', '<!-- style: box -->\n\np\n\n```\na\n```\n\n<!-- /style -->\n\n```\nb\n```\n\n> o\n\n<!-- style: box -->\n\n> r\n\n# h\n\nq\n\n<!-- /style -->\n'],
+    ['two blocks of the same style, one that ends and one that starts with such a block', '<!-- style: box -->\n\np\n\n```\na\n```\n\n<!-- /style -->\n\n<!-- style: box -->\n\n> r\n\nq\n\n<!-- /style -->\n'],
+    ['quotes between blocks of either style', '<!-- style: box -->\n\np\n\n<!-- /style -->\n\n> a\n\n<!-- style: note -->\n\nn\n\n<!-- /style -->\n\n> b\n\n<!-- style: box -->\n\n# h\n\nq\n\n<!-- /style -->\n'],
+    ['a block with such a block between its paragraphs and at its end, before another of its style', '<!-- style: box -->\n\np\n\n# h\n\nq\n\n```\na\n```\n\n<!-- /style -->\n\n<!-- style: note -->\n\nn\n\n<!-- /style -->\n\n<!-- style: box -->\n\nr\n\n<!-- /style -->\n'],
+    ['code after a block that ends with code', '<!-- style: box -->\n\np\n\n```\na\n```\n\n<!-- /style -->\n\n```\nb\n```\n'],
+    ['code before a block that starts with code', '```\na\n```\n\n<!-- style: box -->\n\n```\nb\n```\n\np\n\n<!-- /style -->\n'],
+  ])('keeps the blocks in and out of style blocks as they were, with %s', async (_name, md) => {
+    // Export records how many such blocks each style block starts and ends
+    // with, and those between its paragraphs, so import keeps those outside
+    // out
+    const back = await trip(md);
+    expect(back).toBe(md);
+    expect(await trip(back)).toBe(back);
+  });
+
+  it.each([
+    ['ends with code, with no closing fence', '<!-- style: box -->\n\np\n\n```\na\n```\n', '<!-- style: box -->\n\np\n\n```\na\n```\n\n<!-- /style -->\n'],
+    ['is opened twice, with no fence between, and starts with code', '<!-- style: box -->\n\n<!-- style: box -->\n\n```\na\n```\n\n- i\n', '<!-- style: box -->\n\n```\na\n```\n\n- i\n\n<!-- /style -->\n'],
+  ])('keeps code in a block that %s', async (_name, md, expected) => {
+    // Import closes the first at the end, as export does. The second's
+    // first opening fence starts a block Word has nothing of, which neither
+    // counts among those it opens
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
+  it.each([
+    ['code after a block', '<!-- style: box -->\n\nx{++\n\n++}\n\n<!-- /style -->\n\n```\ncode\n```\n'],
+    ['a heading after a block', '<!-- style: box -->\n\nx{++\n\n++}\n\n<!-- /style -->\n\n# H\n'],
+    ['code a block starts with', 'x{++\n\n++}\n\n<!-- style: box -->\n\n```\ncode\n```\n\ny\n\n<!-- /style -->\n'],
+    ['a quote after a block, as a deleted mark', '<!-- style: box -->\n\nx{--\n\n--}\n\n<!-- /style -->\n\n> q\n'],
+  ])('keeps a tracked paragraph mark before %s', async (_name, md) => {
+    // Word has the mark on the paragraph after it, where import writes a
+    // fence it places by the records, which it wrote before the mark, and
+    // lost the mark
+    const back = await trip(md);
+    expect(back).toBe(md);
+    expect(await trip(back)).toBe(back);
+  });
+
+  /** The style block the line of `text`, alone or after a heading's or a
+   *  quote's marker, is in, in `md`, or '' for none */
+  const blockOf = (md: string, text: string): string => {
+    let open = '';
+    for (const line of md.split('\n')) {
+      const fence = /^<!-- (?:style: (\w+)|\/style) -->$/.exec(line);
+      if (fence) open = fence[1] ?? '';
+      else if (line === text || line.endsWith(' ' + text)) return open;
+    }
+    return 'missing';
+  };
+  const labelless = twoStyles.replace('---\n', '---\ncallout-labels: false\n');
+
+  it.each([
+    ['a block with such a block between its paragraphs, which ends where another of its style starts after only such blocks', twoStyles,
+      '<!-- style: box -->\n\np1\n\n## h1\n\np2\n\n<!-- /style -->\n\n## h2\n\n<!-- style: box -->\n\np3\n\n<!-- /style -->\n', ['h1', 'h2']],
+    ['a block of only such blocks', twoStyles,
+      '<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- style: note -->\n\n```\nk1\n```\n\n<!-- /style -->\n\n<!-- style: box -->\n\np2\n\n<!-- /style -->\n\n'
+      + '<!-- style: note -->\n\np3\n\n## h1\n\n<!-- /style -->\n\n## h2\n\n<!-- style: box -->\n\np4\n\n## h3\n\n## h4\n\n<!-- /style -->\n\n## h5\n', ['k1', 'h1', 'h2', 'h3', 'h4', 'h5']],
+    ['an alert whose lead export leaves out, with its label', labelless, '<!-- style: box -->\n\np1\n\n> [!NOTE]\n>\n> b1\n\n<!-- /style -->\n\n## h1\n', ['b1', 'h1']],
+    ['a section\'s fence in a block', twoStyles,
+      '<!-- style: box -->\n\np1\n\n<!-- landscape -->\n\np2\n\n<!-- /landscape -->\n\np3\n\n<!-- /style -->\n\n<!-- style: note -->\n\np4\n\n## h1\n\n<!-- /style -->\n\n## h2\n\n'
+      + '<!-- style: box -->\n\np5\n\n<!-- /style -->\n\np6\n\n<!-- style: note -->\n\np7\n\n## h3\n\n## h4\n\n<!-- /style -->\n\np8\n', ['h1', 'h2', 'h3', 'h4']],
+    ['a table in a section of its own in a block', twoStyles,
+      '<!-- style: box -->\n\np1\n\n<!-- table-orientation: landscape -->\n\n| a |\n|---|\n| 1 |\n\np2\n\n<!-- /style -->\n\n## h1\n\n<!-- style: note -->\n\np3\n\n## h2\n\n<!-- /style -->\n', ['h1', 'h2']],
+  ])('places such blocks outside any block, as before any record, after %s', async (_name, frontmatter, md, outside) => {
+    // Import counts the blocks from there apart from export, which records
+    // nothing more, so import reads such blocks as ending any block, as
+    // before. It read one block's records for another, and wrote a heading
+    // or code outside any block in one, or closed a block at a heading
+    // between its paragraphs and took the one after it in. Export writes a
+    // section break around a table in a section of its own, as at a
+    // section's fence, where import closes the block and opens another
+    const back = (await convertDocx((await convertMdToDocx(frontmatter + md)).docx)).markdown;
+    expect([back, outside.map(text => blockOf(back, text))]).toEqual([back, outside.map(() => '')]);
+    expect((await convertDocx((await convertMdToDocx(back)).docx)).markdown).toBe(back);
+  });
+
+  it('imports many style blocks with no blank line around their fences in linear time', async () => {
+    // Four times as many take about four times as long, not sixteen. The
+    // check for an HTML block before each fence read the output back to its
+    // start, where no blank line parts the blocks
+    const md = (n: number) => '<!-- style: box -->\np\n<!-- /style -->\n<!-- style: note -->\nq\n<!-- /style -->\n'.repeat(n);
+    const [small, large] = await Promise.all([md(250), md(1000)].map(async text => (await convertMdToDocx(twoStyles + text)).docx));
+    expect(await fastestRunAsync(() => convertDocx(large)) / await fastestRunAsync(() => convertDocx(small))).toBeLessThan(8);
+  }, 30000);
+
+  it.each([
+    ['in a block', (n: number) => '<!-- style: box -->\n\np\n\n' + '```\na\n```\n\n> q\n\n'.repeat(n) + 'q\n\n<!-- /style -->\n'],
+    ['in blocks and out', (n: number) => '<!-- style: box -->\n\np\n\n```\na\n```\n\n<!-- /style -->\n\n> q\n\n'.repeat(n)],
+  ])('imports many such blocks %s in linear time', async (_name, md) => {
+    // Four times as many take about four times as long, not sixteen: import
+    // reads each run of them once
+    const [small, large] = await Promise.all([md(500), md(2000)].map(async text => (await convertMdToDocx(twoStyles + text)).docx));
+    expect(await fastestRunAsync(() => convertDocx(large)) / await fastestRunAsync(() => convertDocx(small))).toBeLessThan(8);
+  }, 60000);
 });
 
 // ============================================================
