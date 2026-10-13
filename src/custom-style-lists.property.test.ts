@@ -271,11 +271,18 @@ describe('Style blocks around lists and in their items', () => {
         // after the list that a blank line alone parts, and writes two
         // blank lines after the fence it puts in there, on main too, which
         // is no block's an item drops. Where such a block parts the quotes,
-        // it writes one. So the blank lines after a closing fence import put
-        // in read as one
+        // it writes one. So the blank lines after a closing fence right after
+        // a quote in an item, blank lines aside, read as one, where import
+        // put one in: where it writes more closing fences, or more right
+        // after such a quote. That's one it moved there where the Markdown
+        // closes the block after the quote after the list, as the quote has
+        // no style of the block's in Word. The blank lines after each other
+        // fence count
         const noneBack = (await convertDocx(none.docx)).markdown;
         const closings = (text: string) => (text.match(/^<!-- \/style -->$/gm) ?? []).length;
-        const oneAfterFences = (text: string) => closings(noneBack) > closings(without) ? text.replace(/^(<!-- \/style -->\n)\n+/gm, (_blank, fence: string) => fence + '\n') : text;
+        const afterItemQuotes = (text: string) => (text.match(/^ +>.*\n+<!-- \/style -->$/gm) ?? []).length;
+        const putIn = closings(noneBack) > closings(without) || afterItemQuotes(noneBack) > afterItemQuotes(without);
+        const oneAfterFences = (text: string) => putIn ? text.replace(/^( +>.*\n+<!-- \/style -->\n)\n+/gm, (_blank, fence: string) => fence + '\n') : text;
         expect([md, without, oneAfterFences(noneBack)]).toEqual([md, without, oneAfterFences(back)]);
       }
     }), {
@@ -290,6 +297,18 @@ describe('Style blocks around lists and in their items', () => {
         [[{ kind: 'open', style: 'box', tight: false }, { kind: 'list', list: { ordered: false, items: [{ children: [
           { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }, { kind: 'dropped', html: 'directive', tight: undefined }], marker: { kind: 'rule' } }] } },
         { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }]],
+        // The same, parted by a fenced code block the item drops, in a style
+        // block that closes after the quote after the list, whose fence
+        // import moves to before that quote
+        [[{ kind: 'open', style: 'box', tight: false }, { kind: 'list', list: { ordered: false, items: [{ children: [
+          { kind: 'quote', repeated: false }, { kind: 'dropped', html: false, tight: undefined }] }] } },
+        { kind: 'quote', repeated: false }, { kind: 'close', tight: false }]],
+        // Quotes of lists parted by a directive the item drops, where import
+        // writes the fence it puts in right after the item's quote, with no
+        // blank line between them
+        [[{ kind: 'open', style: 'box', tight: false }, { kind: 'list', list: { ordered: false, items: [{ children: [
+          { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }, { kind: 'dropped', html: 'directive', tight: undefined }] }] } },
+        { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }, { kind: 'inline', style: 'box' }]],
       ],
     });
   }, 60000);
