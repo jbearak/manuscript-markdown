@@ -13,7 +13,7 @@ import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, n
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import { paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
-import { imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlacesOf, runContentShows, styleListMeta, ZoteroBiblData, zoteroStyleFullId } from './converter';
+import { imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlacesOf, runContentShows, styleListMeta, wordIgnoresStyle, xmlHalfPoints, ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
@@ -21,7 +21,7 @@ import { preprocessGridTables, preprocessGridTablesWithSourceMap, gridColumnAlig
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { findStyleElement } from './style-element';
-import { xmlAttribute, xmlStartTag } from './xml-elements';
+import { replaceXmlElements, xmlAttribute, xmlElement, xmlStartTag } from './xml-elements';
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
@@ -5556,8 +5556,9 @@ function templateStyleRegex(id: string, ids: Map<string, string>, flags = ''): R
  */
 function setRecordsAside(xml: string): { xml: string; restore: (changed: string) => string } {
   const records: string[] = [];
-  const aside = xml.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, (record, tag: string) =>
-    '<w:' + tag + ' record="' + (records.push(record) - 1) + '"/>');
+  // Each read as an XML parser reads it (see replaceXmlElements)
+  const aside = replaceXmlElements(xml, ['w:rPrChange', 'w:pPrChange'], (record, name) =>
+    '<' + name + ' record="' + (records.push(record) - 1) + '"/>');
   return { xml: aside, restore: changed => changed.replace(/<w:(?:rPrChange|pPrChange) record="(\d+)"\/>/g, (_match, index: string) => records[Number(index)]) };
 }
 
@@ -5577,11 +5578,108 @@ function extractNormalStyleSizeHp(stylesXml: string, ids = templateStyleIds(styl
   return szMatch ? parseInt(szMatch[1], 10) : undefined;
 }
 
+/**
+ * `stylesXml` without the w:sz or w:szCs of each of `styleIds` that its base
+ * gives it already, which Word strips (dirty-flag invariant #5), as for a
+ * Heading 4 at Normal's size. A style's base is the nearest along its
+ * w:basedOn that sets the size, or else the document defaults, or else
+ * Word's 10pt, without a tracked change's record of what one was
+ * (w:rPrChange), which Word doesn't show. Each style is found as import
+ * finds it (see findStyleElement), by `ids`, the template's IDs for the
+ * built-in styles (see templateStyleIds). A style based on none, or on one
+ * whose w:basedOn comes back around, is left as it is, and so is one whose
+ * w:basedOn reaches a style Word ignores, its properties and base and all,
+ * as a paragraph style NoList (see wordIgnoresStyle). Leaving a size out
+ * changes no style's size, so the order of `styleIds` doesn't matter.
+ */
+function withoutInheritedSizes(stylesXml: string, styleIds: string[], ids: Map<string, string>): string {
+  // Each element read as an XML parser reads it (see xmlElement), as import
+  // reads them, and as Word shows it, without a tracked change's record of
+  // what it was (see setRecordsAside): a style's own rPr, not one in its
+  // pPr, its base, and its sizes, in whole half-points, as import reads
+  // them (see xmlHalfPoints)
+  const ownRPr = (block: string) => xmlElement(block, 'w:rPr', xmlElement(block, 'w:pPr')?.end ?? 0);
+  const basedOn = (block: string) => { const base = xmlStartTag(block, 'w:basedOn'); return base && xmlAttribute(base.tag, 'w:val'); };
+  const sizeIn = (rPr: string, tag: string) => {
+    const size = xmlStartTag(rPr, tag);
+    return xmlHalfPoints(size && xmlAttribute(size.tag, 'w:val'));
+  };
+  const live = (part: string) => setRecordsAside(part).xml;
+  const docDefaults = live(xmlElement(stylesXml, 'w:docDefaults')?.content ?? '');
+  const defaults = xmlElement(xmlElement(docDefaults, 'w:rPrDefault')?.content ?? '', 'w:rPr')?.content ?? '';
+  let xml = stylesXml;
+  // The styles along a style's w:basedOn in `xml`, nearest first, or
+  // undefined where they come back around, each known by where it is, or
+  // reach one Word ignores
+  const bases = (style: { at: number; element: string }) => {
+    const chain: string[] = [];
+    const seen = new Set([style.at]);
+    for (let id = basedOn(style.element); id !== undefined;) {
+      const base = findStyleElement(xml, id, ids);
+      if (base === undefined) break;
+      if (seen.has(base.at) || wordIgnoresStyle(base.element)) return undefined;
+      seen.add(base.at);
+      chain.push(live(base.element));
+      id = basedOn(base.element);
+    }
+    return chain;
+  };
+  const inherited = (chain: string[], tag: string) => {
+    for (const base of chain) {
+      const size = sizeIn(ownRPr(base)?.content ?? '', tag);
+      if (size !== undefined) return size;
+    }
+    return sizeIn(defaults, tag) ?? 20;
+  };
+  for (const styleId of styleIds) {
+    const style = findStyleElement(xml, styleId, ids);
+    if (style === undefined || basedOn(style.element) === undefined) continue;
+    const chain = bases(style);
+    if (chain === undefined) continue;
+    const records = setRecordsAside(style.element);
+    const block = records.xml;
+    const rPr = ownRPr(block);
+    if (rPr === undefined) continue;
+    let content = rPr.content;
+    for (const tag of ['w:sz', 'w:szCs']) {
+      const size = xmlElement(content, tag);
+      if (size !== undefined && sizeIn(content, tag) === inherited(chain, tag)) content = content.slice(0, size.start) + content.slice(size.end);
+    }
+    if (content === rPr.content) continue;
+    // An rPr left empty goes too, and one with what's left keeps its tags
+    const written = /^\s*$/.test(content) ? '' : rPr.tag + content + block.slice(rPr.start + rPr.tag.length + rPr.content.length, rPr.end);
+    xml = xml.slice(0, style.at) + records.restore(block.slice(0, rPr.start) + written + block.slice(rPr.end)) + xml.slice(style.at + style.element.length);
+  }
+  return xml;
+}
+
+/**
+ * A template's styles with the font overrides applied (see
+ * templateWithFontOverrides), and each size a heading or the title is
+ * given left out where its base gives the same (see withoutInheritedSizes),
+ * for styles written as they are. Export, which adds styles after, as a
+ * Bibliography a heading may be based on, leaves those sizes out of the
+ * styles it writes, with all it adds.
+ */
 export function applyFontOverridesToTemplate(
   stylesXmlBytes: Uint8Array,
   overrides: FontOverrides,
   customStyles?: Record<string, import('./frontmatter').CustomStyleDef>
 ): string {
+  const { xml, sizedStyleIds, ids } = templateWithFontOverrides(stylesXmlBytes, overrides, customStyles);
+  return withoutInheritedSizes(xml, sizedStyleIds, ids);
+}
+
+/**
+ * A template's styles with the font overrides applied, the headings and
+ * title given a size, whose size goes where their base gives it, and the
+ * template's IDs for the built-in styles (see templateStyleIds).
+ */
+function templateWithFontOverrides(
+  stylesXmlBytes: Uint8Array,
+  overrides: FontOverrides,
+  customStyles?: Record<string, import('./frontmatter').CustomStyleDef>
+): { xml: string; sizedStyleIds: string[]; ids: Map<string, string> } {
   // In the encoding they declare, as UTF-16, and as export writes them
   let xml = asUtf8(decodeXml(stylesXmlBytes));
   // The template's IDs for the built-in styles, which its styles are found by
@@ -5617,6 +5715,8 @@ export function applyFontOverridesToTemplate(
 
   // Collect all style IDs we want to modify
   const allTargetIds = new Set([...BODY_STYLE_IDS, ...CODE_STYLE_IDS, ...TABLE_STYLE_IDS]);
+  // The headings and title given a size, which goes where their base gives it
+  const sizedStyleIds: string[] = [];
 
   // The template's styles as they come, for what a style inherits, each
   // found as import finds it (see findStyleElement), by the template's ID for
@@ -5740,6 +5840,7 @@ export function applyFontOverridesToTemplate(
     // but not one a tracked change records, which needs it
     innerContent = innerContent.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)|<w:[pr]Pr\b[^>]*\/>/g,
       (element, change?: string) => change ? element : '');
+    if (sizeHp !== undefined && (isHeading || isTitle)) sizedStyleIds.push(styleId);
 
     // Build the replacement fragments
     const rFontsEl = font === undefined ? undefined
@@ -5892,7 +5993,7 @@ export function applyFontOverridesToTemplate(
     }
   }
 
-  return xml;
+  return { xml, sizedStyleIds, ids };
 }
 
 /** Map from alert style ID → GfmAlertType for template color patching. */
@@ -6168,6 +6269,9 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     ? szPair(overrides.bodySizeHp)
     : szPair(22);
   const normalRpr = '<w:rPr>' + bodyFontStr + normalSz + '</w:rPr>\n';
+  // A heading's or the title's size, but not one it takes from Normal anyway,
+  // which is redundant and Word strips — see dirty-flag invariant #5
+  const sizeOverNormal = (hp: number | null | undefined) => hp && hp !== (overrides?.bodySizeHp || 22) ? szPair(hp) : '';
 
   // Heading helper: per-heading font/style/size overrides with defaults.
   // Pass null for defaultHp when the size matches the base style (Normal) to
@@ -6176,9 +6280,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     const font = overrides?.headingFonts?.get(styleId)
       ? rFonts(overrides.headingFonts.get(styleId)!)
       : bodyFontStr;
-    const sz = overrides?.headingSizesHp?.has(styleId)
-      ? szPair(overrides.headingSizesHp.get(styleId)!)
-      : (defaultHp !== null ? szPair(defaultHp) : '');
+    const sz = sizeOverNormal(overrides?.headingSizesHp?.get(styleId) ?? defaultHp);
     const style = overrides?.headingStyles?.get(styleId);
     let styleStr: string;
     if (style === 'normal') {
@@ -6236,11 +6338,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
   const titleFont = overrides?.titleFonts?.[0]
     ? rFonts(overrides.titleFonts[0])
     : bodyFontStr;
-  const titleSz = overrides?.titleSizesHp?.[0]
-    ? szPair(overrides.titleSizesHp[0])
-    : overrides?.headingSizesHp?.has('Title')
-      ? szPair(overrides.headingSizesHp.get('Title')!)
-      : szPair(56);
+  const titleSz = sizeOverNormal(overrides?.titleSizesHp?.[0] || overrides?.headingSizesHp?.get('Title') || 56);
   let titleStyleStr = '';
   const titleStyle0 = overrides?.titleStyles?.[0];
   if (titleStyle0 === 'normal') {
@@ -6252,7 +6350,8 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     if (titleStyle0.includes('smallcaps')) titleStyleStr += '<w:smallCaps/>';
     else if (titleStyle0.includes('allcaps')) titleStyleStr += '<w:caps/>';
   }
-  const titleRpr = '<w:rPr>' + orderRPr(titleStyleStr + titleFont + titleSz) + '</w:rPr>\n';
+  const titleRprInner = orderRPr(titleStyleStr + titleFont + titleSz);
+  const titleRpr = titleRprInner ? '<w:rPr>' + titleRprInner + '</w:rPr>\n' : '';
 
   // FootnoteText: body font + size from heading map or default 20hp
   const footnoteSz = overrides?.headingSizesHp?.has('FootnoteText')
@@ -10851,15 +10950,20 @@ export async function convertMdToDocx(
 
   // Use template styles if available, otherwise default; apply font/color overrides when present
   if (templateParts?.has('word/styles.xml') && fontOverrides) {
-    let mutated = applyFontOverridesToTemplate(
+    const withFonts = templateWithFontOverrides(
       templateParts.get('word/styles.xml')!,
       fontOverrides,
       frontmatter.styles
     );
-    mutated = applyLineSpacingToTemplate(mutated, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
+    let mutated = applyLineSpacingToTemplate(withFonts.xml, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
     mutated = applyAlertColorsToTemplate(mutated, effectiveColors);
-    // The styles export adds to the template's are based on its Normal
-    zip.file('word/styles.xml', withTemplateStyleIds(ensureManuscriptStyles(mutated), templateIds));
+    // The styles export adds to the template's are based on its Normal. A
+    // size given a heading or the title goes where its base gives the same,
+    // last, against the styles as Word reads them, with all export adds, as
+    // a custom style the frontmatter defines or the Bibliography, which a
+    // heading may be based on (dirty-flag invariant #5)
+    mutated = withoutInheritedSizes(ensureManuscriptStyles(mutated), withFonts.sizedStyleIds, withFonts.ids);
+    zip.file('word/styles.xml', withTemplateStyleIds(mutated, templateIds));
   } else if (templateParts?.has('word/styles.xml')) {
     let decoded = asUtf8(decodeXml(templateParts.get('word/styles.xml')!));
     decoded = applyLineSpacingToTemplate(decoded, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
