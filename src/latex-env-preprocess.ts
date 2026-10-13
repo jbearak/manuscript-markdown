@@ -12,6 +12,7 @@
 
 import { computeCodeRegions } from './code-regions';
 import { findMatchingClose } from './critic-markup';
+import { isEscapedAt } from './math-delimiters';
 
 // All environments recognized by the latexToOmml parser as display math.
 export const DISPLAY_MATH_ENVIRONMENTS = new Set([
@@ -92,15 +93,19 @@ export function computeInertZones(text: string): Zone[] {
 	}
 
 	// 4. Existing $$ ... $$ blocks
+	// Not at a dollar sign a backslash escapes, which opens or closes no
+	// math, as the math rule reads it (see findDollarMathClose in
+	// math-delimiters.ts)
 	{
+		const delimiterAt = (at: number) => text[at] === '$' && text[at + 1] === '$' && !isEscapedAt(text, at);
 		let pos = 0;
 		while (pos < text.length - 1) {
-			if (text[pos] === '$' && text[pos + 1] === '$') {
+			if (delimiterAt(pos)) {
 				const start = pos;
 				pos += 2;
 				// Find closing $$
 				while (pos < text.length - 1) {
-					if (text[pos] === '$' && text[pos + 1] === '$') {
+					if (delimiterAt(pos)) {
 						pos += 2;
 						break;
 					}
