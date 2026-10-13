@@ -57,6 +57,8 @@ Produces `paper.docx`. Automatically loads `paper.bib` if present.
 | `--blockquote-style <style>` | MD→DOCX | Blockquote paragraph style: `Quote`, `IntenseQuote` | `Quote` |
 | `--csl-cache-dir <path>` | MD→DOCX | CSL style cache directory | `~/.manuscript-markdown/csl-cache` |
 
+With `--force`, DOCX→MD keeps the entries of the `.bib` file it overwrites, and the fields of an entry that the converted entry lacks, each written as BibTeX reads it, wherever it was in the entry: a macro, as `month = jan`, stays a macro, and a concatenation, as `"a" # b`, stays whole. The file's `@string` declarations stay too, as they were written, each where it was among the entries, so a field copied with a macro, as `note = extra`, reads as it did.
+
 ## Examples
 
 ```sh

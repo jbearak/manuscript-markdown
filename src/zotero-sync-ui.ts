@@ -233,7 +233,7 @@ const CONFLICT_PROSE: Readonly<Record<ZoteroLinkConflictReason, string>> = {
   'invalid-zotero-uri': 'zotero-uri is not a Zotero identity URI',
   'zotero-key-uri-mismatch': 'zotero-key and zotero-uri name different items',
   'unknown-zotero-key': 'no item in the selected library has this zotero-key',
-  'entry-not-editable': 'the entry’s boundaries could not be determined safely',
+  'entry-not-editable': 'the entry’s boundaries or fields could not be read safely',
   'ambiguous-comment': 'a % outside any field makes the entry’s extent ambiguous',
   'concatenated-field': 'an identifier field uses # concatenation',
   'duplicate-field': 'an identifier field appears twice with different values',

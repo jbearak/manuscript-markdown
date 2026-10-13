@@ -1089,6 +1089,16 @@ describe('entries whose own text is ambiguous', () => {
     expect(plan.updatedText).toBe(bib);
   });
 
+  it('refuses an entry whose quoted value holds an escaped brace', () => {
+    // BibTeX counts `\{` as a brace, so the note's `"` after b is in a group
+    // and the note reads on to y's last `"`: the parser has no DOI field,
+    // where a reader that skips `\{` has the note, a DOI and y.
+    const bib = '@article{k1,\n  note = "a \\{ b",\n  doi = {10.1000/abc},\n  y = "c \\} d"\n}\n';
+    const plan = createZoteroLinkPlan(bib, matching);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('entry-not-editable');
+    expect(plan.updatedText).toBe(bib);
+  });
+
   it('refuses a quoted value holding an unmatched closing brace', () => {
     // BibTeX itself reports unbalanced braces here, so the value has no end
     // every reader agrees on.
