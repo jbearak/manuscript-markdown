@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
-import { wrapBareLatexEnvironments, DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
+import { wrapBareLatexEnvironments, wrapBareLatexEnvironmentsWithLines, DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
+import { fastestRun } from './test-timing';
 
 describe('wrapBareLatexEnvironments', () => {
 	test('wraps a bare equation environment', () => {
@@ -154,4 +155,27 @@ describe('wrapBareLatexEnvironments', () => {
 		const input = '$$\\begin{equation}\nx = 1\n\\end{equation}$$';
 		expect(wrapBareLatexEnvironments(input)).toBe(input);
 	});
+});
+
+describe('wrapBareLatexEnvironments in time linear in the text', () => {
+	// Each environment was checked against the zones to leave alone from the
+	// first, searched the text to its end for its \end where none was, and
+	// built the text again with its block wrapped, and each opener of a
+	// comment or a CriticMarkup span without its end searched the text to
+	// its end, so a text of many took time in the square of their number
+	test.each([
+		['environments between code spans', 'a `c` b\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
+		['environments without their ends', '\\begin{equation}\nx\n\n', 0],
+		['CriticMarkup openers without their closers', 'p {++ a\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
+		['comments without their ends', 'p <!-- a\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
+	])('wraps a text of %s', (_name, unit, wrapped) => {
+		expect(wrapBareLatexEnvironments(unit.repeat(2)).split('$' + '$').length - 1).toBe(wrapped * 2);
+		const time = (n: number) => {
+			const text = unit.repeat(n);
+			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text));
+		};
+		time(4000);
+		const small = time(4000);
+		expect(time(16000) / small).toBeLessThan(8);
+	}, 60000);
 });
