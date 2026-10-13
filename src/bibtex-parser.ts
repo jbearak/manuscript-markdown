@@ -830,10 +830,26 @@ function isAtLineStart(input: string, pos: number): boolean {
 /** Parse BibTeX input, returning both the structured entries and raw entry
  *  texts in a single pass over the entry boundaries.  parseBibtex delegates
  *  here; mergeBibtex uses both the parsed and raw maps directly. */
-// A field's name and the = after it, and a bare value, as a number
-const FIELD_NAME_AT = /\w+(?:-\w+)*/y;
+/** A character BibTeX reads in an identifier, as an entry's type, a field's
+ *  name or a macro's, as bibtex.web's id_class has it: any but the ASCII
+ *  control characters, the space, ", #, %, ', (, ), the comma, =, { and },
+ *  so a letter of any language, a digit, and :, +, ., /, @, \ and the like
+ *  too. An identifier doesn't start with a digit (scan_identifier). Every
+ *  reader of a .bib file's fields reads names and bare values so: the
+ *  parser, the body walk Zotero link edits by (see scanBibtexEntryBody),
+ *  extractRawField and mergeBibtex, which copy what the parser reads, and
+ *  the indentation an added field takes (see detectBibtexFieldIndent).
+ *  A space other than ASCII's, as a no-break space, which BibTeX reads in
+ *  an identifier, is a space to the parser, as \s is to its patterns, so
+ *  it ends one; the body walk refuses an entry that has one between its
+ *  fields, which BibTeX reads otherwise. */
+export const BIBTEX_IDENTIFIER_CHAR = '[^\\s\\x00-\\x1f"#%\'(),={}]';
+// A run of them, read whole, a field's name where it doesn't start with a
+// digit, and the = after it; and a bare value, a number, its digits, as
+// BibTeX scans one, or a macro's name
+const IDENTIFIER_RUN_AT = new RegExp(BIBTEX_IDENTIFIER_CHAR + '+', 'y');
 const FIELD_EQUALS_AT = /\s*=\s*/y;
-const BARE_VALUE_AT = /\w+/y;
+const BARE_VALUE_AT = new RegExp('[0-9]+|' + BIBTEX_IDENTIFIER_CHAR + '+', 'y');
 
 /**
  * An entry body's fields, as `name = {value}`, `name = "value"` or
@@ -890,14 +906,14 @@ function readBibtexFieldRanges(body: string): BibtexFieldRange[] {
   };
   let i = 0;
   while (i < body.length) {
-    FIELD_NAME_AT.lastIndex = i;
-    const name = FIELD_NAME_AT.exec(body)?.[0];
+    // Each run of an identifier's characters read whole, from its start, as
+    // BibTeX reads a name, so :doi is a name, not doi
+    IDENTIFIER_RUN_AT.lastIndex = i;
+    const name = IDENTIFIER_RUN_AT.exec(body)?.[0];
     if (!name) {
       i++;
       continue;
     }
-    // A name read from further in it would end where it does, and have the
-    // same = and value after it, or none
     const nameEnd = i + name.length;
     FIELD_EQUALS_AT.lastIndex = nameEnd;
     const equals = FIELD_EQUALS_AT.exec(body);
@@ -923,8 +939,15 @@ function readBibtexFieldRanges(body: string): BibtexFieldRange[] {
       parts.push(body.slice(next, nextEnd + 1));
       last = nextEnd;
     }
-    fields.push({ name, value, braced: body[start] === '{', nameStart: i, end, parts });
+    // A run that starts with a digit is no name, as BibTeX reads none, but
+    // its value is read past all the same, so nothing in it reads as a field
+    if (!/[0-9]/.test(name[0])) fields.push({ name, value, braced: body[start] === '{', nameStart: i, end, parts });
     i = last + 1;
+    // The rest of the run a number starts, as title in 2020title=x, or .1/a
+    // in 10.1/a, which BibTeX reads as an error, and no name in, as no
+    // reader that reads a run whole does
+    IDENTIFIER_RUN_AT.lastIndex = i;
+    if (/[0-9]/.test(body[last])) i += IDENTIFIER_RUN_AT.exec(body)?.[0].length ?? 0;
   }
   return fields;
 }
@@ -1226,12 +1249,17 @@ const ENTRY_HEADER_RE = /^@(\w+)\s*[{(]/;
  *  Defined by exclusion, and deliberately so.  A caller matches on these names
  *  to decide whether an entry carries an identifier, and every character
  *  wrongly left out of a name splits it — reading `:doi` as `doi` invents a
- *  DOI field the file does not have.  The excluded set is exactly what ends a
- *  name: whitespace, the `=` that follows it, the `,` between fields, the
- *  value delimiters, and the `#`/`%` the surrounding walk must still see. */
-const NAME_CHAR_RE = /[^\s=,{}()"#%]/;
+ *  DOI field the file does not have.  The characters are BibTeX's, and the
+ *  parser's (see BIBTEX_IDENTIFIER_CHAR), so the walk and the parser read
+ *  the same names; what ends one includes whitespace, the `=` that follows
+ *  it, the `,` between fields, the value delimiters, and the `#`/`%` the
+ *  surrounding walk must still see. */
+const NAME_CHAR_RE = new RegExp(BIBTEX_IDENTIFIER_CHAR);
 const NAME_START_RE = NAME_CHAR_RE;
-const SPACE_RE = /\s/;
+// The spaces BibTeX reads between the parts of an entry, and the line ends
+// it reads as one; any other, as a no-break space, it reads in a name or a
+// macro's, where the parser reads a space, so the walk refuses it
+const SPACE_RE = /[\t\n\r ]/;
 
 /** Walk one entry's body, reporting what sits at the entry's own lexical level.
  *
@@ -1385,24 +1413,47 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     return bareEnd;
   };
 
+  // Whether a value, or the operand of a concatenation, ended last, which
+  // BibTeX reads only a `,`, a `#` or the entry's end after, and whether a
+  // `#` came last, which an operand comes after; and after a comma, a field
+  // or the entry's end: anything else, a `name =` with no value too, is text
+  // BibTeX reads as an error, after which it reads none of the entry, where
+  // the parser reads on, so the entry isn't edited. Once a `%` is read, the
+  // entry is refused for it (see hasTopLevelComment), which other readers
+  // read as a comment, so the text after it isn't held to this.
+  let afterValue = false;
+  let afterHash = false;
+  const misread = (): boolean => !hasTopLevelComment;
+
   // Every value is consumed whole by `readValue`, so the loop itself only ever
   // stands at the entry's own lexical level.
   while (i < end) {
     const ch = rawEntry[i];
+    if (misread() && (afterValue
+      ? !SPACE_RE.test(ch) && ch !== ',' && ch !== '#' && ch !== '%'
+      : ch === ',' || ch === '#')) {
+      unbalanced = true;
+      break;
+    }
+    if (ch === ',') afterValue = false;
 
     if (ch === '%' && !isEscaped(i)) {
       hasTopLevelComment = true;
     } else if (ch === '#' && !isEscaped(i)) {
       hasConcatenation = true;
+      afterValue = false;
+      afterHash = true;
     } else if (ch === '{' || ch === '"') {
       // A delimited run with no `name =` before it: the second operand of a
       // concatenation, or a stray.  It still has to close.
       const close = ch === '{' ? skipBraced(i) : skipQuoted(i);
-      if (close === -1) {
+      if (close === -1 || (!afterHash && misread())) {
         unbalanced = true;
         break;
       }
       i = close;
+      afterValue = true;
+      afterHash = false;
       continue;
     } else if (ch === '}' || ch === ')') {
       // A closer at the entry's own level: the range ends somewhere other than
@@ -1417,22 +1468,36 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
       let after = nameEnd;
       while (after < end && SPACE_RE.test(rawEntry[after])) after++;
       if (rawEntry[after] !== '=') {
+        // A bare operand of a concatenation, or a word that is no field's
+        if (!afterHash && misread()) {
+          unbalanced = true;
+          break;
+        }
         i = nameEnd;
+        afterValue = true;
+        afterHash = false;
         continue;
       }
       let valueStart = after + 1;
       while (valueStart < end && SPACE_RE.test(rawEntry[valueStart])) valueStart++;
       const next = readValue(rawEntry.slice(i, nameEnd).toLowerCase(), valueStart);
-      if (next === -1) {
+      if (next === -1 || (next === valueStart && misread())) {
         unbalanced = true;
         break;
       }
       i = next;
+      afterValue = true;
+      afterHash = false;
       continue;
+    } else if (!SPACE_RE.test(ch) && ch !== ',' && misread()) {
+      // A character that starts no field, value or name, as an = or a (
+      unbalanced = true;
+      break;
     }
     i++;
   }
 
+  if (!unbalanced && afterHash && misread()) unbalanced = true;
   if (!unbalanced && !readsAsParserDoes(rawEntry, fields)) unbalanced = true;
   return result();
 }
@@ -1454,7 +1519,7 @@ function readsAsParserDoes(rawEntry: string, fields: readonly BibtexEntryFieldOc
 /** Indentation of an entry's existing field lines, so an inserted field sits
  *  with them rather than announcing itself.  Two spaces — this codebase's
  *  generated BibTeX — is the fallback for an entry written on one line. */
-const FIELD_LINE_RE = /\n([ \t]+)[A-Za-z][\w-]*[ \t]*=/;
+const FIELD_LINE_RE = new RegExp('\\n([ \\t]+)(?![0-9])' + BIBTEX_IDENTIFIER_CHAR + '+[ \\t]*=');
 
 export function detectBibtexFieldIndent(rawEntry: string): string {
   const m = FIELD_LINE_RE.exec(rawEntry);
