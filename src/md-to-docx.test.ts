@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
 import * as fc from 'fast-check';
+import MarkdownIt from 'markdown-it';
 import { XMLValidator } from 'fast-xml-parser';
 import { LATENT_STYLES } from './latent-styles';
 import {
@@ -21,6 +22,7 @@ import {
   preprocessCriticMarkup,
   preprocessGridTables,
   stylesXml,
+  hasCitations,
   applyAlertColorsToTemplate,
   parseTemplatePgSz,
   type MdRun,
@@ -4000,6 +4002,355 @@ describe('Quote lines in code and HTML blocks', () => {
   }, 30000);
 });
 
+describe('Blocks after a code fence in an HTML block or a list item', () => {
+  // A fence's line in an HTML block opens no code block, nor does a fence in
+  // a list item past the item's end, as markdown-it reads them. Export's
+  // steps before markdown-it read each as opening one that no line closed,
+  // so they read no block of theirs after it
+  // A CSV file to embed
+  const embedResolver = {
+    resolveRelative: (_document: string, path: string) => path,
+    readFile: (path: string) => path === 'data.csv' ? new TextEncoder().encode('a,b\n1,2\n') : null,
+  };
+  const roundTrip = async (md: string) => {
+    const { convertDocx } = await import('./converter');
+    return (await convertDocx((await convertMdToDocx(md, { embedResolver, documentPath: 'doc.md' })).docx)).markdown;
+  };
+  // Each fence before a block, and the same before it with text for the
+  // fence, or with the item's fence closed in it
+  const fences: Array<[string, string, string]> = [
+    ['in an HTML block', '<div>\n```\n</div>\n\n', '<div>\nx\n</div>\n\n'],
+    ['of tildes in an HTML block', '<div>\n~~~\n</div>\n\n', '<div>\nx\n</div>\n\n'],
+    ['in a comment', '<!--\n```\n-->\n\n', '<!--\nx\n-->\n\n'],
+    ['in a list item', '- i\n\n  ```\n  x\n\n', '- i\n\n  ```\n  x\n  ```\n\n'],
+  ];
+  // Each block, and what shows import read it
+  const blocks: Array<[string, string, string]> = [
+    ['a grid table', '+---+\n| a |\n+---+\n', '+-----+\n| a   |\n+-----+\n'],
+    ['a LaTeX environment', '\\begin{equation}\nx\n\\end{equation}\n', '$' + '$\nx\n$' + '$\n'],
+    ['a table after a directive for its numbers', '<!-- table-digits: 1 -->\n\n| a |\n|---|\n| 1.25 |\n', '| 1.3 |\n'],
+  ];
+  it.each(fences.flatMap(([fence, before, plain]) => blocks.map(([block, md, read]) => [block, fence, before, plain, md, read])))(
+    'reads %s after a code fence %s', async (_block, _fence, before, plain, md, read) => {
+      const back = await roundTrip(before + md);
+      expect(back).toEndWith(read);
+      // As after the plain block, which import writes as it was, or the
+      // item, whose code block it drops
+      expect(back).toBe((await roundTrip(plain + md)).replace(plain.trim(), () => before.trim()));
+      expect(await roundTrip(back)).toBe(back);
+    });
+
+  // An HTML block export writes as text, which held the fence before, and
+  // so had a code block's protection from the steps before markdown-it
+  it.each([
+    ['an embed directive in a fenced example in a <pre>', '<pre>\n```\n<!-- embed: data.csv -->\n```\n</pre>'],
+    ['a LaTeX environment in a fenced example in a <pre>', '<pre>\n~~~\n\\begin{equation}\nx\n\\end{equation}\n~~~\n</pre>'],
+    ['a table after a directive for its numbers in a fenced example in a <pre>', '<pre>\n~~~\n<!-- table-digits: 1 -->\n| a |\n|---|\n| 1.25 |\n~~~\n</pre>'],
+    ['an embed directive in a <div>', '<div>\n<!-- embed: data.csv -->\n</div>'],
+    ['a LaTeX environment in a <div>', '<div>\n\\begin{equation}\nx\n\\end{equation}\n</div>'],
+    ['a LaTeX environment in a <script>', '<script>\n\\begin{equation}\nx\n\\end{equation}\n</script>'],
+    ['a table after a directive for its numbers in a <pre>', '<pre>\n<!-- table-digits: 1 -->\n| a |\n|---|\n| 1.25 |\n</pre>'],
+    ['an HTML table after a directive for its numbers, which a blank line after its <table> splits into blocks', '<!-- table-digits: 1 -->\n<table>\n\n<tr><td>1.25</td></tr>\n</table>'],
+  ])('keeps %s, which export writes as text, as it was', async (_name, block) => {
+    // Export embedded the file, wrapped the environment in dollar signs or
+    // rounded the number, in the text
+    const back = await roundTrip(block + '\n\np\n');
+    expect(back).toBe(block + '\n\np\n');
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  it.each([
+    ['a blank line after its <table>', '<table>\n\n<tr><td>a</td><td>1.25</td></tr>\n</table>'],
+    ['a blank line between its rows', '<table>\n<tr><td>a</td></tr>\n\n<tr><td>1.25</td></tr>\n</table>'],
+    ['a blank line after its <table> in a <div>', '<div>\n<table>\n\n<tr><td>a</td><td>1.25</td></tr>\n</table>\n</div>'],
+  ])('embeds an HTML table of a Markdown file with %s as the same table in the document', async (_name, file) => {
+    // markdown-it reads the block before the blank line, which holds no
+    // table, as one export writes as text, so the table's start was
+    // skipped, but the embed reads the table to its </table>. Export
+    // writes the table, which a blank line splits, as text, in the
+    // document too
+    const files: Record<string, string> = { 'data.csv': 'a,b\n1,2\n', 't.md': file + '\n' };
+    const resolver = { resolveRelative: (_document: string, path: string) => path, readFile: (path: string) => path in files ? new TextEncoder().encode(files[path]) : null };
+    const { convertDocx } = await import('./converter');
+    const back = (await convertDocx((await convertMdToDocx('<!-- embed: t.md -->\n', { embedResolver: resolver, documentPath: 'doc.md' })).docx)).markdown;
+    const table = file.slice(file.indexOf('<table>'), file.indexOf('</table>') + '</table>'.length);
+    expect(back).toBe(await roundTrip(table.replace('<table', '<table data-embed-idx="0"') + '\n'));
+    expect(back).toContain('<td>1.25</td>');
+  });
+
+  it.each([
+    ['a <pre> in a list item', '- <pre>\n  ```\n  <table>\n\n  <tr><td>1.25</td></tr>\n  </table>\n  ```\n  </pre>'],
+    ['a <pre> in a quote', '> <pre>\n> <table>\n>\n> <tr><td>1.25</td></tr>\n> </table>\n> </pre>'],
+    ['a <pre> in a quote\'s list item', '> - <pre>\n>   <table>\n>\n>   <tr><td>1.25</td></tr>\n>   </table>\n>   </pre>'],
+    ['a comment in a list item', '- <!--\n  <table>\n\n  <tr><td>1.25</td></tr>\n  </table>\n  -->'],
+  ])('embeds no HTML table that %s of a Markdown file holds, with a blank line after its <table>', async (_name, file) => {
+    // markdown-it ends the block at the blank line in a list item, before
+    // the table's </table>, and the embed read the table that starts in it
+    // as one a <div> holds, by the list item's marker, where the block's
+    // opener is
+    const { preprocessEmbeds } = await import('./embed-preprocess');
+    const files: Record<string, string> = { 't.md': file + '\n' };
+    const resolver = { resolveRelative: (_document: string, path: string) => path, readFile: (path: string) => path in files ? new TextEncoder().encode(files[path]) : null };
+    expect(preprocessEmbeds('<!-- embed: t.md -->\n', resolver, 'doc.md')).not.toContain('data-embed-idx');
+  });
+
+  // A grid table or an embed ends the list item it's in, as export writes
+  // it at the top level, so a fence in the item after it, which the item's
+  // end would close, went on at the top level and held the blocks after
+  // the list. Each step leaves the table or the embed in the item then, as
+  // text, as export reads the fence as the item's, which it drops
+  const afters = [...blocks, ['an embed directive', '<!-- embed: data.csv -->\n', ''] as [string, string, string]];
+  const enders: Array<[string, string, string]> = [
+    ['a grid table', '  +---+\n  | a |\n  +---+', '- i\n\n  +---+ | a | +---+\n'],
+    ['an embed directive', '  <!-- embed: data.csv -->', '- i\n\n  <!-- embed: data.csv -->\n'],
+  ];
+  // Not a table after an embed in the item: import writes the embed's
+  // directive, which export left in the item, before the table (on main too)
+  it.each(enders.flatMap(([ender, md, item]) => afters.filter(([block]) => !(ender === 'an embed directive' && block.startsWith('a table')))
+    .map(([block, after]) => [block, ender, md, item, after])))(
+    'reads %s after %s in a list item and a fence after it in the item as after the item, which holds the table or the embed as text', async (_block, _ender, md, item, after) => {
+      // Each step read the fence as the item's, which its end closes, and
+      // so the block after the list, but the step before it that ended the
+      // list, or the next, left it in code
+      const back = await roundTrip('- i\n\n' + md + '\n\n  ```\n  c\n\n' + after);
+      expect(back).toBe((await roundTrip('- i\n\n  ```\n  c\n\n' + after)).replace('- i\n', () => item));
+    });
+
+  // A quote's line without a > after it in a list item ends the list, as
+  // export puts a blank line before it, so a fence in the item after it
+  // goes on at the top level and holds the blocks after the list. The
+  // steps before it read the quote as ending there
+  it.each(afters.map(([block, after]) => [block, after]))(
+    'reads %s after a quote\'s line without a > after it in a list item and a fence after it in the item as after the same with the list ended', async (_block, after) => {
+      const back = await roundTrip('- i\n\n  > q\nl\n\n  ```\n  c\n\n' + after);
+      expect(back).toBe(await roundTrip('- i\n\n  > q\n\nl\n\n  ```\n  c\n\n' + after));
+      expect(back).toEndWith(after.replace(/\n$/, '') + '\n```\n');
+    });
+
+  it.each([
+    ['an indented code block', '> q\n    code\n', '> q\n\n```\ncode\n```\n'],
+    ['an indented code block in a list item', '- i\n\n  > q\n      code\n', '- i\n\n  > q\n'],
+    ['a <span> line', '> q\n<span>\n\np\n', '> q\n<span>\n\np\n'],
+    ['a fence', '> q\n```\nx\n```\n', '> q\n\n```\nx\n```\n'],
+  ])('ends a quote before %s on the line after it, which ends it as export reads it', async (_name, md, expected) => {
+    // Markdown-it reads an indented line or a <span> line after a quote's
+    // as going on its paragraph, and the steps before it as starting a
+    // block once the quote ends there, so the step that ends the quote put
+    // no blank line before it, which it puts in no block. A fence ends the
+    // quote as written
+    expect(await roundTrip(md)).toBe(expected);
+  });
+
+  it.each([
+    ['alone', '\\begin{equation}\n\n<x>\n\\end{equation}\n\np\n', '$' + '$\n<x>\n$' + '$\n\np\n'],
+    ['with another environment right after', '\\begin{equation}\n\n<x>\n\\end{equation}\n\\begin{align}\na\n\\end{align}\n\np\n',
+      '$' + '$\n<x>\n$' + '$\n$' + '$\n\\begin{gathered}\na\n\\end{gathered}\n$' + '$\n\np\n'],
+  ])('reads an environment with a line that would start an HTML block after a blank line in it as display math, %s', async (_name, md, expected) => {
+    // The parse that finds HTML blocks read <x> and the lines after it,
+    // the environment's end too, as one, which export writes as text, so
+    // the environment wasn't wrapped. The wrap joins its lines into one
+    // paragraph, where <x> starts no block.
+    expect(await roundTrip(md)).toBe(expected);
+  });
+
+  it('wraps a LaTeX environment in an HTML table\'s block, which export reads as display math there', async () => {
+    const { wrapBareLatexEnvironments } = await import('./latex-env-preprocess');
+    const md = '<div>\n\\begin{equation}\nx\n\\end{equation}\n<table><tr><td>a</td></tr></table>\n</div>\n';
+    expect(wrapBareLatexEnvironments(md)).toContain('$' + '$\\begin{equation}');
+    expect(wrapBareLatexEnvironments(md.replace(/<table>.*\n/, ''))).toBe(md.replace(/<table>.*\n/, ''));
+  });
+
+  it('joins a CriticMarkup span\'s paragraphs after a backtick that only one in an HTML block comes after', () => {
+    // The two read as a code span over the text between them, as no backtick
+    // closed the first in its paragraph, and markdown-it reads none in the
+    // block, so the span's blank line was left to end its paragraph
+    expect(preprocessCriticMarkup('a `b {++c\n\nd++}\n\n<div>\n`\n</div>\n')).toBe('a `b {++c' + PARA_PLACEHOLDER + 'd++}\n\n<div>\n`\n</div>\n');
+  });
+
+  // Documents of HTML blocks of each kind export writes as text, holding a
+  // code fence, an embed directive, a LaTeX environment, a citation, a grid
+  // table, a table after a directive for its numbers or text, some in a
+  // CriticMarkup span of lines, which export joins into a paragraph, HTML
+  // tables, and list items, some holding a code fence, and before and after
+  // them, the same outside, quotes with a line after them without a >,
+  // paragraphs with a note, and landscape sections
+  const htmlContents = {
+    fence: '```', tildes: '~~~', embed: '<!-- embed: data.csv -->', latex: '\\begin{equation}\nx\n\\end{equation}',
+    cite: '[@cite]', grid: '+---+\n| a |\n+---+', digits: '<!-- table-digits: 1 -->\n| a |\n|---|\n| 1.25 |',
+  };
+  type HtmlTag = 'div' | 'pre' | 'script' | 'style' | 'textarea' | 'comment';
+  type Block = { kind: 'html' | 'critic'; tag: HtmlTag; content: keyof typeof htmlContents | undefined } | { kind: 'item'; fence: boolean }
+    | { kind: 'grid' | 'latex' | 'quote' | 'note' | 'digits' | 'landscape' | 'para' | 'embed' | 'cite' | 'table' };
+  const blockArb: fc.Arbitrary<Block> = fc.oneof(
+    fc.record({
+      kind: fc.constant('html' as const),
+      tag: fc.constantFrom<HtmlTag>('div', 'pre', 'script', 'style', 'textarea', 'comment'),
+      content: fc.constantFrom(...Object.keys(htmlContents) as Array<keyof typeof htmlContents>, undefined),
+    // A comment ends at the first -->, as a directive's
+    }).filter(block => block.tag !== 'comment' || !htmlContents[block.content!]?.includes('-->')),
+    // A citation in a span is one (see hasCitations), whose note import
+    // writes at the document's end
+    fc.record({
+      kind: fc.constant('critic' as const),
+      tag: fc.constantFrom<HtmlTag>('div', 'pre', 'script', 'comment'),
+      content: fc.constantFrom('fence' as const, 'tildes' as const, 'embed' as const, 'latex' as const, 'grid' as const, 'digits' as const),
+    }).filter(block => block.tag !== 'comment' || !htmlContents[block.content!]?.includes('-->')),
+    fc.record({ kind: fc.constant('item' as const), fence: fc.boolean() }),
+    fc.record({ kind: fc.constantFrom('grid' as const, 'latex' as const, 'quote' as const, 'note' as const, 'digits' as const, 'landscape' as const, 'para' as const, 'embed' as const, 'cite' as const, 'table' as const) }),
+  );
+  /** The `n`th block, an HTML block, in a CriticMarkup span of lines for
+   *  'critic', holding text in `plain` */
+  const htmlOf = (block: { kind: 'html' | 'critic'; tag: HtmlTag; content: keyof typeof htmlContents | undefined }, n: number, plain: boolean): string => {
+    const [open, close] = block.tag === 'comment' ? ['<!--', '-->'] : ['<' + block.tag + '>', '</' + block.tag + '>'];
+    const html = open + '\n' + (!block.content || plain ? 'h' + n : htmlContents[block.content]) + '\n' + close;
+    return block.kind === 'critic' ? '{++\n' + html + '\n++}' : html;
+  };
+  /** The Markdown of `blocks`, each one's text its own. In `plain`, an HTML
+   *  block holds text, and a fence in a list item is closed in it */
+  const markdownOf = (blocks: Block[], plain: boolean): string => blocks.map((block, n) => blockOf(block, n, plain)).join('\n\n') + '\n';
+  /** The `n`th block (see markdownOf) */
+  const blockOf = (block: Block, n: number, plain: boolean): string => {
+    switch (block.kind) {
+      case 'html': case 'critic': return htmlOf(block, n, plain);
+      case 'embed': return '<!-- embed: data.csv -->';
+      case 'cite': return 'p' + n + ' [@cite]';
+      case 'table': return '<table><tr><td>t' + n + '</td></tr></table>';
+      case 'item': return '- i' + n + (block.fence ? '\n\n  ```\n  c' + n + (plain ? '\n  ```' : '') : '');
+      case 'grid': return '+----+\n| g' + n + ' |\n+----+';
+      case 'latex': return '\\begin{equation}\nx_' + n + '\n\\end{equation}';
+      case 'quote': return '> q' + n + '\nl' + n;
+      case 'note': return 'p' + n + '[^n' + n + ']\n\n[^n' + n + ']: note ' + n;
+      case 'digits': return '<!-- table-digits: 1 -->\n\n| a' + n + ' |\n|---|\n| ' + n + '.25 |';
+      case 'landscape': return '<!-- landscape -->\n\np' + n + '\n\n<!-- /landscape -->';
+      case 'para': return 'p' + n;
+    }
+  };
+
+  it('keeps each HTML block export writes as text as it was, and reads the blocks around it as it reads those around one of text', async () => {
+    await fc.assert(fc.asyncProperty(fc.array(blockArb, { minLength: 1, maxLength: 6 }), async blocks => {
+      const md = markdownOf(blocks, false);
+      // The same as with text in each HTML block, and with the item's fence
+      // closed in it
+      let plain = await roundTrip(markdownOf(blocks, true));
+      for (const [n, block] of blocks.entries()) {
+        if (block.kind === 'html' && block.content) plain = plain.replace(new RegExp('^h' + n + '$', 'm'), () => htmlContents[block.content!]);
+        if (block.kind === 'critic') {
+          // A span of lines is a paragraph, as import writes it alone, of
+          // the text that holds, which no step before export joins it read
+          // as a block: no embedded table, no number formatted
+          const alone = await roundTrip(htmlOf(block, n, false) + '\n');
+          expect([md, alone]).not.toEqual([md, expect.stringMatching(/data-embed-idx|1\.3|\$\$/)]);
+          plain = plain.replace((await roundTrip(htmlOf(block, n, true) + '\n')).trim(), () => alone.trim());
+        }
+      }
+      expect([md, await roundTrip(md)]).toEqual([md, plain]);
+    }), { numRuns: 100 });
+  }, 60000);
+
+  // A grid table, an embed or a quote's line without a > after it in a list
+  // item, some with a fence after it in the item, which the item's end
+  // closes, or a grid table or an embed in a quote, which export reads as
+  // the quote's text, some with a fence after it in the quote, each before
+  // a paragraph, and the blocks above after them
+  type Container = { kind: 'container'; container: 'item' | 'quote'; ender: 'grid' | 'embed' | 'lazy'; fence: boolean };
+  const containerArb = (container: 'item' | 'quote'): fc.Arbitrary<Container> => fc.record({
+    kind: fc.constant('container' as const),
+    container: fc.constant(container),
+    ender: container === 'item' ? fc.constantFrom('grid' as const, 'embed' as const, 'lazy' as const) : fc.constantFrom('grid' as const, 'embed' as const),
+    fence: fc.boolean(),
+  });
+  /** The `n`th block, a container, with a blank line before a quote's line
+   *  without a > after it, where `ended`, as export puts one in */
+  const containerOf = (block: Container, n: number, ended = false): string => {
+    const lines = block.ender === 'grid' ? ['+----+', '| k' + n + ' |', '+----+'] : block.ender === 'embed' ? ['<!-- embed: data.csv -->'] : ['> q' + n, 'l' + n];
+    if (block.container === 'quote') return '> k' + n + '\n>\n' + lines.map(line => '> ' + line).join('\n') + (block.fence ? '\n>\n> ```\n> c' + n : '');
+    const body = block.ender === 'lazy' ? ['  ' + lines[0], ...(ended ? [''] : []), lines[1]] : lines.map(line => '  ' + line);
+    return '- k' + n + '\n\n' + body.join('\n') + (block.fence ? '\n\n  ```\n  c' + n : '');
+  };
+
+  it('reads the blocks after a grid table or an embed in a list item or a quote as after the item or the quote alone, and after a quote\'s line without a > after it in an item as after the item ended there', async () => {
+    // No note, whose definition export takes out before it reads a quote's
+    // line without a > as ending a list (see the known limit below)
+    const restArb = fc.oneof(blockArb.filter(block => block.kind !== 'note'), containerArb('item'), containerArb('quote'));
+    await fc.assert(fc.asyncProperty(fc.array(restArb, { minLength: 1, maxLength: 5 }).filter(blocks => blocks.some(block => block.kind === 'container')), async blocks => {
+      const md = blocks.map((block, n) => block.kind === 'container' ? containerOf(block, n) + '\n\ns' + n : blockOf(block, n, false)).join('\n\n') + '\n';
+      // As the text with each container markdown-it reads outside code
+      // written as its first line alone, whose round trip, with the
+      // paragraph after it, the container's stands in for, or, for a
+      // quote's line without a > in an item, with the blank line before it
+      // that export puts in
+      let text = '';
+      const alone: Array<[string, string]> = [];
+      for (const [n, block] of blocks.entries()) {
+        const before = text + (n > 0 ? '\n\n' : '');
+        if (block.kind !== 'container') {
+          text = before + blockOf(block, n, false);
+          continue;
+        }
+        const lines = before.split('\n').length - 1;
+        const inCode = new MarkdownIt({ html: true }).parse(before + 'z', {})
+          .some(token => ['fence', 'code_block', 'html_block'].includes(token.type) && token.map![0] <= lines && lines < token.map![1]);
+        const plain = (block.container === 'item' ? '- k' : '> k') + n;
+        if (!inCode && block.ender !== 'lazy') alone.push([(await roundTrip(plain + '\n\ns' + n + '\n')).trim(), (await roundTrip(containerOf(block, n) + '\n\ns' + n + '\n')).trim()]);
+        text = before + (inCode ? containerOf(block, n) : block.ender === 'lazy' ? containerOf(block, n, true) : plain) + '\n\ns' + n;
+      }
+      let expected = await roundTrip(text + '\n');
+      for (const [plain, container] of alone) expected = expected.replace(plain, () => container);
+      expect([md, await roundTrip(md)]).toEqual([md, expected]);
+    }), { numRuns: 100 });
+  }, 120000);
+
+  it('keeps a note\'s definition after a list item with a grid table and a fence after it in the item', async () => {
+    // The table stays in the item, as text, so the item's end closes the
+    // fence, as extractFootnoteDefinitions reads it
+    expect(await roundTrip('- k\n\n  +----+\n  | k |\n  +----+\n\n  ```\n  c\n\np[^n]\n\n[^n]: note\n')).toBe('- k\n\n  +----+ | k | +----+\n\np[^n]\n\n[^n]: note\n');
+  });
+
+  it('known limit: takes out a note\'s definition that a fence in a list item holds once a quote\'s line without a > after it before it ends the list', async () => {
+    // extractFootnoteDefinitions reads the blocks before de-lazify puts a
+    // blank line before the line without a >, which ends the list, so it
+    // reads the fence as the item's, which the item's end closes, and takes
+    // the definition after the list out of the code block export writes.
+    // On main too. When it reads the quote as export does, the definition
+    // stays in the code block, as with the blank line written, and the
+    // property above can hold notes.
+    expect(await roundTrip('- k\n\n  > q\nl\n\n  ```\n  c\n\np[^n]\n\n[^n]: note\n')).toEndWith('```\nc\n\np[^n]\n\n```\n');
+    expect(await roundTrip('- k\n\n  > q\n\nl\n\n  ```\n  c\n\np[^n]\n\n[^n]: note\n')).toEndWith('```\nc\n\np[^n]\n\n[^n]: note\n```\n');
+  });
+
+  it('keeps the blank lines around a comment whose text a block before it holds', async () => {
+    // parseMd found a comment's lines in the source by its text, for the
+    // blank lines around it, and found them in the code block or the
+    // CriticMarkup span before it, which holds the same text. It reads them
+    // through the line map since #537
+    for (const before of ['```\n<!--\nc\n-->\n```', '{++\n<!--\nc\n-->\n++}']) {
+      const back = await roundTrip(before + '\n\n<!--\nc\n-->\n\np\n');
+      expect(back).toEndWith('\n\n<!--\nc\n-->\n\np\n');
+    }
+  });
+
+  it('reads blocks after code fences in HTML blocks in time linear in their number', async () => {
+    // Each step finds the code and HTML blocks once, and a code span ends
+    // at the end of the HTML block it starts in. One LaTeX environment, as
+    // the time to wrap many grows faster than their number (not this test's)
+    const { preprocessBlocks } = await import('./block-preprocess');
+    const { formatTableNumbers } = await import('./table-number-format');
+    const unit = '<div>\n```\n</div>\n\n+---+\n| a |\n+---+\n\n<!-- table-digits: 1 -->\n\n| a |\n|---|\n| 1.25 |\n\n';
+    const md = (n: number) => unit.repeat(n) + '\\begin{equation}\nx\n\\end{equation}\n';
+    expect(preprocessBlocks(md(2)).output.match(/MANUSCRIPT_GRID_TABLE|\$\$\\begin/g)).toHaveLength(3);
+    expect(formatTableNumbers(md(2)).output.match(/\| 1\.3 \|/g)).toHaveLength(2);
+    const time = (n: number) => {
+      const text = md(n);
+      return fastestRun(() => {
+        formatTableNumbers(preprocessBlocks(text).output);
+      });
+    };
+    time(4000);
+    const small = time(4000);
+    expect(time(16000) / small).toBeLessThan(8);
+  }, 30000);
+});
+
 describe('Quotes a blank line separates', () => {
   /** Each paragraph of Word's body: a quote's spacer, an empty paragraph,
    *  or its style and text */
@@ -6630,4 +6981,112 @@ describe('Export of many hidden paragraphs, comment bodies and comments', () => 
     expect(xml.match(/<w:commentRangeStart w:id="(\d+)"\/>/g)).toEqual(['0', '1', '2', '3'].map(id => '<w:commentRangeStart w:id="' + id + '"/>'));
     expect(growth(md, 4000)).toBeLessThan(8);
   }, 30000);
+});
+
+describe('hasCitations', () => {
+  it.each(['[@smith2020]', '[-@smith2020]', '[e.g., @smith2020; @jones2021]', '[see @Öztürk2020]', '[for n = 10, see @smith2020]', '[see \\`x\\` @smith2020]'])('detects %s', (md) => {
+    expect(hasCitations('Text ' + md + '.')).toBe(true);
+  });
+
+  it.each([
+    '[write to me@example.com]',
+    'No citations here.',
+    '[see above; @smith2020]',
+    '[see @smith2020](https://example.com)',
+    '[see `git show @HEAD`]',
+    '```\n[see @smith2020]\n```\n',
+    '```\n[@smith2020]\n```\n',
+    '    [@smith2020]\n',
+    'Use `[@smith2020]` for citations.',
+  ])('ignores %s', (md) => {
+    expect(hasCitations(md)).toBe(false);
+  });
+
+  it('detects a citation after code that mentions one', () => {
+    expect(hasCitations('```\n[@example]\n```\n\nText [e.g., @smith2020].')).toBe(true);
+    expect(hasCitations('Use `[@a` and [@smith2020].')).toBe(true);
+  });
+
+  it.each([
+    ['in an HTML block', '<div>\n```\n</div>\n\n', ''],
+    ['in a list item', '- i\n\n  ```\n  x\n\n', ''],
+    ['in an HTML block, with another after the citation', '<div>\n```\n</div>\n\n', '\n<div>\n```\n</div>\n'],
+  ])('detects a citation after a code fence %s', (_name, before, after) => {
+    // The fence opens no code block past the block or the item, as markdown-it
+    // reads it, but the check for code read one to the end, and a backtick
+    // in an HTML block starts no code span
+    expect(hasCitations(before + 'Text [@smith2020].\n' + after)).toBe(true);
+  });
+
+  it.each([
+    ['a fenced example in a <pre>', '<pre>\n~~~\n[@example]\n~~~\n</pre>\n'],
+    ['a <div>', '<div>\n[@example]\n</div>\n'],
+    ['a <script>', '<script>\n[@example]\n</script>\n'],
+    ['a comment', '<!--\n[@example]\n-->\n'],
+  ])('detects no citation in %s, which export writes as text', (_name, block) => {
+    expect(hasCitations(block)).toBe(false);
+    expect(hasCitations(block + '\nText [@smith2020].\n')).toBe(true);
+  });
+
+  it.each([
+    ['a <div>', '{++\n<div> [@smith2020] </div>\n++}\n'],
+    ['a <pre>', '{++\n<pre>\n[@smith2020]\n</pre>\n++}\n'],
+    ['a <div>, after text before the span', 'a {++\n<div> [@smith2020] </div>\n++}\n'],
+  ])('detects a citation in a CriticMarkup span that holds %s, which export joins into a paragraph', (_name, md) => {
+    // The <div> was an HTML block export writes as text, but export joins
+    // the span's lines first, and reads the key as a citation in the span
+    expect(hasCitations(md)).toBe(true);
+  });
+
+  it.each([
+    ['a note\'s body', 'Text.[^1]\n\n[^1]: See [@smith2020].\n'],
+    ['a grid table\'s cell', '+-------------+\n| [@smith2020] |\n+-------------+\n'],
+  ])('detects a citation in %s', (_name, md) => {
+    expect(hasCitations(md)).toBe(true);
+  });
+
+  it('detects a citation where export, without a bibliography, warns of a key it didn\'t find', async () => {
+    // Blocks of a citation, or of none, in code, in HTML blocks, in
+    // CriticMarkup spans of lines that hold HTML blocks, which export joins
+    // into a paragraph, in comments, in HTML tables, grid tables, notes,
+    // list items and quotes. Not in a deletion, which export warns of no key
+    // in, but which the Markdown holds
+    const blockArb = fc.tuple(fc.constantFrom(
+      (c: string) => 'p ' + c,
+      (c: string) => '```\n' + c + '\n```',
+      (c: string) => '    ' + c,
+      (c: string) => '<div>\n' + c + '\n</div>',
+      (c: string) => '<pre>\n~~~\n' + c + '\n~~~\n</pre>',
+      (c: string) => '<!--\n' + c + '\n-->',
+      (c: string) => '{++\n<div> ' + c + ' </div>\n++}',
+      (c: string) => '{==\n<pre>\n' + c + '\n</pre>\n==}',
+      (c: string) => 'a {++\n<div>\n' + c + '\n</div>\n++}',
+      (c: string) => 'p{>>see ' + c + '<<}',
+      (c: string) => '{>>\n<div> ' + c + ' </div>\n<<}',
+      (c: string) => '<table><tr><td>' + c + '</td></tr></table>',
+      (c: string) => '+------------+\n| ' + c + ' |\n+------------+',
+      (c: string) => 'p[^n]\n\n[^n]: ' + c,
+      (c: string) => '- ' + c,
+      (c: string) => '> ' + c,
+    ), fc.boolean()).map(([block, cites]) => block(cites ? '[@k2020]' : '[k2020]'));
+    await fc.assert(fc.asyncProperty(fc.array(blockArb, { minLength: 1, maxLength: 4 }), async blocks => {
+      const md = blocks.join('\n\n') + '\n';
+      const { warnings } = await convertMdToDocx(md);
+      expect([md, hasCitations(md)]).toEqual([md, warnings.some(warning => warning.startsWith('Citation key not found'))]);
+    }), { numRuns: 100 });
+  }, 60000);
+
+  it('detects no citation in a note of a key export didn\'t find', () => {
+    expect(hasCitations('Citation data for @smith2020 was not found in the bibliography file.\n')).toBe(false);
+  });
+
+  it.each([
+    ['a CriticMarkup comment', 'a{>>see [@smith2020]<<}\n'],
+    ['a comment that holds a <div>', '{>>\n<div> [@smith2020] </div>\n<<}\n'],
+    ['an HTML table\'s cell', '<table><tr><td>[@smith2020]</td></tr></table>\n'],
+  ])('detects no citation in %s, where export reads none', (_name, md) => {
+    // Export writes a comment's text and a cell's as they are, and warns
+    // of no key it doesn't find there
+    expect(hasCitations(md)).toBe(false);
+  });
 });

@@ -5,6 +5,8 @@ import type { HtmlTableMeta, HtmlTableRun } from './html-table-parser';
 import { LineMap, type LineMapSegment } from './preview/line-map';
 import { preprocessGridTables, gridColumnAlign, GRID_TABLE_PLACEHOLDER_PREFIX, GRID_TABLE_SEPARATOR_RE, type GridTableData } from './grid-table-preprocess';
 import MarkdownIt from 'markdown-it';
+import { computeMarkdownRegions, endsListInPlace, isInsideCodeRegion, regionAt } from './code-regions';
+import { exportsLiterally } from './html-blocks';
 
 const sharedMarkdownIt = new MarkdownIt({ html: true });
 
@@ -253,38 +255,21 @@ export function preprocessEmbedsTracked(markdown: string, resolver: EmbedResolve
   const push = (line: string, from: number) => { result.push(line); sourceLines.push(from); };
   const embedDirectives: string[] = [];
   let i = 0;
-  let fenceChar: '`' | '~' | null = null;
-  let fenceLen = 0;
   let embedIdx = startIdx;
+  // The code blocks markdown-it reads and the HTML blocks export writes as
+  // text, whose lines hold no directive, found once, at the first line that
+  // reads as one (see literalLines)
+  let literal: LiteralLines | undefined;
 
   while (i < lines.length) {
-    // Track fenced code blocks
-    const fenceMatch = lines[i].match(/^ {0,3}([`~]{3,})/);
-    if (fenceMatch) {
-      const run = fenceMatch[1];
-      const runChar = run[0] as '`' | '~';
-      if (!fenceChar) {
-        fenceChar = runChar;
-        fenceLen = run.length;
-      } else if (runChar === fenceChar && run.length >= fenceLen
-        && lines[i].slice(fenceMatch.index! + run.length).trim() === '') {
-        fenceChar = null;
-        fenceLen = 0;
-      }
-      push(lines[i], i);
-      i++;
-      continue;
-    }
-    if (fenceChar) {
-      push(lines[i], i);
-      i++;
-      continue;
-    }
-
     // Check for embed directive
     const trimmed = lines[i].trim();
     const directive = parseEmbedDirective(trimmed);
-    if (directive) {
+    // A directive is an HTML block of its own, which export would write as
+    // a comment. Not one in a list item an embed would end before a block
+    // that only the item's end closes, which would go on past it
+    const where = directive && (literal ??= literalLines(lines)).at(i);
+    if (directive && (where === undefined || where === 'alone') && literal!.inPlace(i)) {
       embedDirectives.push(trimmed);
       let expanded = resolveEmbed(directive, resolver, documentPath, options);
 
@@ -404,6 +389,45 @@ function resolveMd(data: Uint8Array): string {
   return outputParts.join('\n\n');
 }
 
+/** Where each of `lines` is in text export reads no Markdown in: 'code' in
+ *  a fenced or indented code block, as markdown-it reads them, with HTML
+ *  blocks, a fence's line in which opens no code, and a fence in a list
+ *  item, which the item's end closes, or in an HTML block export writes as
+ *  text, as a <pre> or a <div> (see exportsLiterally), 'alone' where it is
+ *  the line alone, as a directive's is, and 'within' where it holds more.
+ *  But 'table' for a line that starts a table, <table, in such a block that
+ *  a blank line ends before the table's </table>, and whose opener isn't
+ *  one that only its end ends, as a <pre>'s, which holds the table as text
+ *  even where markdown-it ends it at a blank line in a list item, by the
+ *  opener markdown-it reads past the prefixes of the list items and quotes
+ *  it's in (see HtmlBlockRegion): export reads a block as
+ *  text where the block holds no table, as a <table> line alone before a
+ *  blank line and the table's rows, but extractTableBlocks reads an embedded
+ *  file's table to its </table>, past blank lines, as it did before it read
+ *  HTML blocks. And whether an embed, at a line's start, in place of a
+ *  line, which ends the list the line is in, leaves the code and HTML
+ *  blocks after it as they are (see endsListInPlace) */
+function literalLines(lines: string[]): LiteralLines {
+  const text = lines.join('\n');
+  const regions = computeMarkdownRegions(text,
+    { inlineCode: false, html: 'all', literalHtml: exportsLiterally, includeLists: true, exportQuotes: true });
+  const { blockCodeRegions, literalHtmlRegions } = regions;
+  const starts = [0];
+  for (const line of lines) starts.push(starts[starts.length - 1] + line.length + 1);
+  const at = (line: number): Literal => {
+    if (isInsideCodeRegion(starts[line], blockCodeRegions)) return 'code';
+    const region = regionAt(starts[line], literalHtmlRegions);
+    if (region && lines[line].trim().startsWith('<table')) {
+      if (!region.endsAtItsEnd && !text.slice(starts[line], region.end).includes('</table>')) return 'table';
+    }
+    return !region ? undefined : region.start === starts[line] && region.end <= starts[line + 1] ? 'alone' : 'within';
+  };
+  return { at, inPlace: line => endsListInPlace(starts[line], starts[line] + lines[line].length, regions) };
+}
+
+type Literal = 'code' | 'alone' | 'within' | 'table' | undefined;
+interface LiteralLines { at: (line: number) => Literal; inPlace: (line: number) => boolean }
+
 interface TableBlock {
   directives: string[];
   tableLines: string[];
@@ -416,29 +440,17 @@ function extractTableBlocks(content: string): TableBlock[] {
   const lines = content.split('\n');
   const blocks: TableBlock[] = [];
   let pendingDirectives: string[] = [];
-  let fenceChar: '`' | '~' | null = null;
-  let fenceLen = 0;
+  const literal = literalLines(lines);
   let i = 0;
 
   while (i < lines.length) {
-    // Track fenced code blocks — skip lines inside fences
-    const fenceMatch = lines[i].match(/^ {0,3}([`~]{3,})/);
-    if (fenceMatch) {
-      const run = fenceMatch[1];
-      const runChar = run[0] as '`' | '~';
-      if (!fenceChar) {
-        fenceChar = runChar;
-        fenceLen = run.length;
-        pendingDirectives = [];
-      } else if (runChar === fenceChar && run.length >= fenceLen
-        && lines[i].slice(fenceMatch.index! + run.length).trim() === '') {
-        fenceChar = null;
-        fenceLen = 0;
-      }
-      i++;
-      continue;
-    }
-    if (fenceChar) {
+    // Skip the lines of code blocks and of HTML blocks export writes as
+    // text, but a directive's own, which hold no table, and which part a
+    // directive from a table after them, and the start of a table that such
+    // a block holds only part of, which the HTML table's case below reads
+    const where = literal.at(i);
+    if (where === 'code' || where === 'within' || (where === 'alone' && !TABLE_DIRECTIVE_RE.test(lines[i].trim()))) {
+      pendingDirectives = [];
       i++;
       continue;
     }

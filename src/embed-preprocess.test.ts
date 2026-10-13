@@ -457,6 +457,60 @@ describe('preprocessEmbeds — .md embed formats', () => {
   });
 });
 
+describe('preprocessEmbeds — code fences in HTML blocks and list items', () => {
+  // A fence's line in an HTML block opens no code block, nor does one in a
+  // list item past the item's end, as markdown-it reads them. Export read
+  // it as opening one that no line closed, so it read no directive, or no
+  // table in an embedded file, after it
+  const fences: Array<[string, string]> = [
+    ['in an HTML block', '<div>\n```\n</div>\n\n'],
+    ['in an HTML block, of tildes', '<div>\n~~~\n</div>\n\n'],
+    ['in a list item', '- i\n\n  ```\n  x\n\n'],
+  ];
+
+  it.each(fences)('embeds a file after a code fence %s', (_name, before) => {
+    const resolver = makeTestResolver({ '/doc/data.csv': 'A\n1' });
+    const result = preprocessEmbeds(before + '<!-- embed: data.csv -->\n', resolver, '/doc/file.md');
+    expect(result).toContain('<table');
+    expect(result).not.toContain('<!-- embed:');
+  });
+
+  it.each(fences)('embeds a table of a Markdown file after a code fence %s', (_name, before) => {
+    const resolver = makeTestResolver({ '/doc/table.md': before + '| A |\n|---|\n| 1 |\n' });
+    expect(preprocessEmbeds('<!-- embed: table.md -->', resolver, '/doc/file.md')).toContain('<table');
+  });
+
+  it.each([
+    ['a fenced example in a <pre>', '<pre>\n```\n<!-- embed: data.csv -->\n```\n</pre>'],
+    ['a <pre>', '<pre>\n<!-- embed: data.csv -->\n</pre>'],
+    ['a <div>', '<div>\n<!-- embed: data.csv -->\n</div>'],
+    ['a <script>', '<script>\n<!-- embed: data.csv -->\n</script>'],
+    ['a comment', '<!--\n<!-- embed: data.csv -->'],
+  ])('embeds no directive in %s, which export writes as text, but one after it', (_name, block) => {
+    // A fence in the block opens no code block, as markdown-it reads it, and
+    // export reads no directive in a block it writes as text
+    const resolver = makeTestResolver({ '/doc/data.csv': 'A\n1' });
+    const result = preprocessEmbeds(block + '\n\n<!-- embed: data.csv -->\n', resolver, '/doc/file.md');
+    expect(result).toStartWith(block + '\n\n<table');
+    expect(result.match(/<table/g)).toHaveLength(1);
+  });
+
+  it('embeds a directive after a comment of its own, and a table in an embedded file after a <pre>, but none in it', () => {
+    const resolver = makeTestResolver({ '/doc/data.csv': 'A\n1', '/doc/table.md': '<pre>\n| A |\n|---|\n| 1 |\n</pre>\n\n| B |\n|---|\n| 2 |\n' });
+    expect(preprocessEmbeds('<!-- a -->\n<!-- embed: data.csv -->\n', resolver, '/doc/file.md')).toContain('<table');
+    const table = preprocessEmbeds('<!-- embed: table.md -->', resolver, '/doc/file.md');
+    expect(table).toContain('B');
+    expect(table).not.toContain('A');
+  });
+
+  it('embeds no directive or table in a code block', () => {
+    const resolver = makeTestResolver({ '/doc/data.csv': 'A\n1', '/doc/table.md': '```\n| A |\n|---|\n| 1 |\n```\n\n    | B |\n    |---|\n    | 2 |\n' });
+    const input = '```\n<!-- embed: data.csv -->\n```\n\n    <!-- embed: data.csv -->\n';
+    expect(preprocessEmbeds(input, resolver, '/doc/file.md')).toBe(input);
+    expect(preprocessEmbeds('<!-- embed: table.md -->', resolver, '/doc/file.md')).toBe('');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // preprocessEmbedsTracked — startIdx offset
 // ---------------------------------------------------------------------------

@@ -315,8 +315,12 @@ describe('table number formatting', () => {
 		expect(formatTableNumbers(commentedPipe, { digits: 1 }).output).toBe(commentedPipe);
 		const multilineScript = '<script\n type="text/javascript">\nconst tpl = `\n<table><tr><td>1.2345</td></tr></table>\n`;\n</script>';
 		expect(formatTableNumbers(multilineScript, { digits: 1 }).output).toBe(multilineScript);
+		// A block that starts with a <script>, export writes as text, the
+		// table after it on its line too
 		const sameLineClose = '<script>ignore</script><table data-digits="1"><tr><td>12.34</td></tr></table>';
-		expect(formatTableNumbers(sameLineClose, { digits: 2 }).output).toContain('<td>12.3</td>');
+		expect(formatTableNumbers(sameLineClose, { digits: 2 }).output).toBe(sameLineClose);
+		const nextBlock = '<script>ignore</script>\n\n<table data-digits="1"><tr><td>12.34</td></tr></table>';
+		expect(formatTableNumbers(nextBlock, { digits: 2 }).output).toContain('<td>12.3</td>');
 		const prefixClose = '<table><tr><td><script>const x="</scripture><table><tr><td>99.9</td></tr></table>"</script>12.34</td></tr></table>';
 		const prefixOutput = formatTableNumbers(prefixClose, { digits: 2 }).output;
 		expect(prefixOutput).toContain('<td>99.9</td>');
@@ -328,14 +332,20 @@ describe('table number formatting', () => {
 			const inert = '<' + tag + '>\n`code`\n| Value |\n| --- |\n| 99.99 |\n'
 				+ '<table><tr><td>88.88</td></tr></table>\n</' + tag + '>';
 			const valid = '<table><tr><td>12.34</td></tr></table>';
-			const output = formatTableNumbers(inert + '\n' + valid, { digits: 1 }).output;
+			// A block of its own after it; in the element's block, export
+			// writes the table as text, as the rest of the block
+			const output = formatTableNumbers(inert + '\n\n' + valid, { digits: 1 }).output;
 			expect(output).toStartWith(inert);
 			expect(output).toEndWith('<table><tr><td>12.3</td></tr></table>');
+			expect(formatTableNumbers(inert + '\n' + valid, { digits: 1 }).output).toBe(inert + '\n' + valid);
 		}
 		for (const tag of ['title', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext']) {
+			// An HTML block that starts with one, as markdown-it reads one that
+			// starts with a <title>, an <iframe> or a <noframes>, export writes
+			// as text; the others start a paragraph
 			const selfClosing = '<' + tag + '/><table><tr><td>12.34</td></tr></table>';
-			expect(formatTableNumbers(selfClosing, { digits: 1 }).output)
-				.toBe('<' + tag + '/><table><tr><td>12.3</td></tr></table>');
+			expect(formatTableNumbers(selfClosing, { digits: 1 }).output).toBe(['title', 'iframe', 'noframes'].includes(tag)
+				? selfClosing : '<' + tag + '/><table><tr><td>12.3</td></tr></table>');
 			const inCell = '<table><tr><td><' + tag + '/>12.34</td></tr></table>';
 			expect(formatTableNumbers(inCell, { digits: 1 }).output)
 				.toBe('<table><tr><td><' + tag + '/>12.3</td></tr></table>');

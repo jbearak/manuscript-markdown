@@ -1,6 +1,6 @@
 // Shared grid table preprocessing — used by both md-to-docx and the preview plugin.
 
-import { computeMarkdownRegions, isInsideCodeRegion, type CodeRegion } from './code-regions';
+import { computeMarkdownRegions, endsListInPlace, isInsideCodeRegion, type MarkdownRegions } from './code-regions';
 
 // A colon at either end of a column's dashes sets its alignment, as in +:==+==:+
 export const GRID_TABLE_SEPARATOR_RE = /^\+:?[-=]+:?(\+:?[-=]+:?)*\+$/;
@@ -145,37 +145,22 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
   const push = (line: string, from: number) => { result.push(line); sourceLines.push(from); };
   const replacements: Array<{ resultIndex: number; sourceStart: number; sourceEnd: number }> = [];
   let i = 0;
-  let fenceChar: '`' | '~' | null = null;
-  let fenceLen = 0;
-  // The HTML blocks markdown-it reads, as a <div> and the lines after it to
-  // a blank line, which a grid table's lines in are text of, as a pipe
-  // table's are, found once, where there's a grid table
-  let htmlRegions: CodeRegion[] | undefined;
-  const inHtmlBlock = (offset: number) => markdown.includes('<')
-    && isInsideCodeRegion(offset, htmlRegions ??= computeMarkdownRegions(markdown, { includeCode: false, html: 'all' }).htmlRegions);
+  // The code blocks and HTML blocks markdown-it reads, as a fence and the
+  // lines after it to one that closes it or to the end of the list item
+  // it's in, or a <div> and the lines after it to a blank line, which a
+  // grid table's lines in are text of, as a pipe table's are, found once,
+  // where there's a grid table. A fence's line in an HTML block opens no
+  // code block. And the list items, where a placeholder, at a line's start,
+  // ends the list, which goes on past the table in the Markdown, so the
+  // table stays text where a block after it in the item would go on past
+  // the list (see endsListInPlace)
+  let regions: MarkdownRegions | undefined;
+  const inBlock = (start: number, end: number) => {
+    regions ??= computeMarkdownRegions(markdown, { inlineCode: false, html: 'all', includeLists: true, exportQuotes: true });
+    return isInsideCodeRegion(start, regions.codeRegions) || isInsideCodeRegion(start, regions.htmlRegions) || !endsListInPlace(start, end, regions);
+  };
 
   while (i < lines.length) {
-    // Track fenced code blocks to avoid false grid table detection inside them
-    const fenceMatch = lines[i].match(/^ {0,3}([`~]{3,})/);
-    if (fenceMatch) {
-      const run = fenceMatch[1];
-      const runChar = run[0] as '`' | '~';
-      if (!fenceChar) {
-        fenceChar = runChar;
-        fenceLen = run.length;
-      } else if (runChar === fenceChar && run.length >= fenceLen) {
-        fenceChar = null;
-        fenceLen = 0;
-      }
-      push(lines[i], i);
-      i++;
-      continue;
-    }
-    if (fenceChar) {
-      push(lines[i], i);
-      i++;
-      continue;
-    }
     if (GRID_TABLE_SEPARATOR_RE.test(lines[i].trim()) && !/^(?: {4}|\t)/.test(lines[i])) {
       // Potential grid table start — collect all lines until we leave the table
       const tableLines: string[] = [];
@@ -193,7 +178,7 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
       // Validate: must start and end with separator, have at least 3 lines
       if (tableLines.length >= 3 && GRID_TABLE_SEPARATOR_RE.test(tableLines[tableLines.length - 1].trim())) {
         const parsed = parseGridTable(tableLines);
-        if (parsed && parsed.rows.length > 0 && !inHtmlBlock(lineOffsets[start])) {
+        if (parsed && parsed.rows.length > 0 && !inBlock(lineOffsets[start], lineOffsets[i - 1] + lines[i - 1].length)) {
           const json = JSON.stringify(parsed);
           // Base64-encode to prevent cell content containing '-->' from
           // breaking the HTML comment wrapper.

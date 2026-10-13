@@ -1,6 +1,7 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
-import { computeCodeRegions } from './code-regions';
+import { computeMarkdownRegions, isInsideCodeRegion, lineInRegions } from './code-regions';
+import { exportsLiterally } from './html-blocks';
 import { maxOf, pushAll } from './arrays';
 import type { LineEdit } from './line-map';
 import { decodeHtmlAttribute, decodeHtmlCharacterReferences, HTML_CHARACTER_REFERENCE } from './html-entities';
@@ -1307,7 +1308,11 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	const lineOffsets: number[] = [];
 	let nextLineOffset = 0;
 	for (const line of lines) { lineOffsets.push(nextLineOffset); nextLineOffset += line.length + 1; }
-	const codeRegions = computeCodeRegions(markdown);
+	// Code as export reads it, with HTML blocks, a fence's line in which
+	// opens no code block, and past whose edges no code span runs, and the
+	// code blocks alone, whose lines hold no table or directive, nor do the
+	// HTML blocks export writes as text, but a directive's own
+	const { codeRegions, blockCodeRegions, literalHtmlRegions } = computeMarkdownRegions(markdown, { html: 'all', literalHtml: exportsLiterally, exportQuotes: true });
 	const structuralIndex = buildHtmlStructuralIndex(markdown, codeRegions, lineOffsets, scanStats);
 	const inertRegions = mergeSourceRanges([...codeRegions, ...structuralIndex.inertRegions]);
 	const recordWarnings = (from: number, start: number, end: number) => {
@@ -1328,23 +1333,20 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	let pending: Partial<TableNumberFormat> = {};
 	let pendingInvalid = false;
 	let i = 0;
-	let fenceChar: '`' | '~' | undefined;
-	let fenceLength = 0;
 	while (i < lines.length) {
-		const fence = lines[i].match(/^ {0,3}([`~]{3,})/);
-		if (fence) {
-			const char = fence[1][0] as '`' | '~';
-			if (!fenceChar) { fenceChar = char; fenceLength = fence[1].length; }
-			else if (char === fenceChar && fence[1].length >= fenceLength) { fenceChar = undefined; fenceLength = 0; }
+		// Four spaces in, a line is code, or the text of a paragraph it goes
+		// on, which holds no table either, as markdown-it reads none there
+		if (isInsideCodeRegion(lineOffsets[i], blockCodeRegions) || /^ {4}/.test(lines[i])) {
 			output.push(lines[i++]);
 			pending = {};
 			pendingInvalid = false;
 			continue;
 		}
-		if (fenceChar || /^ {4}/.test(lines[i])) {
-			output.push(lines[i++]);
-			pending = {};
-			pendingInvalid = false;
+		const literalHtml = lineInRegions(lineOffsets[i], lineOffsets[i + 1] ?? markdown.length, literalHtmlRegions);
+		if (literalHtml && !(literalHtml === 'alone' && parseDirective(lines[i]))) {
+			output.push(lines[i]);
+			if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) { pending = {}; pendingInvalid = false; }
+			i++;
 			continue;
 		}
 		const currentLineStart = lineOffsets[i];
