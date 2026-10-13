@@ -13860,13 +13860,14 @@ function buildMarkdownOnce(
   const joinedParagraphs = joinTrackedParagraphBreaks(content, marks, (para, opening) => (
     opening && prefixesQuoteLines(opening) ? '' : paragraphLinePrefix(para)
   ));
-  // The paragraphs that may take the forms buildMarkdown reads back, by
-  // the block edges before them, which the steps after, to mergedContent,
-  // keep, as they keep a paragraph's items text and hidden comments in no
-  // Word comment's range, change or link. Their hidden runs' line breaks
-  // go as breaks of their own, but where they go as main writes them
-  const plain = plainParagraphs(joinedParagraphs);
-  const lines = breakCommentLines(joinedParagraphs, key => plain.has(key) && !fallback.has(key));
+  // The hidden runs' line breaks of the paragraphs plain here (see
+  // plainParagraphs), by the block edges before them, which the steps
+  // after, to mergedContent, keep, go as breaks of their own, but where
+  // they go as main writes them. Those whose breaks go so are read back.
+  // Here a citation without keys isn't yet text, which keeps its
+  // paragraph from this form, but not from the others (see `plain`)
+  const splittable = plainParagraphs(joinedParagraphs);
+  const lines = breakCommentLines(joinedParagraphs, key => splittable.has(key) && !fallback.has(key));
   const joinedContent = lines.content;
   // Notes in the order they're written, after the body
   // Those only notes refer to after the others, as they reach them
@@ -13930,8 +13931,10 @@ function buildMarkdownOnce(
   const takesNoRanges = (table: TableItem, index: number) => cellsTakeNoRanges(table, rangeSettings, index);
   const mergedContent = mergeConsecutiveRuns(withoutHiddenCommentSpace(options?.calloutLabels === false ? joinedContent
     : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup, takesNoRanges)));
-  // The block edges before each item, which key its paragraph
+  // The block edges before each item, which key its paragraph, and the
+  // paragraphs that may take the forms buildMarkdown reads back
   const formsKeys = edgesBefore(mergedContent);
+  const plain = plainParagraphs(mergedContent);
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
   const commentIdRemap = new Map<string, string>();
@@ -15588,7 +15591,7 @@ function buildMarkdownOnce(
     }
 
     const formsKey = formsKeys[i];
-    const forms = plain.has(formsKey) && !fallback.has(formsKey) ? { used: lines.changed.has(formsKey) } : undefined;
+    const forms = (plain.has(formsKey) || lines.changed.has(formsKey)) && !fallback.has(formsKey) ? { used: lines.changed.has(formsKey) } : undefined;
     const rendered = renderInlineRange(mergedContent, i, comments, {
       stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading, ...(quoteLinePrefix ? {} : { listLinePrefix }), forms,
     }, renderOpts);

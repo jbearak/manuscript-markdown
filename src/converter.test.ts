@@ -21467,6 +21467,19 @@ describe('HTML comments between Word runs', () => {
       .toBe((await shown(docx)).join('').replace(/ /g, ''));
   });
 
+  test('writes a line break after a citation without keys, before a comment with a blank line in it at its paragraph\'s end, as <br>', async () => {
+    // The citation goes as text once its runs merge, after which the
+    // paragraph is plain, though not before, where its hidden runs' line
+    // breaks are read. Its \ showed on the next export
+    const citation: ContentItem = { type: 'citation', text: '(Doe 2020)', pandocKeys: [], commentIds: new Set() };
+    const [para, ...rest] = paragraphItems('\\\n', '<!-- a\n\nb -->');
+    const markdown = buildMarkdown([para, citation, ...rest], new Map());
+    expect(markdown).toBe('(Doe 2020)<br>\n\n<!-- a\n\nb -->');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await shown(again)).join('')).toBe('(Doe 2020)');
+    expect(await shownBreaks(again)).toBe(1);
+  });
+
   test.each([
     ['after a comment', (n: number) => paragraphItems('Source', '<!-- x -->' + '\n'.repeat(n), 'A')],
     ['each after a comment', (n: number) => paragraphItems('Source', ...Array.from({ length: n }, () => '<!-- x -->\n'), 'A')],
