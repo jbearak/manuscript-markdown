@@ -1808,6 +1808,60 @@ function droppedBlocksOf(tokens: MdToken[], source: (line: number) => number): D
   return { before, after };
 }
 
+/** Adds to `dropped` the fences of each style block at the top level of
+ *  `tokens` that Word has no paragraph of in its style, as one of only
+ *  quotes, headings, code, tables or thematic breaks, which keep their own
+ *  (see unstyledInStyleBlock), or of nothing. Import can't write those
+ *  fences, as it finds the block by its paragraphs, so the blank lines on
+ *  either side of one are those of the blocks beside it, as for a block a
+ *  list item drops */
+function addUnshownStyleFences(tokens: MdToken[], source: (line: number) => number, dropped: DroppedLines): void {
+  let open: { style: string; fences: Array<[number, number]>; shown: boolean } | undefined;
+  const close = () => {
+    if (open && !open.shown) {
+      for (const [start, end] of open.fences) {
+        const from = source(start);
+        const to = source(end);
+        if (from >= to) continue;
+        dropped.before.set(to, from);
+        dropped.after.set(from, to);
+      }
+    }
+    open = undefined;
+  };
+  // A paragraph of comment bodies only that Word doesn't get is no
+  // paragraph of the block's, as generateDocumentXml leaves it out (see
+  // commentBodiesOmitted), which reads it after the last block it reads
+  const omitsCommentBodies = commentBodiesOmitted(tokens);
+  let prev: MdToken | undefined;
+  for (const [at, token] of tokens.entries()) {
+    if (omitsCommentBodies(at, prev)) continue;
+    prev = token;
+    const run = token.type === 'paragraph' && !token.listContinuation && token.runs.length === 1 ? token.runs[0] : undefined;
+    const fence = run?.type === 'html_comment' ? styleFence(run.text) : undefined;
+    // A block that opens closes the one open, as a block on one line or
+    // one in a list item does too (see applyCustomStyleSentinels), but one
+    // of the same style goes on in it, as generateDocumentXml reads it
+    // (see startsStyleBlock)
+    if (fence?.kind === 'open') {
+      if (startsStyleBlock(open?.style, fence.style)) {
+        close();
+        open = { style: fence.style, fences: [], shown: false };
+      }
+      if (token.sourceRange) open!.fences.push(token.sourceRange);
+    } else if (fence?.kind === 'close') {
+      if (open && token.sourceRange) open.fences.push(token.sourceRange);
+      close();
+    } else if (fence?.kind === 'inline') {
+      // Its paragraph is the open block's, of the same style
+      if (open && !startsStyleBlock(open.style, fence.style)) open.shown = true;
+      close();
+    } else if (token.itemStyleOpen !== undefined) close();
+    else if (open && !unstyledInStyleBlock(token) && !marksSectionOrBibliography(token)) open.shown = true;
+  }
+  close();
+}
+
 /** The most blank lines in a row from `from` of `lines`, by `step`, from
  *  `low` on, past the blocks list items dropped, `dropped`, which Word gets
  *  nothing of, so that those on either side of one are those of the block
@@ -1879,6 +1933,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
   // Past the blocks list items dropped, so that the blank lines on either
   // side of one are the quote's
   const dropped = droppedBlocksOf(tokens, source);
+  addUnshownStyleFences(tokens, source, dropped);
   const blankRunPastDropped = (from: number, step: 1 | -1) => blankLinesPastDropped(sourceLines, dropped, from, step);
   groups.forEach((group, g) => {
     if (!group) return;
@@ -9129,6 +9184,20 @@ function unstyledInStyleBlock(token: MdToken): boolean {
     || token.type === 'code_block' || token.type === 'table' || token.type === 'hr');
 }
 
+/** Whether `token` marks a section's fence or the bibliography's place,
+ *  which Word gets no paragraph of a style block's for */
+function marksSectionOrBibliography(token: MdToken): boolean {
+  return !!(token.landscapeOpen || token.landscapeClose || token.portraitOpen || token.portraitClose || token.bibliographyMarker);
+}
+
+/** Whether an opening fence of `style` starts a style block of its own
+ *  where one of `openStyle` is open, or none is: where it's of another
+ *  style. One of the same style, which no fence closed, goes on in the
+ *  block open, in Word too */
+function startsStyleBlock(openStyle: string | undefined, style: string): boolean {
+  return openStyle !== style;
+}
+
 /**
  * Tokens with each quote paragraph of comment bodies only moved into the
  * paragraph of its quote before it, or else the one after, which takes its
@@ -10243,7 +10312,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       codeBeforeFence = false;
       // Not a section's fence or the bibliography's place, which Word gets
       // no paragraph of the block's for
-      const marker = token.landscapeOpen || token.landscapeClose || token.portraitOpen || token.portraitClose || token.bibliographyMarker;
+      const marker = marksSectionOrBibliography(token);
       if (unstyledInStyleBlock(token)) {
         if (token.alertLead && options?.calloutLabels === false) recording = false;
         if (!styleBlock) unitsOutside++;
@@ -10343,7 +10412,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         if (token.blankLinesAfter !== undefined) sentinelGaps['csoa' + sentinelCsoIdx] = token.blankLinesAfter;
         // One of the style of the block open, which no fence closed, goes on
         // in it in Word, and one of another ends it
-        if (styleBlock?.style !== token.customStyleOpen) {
+        if (startsStyleBlock(styleBlock?.style, token.customStyleOpen)) {
           closeStyleBlock();
           styleBlock = { style: token.customStyleOpen, styled: false, lead: 0, trail: 0, inner: false, before: unitsOutside };
           unitsOutside = 0;
