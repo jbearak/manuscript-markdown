@@ -5,8 +5,10 @@
  */
 
 import MarkdownIt from 'markdown-it';
+import { HTML_OPEN_CLOSE_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import type Token from 'markdown-it/lib/token.mjs';
 import blockquote from 'markdown-it/lib/rules_block/blockquote.mjs';
+import { commentEnds } from './inline-html-comments';
 import { normalizeNewlines } from './newlines';
 
 export interface CodeRegion {
@@ -39,6 +41,10 @@ export interface MarkdownRegions {
 	/** With `includeTables`, each pipe table's lines, sorted, not merged
 	 *  with one it touches */
 	tableRegions: CodeRegion[];
+	/** With `inlineHtml`, the raw HTML in a paragraph's or a heading's text
+	 *  that markdown-it reads there whatever comes before it, sorted (see
+	 *  pushInlineHtml) */
+	inlineHtmlRegions: CodeRegion[];
 }
 
 export interface MarkdownRegionOptions {
@@ -51,6 +57,8 @@ export interface MarkdownRegionOptions {
 	literalHtml?: (content: string) => boolean;
 	includeLists?: boolean;
 	includeTables?: boolean;
+	/** With `html`, inlineHtmlRegions */
+	inlineHtml?: boolean;
 	/** With `html`, read a quote as ending before a line with text that
 	 *  doesn't start as a quote's line does, as export does, which puts a
 	 *  blank line before each (see deLazifyBlockquotesWithLines in
@@ -85,6 +93,7 @@ exportBlockParser.block.ruler.at('blockquote', (state, startLine, endLine, silen
  *  one level in, as deLazifyBlockquotesWithLines reads one */
 const QUOTE_LINE_RE = /^ {0,3}>/;
 const HTML_COMMENT_ONLY_RE = /^<!--[\s\S]*?-->\s*$/;
+const OPEN_CLOSE_TAG_AT = new RegExp(HTML_OPEN_CLOSE_TAG_RE.source.replace(/^\^/, ''), 'y');
 
 /** The offset of each line's start: after a line feed or carriage return, alone or both */
 export function computeLineStarts(text: string): number[] {
@@ -199,6 +208,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	const literalHtmlRegions: HtmlBlockRegion[] = [];
 	const listRegions: CodeRegion[] = [];
 	const tableRegions: CodeRegion[] = [];
+	const inlineHtmlRegions: CodeRegion[] = [];
 	const outerItemRegions: CodeRegion[] = [];
 	const itemClosedStarts: number[] = [];
 	// The list items and quotes each token is in, innermost last
@@ -227,7 +237,14 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	// The lines to the last with text
 	let textEnd = blockLines.length;
 	while (textEnd > 0 && blockLines[textEnd - 1].trim() === '') textEnd--;
+	let previous: Token | undefined;
 	for (const token of blockTokens) {
+		const before = previous;
+		previous = token;
+		if (options?.html && options.inlineHtml && token.type === 'inline' && token.map && token.content.includes('<')
+			&& (before?.type === 'paragraph_open' || before?.type === 'heading_open')) {
+			pushInlineHtml(token, text, lineStarts, inlineHtmlRegions);
+		}
 		if (options?.includeLists) {
 			if (token.type === 'list_item_close' || token.type === 'blockquote_close') containers.pop();
 			else if (token.type === 'blockquote_open') containers.push('quote');
@@ -281,7 +298,94 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		itemClosedStarts,
 		// In the order of the tokens, which is the text's
 		tableRegions,
+		inlineHtmlRegions,
 	};
+}
+
+/** Where each line of an inline token's text starts, in the text and in
+ *  `text`, from its map's lines, or null where a line of it isn't the end
+ *  of its line in `text`, as where markdown-it cut a tab in an indent */
+function inlineLines(token: Token, text: string, lineStarts: number[]): Array<{ content: number; source: number }> | null {
+	const contentLines = token.content.split('\n');
+	const lines: Array<{ content: number; source: number }> = [];
+	let content = 0;
+	for (let k = 0; k < contentLines.length; k++) {
+		const start = lineStarts[token.map![0] + k];
+		if (start === undefined) return null;
+		let end = lineStarts[token.map![0] + k + 1] ?? text.length;
+		while (end > start && (text.charCodeAt(end - 1) === 0x0A || text.charCodeAt(end - 1) === 0x0D)) end--;
+		// markdown-it trims the text, at the end of its last line too
+		if (k === contentLines.length - 1) while (end > start && /\s/.test(text[end - 1])) end--;
+		const line = contentLines[k];
+		if (end - start < line.length || !text.startsWith(line, end - line.length)) return null;
+		lines.push({ content, source: end - line.length });
+		content += line.length + 1;
+	}
+	return lines;
+}
+
+/** Whether a construct markdown-it reads in a paragraph's text can end at
+ *  `at` of `content`: a code span, an equation, a link's text or
+ *  destination, a citation, a highlight or CriticMarkup, and a
+ *  substitution's old text at its ~>, as each side is read on its own */
+function constructEndsAt(content: string, at: number): boolean {
+	const char = content[at];
+	if (char === '`' || char === '$' || char === ']' || char === ')') return true;
+	const next = content[at + 1];
+	if ((char === '=' && next === '=') || (char === '~' && next === '>')) return true;
+	return content[at + 2] === '}' && (char === '+' || char === '-' || char === '~' || char === '<') && next === char;
+}
+
+/**
+ * Push to `regions` the raw HTML in an inline token's text, of a paragraph
+ * or a heading, as markdown-it reads it there, a comment or an open or close
+ * tag, in `text`'s offsets, that no construct read before it can cut short:
+ * one that holds no end of one (see constructEndsAt). Such a construct, as
+ * a code span or a span of CriticMarkup from before its <, would leave the
+ * rest of it text, as in [a <!--](x) {++ -->. One that holds all of it
+ * holds what's in it too, so a CriticMarkup opener in the HTML starts no
+ * span either way. A < after a backslash is text. A comment that doesn't
+ * end in the text, and a processing instruction, a declaration or CDATA,
+ * are left out, as are the text's whose lines aren't the ends of their
+ * lines in `text` (see inlineLines).
+ */
+function pushInlineHtml(token: Token, text: string, lineStarts: number[], regions: CodeRegion[]): void {
+	const content = token.content;
+	const lines = inlineLines(token, text, lineStarts);
+	if (!lines) return;
+	// The first offset at or after each where a construct can end
+	const nextEnd = new Int32Array(content.length + 1);
+	nextEnd[content.length] = content.length;
+	for (let at = content.length - 1; at >= 0; at--) nextEnd[at] = constructEndsAt(content, at) ? at : nextEnd[at + 1];
+	const ends = content.includes('<!--') ? commentEnds(content) : undefined;
+	let line = 0;
+	const source = (at: number) => {
+		while (line + 1 < lines.length && lines[line + 1].content <= at) line++;
+		return lines[line].source + at - lines[line].content;
+	};
+	for (let at = content.indexOf('<'); at !== -1;) {
+		let backslashes = 0;
+		while (content.charCodeAt(at - 1 - backslashes) === 0x5C) backslashes++;
+		let end = -1;
+		if (backslashes % 2 === 0) {
+			if (content.startsWith('<!--', at)) {
+				const empty = /^<!---?>/.exec(content.slice(at, at + 6));
+				const close = empty ? -1 : ends![at + 4];
+				end = empty ? at + empty[0].length : close === -1 ? -1 : close + 3;
+			} else {
+				OPEN_CLOSE_TAG_AT.lastIndex = at;
+				const tag = OPEN_CLOSE_TAG_AT.exec(content);
+				if (tag) end = at + tag[0].length;
+			}
+		}
+		if (end !== -1 && nextEnd[at] >= end) {
+			const start = source(at);
+			regions.push({ start, end: source(end - 1) + 1 });
+			at = content.indexOf('<', end);
+		} else {
+			at = content.indexOf('<', at + 1);
+		}
+	}
 }
 
 /** The end of each HTML block that only its end ends, by its start, as
