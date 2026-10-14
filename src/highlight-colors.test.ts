@@ -8,7 +8,6 @@ import {
   extractCriticDelimiterRanges,
   extractCommentRanges,
   extractAllDecorationRanges,
-  maskCriticDelimiters,
   setDefaultHighlightColor,
   getDefaultHighlightColor,
   resolveMarkdownColor,
@@ -146,6 +145,19 @@ describe('Editor decorations for CriticMarkup without its closers', () => {
     const small = time(10000);
     expect(time(40000) / small).toBeLessThan(8);
   }, 60000);
+
+  it('finds critic highlights in additions, deletions and substitutions in time linear in the text', () => {
+    // Each {== in a span whose ==} is past the span's end, at the text's end
+    const input = (n: number) => 'x {-- a {== b --} c {++ d {== e ++} f {~~ g {== h ~> i {== j ~~} '.repeat(n) + '==}';
+    expect(extractAllDecorationRanges(input(2), 'yellow').highlights.get('critic')).toBeUndefined();
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => extractAllDecorationRanges(text, 'yellow'));
+    };
+    time(10000);
+    const small = time(10000);
+    expect(time(40000) / small).toBeLessThan(8);
+  }, 60000);
 });
 
 // Feature: highlight-colors, Property 9: Default highlight color respects configuration
@@ -257,11 +269,10 @@ describe('Comment-with-ID {#id>>...<<} handling', () => {
     expect(text.slice(ranges[1].start, ranges[1].end)).toBe('with id');
   });
 
-  it('maskCriticDelimiters masks {#id>> and <<} delimiters', () => {
-    const text = '{#abc>>hello<<}';
-    const masked = maskCriticDelimiters(text);
-    expect(masked).toBe('       hello   ');
-    expect(masked.length).toBe(text.length);
+  it('extractHighlightRanges reads {#id>>...<<} as one span, whose } a format highlight holds', () => {
+    const text = '==a {#abc>>b}c<<} d==';
+    const yellow = extractHighlightRanges(text, 'yellow').get('yellow') ?? [];
+    expect(yellow.map(r => text.slice(r.start, r.end))).toEqual([text]);
   });
 
   it('extractAllDecorationRanges populates comments and commentDelimiters for {#id>>...<<}', () => {

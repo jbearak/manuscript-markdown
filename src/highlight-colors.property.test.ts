@@ -59,11 +59,16 @@ const nestedColoredInAddition = fc.tuple(safeContent, fc.constantFrom(...VALID_C
   ([s, c]) => `{++before ==${s}=={${c}} after++}`
 );
 
+// Nested: critic highlight inside an addition, a deletion or one side of a
+// substitution, which export and the preview show highlighted there
+const criticInAddition = fc.tuple(safeContent, safeContent).map(([a, b]) => `{++` + a + `{==` + b + `==}++}`);
+const criticInDeletion = fc.tuple(safeContent, safeContent).map(([a, b]) => `{--{==` + a + `==}` + b + `--}`);
+const criticInSubstitution = fc.tuple(safeContent, safeContent).map(([a, b]) => `{~~{==` + a + `==}~>` + b + ` {==` + a + `==}~~}`);
+
 const colorGen = fc.constantFrom(...VALID_COLOR_IDS, 'invalid-color');
 
-// Text generator mixing all pattern types including nested
-const mixedTextGen = fc.array(
-  fc.oneof(
+// One well-formed piece of any pattern type, including nested
+const mixedPiece = fc.oneof(
     { weight: 3, arbitrary: safeContent },
     { weight: 2, arbitrary: formatHighlight },
     { weight: 2, arbitrary: coloredHighlight },
@@ -80,9 +85,34 @@ const mixedTextGen = fc.array(
     { weight: 1, arbitrary: nestedHighlightInComment },
     { weight: 1, arbitrary: nestedHighlightInIdComment },
     { weight: 1, arbitrary: nestedColoredInAddition },
-  ),
-  { minLength: 1, maxLength: 8 }
-).map(parts => parts.join(' '));
+    { weight: 1, arbitrary: criticInAddition },
+    { weight: 1, arbitrary: criticInDeletion },
+    { weight: 1, arbitrary: criticInSubstitution },
+);
+
+// Text generator mixing all pattern types including nested
+const mixedTextGen = fc.array(mixedPiece, { minLength: 1, maxLength: 8 }).map(parts => parts.join(' '));
+
+// Malformed text: delimiters and pieces of them, unpaired, crossing and
+// nested, side by side with no space between them, as in
+// {--{==~>==}}~~}--} and ==a{=={=={>>==}b, which the pieces above, each
+// well formed and set apart by spaces, never make. The highlights' are
+// drawn more often: with all drawn alike, too few texts had a highlight
+// that closes in a critic highlight it starts before, as the second does.
+const fragment = fc.oneof(
+  { weight: 3, arbitrary: fc.constantFrom('{==', '==}', '==') },
+  {
+    weight: 4,
+    arbitrary: fc.constantFrom(
+      '{>>', '<<}', '{++', '++}', '{--', '--}', '{~~', '~~}', '{#x>>',
+      '~>', '=', '{', '}', '~', '>', '<', '-', '+', '{red}', 'a', 'b', ' ', '\n',
+    ),
+  },
+);
+const malformedTextGen = fc.array(
+  fc.oneof({ weight: 6, arbitrary: fragment }, { weight: 1, arbitrary: mixedPiece }),
+  { minLength: 1, maxLength: 16 }
+).map(parts => parts.join(''));
 
 describe('Property 3: Single-pass decoration extraction equivalence', () => {
 
@@ -98,6 +128,16 @@ describe('Property 3: Single-pass decoration extraction equivalence', () => {
         expect(normalizedAll).toEqual(normalizedStandalone);
       }),
       { numRuns: 200 }
+    );
+  });
+
+  test('on malformed text too', () => {
+    fc.assert(
+      fc.property(malformedTextGen, colorGen, (text, defaultColor) => {
+        expect(normalizeHighlights(extractAllDecorationRanges(text, defaultColor).highlights))
+          .toEqual(normalizeHighlights(extractHighlightRanges(text, defaultColor)));
+      }),
+      { numRuns: 5000 }
     );
   });
 
@@ -149,6 +189,39 @@ describe('Nested highlight extraction', () => {
     // as an opener, as the preview and extractHighlightRanges do
     for (const highlights of [extractHighlightRanges(text, 'yellow'), extractAllDecorationRanges(text, 'yellow').highlights]) {
       expect((highlights.get(color) ?? []).map(r => text.slice(r.start, r.end))).toEqual([highlighted]);
+    }
+  });
+
+  test.each([
+    // A critic highlight in an addition, a deletion or one side of a
+    // substitution, which export and the preview show highlighted there
+    ['{--{==~>==}}~~}--}', { critic: ['~>'] }],
+    ['{--a {==b==} c--}', { critic: ['b'] }],
+    ['x {++a {==b==} c++} y', { critic: ['b'] }],
+    ['{~~a {==b==}~>c {==d==}~~}', { critic: ['b', 'd'] }],
+    ['=={++a {==b==} c++}==', { critic: ['b'], yellow: ['=={++a {==b==} c++}=='] }],
+    // But not one in a comment, whose text export writes as it is, or one
+    // that runs past a substitution's ~> or out of its span
+    ['{>>a {==b==} c<<}', {}],
+    ['{~~a {==b~>c==}~~}', {}],
+    ['{++~>{==b++}==}', {}],
+    // Nor any in text that holds another opener, as before: there a {== can
+    // be in a comment, or run past a nested substitution's ~>
+    ['{++{>>a {==b==} c<<}++}', {}],
+    ['{++{~~a {==b~>c==}~~}++}', {}],
+    ['{--{#n1>>a {==b==} c<<}--}', {}],
+    // That is each side of a substitution by itself
+    ['{~~a {==b==}~>{>>c<<}~~}', { critic: ['b'] }],
+    // A format highlight that would close in a critic highlight it starts
+    // before, or outside the span it starts in, is none
+    ['==a{=={=={>>==}b', { critic: ['{=={>>'] }],
+    ['==a {==b==c==}', { critic: ['b==c'] }],
+    ['{>>b==<<}==', {}],
+  ])('%j: the editor\'s highlights and extractHighlightRanges\'s are export\'s', (text, expected) => {
+    for (const highlights of [extractHighlightRanges(text, 'yellow'), extractAllDecorationRanges(text, 'yellow').highlights]) {
+      const found = Object.fromEntries([...highlights].map(([key, ranges]) =>
+        [key, [...ranges].sort((x, y) => x.start - y.start).map(r => text.slice(r.start, r.end))]));
+      expect(found).toEqual(expected);
     }
   });
 
