@@ -716,12 +716,21 @@ function footnoteRefRule(state: StateInline, silent: boolean): boolean {
   // No colon check needed here — start-of-line definitions are already
   // stripped by extractFootnoteDefinitions() before parseMd() is called.
 
-  if (!silent) {
-    const token = pushManuscriptToken(state, 'footnote_ref', '', 0);
-    token.footnoteLabel = label;
-    // An image's alt text, which joins its tokens' content, keeps it as written
-    token.content = src.slice(start, end + 1);
+  // In silent mode, where markdown-it scans a link's label, its [ alone, as
+  // text's: a token there that starts with a [ and goes on past it reads as
+  // a link in the link, which makes the link none, so [a[^1] b](u) was
+  // text, though Pandoc reads a link with a note in it. Its ] then closes
+  // that [, as its label holds no bracket, so the label ends where it
+  // would. The [ is still this rule's, so the link rule reads no link from
+  // it there, as of [^1](x), which tokenizing reads as the note and text.
+  if (silent) {
+    state.pos = start + 1;
+    return true;
   }
+  const token = pushManuscriptToken(state, 'footnote_ref', '', 0);
+  token.footnoteLabel = label;
+  // An image's alt text, which joins its tokens' content, keeps it as written
+  token.content = src.slice(start, end + 1);
   state.pos = end + 1;
   return true;
 }
@@ -4296,6 +4305,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           text: '',
           footnoteLabel: token.footnoteLabel,
           ...formatStack,
+          href: currentHref,
         });
         break;
 
@@ -8209,7 +8219,7 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'footnote_ref') {
-      emit(noteReferenceXml(run.footnoteLabel || '', state, 'deletion', highlightRPr(run)));
+      emit(noteReferenceXml(run.footnoteLabel || '', state, 'deletion', highlightRPr(run)), run);
       continue;
     }
     if (run.type === 'image') {
@@ -8424,8 +8434,8 @@ function insertionXml(insertedXml: string, author: string, dateAttr: string, sta
   return trackedChangeXml('w:ins', insertedXml, HYPERLINK_RE, author, dateAttr, state);
 }
 
-/** The runs a link's hyperlink holds: its text, line breaks, images and tracked changes */
-const LINK_RUN_TYPES = new Set<MdRun['type']>(['text', 'softbreak', 'hardbreak', 'image', 'critic_add', 'critic_del', 'critic_sub']);
+/** The runs a link's hyperlink holds: its text, line breaks, images, note references and tracked changes */
+const LINK_RUN_TYPES = new Set<MdRun['type']>(['text', 'softbreak', 'hardbreak', 'image', 'critic_add', 'critic_del', 'critic_sub', 'footnote_ref']);
 
 /** Whether a run's tracked change holds a link to somewhere other than `href` */
 function holdsOtherLink(run: MdRun, href: string): boolean {

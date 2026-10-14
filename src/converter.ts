@@ -1589,7 +1589,8 @@ export type ContentItem =
   // inParagraph: display math in a w:p, which goes on in its text, not a
   // body's m:oMathPara of its own
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean }
-  | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting }
+  // href and link: as text's, of a w:hyperlink around the reference
+  | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting; href?: string; link?: number }
   // otherLineEnds: its hidden runs held a line end that isn't a line break
   // of Word's, as a line feed in their text, which Word shows as a space, or
   // a page or column break (see breakCommentLines)
@@ -5748,6 +5749,7 @@ function parseNoteBody(
                 commentIds: new Set(activeComments),
                 ...(revision ? { revision } : {}),
                 ...highlightOnly(fieldFormatting),
+                ...(currentHref ? { href: currentHref, link: currentLink } : {}),
               });
             }
             noterefInfo = undefined;
@@ -5776,7 +5778,8 @@ function parseNoteBody(
           // refer to (see convertDocx)
           const noteId = xmlNumberId(getAttr(node, 'id'));
           if (noteId && noteId !== '0' && noteId !== '-1') {
-            target.push({ type: 'footnote_ref', noteId, noteKind: key === 'w:footnoteReference' ? 'footnote' : 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
+            target.push({ type: 'footnote_ref', noteId, noteKind: key === 'w:footnoteReference' ? 'footnote' : 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting),
+              ...(currentHref ? { href: currentHref, link: currentLink } : {}) });
           }
 
         // --- Hyperlinks ---
@@ -7334,6 +7337,7 @@ export async function extractDocumentContent(
                 commentIds: new Set(activeComments),
                 ...(revision ? { revision } : {}),
                 ...highlightOnly(fieldFormatting),
+                ...(currentHref ? { href: currentHref, link: currentLink } : {}),
               });
             }
             if (inCitationField && currentCitation && shows) {
@@ -7382,12 +7386,14 @@ export async function extractDocumentContent(
         } else if (key === 'w:footnoteReference') {
           const noteId = xmlNumberId(getAttr(node, 'id'));
           if (noteId && noteId !== '0' && noteId !== '-1') {
-            target.push({ type: 'footnote_ref', noteId, noteKind: 'footnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
+            target.push({ type: 'footnote_ref', noteId, noteKind: 'footnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting),
+              ...(currentHref ? { href: currentHref, link: currentLink } : {}) });
           }
         } else if (key === 'w:endnoteReference') {
           const noteId = xmlNumberId(getAttr(node, 'id'));
           if (noteId && noteId !== '0' && noteId !== '-1') {
-            target.push({ type: 'footnote_ref', noteId, noteKind: 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
+            target.push({ type: 'footnote_ref', noteId, noteKind: 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting),
+              ...(currentHref ? { href: currentHref, link: currentLink } : {}) });
           }
         } else if (key === 'w:hyperlink' || key === 'w:fldSimple' && hyperlinkFieldTarget(getAttr(node, 'instr')) !== undefined) {
           // A w:hyperlink, or a HYPERLINK field Word wrote whole, whose runs are its result
@@ -8198,9 +8204,10 @@ function bareLinkReadsBack(before: string, address: string, closer: string, foll
 }
 
 /** `markdown`, the Markdown of the text at `index`, with a ! at its end
- *  escaped where a link, or a picture in one, comes next in its comments,
- *  which the ! would make an image of, as in ![text](url). A note's [^1] or a citation's [@key]
- *  isn't one, and stays one after a !. Spans of a tracked change keep apart
+ *  escaped where a link, or a picture or a note's [^1] that starts one,
+ *  comes next in its comments, which the ! would make an image of, as in
+ *  ![text](url). A note's [^1] or a citation's [@key] outside a link isn't
+ *  one, and stays one after a !. Spans of a tracked change keep apart
  *  at a ! before a link (canJoinSpans), so only text in none, or on a side
  *  of a substitution (`side`), which has none of its own, runs into one.
  *  From the text's Markdown, as reading the end of Markdown being built
@@ -8214,7 +8221,7 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   // A tracked change's delimiters come between them, but for one of part of
   // a link of several runs, which go inside its text, after its [. In an
   // HTML table's cell, a link is its tag, which a ! makes nothing of.
-  if (!readsMarkdown || k >= end || item.type !== 'text' || next.type !== 'text' && next.type !== 'image' || next.href === undefined
+  if (!readsMarkdown || k >= end || item.type !== 'text' || next.type !== 'text' && next.type !== 'image' && next.type !== 'footnote_ref' || next.href === undefined
     || !side && (item.revision || next.revision && !partlyRevisedLinkAt(segment, k, end, next.commentIds))
     || !commentSetsEqual(item.commentIds, next.commentIds)) return markdown;
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
@@ -8666,7 +8673,7 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
   const joins = (item: ContentItem) =>
     (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || (item.type === 'math' && !item.display))
     && revisionsEqual(item.revision, first.revision) && commentSetsEqual(item.commentIds, commentIds)
-    && !(item.type === 'text' && item.href) && !groupItemSource(item).includes('==');
+    && !((item.type === 'text' || item.type === 'footnote_ref') && item.href) && !groupItemSource(item).includes('==');
   if (!joins(first)) return start;
   const groupless = grouplessRuns.get(segment);
   if (groupless && groupless.from < start && start < groupless.to) return start;
@@ -8833,6 +8840,11 @@ function combinedSpanJoin(items: InlineRevisionItem[], afterItem?: (k: number) =
  *  neighbours' (`joinsHighlight`, see joinHighlights), at the start of a
  *  line where an item of the side before it ends one (`lineStart`). */
 function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter, joinsHighlight = false, lineStart = false): string {
+  // A note reference in a link, in the link, around its highlight, as
+  // linkGroup writes one
+  if (item.type === 'footnote_ref' && item.href) {
+    return markdownLink(substitutionItemText({ ...item, href: undefined, link: undefined }, precedingText, noteLabels, after), item.href);
+  }
   const color = highlightColorOf(item);
   if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
     const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after);
@@ -9014,7 +9026,7 @@ function renderSubstitutionRun(
       const item = segment[j] as SubstitutionItem;
       starts[j - from] = text.length;
       // A link of several runs stays one link, as outside a substitution
-      const link = item.type === 'text' ? linkGroup(segment, j, to, item.commentIds) : undefined;
+      const link = item.type === 'text' || item.type === 'footnote_ref' ? linkGroup(segment, j, to, item.commentIds, undefined, noteLabels) : undefined;
       if (link) {
         text += link.text;
         j = link.end;
@@ -9503,6 +9515,8 @@ function indexedText(item: ContentItem): string {
       : '\uFFFC' + item.alt + '\uFFFC(' + formatHrefForMarkdown(item.src) + ')').replace(/[[\]]/g, '\uFFFC');
     return item.href ? '[' + image + '](' + formatHrefForMarkdown(item.href) + ')' : image;
   }
+  // A linked note reference's link goes around it, as a link's below
+  if (item.type === 'footnote_ref' && item.href) return '[\uFFFC](' + formatHrefForMarkdown(item.href) + ')';
   if (item.type !== 'text') return '\uFFFC';
   // A link's text in its brackets, whose ] closes a citation before it
   // and whose URL's $ closes math, even where it's written as its URL
@@ -9671,40 +9685,47 @@ function startsBlockLine(markdown: string): boolean {
 const startsBlock = (item: ContentItem | undefined): boolean =>
   item?.type === 'text' && startsBlockLine(wrapWithFormatting(item.text, item.formatting));
 
+/** A run a link's text holds (see linkGroup) */
+type LinkItem = Extract<ContentItem, { type: 'text' | 'image' | 'footnote_ref' }>;
+
 /**
- * A Word hyperlink's runs from `start`, its text, line breaks and pictures,
- * all in the comments `commentIds`, as one Markdown link around them, but
- * not the next hyperlink's, though it goes to the same place, so
- * [a **b** c](u), a link with a line break in it and [a ![b](b.png) c](u)
- * stay one link. A revision of the whole
+ * A Word hyperlink's runs from `start`, its text, line breaks, pictures and
+ * note references, all in the comments `commentIds`, as one Markdown link
+ * around them, but not the next hyperlink's, though it goes to the same
+ * place, so [a **b** c](u), a link with a line break in it,
+ * [a ![b](b.png) c](u) and [a[^1] b](u) stay one link. A revision of the whole
  * link goes around it, from `item`'s, and one of part of it inside it, as
  * a deletion at its end does where its insertion comes after the link,
  * which Word keeps out of the hyperlink, and each run's of one of all of it
  * where no span around it holds its text.
  * Its emphasis is left marked, for the range's resolveEmphasis, which reads
- * the runs around the link too. Undefined where the link is one run.
+ * the runs around the link too. Undefined where the link is one run, but
+ * for a note reference alone, which writes no link of its own.
  */
 function linkGroup(
   segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>, imageFormatMapping?: Map<string, string>,
+  noteLabels?: Map<string, string>,
 ): { text: string; end: number; item: InlineRevisionItem; join: { join: SpanJoin; literal: Set<string> } } | undefined {
   const first = segment[start];
-  if ((first.type !== 'text' && first.type !== 'image') || !first.href || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
-  const inLink = (i: number): ContentItem & { type: 'text' | 'image' } | undefined => {
+  if ((first.type !== 'text' && first.type !== 'image' && first.type !== 'footnote_ref') || !first.href
+    || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
+  const inLink = (i: number): LinkItem | undefined => {
     const item = segment[i];
-    return i < end && (item.type === 'text' || item.type === 'image') && item.href === first.href && item.link === first.link
+    return i < end && (item.type === 'text' || item.type === 'image' || item.type === 'footnote_ref') && item.href === first.href && item.link === first.link
       && commentSetsEqual(item.commentIds, commentIds) ? item : undefined;
   };
-  const items: Array<ContentItem & { type: 'text' | 'image' }> = [];
-  for (let next = first; next; next = inLink(start + items.length)!) {
+  const items: LinkItem[] = [];
+  for (let next: LinkItem | undefined = first; next; next = inLink(start + items.length)) {
     items.push(next);
-    if (next.type === 'image') continue;
+    if (next.type !== 'text') continue;
     if (next.text === '\\\n') {
       // A line of the link that would start a block, which Markdown reads
       // before the link, starts a link of its own after the break, which
       // ends this one, so the line starts with its ](url)
       let line = '';
       for (let i = start + items.length, item = inLink(i); item && !(item.type === 'text' && item.text === '\\\n'); item = inLink(++i)) {
-        line += item.type === 'image' ? pictureMarkdown(item, imageFormatMapping) : wrapWithFormatting(item.text, item.formatting);
+        line += item.type === 'image' ? pictureMarkdown(item, imageFormatMapping)
+          : item.type === 'footnote_ref' ? footnoteRefText(item, noteLabels) : wrapWithFormatting(item.text, item.formatting);
       }
       if (startsBlockLine(line)) break;
     }
@@ -9715,7 +9736,7 @@ function linkGroup(
     // (see spanJoin), come between them
     if (OPEN_TAG_AT_END_RE.test(next.text)) break;
   }
-  if (items.length < 2) return undefined;
+  if (items.length < 2 && first.type !== 'footnote_ref') return undefined;
   const href = first.href;
   // The item at k as Markdown in the link's text, which reads the runs
   // `after` it as the rest of the text before the link's ](url), as a link
@@ -9726,6 +9747,11 @@ function linkGroup(
   const itemText = (k: number, after: RunsAfter): string => {
     const item = items[k];
     if (item.type === 'image') return pictureMarkdown(item, imageFormatMapping, after.linkTo(href));
+    if (item.type === 'footnote_ref') {
+      // In its highlight, which Word shows on it
+      const color = highlightColorOf(item);
+      return color ? wrapHighlight(footnoteRefText(item, noteLabels), color) : footnoteRefText(item, noteLabels);
+    }
     return item.text === '\\\n' && !showsOnBreak(item.formatting) ? lineBreakText()
       : escapeBraceAfterImage(markedFormatting(item.text, item.formatting, false, after.linkTo(href)), segment, start + k);
   };
@@ -9974,6 +10000,13 @@ function renderInlineRange(
     }
 
     if (item.type === 'footnote_ref' && item.commentIds.size === 0) {
+      // With the rest of its link, as the link's text goes
+      const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS, renderOpts?.imageFormatMapping, renderOpts?.noteLabels);
+      if (link) {
+        [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
+        i = link.end;
+        continue;
+      }
       [out, lastSpan] = appendRevised(out, footnoteRefText(item, renderOpts?.noteLabels), item, lastSpan);
       i++;
       continue;
@@ -9982,7 +10015,7 @@ function renderInlineRange(
     // An image in a comment's range goes in its anchor, below. One in a
     // link goes with the rest of the link's runs, as they do
     if (item.type === 'image' && item.commentIds.size === 0) {
-      const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS, renderOpts?.imageFormatMapping);
+      const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS, renderOpts?.imageFormatMapping, renderOpts?.noteLabels);
       if (link) {
         [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
         i = link.end;
@@ -10076,7 +10109,7 @@ function renderInlineRange(
           break;
         }
         if (seg.type === 'image') {
-          const link = linkGroup(segment, j, segmentEnd, commentSet, renderOpts?.imageFormatMapping);
+          const link = linkGroup(segment, j, segmentEnd, commentSet, renderOpts?.imageFormatMapping, renderOpts?.noteLabels);
           if (link) {
             [anchorText, anchorSpan] = appendRevised(anchorText, link.text, link.item, anchorSpan, link.join);
             j = link.end;
@@ -10093,7 +10126,7 @@ function renderInlineRange(
           j++;
           continue;
         }
-        const link = linkGroup(segment, j, segmentEnd, commentSet, renderOpts?.imageFormatMapping);
+        const link = linkGroup(segment, j, segmentEnd, commentSet, renderOpts?.imageFormatMapping, renderOpts?.noteLabels);
         if (link) {
           [anchorText, anchorSpan] = appendRevised(anchorText, link.text, link.item, anchorSpan, link.join);
           j = link.end;
@@ -10143,7 +10176,7 @@ function renderInlineRange(
       continue;
     }
 
-    const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS, renderOpts?.imageFormatMapping);
+    const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS, renderOpts?.imageFormatMapping, renderOpts?.noteLabels);
     if (link) {
       [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
       i = link.end;
@@ -10296,7 +10329,7 @@ function renderInlineRangeWithIds(
     // start first, as they would for it alone, so one can start where a
     // comment's range ends.
     if (isSubstitutionItem(item) && item.revision?.type === 'deletion'
-        && !(item.type === 'text' && partlyRevisedLinkAt(segment, i, segmentEnd, item.commentIds))) {
+        && !partlyRevisedLinkAt(segment, i, segmentEnd, item.commentIds)) {
       enterComments(item.commentIds);
       const eligible = (candidate: ContentItem) => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds);
       const run = renderSubstitutionRun(segment, i, segmentEnd, out, eligible, noteLabels);
@@ -10359,6 +10392,13 @@ function renderInlineRangeWithIds(
     if (item.type === 'footnote_ref') {
       const currentIds = item.commentIds;
       enterComments(currentIds);
+      // With the rest of its link, as the link's text goes
+      const link = linkGroup(segment, i, segmentEnd, currentIds, imageFormatMapping, noteLabels);
+      if (link) {
+        [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
+        i = link.end;
+        continue;
+      }
       [out, lastSpan] = appendRevised(out, footnoteRefText(item, noteLabels), item, lastSpan);
       i++;
       continue;
@@ -10369,7 +10409,7 @@ function renderInlineRangeWithIds(
       const currentIds = item.commentIds;
       enterComments(currentIds);
       // With the rest of its link, as the link's text goes
-      const link = linkGroup(segment, i, segmentEnd, currentIds, imageFormatMapping);
+      const link = linkGroup(segment, i, segmentEnd, currentIds, imageFormatMapping, noteLabels);
       if (link) {
         [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
         i = link.end;
@@ -10422,7 +10462,7 @@ function renderInlineRangeWithIds(
 
     enterComments(currentIds);
 
-    const link = linkGroup(segment, i, segmentEnd, currentIds, imageFormatMapping);
+    const link = linkGroup(segment, i, segmentEnd, currentIds, imageFormatMapping, noteLabels);
     if (link) {
       [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
       i = link.end;
