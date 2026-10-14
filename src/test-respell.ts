@@ -224,14 +224,29 @@ export function canonicalXml(xml: string): string {
   }).join('');
 }
 
-/** A Word file with each XML part of `parts` spelled otherwise (see respellXml) */
-export async function respellDocx(docx: Uint8Array, random: () => number, parts: (path: string) => boolean = () => true): Promise<Uint8Array> {
+/**
+ * A Word file with each XML part of `parts` spelled otherwise (see
+ * respellXml), each by numbers of its own from `seed` and its path (see
+ * partSeed), so a part's spelling depends on the seed and its own XML
+ * alone, and a seed spells it the same way again whatever the other parts
+ * hold, as the random IDs of a template export makes (see template in
+ * respelling.property.test.ts), and whatever parts there are.
+ */
+export async function respellDocx(docx: Uint8Array, seed: number, parts: (path: string) => boolean = () => true): Promise<Uint8Array> {
   const zip = await JSZip.loadAsync(docx);
   for (const path of Object.keys(zip.files).sort()) {
     if (zip.files[path].dir || !/\.(xml|rels)$/.test(path) || !parts(path)) continue;
-    zip.file(path, respellXml(await zip.files[path].async('string'), random));
+    zip.file(path, respellXml(await zip.files[path].async('string'), seeded(partSeed(seed, path))));
   }
   return zip.generateAsync({ type: 'uint8array' });
+}
+
+/** The seed of the part at `path` from `seed`: the path's 32-bit FNV-1a
+ *  hash, begun from the seed */
+function partSeed(seed: number, path: string): number {
+  let hash = (0x811c9dc5 ^ seed) >>> 0;
+  for (let k = 0; k < path.length; k++) hash = Math.imul(hash ^ path.charCodeAt(k), 0x01000193) >>> 0;
+  return hash;
 }
 
 /**
@@ -260,7 +275,7 @@ export async function canonicalParts(docx: Uint8Array): Promise<Record<string, s
 }
 
 /** Numbers from 0 up to 1, the same for the same seed */
-export function seeded(seed: number): () => number {
+function seeded(seed: number): () => number {
   let state = seed >>> 0 || 1;
   return () => {
     state ^= state << 13;

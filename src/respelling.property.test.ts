@@ -5,7 +5,7 @@ import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { convertDocx } from './converter';
 import { convertMdToDocx } from './md-to-docx';
-import { canonicalParts, respellDocx, seeded } from './test-respell';
+import { canonicalParts, respellDocx } from './test-respell';
 import { xmlAttribute, xmlStartTag } from './xml-elements';
 
 // XML spells one document many ways: with whitespace inside a tag, an
@@ -226,7 +226,7 @@ describe('A template spelled otherwise', () => {
   test('imports, and exports a document, as it does as written', async () => {
     await fc.assert(fc.asyncProperty(variantArb, fc.boolean(), frontmatterArb, fc.integer({ min: 1, max: 0x7fffffff }), async (variant, special, frontmatter, seed) => {
       const templateDocx = await template(variant, special ? SPECIAL_IDS : PLAIN_IDS);
-      const respelled = await respellDocx(templateDocx, seeded(seed), TEMPLATE_PARTS);
+      const respelled = await respellDocx(templateDocx, seed, TEMPLATE_PARTS);
       expect(await importOf(respelled)).toBe(await importOf(templateDocx));
       const md = '---\n' + frontmatter + '\n---\n\n' + BODY;
       const exported = await exportWith(md, templateDocx);
@@ -244,7 +244,7 @@ describe('A template spelled otherwise', () => {
     const markdown = await importOf(templateDocx);
     const exported = await exportWith(md, templateDocx);
     for (const seed of [1, 2, 3]) {
-      const respelled = await respellDocx(templateDocx, seeded(seed * 7919), TEMPLATE_PARTS);
+      const respelled = await respellDocx(templateDocx, seed * 7919, TEMPLATE_PARTS);
       expect(await importOf(respelled)).toBe(markdown);
       expectSameParts(await exportWith(md, respelled), exported);
     }
