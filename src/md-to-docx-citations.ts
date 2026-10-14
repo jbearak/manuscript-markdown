@@ -2,6 +2,7 @@ import { BibtexEntry } from './bibtex-parser';
 import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_INSERTION_COMMAND, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
+import { decodeHtmlCharacterReferences } from './html-entities';
 
 export interface CiteprocName {
   family?: string;
@@ -118,21 +119,9 @@ export function textElements(text: string, tag: 'w:t' | 'w:delText' = 'w:t'): st
   return '<' + tag + (preserve ? ' xml:space="preserve"' : '') + '>' + escaped + '</' + tag + '>';
 }
 
+/** citeproc's HTML's text, as htmlToOoxmlRuns writes it, without its tags */
 function stripHtmlTags(html: string): string {
-  return decodeHtmlEntities(html.replace(/<[^>]+>/g, ''));
-}
-
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&nbsp;/g, '\u00A0')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&');
+  return decodeHtmlCharacterReferences(html.replace(/<[^>]+>/g, ''));
 }
 
 /** CT_RPr's children in schema order, the record of a tracked change to
@@ -302,7 +291,9 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
     if (extraRPr) rPr.push(extraRPr);
 
     const rPrXml = rPr.length > 0 ? '<w:rPr>' + orderRPr(rPr.join('')) + '</w:rPr>' : '';
-    return '<w:r>' + rPrXml + textElements(decodeHtmlEntities(text)) + '</w:r>';
+    // Each character reference read once, as the browser reads citeproc's
+    // HTML, so the &#38;lt; it writes for a title's &lt; is that text, not <
+    return '<w:r>' + rPrXml + textElements(decodeHtmlCharacterReferences(text)) + '</w:r>';
   }).join('');
 }
 
@@ -540,7 +531,9 @@ function resolveVisibleText(
     const rendered = renderCitationText(citeprocEngine, keys, locators, suppressAuthorKeys, prefixes);
     if (rendered) return rendered;
   }
-  return generateFallbackText(keys, entries, locators, suppressAuthorKeys, prefixes);
+  // As HTML, as citeproc writes its text, which htmlToOoxmlRuns reads, so
+  // the source's text shows as it is written there too
+  return escapeXmlText(generateFallbackText(keys, entries, locators, suppressAuthorKeys, prefixes));
 }
 
 function buildCitationFieldCode(
