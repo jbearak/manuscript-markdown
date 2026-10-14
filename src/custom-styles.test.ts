@@ -824,6 +824,40 @@ describe('Custom Styles — List items', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
+  const merged = (text: string) => '<!-- style: box -->\n\nB.\n\n' + text + '\n\n<!-- /style -->\n\n';
+  it.each([
+    ['two blocks of a style with nothing between', '<!-- style: box -->\n\nB.\n\n<!-- /style -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n', merged('C.')],
+    ['two blocks of a style, the second\'s closing fence after two blank lines', '<!-- style: box -->\n\nB.\n\n<!-- /style -->\n\n<!-- style: box -->\n\nC.\n\n\n<!-- /style -->\n\n', merged('C.\n')],
+    ['three blocks of a style with nothing between', '<!-- style: box -->\n\nB.\n\n<!-- /style -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n<!-- style: box -->\n\nC2.\n\n<!-- /style -->\n\n', merged('C.\n\nC2.')],
+    ['two blocks of a style with an empty block of another between', '<!-- style: box -->\n\nB.\n\n<!-- /style -->\n\n<!-- style: note -->\n<!-- /style -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n', merged('C.')],
+    ['a block of its style after an empty block of another opening closes one', '<!-- style: box -->\n\nB.\n\n<!-- style: note -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n', merged('C.')],
+    ['a block of its style after a block in a list item of only a quote closes one', itemQuote + '<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n', itemQuote.replace('  <!-- style: box -->\n\n', '') + 'C.\n\n<!-- /style -->\n\n'],
+    ['a block of its style opened twice after a block in a list item of only a quote closes one', itemQuote + '<!-- style: box -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n', itemQuote.replace('  <!-- style: box -->\n\n', '') + 'C.\n\n<!-- /style -->\n\n'],
+    ['a block of its style after a block in a list item of only a quote closes one, and an empty block of another', itemQuote + '<!-- style: note -->\n<!-- /style -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n', itemQuote.replace('  <!-- style: box -->\n\n', '') + 'C.\n\n<!-- /style -->\n\n'],
+  ])('keeps the blank lines of the fences after %s, which import reads as one block', async (_name, md, expected) => {
+    // Import writes neither the closing fence between the blocks nor the
+    // opening fence after it, but export counted a place for that opening
+    // fence among the opening fences, and for the closing fence among the
+    // closing ones where the source has it, so each fence after took the
+    // blank lines of the one before it
+    const after = 'D.\n\n<!-- style: box -->\n\n\nE.\n\n\n<!-- /style -->\n\nF.\n';
+    const markdown = (await convertDocx((await convertMdToDocx(twoStyles + md + after)).docx)).markdown;
+    expect(markdown).toBe(twoStyles + expected + after);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  it('keeps the blank lines of the fences after two blocks of a style the bibliography\'s place parts, as before', async () => {
+    // Import closes the block at the bibliography's place and opens another
+    // after it, so it writes both fences there, and each fence keeps its
+    // own place
+    const after = 'D.\n\n<!-- style: box -->\n\n\nE.\n\n\n<!-- /style -->\n\nF.\n';
+    const md = twoStyles + '<!-- style: box -->\n\nB.\n\n<!-- references -->\n\n<!-- /style -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n' + after;
+    const expected = twoStyles + '<!-- style: box -->\n\nB.\n\n<!-- /style -->\n\n<!-- references -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n' + after;
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(markdown).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
   const listInBlockWarning = 'List inside a style block in a list item exported without the style (not supported). Move the style block outside the list for round-trip fidelity.';
   const nestedWarning = 'Nested <!-- style: --> directives are not supported; outer style "box" closed implicitly.';
 
