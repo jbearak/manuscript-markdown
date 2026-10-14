@@ -29,7 +29,8 @@ import {
 	TextDocuments,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { BibtexEntry } from '../bibtex-parser';
+import { BibtexEntry, parseBibtexWithRaw } from '../bibtex-parser';
+import { isCitableKey } from '../citation-syntax';
 
 // --- Implementation notes ---
 // - References from markdown — intentional asymmetry: return only .bib declaration
@@ -52,6 +53,7 @@ import {
 	findBibFileFieldAtLine,
 	findBibKeyAtOffset,
 	findCitekeyAtOffset,
+	findUncitableBibKeys,
 	findUsagesForKey,
 	formatFileEntryMarkdown,
 	fsPathToUri,
@@ -107,6 +109,8 @@ const frontmatterDiagnostics = new Map<string, Diagnostic[]>();
 const orientationDiagnostics = new Map<string, Diagnostic[]>();
 const embedDiagnostics = new Map<string, Diagnostic[]>();
 const tableNumberDiagnostics = new Map<string, Diagnostic[]>();
+// For a .bib document, its keys no citation can cite
+const bibKeyDiagnostics = new Map<string, Diagnostic[]>();
 
 const severityMap: Record<string, DiagnosticSeverity> = {
 	'error': DiagnosticSeverity.Error,
@@ -120,7 +124,8 @@ function publishDiagnostics(uri: string): void {
 	const orientation = orientationDiagnostics.get(uri) ?? [];
 	const embed = embedDiagnostics.get(uri) ?? [];
 	const tableNumbers = tableNumberDiagnostics.get(uri) ?? [];
-	connection.sendDiagnostics({ uri, diagnostics: [...citekey, ...frontmatter, ...orientation, ...embed, ...tableNumbers] });
+	const bibKeys = bibKeyDiagnostics.get(uri) ?? [];
+	connection.sendDiagnostics({ uri, diagnostics: [...citekey, ...frontmatter, ...orientation, ...embed, ...tableNumbers, ...bibKeys] });
 }
 
 interface OpenDocBibCache {
@@ -144,7 +149,9 @@ function scheduleValidation(uri: string): void {
 	validationTimers.set(uri, setTimeout(() => {
 		validationTimers.delete(uri);
 		const doc = documents.get(uri);
-		if (doc) {
+		if (doc && isBibUri(uri)) {
+			validateBibKeys(doc);
+		} else if (doc) {
 			runValidationPipeline(doc).catch(e =>
 				connection.console.error(`Scheduled validation error for ${uri}: ${e instanceof Error ? e.message : String(e)}`)
 			);
@@ -243,6 +250,9 @@ connection.onDidChangeConfiguration((params) => {
 });
 
 documents.onDidOpen((event) => {
+	if (isBibUri(event.document.uri)) {
+		validateBibKeys(event.document);
+	}
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
 		runValidationPipeline(event.document).catch(e =>
 			connection.console.error(`Validation error on open for ${event.document.uri}: ${e instanceof Error ? e.message : String(e)}`)
@@ -252,6 +262,7 @@ documents.onDidOpen((event) => {
 
 documents.onDidChangeContent((event) => {
 	if (isBibUri(event.document.uri)) {
+		scheduleValidation(event.document.uri);
 		invalidateBibCache(event.document.uri);
 		const fsPath = uriToFsPath(event.document.uri);
 		if (fsPath) {
@@ -268,6 +279,13 @@ documents.onDidChangeContent((event) => {
 
 documents.onDidClose((event) => {
 	if (isBibUri(event.document.uri)) {
+		const pending = validationTimers.get(event.document.uri);
+		if (pending) {
+			clearTimeout(pending);
+			validationTimers.delete(event.document.uri);
+		}
+		bibKeyDiagnostics.delete(event.document.uri);
+		connection.sendDiagnostics({ uri: event.document.uri, diagnostics: [] });
 		invalidateBibCache(event.document.uri);
 		const fsPath = uriToFsPath(event.document.uri);
 		if (fsPath) {
@@ -382,6 +400,10 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 
 	for (const entry of sortedEntries) {
 		if (prefix && !entry.key.toLowerCase().startsWith(prefix)) {
+			continue;
+		}
+		// A key no citation can cite, which the .bib file reports
+		if (!isCitableKey(entry.key)) {
 			continue;
 		}
 		items.push({
@@ -922,6 +944,19 @@ function invalidateBibCache(uri: string): void {
 		bibCache.delete(key);
 		openDocBibCache.delete(key);
 	}
+}
+
+/** Report each key of a .bib document that no citation can cite, as one
+ *  with a ;, a ] or a backtick (see findUncitableBibKeys) */
+function validateBibKeys(doc: TextDocument): void {
+	const diagnostics: Diagnostic[] = findUncitableBibKeys(parseBibtexWithRaw(doc.getText()).ranges).map(range => ({
+		severity: DiagnosticSeverity.Warning,
+		range: Range.create(doc.positionAt(range.keyStart), doc.positionAt(range.keyEnd)),
+		message: 'Citation key "' + range.key + '" can\'t be cited from Markdown: a citation doesn\'t read a key with a ;, a ] or a backtick whole.',
+		source: 'manuscript-markdown',
+	}));
+	bibKeyDiagnostics.set(doc.uri, diagnostics);
+	publishDiagnostics(doc.uri);
 }
 
 async function validateCitekeys(doc: TextDocument, metadata?: Frontmatter): Promise<void> {

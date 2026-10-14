@@ -1765,3 +1765,63 @@ describe('BibTeX field reader', () => {
     expect(fastestRun(() => expect(fields('  title = ' + delimit(text) + ',\n  year = {2020}')).toEqual({ title: text, year: '2020' }))).toBeLessThan(1000);
   }, 30000);
 });
+
+describe('citation keys', () => {
+  // Which the parser read otherwise than BibTeX and biber both: a key ran on
+  // past an @, so an entry with no key took the next line's header for its
+  // key, as @book{b; and a key needed a comma after it, so an entry with no
+  // fields, which both read, was none. And an @ in a key, which BibTeX
+  // reads in it and biber reads as an error, as no entry
+  it.each([
+    ['an entry with no key, then an entry on the next line', '@article{\n@book{b,\n  title = {T}\n}\n', [['b', 'T']]],
+    ['an entry with no fields', '@article{k}\n@book{b, title = {T}}', [['k', undefined], ['b', 'T']]],
+    ['an entry with no fields and spaces around its key', '@article{ k }', [['k', undefined]]],
+    ['a paren entry with no fields', '@article(k)', [['k', undefined]]],
+    ['an @ in a key, which biber reads as no key', '@article{a@b,\n  title = {T}\n}\n@book{c, title = {U}}', [['c', 'U']]],
+    // Guards: a key of characters other than letters, which both read, a }
+    // in a paren entry's key, which BibTeX reads, and a space before a key's
+    // comma
+    ['a key of characters other than letters', "@article{a:b/c.d-e+f'g\u00E9, title = {T}}", [["a:b/c.d-e+f'g\u00E9", 'T']]],
+    ['a } in a paren entry\'s key', '@article(a}b, title = {T})', [['a}b', 'T']]],
+    ['a space before a key\'s comma', '@article{k , title = {T}}', [['k', 'T']]],
+  ])('reads %s as BibTeX and biber do', (_name, input, expected) => {
+    expect([...parseBibtex(input)].map(([key, entry]) => [key, entry.fields.get('title')])).toEqual(expected);
+  });
+
+  it('reads an entry with no fields as all of its text, its key where it is', () => {
+    const input = '@article{ k }';
+    const { raw, ranges } = parseBibtexWithRaw(input);
+    expect(raw.get('k')).toBe(input);
+    expect(ranges.map(range => input.slice(range.keyStart, range.keyEnd))).toEqual(['k']);
+  });
+
+  // Guard: the walk reads no field in an entry with no fields, and edits it,
+  // and a field added to it reads back
+  it('edits an entry with no fields', () => {
+    const raw = '@article{k}';
+    expect(scanBibtexEntryBody(raw)).toMatchObject({ fields: [], unbalanced: false, hasConcatenation: false });
+    expect(parseBibtex(spliceFieldsIntoEntry(raw, ['  doi = {10.1/a}'])).get('k')?.fields.get('doi')).toBe('10.1/a');
+  });
+
+  // Which took a key's last ( or { for the opener of an entry with no key,
+  // so left out the comma after the key, and the entry read no key: for
+  // DOCX import's merge into an existing .bib file, and for Zotero link and
+  // sync, which add fields to an entry the same way
+  it.each([
+    ['a paren entry whose key ends in a (', '@article(k(, doi = {10.1/a})', '@article(k()', 'k('],
+    ['a brace entry whose key ends in a {', '@article{k{, doi = {10.1/a}}', '@article{k{}', 'k{'],
+    ['a brace entry whose key is a {', '@article{{, doi = {10.1/a}}', '@article{{}', '{'],
+    // Guards: an entry with no fields whose key ends otherwise, and one with
+    // a comma after its key, which takes no other
+    ['a paren entry whose key ends in a letter', '@article(k, doi = {10.1/a})', '@article(k)', 'k'],
+    ['a brace entry with a comma after its key', '@article{k{, doi = {10.1/a}}', '@article{k{,}', 'k{'],
+  ])('adds a field to %s, with no fields', (_name, existing, produced, key) => {
+    const spliced = spliceFieldsIntoEntry(produced, ['  doi = {10.1/a}']);
+    expect(parseBibtex(spliced).get(key)?.fields.get('doi')).toBe('10.1/a');
+    expect(spliced).not.toContain(',,');
+    const merged = mergeBibtex(existing, produced);
+    expect(parseBibtex(merged).get(key)?.fields.get('doi')).toBe('10.1/a');
+    expect(merged).not.toContain(',,');
+    expect(mergeBibtex(existing, merged)).toBe(merged);
+  });
+});

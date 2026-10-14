@@ -2,6 +2,8 @@ import { describe, test, expect } from 'bun:test';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { parseMd } from '../md-to-docx';
+import { fastestRun } from '../test-timing';
 import {
 	buildBibFieldLink,
 	canonicalizeFsPath,
@@ -10,6 +12,8 @@ import {
 	findBibFileFieldAtLine,
 	findBibKeyAtOffset,
 	findCitekeyAtOffset,
+	findUncitableBibKeys,
+	findUsagesForKey,
 	formatFileEntryMarkdown,
 	fsPathToUri,
 	getAccessLinksForEntry,
@@ -62,6 +66,119 @@ describe('scanCitationUsages', () => {
 		expect(usages.map((u) => u.key)).toEqual(['smith2020', 'smith2020', 'smith2020']);
 		const offsets = usages.map((u) => u.keyStart);
 		expect(new Set(offsets).size).toBe(3);
+	});
+});
+
+describe('citation keys as export reads them', () => {
+	// Which the LSP read as letters, digits, _, : and -, where export reads a
+	// key to its comma (see readCitationItem): so it reported part of a key
+	// as missing, or none of one, took an e-mail address's domain for a key,
+	// and found a key in a longer one
+	test.each([
+		['a key with a period', '[@smith.2020]', ['smith.2020']],
+		['a key in letters of another language', '[@\u00E9t\u00E92020]', ['\u00E9t\u00E92020']],
+		['a key with a slash, after a prefix and before a locator', '[see @a/b, p. 3]', ['a/b']],
+		['a key with a space in it, which export reads to its comma', '[@smith 2020]', ['smith 2020']],
+		['an e-mail address', '[write to me@example.com]', []],
+		// Guard: keys of letters and digits, one with its author suppressed
+		['keys of letters and digits', '[@a1; -@b2, p. 3]', ['a1', 'b2']],
+	])('reads %s as export does', (_name, text, keys) => {
+		expect(scanCitationUsages(text).map(usage => [usage.key, text.slice(usage.keyStart, usage.keyEnd)])).toEqual(keys.map(key => [key, key]));
+	});
+
+	// Which read from a segment's first [ to its ], so in `[text [@smith2020]]`
+	// it read `text [@smith2020` as the citation, and the @ after a [, not a
+	// space, as no key's. A citation starts at the [ export's citationEnd
+	// reads it from: the first whose text starts with an @ or a -@, or has no
+	// other [ before the ]
+	test.each([
+		['a citation in brackets, after text', '[text [@smith2020]]', ['smith2020']],
+		['a citation two brackets deep', '[t [u [@a; @b]]]', ['a', 'b']],
+		['a citation in brackets, after a prefixed one', '[see [see @a]]', ['a']],
+		['a citation after an @ in text and a [', '[mail a@b [@c]]', ['c']],
+		['a citation after an escaped [', '\\[x [@a]', ['a']],
+		// Guards: a [ in a locator, which export reads as text in the item,
+		// a [ in a key, and a citation after bracketed text; and brackets over
+		// more than one line, whose keys are read as main read them, where
+		// export reads the same: a citation over a line end, with CRLF, CR
+		// alone, and in a blockquote
+		['a [ in a locator', '[@a, see [@b]]', ['a']],
+		['a [ in a key', '[@a[b]', ['a[b']],
+		['a citation after bracketed text', '[a] [@b]', ['b']],
+		['a citation over a line end', '[see\n@a, p.\n3]', ['a']],
+		['items on two lines, with CRLF', '[@a;\r\n@b]', ['a', 'b']],
+		['items on two lines, with CR', '[@a;\r@b]', ['a', 'b']],
+		['a citation in a blockquote, its ] on the next line', '> [@smith2020\n> ]', ['smith2020']],
+		['items on two lines of a blockquote in a blockquote', '> > [@a;\n> > @b]', ['a', 'b']],
+	])('reads %s as export does', (_name, text, keys) => {
+		expect(scanCitationUsages(text).map(usage => [usage.key, text.slice(usage.keyStart, usage.keyEnd)])).toEqual(keys.map(key => [key, key]));
+		const runs = parseMd(text).flatMap(token => token.runs ?? []).filter(item => item.type === 'citation');
+		expect(runs.flatMap(item => item.keys ?? [])).toEqual(keys);
+	});
+
+	// Brackets over more than one line, whose keys are read as main read
+	// them, where export, which reads a block at a time, reads others: no
+	// citation across a blank line, and none from an unfinished [@draft
+	// across a heading
+	test.each([
+		['brackets with a blank line between', '[@a\n\nb]', ['a'], []],
+		['brackets with a line of spaces between', '[@a\n  \nb]', ['a'], []],
+		['brackets with a blank line between, with CRLF', '[@a\r\n\r\nb]', ['a'], []],
+		['brackets with a blockquote\'s blank line between', '> [@a\n>\n> b]', ['a'], []],
+		['a citation after a blank line in brackets', '[@a\n\n[@b]', ['a', 'b'], ['b']],
+		['a citation after a heading, after an unfinished one', '[@draft\n# Heading\n[@smith2020]', ['draft', 'smith2020'], ['smith2020']],
+	])('reads %s as main did', (_name, text, keys, exportKeys) => {
+		expect(scanCitationUsages(text).map(usage => [usage.key, text.slice(usage.keyStart, usage.keyEnd)])).toEqual(keys.map(key => [key, key]));
+		const runs = parseMd(text).flatMap(token => token.runs ?? []).filter(item => item.type === 'citation');
+		expect(runs.flatMap(item => item.keys ?? [])).toEqual(exportKeys);
+	});
+
+	test('finds the key of a citation in brackets after text at the cursor', () => {
+		const text = '[text [@smith2020]]';
+		expect(findCitekeyAtOffset(text, text.indexOf('smith') + 2)).toBe('smith2020');
+	});
+
+	// A guard: the key after a heading, after an unfinished citation, as main
+	// found it, at the cursor and among the key's usages
+	test('finds the key of a citation after a heading, after an unfinished one', () => {
+		const text = '[@draft\n# Heading\n[@smith2020]';
+		const at = text.indexOf('smith2020');
+		expect(findCitekeyAtOffset(text, at + 2)).toBe('smith2020');
+		expect(findUsagesForKey(text, 'smith2020')).toEqual([{ key: 'smith2020', keyStart: at, keyEnd: at + 'smith2020'.length }]);
+	});
+
+	// Each [ before a citation's own, and each line, is read once
+	test.each([
+		['a citation in brackets nested deep', (n: number) => '[x '.repeat(n) + '[@a]' + ']'.repeat(n)],
+		['brackets over many lines', (n: number) => '[@a\n\n'.repeat(n) + ']'],
+	])('reads %s in linear time', (_name, text) => {
+		const time = (n: number) => {
+			const input = text(n);
+			return fastestRun(() => scanCitationUsages(input), 5);
+		};
+		time(4000);
+		expect(time(16000) / time(4000)).toBeLessThan(8);
+	}, 30000);
+
+	test('finds no usage of a key in a longer one', () => {
+		expect(findUsagesForKey('[@smith.2020]', 'smith')).toEqual([]);
+		expect(findUsagesForKey('[@smith.2020]', 'smith.2020')).toHaveLength(1);
+	});
+
+	test('completes a key with a period from all of it', () => {
+		expect(getCompletionContextAtOffset('[@smith.20', 10)?.prefix).toBe('smith.20');
+	});
+
+	// A key with a ; or a ], which ends the citation's item or the citation
+	// there, or a backtick, which can start code, so no citation can cite
+	// it, and a guard, a key of other characters, which one can
+	test.each([
+		['a ;', '@article{a;b, title = {T}}', ['a;b']],
+		['a ]', '@article{a]b, title = {T}}', ['a]b']],
+		['a backtick', '@article{a`b, title = {T}}', ['a`b']],
+		['other characters', "@article{a:b.c/d'e, title = {T}}", []],
+	])('reports a .bib key with %s as one no citation can cite', (_name, text, keys) => {
+		expect(findUncitableBibKeys(parseBibDataFromText('/tmp/test.bib', text).ranges).map(range => range.key)).toEqual(keys);
 	});
 });
 

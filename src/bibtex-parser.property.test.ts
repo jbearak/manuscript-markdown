@@ -454,3 +454,31 @@ describe('BibTeX field reader parity', () => {
     );
   });
 });
+
+describe('BibTeX merge into entries with no fields', () => {
+  /**
+   * An existing entry's field merges into a produced entry of the same key
+   * with no fields, whatever its key, as one ending in a ( or a {, which
+   * isn't the entry's opener, with a comma after its key or not, and reads
+   * back, with no comma after another, and a second merge changes nothing.
+   */
+  it('merges a field into an entry with no fields, whatever its key', () => {
+    const keyChar = fc.constantFrom('a', 'Z', '0', '_', ':', '.', '-', "'", 'é', '\\', ';', ']', '[', '}', ')', '(', '{', '"', '#', '%', '=', '`');
+    const key = fc.array(keyChar, { minLength: 1, maxLength: 6 }).map(chars => chars.join(''));
+    fc.assert(
+      fc.property(key, fc.boolean(), fc.constantFrom('', ' ', ',', ' , '), (written, paren, space) => {
+        const [open, close] = paren ? ['(', ')'] : ['{', '}'];
+        const produced = '@article' + open + written + space + close;
+        for (const { key: read } of parseBibtexWithRaw(produced).ranges) {
+          const existing = '@article' + open + read + ', doi = {10.1/a}' + close;
+          if (!parseBibtex(existing).has(read)) continue;
+          const merged = mergeBibtex(existing, produced);
+          if (parseBibtex(merged).get(read)?.fields.get('doi') !== '10.1/a' || /,\s*,/.test(merged)) throw new Error(JSON.stringify(produced) + ' merged as ' + JSON.stringify(merged));
+          if (mergeBibtex(existing, merged) !== merged) throw new Error(JSON.stringify(merged) + ' merged again otherwise');
+        }
+        return true;
+      }),
+      { numRuns: 3000 }
+    );
+  });
+});

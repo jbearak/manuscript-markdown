@@ -827,6 +827,38 @@ function isAtLineStart(input: string, pos: number): boolean {
   return true;
 }
 
+/** A citation key, as BibTeX and biber both read one: after the white
+ *  space after the entry's opener, a run of characters to white space, a
+ *  comma or the entry's closer, with no @ in it. BibTeX reads a key to white
+ *  space, a comma or, in a brace entry, the } (bibtex.web's
+ *  scan2_white(comma, right_brace); in a paren entry, scan1_white(comma)),
+ *  so it reads an @ in one; biber (btparse's NAME token, which a key is)
+ *  reads none, so `@article{` with no key and `@book{b,` on the next line
+ *  are an entry b, not an entry keyed `@book{b`. In a paren entry the )
+ *  ends a key, as in btparse, where BibTeX reads it in the key. After the
+ *  key and any white space, a comma starts the entry's fields, or the
+ *  closer ends it with none, as BibTeX reads `@article{k}`. The parser
+ *  reads keys so (see scanBibtex), and with it where an entry's body
+ *  starts, which the tables of where entries end read from (see
+ *  readEntryEnds), and so does the walk Zotero link edits by (see
+ *  scanBibtexEntryBody). A Markdown citation can cite any such key with no
+ *  ;, ] or backtick in it (see isCitableKey). */
+const ENTRY_KEY_AT = { '}': /\s*([^\s,@}]+)\s*([,}])/y, ')': /\s*([^\s,@)]+)\s*([,)])/y };
+
+/** The key of the entry whose opener is just before `at` in `text`, and
+ *  where it starts, and where the entry's body does: just past the comma
+ *  after the key, or at the closer, for an entry with no fields; or
+ *  undefined where the entry has no key (see ENTRY_KEY_AT) */
+export function readEntryKey(text: string, at: number, closer: '}' | ')'): { key: string; keyStart: number; bodyStart: number } | undefined {
+  const keyAt = ENTRY_KEY_AT[closer];
+  keyAt.lastIndex = at;
+  const match = keyAt.exec(text);
+  if (!match) return undefined;
+  const keyStart = at + match[0].indexOf(match[1]);
+  const end = at + match[0].length;
+  return { key: match[1], keyStart, bodyStart: match[2] === ',' ? end : end - 1 };
+}
+
 /** Parse BibTeX input, returning both the structured entries and raw entry
  *  texts in a single pass over the entry boundaries.  parseBibtex delegates
  *  here; mergeBibtex uses both the parsed and raw maps directly. */
@@ -970,7 +1002,6 @@ function scanBibtex(input: string): ScannedBibtex {
   // BibTeX accepts either delimiter around an entry body, and skipping the
   // paren form would leave a paren `@comment`'s contents exposed as entries.
   const headerRe = /@(\w+)\s*([{(])/g;
-  const keyRe = /\s*([^,\s]+)\s*,/y;
   // Where each entry ends, read once for all of them
   const entryEnds = readEntryEnds(input);
 
@@ -1036,9 +1067,8 @@ function scanBibtex(input: string): ScannedBibtex {
       continue;
     }
 
-    keyRe.lastIndex = afterBrace;
-    const keyMatch = keyRe.exec(input);
-    if (!keyMatch) {
+    const keyRead = readEntryKey(input, afterBrace, closer);
+    if (!keyRead) {
       // `@type{` opened but the header has no citation key.  Consume its
       // balanced body rather than scanning into it — the `@book{...}` sitting
       // in a field of a malformed entry is that entry's data, not an entry.
@@ -1055,8 +1085,7 @@ function scanBibtex(input: string): ScannedBibtex {
       continue;
     }
 
-    const key = keyMatch[1];
-    const startPos = afterBrace + keyMatch[0].length;
+    const { key, keyStart, bodyStart: startPos } = keyRead;
 
     const endPos = entryEnds.body(startPos, closer);
     if (endPos === -1) {
@@ -1071,9 +1100,6 @@ function scanBibtex(input: string): ScannedBibtex {
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
-    // Search for the key after the opening delimiter, so a key that also
-    // spells the entry type (`@article{article,`) still points at the key.
-    const keyStart = afterBrace + keyMatch[0].indexOf(key);
     ranges.push({
       key, start: entryStart, end: endPos + 1,
       keyStart, keyEnd: keyStart + key.length,
@@ -1141,9 +1167,14 @@ export function serializeBibtex(entries: Map<string, BibtexEntry>): string {
 // Amend-only .bib merging helpers
 // ---------------------------------------------------------------------------
 
-// An entry's header, its type and its key, to the comma after the key, as
-// the parser reads it, after which its fields start
-const ENTRY_KEY_HEADER_RE = /^@\w+\s*[{(]\s*[^,\s]+\s*,/;
+/** Where the fields of the entry `rawEntry` starts with start, after its
+ *  key and the comma after it, or at its closer where it has none, as the
+ *  parser reads its key (see readEntryKey); or undefined where the parser
+ *  reads no key */
+function entryBodyStart(rawEntry: string): number | undefined {
+  const header = ENTRY_HEADER_RE.exec(rawEntry);
+  return header ? readEntryKey(rawEntry, header[0].length, header[0].endsWith('(') ? ')' : '}')?.bodyStart : undefined;
+}
 
 /** A single field of an entry as a line of its own, in the form
  *  `spliceFieldsIntoEntry` expects, e.g. `  title = {{My Title}},`, at
@@ -1169,10 +1200,10 @@ export function extractRawField(rawEntry: string, fieldName: string, indent = de
  *  name, lowercased, each the last of a repeated name, read once for all of
  *  them; or undefined where the parser reads no header */
 function readEntryFields(rawEntry: string): Map<string, BibtexFieldRange> | undefined {
-  const header = ENTRY_KEY_HEADER_RE.exec(rawEntry);
-  if (!header) return undefined;
+  const bodyStart = entryBodyStart(rawEntry);
+  if (bodyStart === undefined) return undefined;
   const fields = new Map<string, BibtexFieldRange>();
-  for (const read of readBibtexFieldRanges(rawEntry.slice(header[0].length, -1))) fields.set(read.name.toLowerCase(), read);
+  for (const read of readBibtexFieldRanges(rawEntry.slice(bodyStart, -1))) fields.set(read.name.toLowerCase(), read);
   return fields;
 }
 
@@ -1292,14 +1323,16 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     ...(entryType !== undefined ? { entryType } : {}),
   });
 
-  // The citation key runs to the first comma and cannot contain one.
-  const bodyStart = header ? rawEntry.indexOf(',', header[0].length) : -1;
-  if (bodyStart === -1) return result();
+  // The body starts after the key, as the parser reads it (see
+  // readEntryKey): past its comma, or at the closer, for an entry with no
+  // fields, as `@article{k}`.
+  const key = header ? readEntryKey(rawEntry, header[0].length, header[0].endsWith('(') ? ')' : '}') : undefined;
+  if (!key) return result();
 
   // Stop before the closing delimiter, which is the last character of an exact
   // entry range.
   const end = rawEntry.length - 1;
-  let i = bodyStart + 1;
+  let i = key.bodyStart;
 
   const isEscaped = (pos: number): boolean => {
     let backslashes = 0;
@@ -1506,9 +1539,8 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
  *  (`fields`): the same names, as the walk lowercases them, and values, at
  *  the same offsets (see readBibtexFields) */
 function readsAsParserDoes(rawEntry: string, fields: readonly BibtexEntryFieldOccurrence[]): boolean {
-  const header = ENTRY_KEY_HEADER_RE.exec(rawEntry);
-  if (!header) return fields.length === 0;
-  const bodyStart = header[0].length;
+  const bodyStart = entryBodyStart(rawEntry);
+  if (bodyStart === undefined) return fields.length === 0;
   const parsed = readBibtexFieldRanges(rawEntry.slice(bodyStart, -1));
   return parsed.length === fields.length && parsed.every((field, k) =>
     field.name.toLowerCase() === fields[k].name
@@ -1572,9 +1604,16 @@ export function spliceFieldsIntoEntry(
   // appended after a trim: whitespace the author left before the closer is
   // unrelated to the edit, and deleting it turns adding a field into a
   // reformat.
+  // The text before the closer ends in the opener's character where the
+  // entry has no key and no fields, as `@article{}`, which takes no comma;
+  // but also where it has no fields and its key ends in that character, as
+  // `k(` in `@article(k()` (see readEntryKey), which a comma must follow.
   const opener = closer === ')' ? '(' : '{';
+  const header = ENTRY_HEADER_RE.exec(producedRaw);
+  const key = header && header[0].endsWith(opener) ? readEntryKey(producedRaw, header[0].length, closer) : undefined;
+  const endsInKey = key !== undefined && key.keyStart + key.key.length === trimmed.length;
   const needsComma =
-    trimmed.length > 0 && !trimmed.endsWith(',') && !trimmed.endsWith(opener);
+    trimmed.length > 0 && !trimmed.endsWith(',') && (!trimmed.endsWith(opener) || endsInKey);
   const body = needsComma ? trimmed + ',' + head.slice(trimmed.length) : head;
   const before = body + (body.endsWith('\n') ? '' : eol);
 

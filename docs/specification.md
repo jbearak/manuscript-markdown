@@ -645,6 +645,8 @@ Manuscript Markdown uses [Pandoc citation syntax](https://pandoc.org/MANUAL.html
 
 Separate keys with semicolons even after a prefix. Write `[e.g., @smith2020; @jones2021]`, not `[e.g., @smith2020 and @jones2021]`. A citation with a prefix keeps its keys in the order written, even when the style would otherwise sort them, so a leading "e.g.," stays first. A prefix is plain text. Punctuation such as `=` or `<` is fine, but if the text before the first key contains Markdown formatting, such as code, emphasis, or CriticMarkup, the brackets stay ordinary text. To keep a character literal, escape it with a backslash, as in `[see \*also\* @smith2020]`. Keys and locators are read as written, so a tag such as `<b>` in one is text, and the preview shows a citation as text too. On DOCX import, Word's text that reads as a citation stays one only where it is all one run of formatting. Where formatting, a tracked change or a comment changes inside it, export would take the delimiters for the key's, locator's or prefix's text, so its `[` is escaped: plain `[@smith2020, p. ` before a bold `2` and a plain `]` comes back as `\[@smith2020, p. **2**]`. Text with a key right after its `[` and no `]`, before a citation or a footnote reference, has its `[` escaped too, as export would read from it to the citation's or reference's `]` and take that for its key: Word's `see [@a ` before a Zotero citation comes back as `see \[@a [@smith2020]`.
 
+A key is the text after the `@` to the item's comma, as written, so `[@smith.2020]` cites `smith.2020`. A key with a `;`, a `]` or a backtick can't be cited: a `;` or `]` ends the item or the citation there, and a backtick with another after it makes code of the text between, which the language server reads no citation in. The language server reports such a key in the `.bib` file and leaves it out of completions.
+
 Citations reference entries in a companion `.bib` file (see [BibTeX Companion File](#bibtex-companion-file) below).
 
 ### Bibliography Placement
@@ -672,6 +674,8 @@ bibliography: shared/references.bib
 ```
 
 The `.bib` extension is optional (`bibliography: shared/references` also works). Relative paths resolve from the `.md` file directory first, then the workspace root. Paths starting with `/` resolve from the workspace root first, then as absolute OS paths.
+
+An entry's key is what BibTeX and biber both read as one: after the entry's `{` or `(`, the text to a space, a comma or the entry's closing delimiter, with no `@` in it. BibTeX reads an `@` in a key, but biber reads none, so `@article{` with no key, followed by `@book{b,` on the next line, is an entry `b`, not one keyed `@book{b`. An entry with no fields, as `@article{k}`, is an entry `k`.
 
 Each entry contains standard BibTeX fields:
 

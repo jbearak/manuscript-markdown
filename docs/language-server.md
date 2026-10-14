@@ -11,6 +11,15 @@ In a markdown file, typing `[@` inside brackets triggers autocomplete from the p
 - **Detail**: author and year
 - **Documentation**: title
 
+A key no citation can cite, as one with a `;`, a `]` or a backtick, is left out (see [Diagnostics](#diagnostics)).
+
+The server reads a citation's keys as Word export does: each key is the text after its `@` to the item's comma, so `[@smith.2020]` is the key `smith.2020`. It finds the `[` a citation starts at as export does too, so in `[text [@smith2020]]` the citation is the inner brackets. Brackets over more than one line, which export can read as more than one block, are read as before: each `@` starts a key of letters, digits, `_`, `:` and `-`.
+
+### Diagnostics
+
+- **In markdown**: a citation key the paired `.bib` file doesn't have is reported where it's cited.
+- **In a `.bib` file**: a key no citation can cite is reported on the key. A `;` or `]` in a key ends the citation's item or the citation there, and a backtick with another after it makes code of the text between, where the server reads no citation.
+
 ### Go to Definition
 
 From a `[@citekey]` in markdown, navigates to the key's declaration in the `.bib` file.

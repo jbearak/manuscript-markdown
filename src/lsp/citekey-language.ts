@@ -4,6 +4,7 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, BibtexSourceRange, parseBibtexWithRaw, stripOuterBraces } from '../bibtex-parser';
+import { isCitableKey, isCitationKeyChar, readCitationItems } from '../citation-syntax';
 import { computeCodeRegions, isInsideCodeRegion, type CodeRegion } from '../code-regions';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
@@ -18,7 +19,28 @@ import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter'
 const realpathNativeAsync = promisify(fs.realpath.native);
 
 const CITATION_SEGMENT_RE = /\[[^\]]*@[^\]]*]/g;
+// A segment over more than one line, which export can read as more than one
+// block, as across a blank line, a heading or a blockquote's markers, has
+// its keys read as the server read every key before it read them as export
+// does: each @'s run of letters, digits, _, : and -
+const LINE_END_RE = /[\r\n]/;
 const CITEKEY_RE = /@([A-Za-z0-9_:-]+)/g;
+
+/** The [ of the citation that ends at the ] at `close` in `scanText`, of
+ *  the [s from `start`, as export's citationEnd tries them: the first where
+ *  the text after it starts with an @ or a -@, or has no other [ before the
+ *  ], so in `[text [@smith2020]` the inner one. No [ the segment's regex
+ *  reads has a ] after it before `close`, so each citation export reads
+ *  from one ends there too. */
+function citationOpen(scanText: string, start: number, close: number): number {
+	let at = start;
+	for (;;) {
+		if (/^-?@/.test(scanText.slice(at + 1, at + 3))) return at;
+		const next = scanText.indexOf('[', at + 1);
+		if (next === -1 || next > close) return at;
+		at = next;
+	}
+}
 
 /** Replace all characters inside code regions with spaces, preserving offsets. */
 function blankCodeRegions(text: string, regions: CodeRegion[]): string {
@@ -160,25 +182,51 @@ export function scanCitationUsages(text: string): CitekeyUsage[] {
 	return scanBlankedCitationUsages(blankCodeRegions(text, computeCodeRegions(text)));
 }
 
-/** The citekeys in `scanText`, whose code regions are already blanked. */
-function scanBlankedCitationUsages(scanText: string): CitekeyUsage[] {
+/** The keys main read in a segment's text, `inner`, from `offset`, over
+ *  more than one line (see LINE_END_RE) */
+function multilineUsages(inner: string, offset: number): CitekeyUsage[] {
+	const usages: CitekeyUsage[] = [];
+	let keyMatch: RegExpExecArray | null;
+	CITEKEY_RE.lastIndex = 0;
+	while ((keyMatch = CITEKEY_RE.exec(inner)) !== null) {
+		const key = keyMatch[1];
+		const keyStart = offset + keyMatch.index + 1;
+		usages.push({ key, keyStart, keyEnd: keyStart + key.length });
+	}
+	return usages;
+}
+
+/** The citekeys in `scanText`, whose code regions are already blanked: in
+ *  a segment on one line, as export reads them, and in one over more than
+ *  one line, as `readMultiline` reads them, main's reading by default */
+function scanBlankedCitationUsages(
+	scanText: string,
+	readMultiline: (inner: string, offset: number) => CitekeyUsage[] = multilineUsages,
+): CitekeyUsage[] {
 	const usages: CitekeyUsage[] = [];
 	let citationMatch: RegExpExecArray | null;
 
 	CITATION_SEGMENT_RE.lastIndex = 0;
 	while ((citationMatch = CITATION_SEGMENT_RE.exec(scanText)) !== null) {
 		const segment = citationMatch[0];
-		const segmentOffset = citationMatch.index + 1;
-		const inner = segment.slice(1, -1);
-		let keyMatch: RegExpExecArray | null;
-		CITEKEY_RE.lastIndex = 0;
-		while ((keyMatch = CITEKEY_RE.exec(inner)) !== null) {
-			const key = keyMatch[1];
-			const keyStart = segmentOffset + keyMatch.index + 1;
+		if (LINE_END_RE.test(segment)) {
+			for (const usage of readMultiline(segment.slice(1, -1), citationMatch.index + 1)) usages.push(usage);
+			continue;
+		}
+		// The citation's own [, which in `[text [@smith2020]` isn't the
+		// segment's first
+		const close = citationMatch.index + segment.length - 1;
+		const open = citationOpen(scanText, citationMatch.index, close);
+		const segmentOffset = open + 1;
+		// Each item's key as export reads it (see readCitationItem), where an
+		// @ marks it
+		for (const item of readCitationItems(scanText.slice(open + 1, close))) {
+			if (item.markStart === -1 || !item.key) continue;
+			const keyStart = segmentOffset + item.itemStart + item.keyStart;
 			usages.push({
-				key,
+				key: item.key,
 				keyStart,
-				keyEnd: keyStart + key.length,
+				keyEnd: keyStart + item.key.length,
 			});
 		}
 	}
@@ -187,25 +235,21 @@ function scanBlankedCitationUsages(scanText: string): CitekeyUsage[] {
 }
 
 export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
+	// In a segment over more than one line, as main found a key: each @
+	// with the key after it, and no letter, digit, _, : or - after that
 	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-	const segRe = /\[[^\]]*@[^\]]*\]/g;
-	const keyRe = new RegExp(`@${escaped}(?![A-Za-z0-9_:-])`, 'g');
-	const codeRegions = computeCodeRegions(text);
-	const scanText = blankCodeRegions(text, codeRegions);
-	const usages: CitekeyUsage[] = [];
-	let segMatch: RegExpExecArray | null;
-	segRe.lastIndex = 0;
-	while ((segMatch = segRe.exec(scanText)) !== null) {
-		const inner = segMatch[0].slice(1, -1);
-		const segmentOffset = segMatch.index + 1;
-		keyRe.lastIndex = 0;
+	const keyRe = new RegExp('@' + escaped + '(?![A-Za-z0-9_:-])', 'g');
+	const multiline = (inner: string, offset: number): CitekeyUsage[] => {
+		const usages: CitekeyUsage[] = [];
 		let keyMatch: RegExpExecArray | null;
+		keyRe.lastIndex = 0;
 		while ((keyMatch = keyRe.exec(inner)) !== null) {
-			const keyStart = segmentOffset + keyMatch.index + 1;
+			const keyStart = offset + keyMatch.index + 1;
 			usages.push({ key, keyStart, keyEnd: keyStart + key.length });
 		}
-	}
-	return usages;
+		return usages;
+	};
+	return scanBlankedCitationUsages(blankCodeRegions(text, computeCodeRegions(text)), multiline).filter(usage => usage.key === key);
 }
 
 export function findCitekeyAtOffset(text: string, offset: number): string | undefined {
@@ -277,7 +321,7 @@ export function getCompletionContextAtOffset(text: string, offset: number): Comp
 	}
 
 	let replaceStart = offset;
-	while (replaceStart > 0 && isCitekeyChar(text.charAt(replaceStart - 1))) {
+	while (replaceStart > 0 && isCitationKeyChar(text.charAt(replaceStart - 1))) {
 		replaceStart--;
 	}
 
@@ -396,6 +440,13 @@ export function parseBibDataFromText(filePath: string, text: string): ParsedBibD
 	return { filePath, text, entries: parsed, ranges, keyOffsets };
 }
 
+/** The keys of a .bib file's entries, as the parser read them (`ranges`),
+ *  that no Markdown citation can cite, as one with a ; or a ], which ends
+ *  its item or its citation there, or a backtick (see isCitableKey) */
+export function findUncitableBibKeys(ranges: readonly BibtexSourceRange[]): BibtexSourceRange[] {
+	return ranges.filter(range => !isCitableKey(range.key));
+}
+
 export function findBibKeyAtOffset(parsedBib: ParsedBibData, offset: number): string | undefined {
 	for (const [key, start] of parsedBib.keyOffsets) {
 		if (offset >= start && offset <= start + key.length) {
@@ -432,10 +483,6 @@ function isBareCitationContext(text: string, atOffset: number): boolean {
 		return false;
 	}
 	return true;
-}
-
-function isCitekeyChar(ch: string | undefined): boolean {
-	return ch !== undefined && /^[A-Za-z0-9_:-]$/.test(ch);
 }
 
 function isExistingFile(filePath: string): boolean {
