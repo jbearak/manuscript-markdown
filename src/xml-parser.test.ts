@@ -57,16 +57,17 @@ describe('a parser xmlParser builds', () => {
   });
 
   // xmlTextValue, which reads a template's field codes, reads text as the
-  // parser does
+  // parser does, and each as XML reads it
   it.each([
-    ['a tab, line feed and carriage return written as themselves', '1\t2\n3\r4'],
-    ['a line end of a carriage return and a line feed', '1\r\n2'],
-    ['each written as a reference', '1&#9;2&#xA;3&#13;4'],
-    ['references that are no character of XML\'s, or to no entity XML declares', '&#0;&#x110000;&nbsp;&AMP;&#X43;'],
-    ['an escaped reference', '&amp;#65;&amp;amp;'],
-  ])('reads %s in text as xmlTextValue does', (_name, text) => {
+    ['a tab, line feed and carriage return written as themselves', '1\t2\n3\r4', '1\t2\n3\n4'],
+    ['a line end of a carriage return and a line feed', '1\r\n2', '1\n2'],
+    ['each written as a reference', '1&#9;2&#xA;3&#13;4', '1\t2\n3\r4'],
+    ['references that are no character of XML\'s, or to no entity XML declares', '&#0;&#x110000;&nbsp;&AMP;&#X43;', '&#0;&#x110000;&nbsp;&AMP;C'],
+    ['an escaped reference', '&amp;#65;&amp;amp;', '&#65;&amp;'],
+  ])('reads %s in text as xmlTextValue does', (_name, text, expected) => {
     const [a] = xmlParser(OPTIONS).parse('<a>' + text + '</a>');
-    expect(xmlTextValue(text)).toBe(a.a[0]['#text']);
+    expect(xmlTextValue(text)).toBe(expected);
+    expect(a.a[0]['#text']).toBe(expected);
   });
 
   it('reads more than a thousand references to entities, which fast-xml-parser\'s default limit refuses', () => {
