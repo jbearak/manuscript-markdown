@@ -10321,6 +10321,27 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // isImplicitStyleClose), while the blocks after it are paragraphs and
   // quotes in list items with no custom style, which import reads in it
   let unfenced: number | undefined;
+  // Whether a block Word has a paragraph of has closed where one of
+  // another style opened at the top level, with no fence, while that one
+  // has no paragraph in its style yet
+  let unfencedBeforeBlock = false;
+  /** The place among the closing fences of the fence import writes where a
+   *  block closed with no fence, before `next`, with a blank line on each
+   *  side, as import writes one between blocks. It parts two quotes it's
+   *  between, as a fence on a line of its own does, so the fences and
+   *  quotes after it keep their own. Word's paragraphs stay as they are:
+   *  the empty ones between the quotes went in already */
+  const placeUnfencedClose = (next?: MdToken): void => {
+    sentinelGaps['csc' + sentinelCscIdx] = 1;
+    sentinelGaps['csca' + sentinelCscIdx] = 1;
+    sentinelCscIdx++;
+    const group = next?.type === 'blockquote' ? next.blockquoteGroupIndex : undefined;
+    if (group !== undefined && (state.blockquoteGaps.get(group - 1) ?? -1) >= 0) {
+      state.blockquoteGaps.set(group - 1, -1);
+      state.blockquotePostContentBlankLines.set(group - 1, 1);
+      state.blockquotePreContentBlankLines.set(group, 1);
+    }
+  };
   // Whether the list open at each level is ordered, so a quote in a list item
   // can tell whether the next item continues its list or an ancestor's
   const openListOrdered: boolean[] = [];
@@ -10351,16 +10372,12 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // block Word can't give the block's style, which import doesn't read in
     // the block, as it has no record of such blocks between its paragraphs
     // (see planRun in convertDocx). That fence takes its place among the
-    // closing ones, with a blank line on each side, as import writes one
-    // between blocks, and parts two quotes it's between, as a fence on a
-    // line of its own does, so the fences and quotes after it keep their
-    // own. Word's paragraphs stay as they are: the empty ones between the
-    // quotes went in already. Before anything else, export counts nothing,
-    // as before: before a fence, past which import may read a block of its
-    // style as the same, as it does past an empty block of another, or a
-    // paragraph in a custom style in a list item or an item of a sublist,
-    // where import writes a block in the item, which ends the one at the
-    // top level with no fence there
+    // closing ones (see placeUnfencedClose). Before anything else, export
+    // counts nothing, as before: before a fence, past which import may read
+    // a block of its style as the same, as it does past an empty block of
+    // another, or a paragraph in a custom style in a list item or an item
+    // of a sublist, where import writes a block in the item, which ends the
+    // one at the top level with no fence there
     if (isImplicitStyleClose(token)) {
       if (styleBlock?.styled) unfenced = styleBlock.index;
     } else if (unfenced !== undefined && !(token.listContinuation && (token.type === 'blockquote' || listContinuationStyleId(token, state) === 'ManuscriptListContinuation'))) {
@@ -10368,17 +10385,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         || token.type === 'list_item' && (token.level ?? 1) === 1
         || unstyledInStyleBlock(token) && !styleBlockEdges['csi' + unfenced];
       unfenced = undefined;
-      if (fenced) {
-        sentinelGaps['csc' + sentinelCscIdx] = 1;
-        sentinelGaps['csca' + sentinelCscIdx] = 1;
-        sentinelCscIdx++;
-        const group = token.type === 'blockquote' ? token.blockquoteGroupIndex : undefined;
-        if (group !== undefined && (state.blockquoteGaps.get(group - 1) ?? -1) >= 0) {
-          state.blockquoteGaps.set(group - 1, -1);
-          state.blockquotePostContentBlankLines.set(group - 1, 1);
-          state.blockquotePreContentBlankLines.set(group, 1);
-        }
-      }
+      if (fenced) placeUnfencedClose(token);
     }
     const codeAcrossFence = codeBeforeFence && token.type === 'code_block';
     if (!isStyleDirective(token)) {
@@ -10415,6 +10422,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
             recording = false;
           }
           if (styleBlock.lead > 0) record('csl' + styleBlock.index, styleBlock.lead);
+          // Import closes the block before it with a fence, as its style
+          // changes at this paragraph, whatever is between them, which
+          // planRun closes it in, too (see convertDocx)
+          if (unfencedBeforeBlock) placeUnfencedClose();
+          unfencedBeforeBlock = false;
         } else if (styleBlock.trail > 0 && !styleBlock.inner) {
           styleBlock.inner = true;
           record('csi' + styleBlock.index, 1);
@@ -10486,6 +10498,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         // in it in Word, and one of another ends it. Its gaps wait for the
         // block's first paragraph in its style (see recordOpeningGaps)
         if (startsStyleBlock(styleBlock?.style, token.customStyleOpen)) {
+          // The block open closes with no fence, which import writes once
+          // this one has a paragraph in its style. With none, import may
+          // write none, as where the block before goes on in Word, and
+          // export counts nothing
+          unfencedBeforeBlock = !!styleBlock?.styled;
           closeStyleBlock();
           styleBlock = { style: token.customStyleOpen, styled: false, lead: 0, trail: 0, inner: false, before: unitsOutside, fence: token };
           unitsOutside = 0;
@@ -10507,6 +10524,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         // comes next as it would after a fence (see closeStyleBlock)
         closeStyleBlock();
         styleBlock = undefined;
+        unfencedBeforeBlock = false;
         state.activeCustomStyle = undefined;
         biblAtSectionStart = biblFirst;
       }
