@@ -166,6 +166,7 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
   // break and incorrectly pulls that paragraph into the revision.
   const { source: markdown, inertRegions, listRegions } = analysis;
   const mathRegions = computeDollarMathRegions(markdown, inertRegions);
+  const closers = criticCloserSearch(markdown);
   const edits: LineEdit[] = [];
   const moved = (offset: number, full: string, text: string) => {
     edits.push({ start: offset, end: offset + full.length, text });
@@ -178,11 +179,11 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
           isInsideCodeRegion(offset, mathRegions) || isInsideCodeRegion(offset, listRegions)) return full;
       const contentStart = offset + open.length;
       const closePos = open === '{>>'
-        ? findMatchingClose(markdown, contentStart)
-        : markdown.indexOf(open === '{++' ? '++}' : open === '{--' ? '--}' : open === '{==' ? '==}' : '~~}', contentStart);
+        ? closers.matching(contentStart)
+        : closers.next(open === '{++' ? '++}' : open === '{--' ? '--}' : open === '{==' ? '==}' : '~~}', contentStart);
       if (closePos === -1) return full;
       if (open === '{~~') {
-        const separatorPos = markdown.indexOf('~>', contentStart);
+        const separatorPos = closers.next('~>', contentStart);
         if (separatorPos === -1 || separatorPos >= closePos) return full;
       }
       // A span of the break alone, as import writes a tracked paragraph
@@ -304,6 +305,87 @@ function findNextCommentOpenerBefore(
   return undefined;
 }
 
+/** The closers of the CriticMarkup in one text, for a scan that looks for
+ *  the closer of each opener it meets. A search with indexOf or
+ *  findMatchingClose for each read the rest of the text again where none
+ *  was, so many openers without a closer took time in their number times
+ *  the text's length. Here each closer's offsets are found once, in one
+ *  pass, and each search is a binary search of them; each comment's
+ *  matching <<} comes from one pass over the comments' openers and closers.
+ *  The results are indexOf's and findMatchingClose's. */
+export interface CriticCloserSearch {
+  readonly src: string;
+  /** `src.indexOf(closer, from)` */
+  next(closer: string, from: number): number;
+  /** `findMatchingClose(src, from)` */
+  matching(from: number): number;
+}
+
+export function criticCloserSearch(src: string): CriticCloserSearch {
+  const offsets = new Map<string, number[]>();
+  let matches: Map<number, number> | undefined;
+  return {
+    src,
+    next(closer, from) {
+      let at = offsets.get(closer);
+      if (!at) {
+        at = [];
+        for (let k = src.indexOf(closer); k !== -1; k = src.indexOf(closer, k + 1)) at.push(k);
+        offsets.set(closer, at);
+      }
+      // The first at or after `from`
+      let lo = 0;
+      let hi = at.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (at[mid] < from) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo < at.length ? at[lo] : -1;
+    },
+    matching(from) {
+      matches ??= commentMatches(src);
+      return matches.get(from) ?? findMatchingClose(src, from);
+    },
+  };
+}
+
+/** For the end of each comment's opener in `src`, its matching <<}, or -1
+ *  for none, from one pass in which each <<} closes the innermost opener
+ *  still open. The openers and closers are those findMatchingClose reads,
+ *  found the same way, and as none overlaps another, it reads the same ones
+ *  from the end of any opener. */
+function commentMatches(src: string): Map<number, number> {
+  const matches = new Map<number, number>();
+  const open: number[] = [];
+  let pos = 0;
+  let nextClose = src.indexOf('<<}');
+  while (true) {
+    const opener = findNextCommentOpenerBefore(src, pos, nextClose === -1 ? src.length : nextClose);
+    if (opener) {
+      pos = opener.index + opener.length;
+      open.push(pos);
+      matches.set(pos, -1);
+      continue;
+    }
+    if (nextClose === -1) return matches;
+    const contentStart = open.pop();
+    if (contentStart !== undefined) matches.set(contentStart, nextClose);
+    pos = nextClose + 3;
+    nextClose = src.indexOf('<<}', pos);
+  }
+}
+
+const stateSearches = new WeakMap<object, CriticCloserSearch>();
+
+/** The closer search of a markdown-it state's text, made once for the
+ *  state, for a rule markdown-it calls at each opener in it */
+export function criticCloserSearchOf(state: { src: string }): CriticCloserSearch {
+  let search = stateSearches.get(state);
+  if (!search || search.src !== state.src) stateSearches.set(state, search = criticCloserSearch(state.src));
+  return search;
+}
+
 interface CriticOpener {
   index: number;
   open: string;
@@ -359,6 +441,7 @@ function findNextCriticOpener(src: string, pos: number): CriticOpener | undefine
  *  opener not escaped nor in code or an HTML block, to its closer, the first
  *  after it but for a comment's, which is past its replies. */
 function* criticSpans(source: string, inertRegions: CodeRegion[]): IterableIterator<{ start: number; contentStart: number; closeIdx: number }> {
+  const closers = criticCloserSearch(source);
   let searchFrom = 0;
   while (true) {
     const candidate = findNextCriticOpener(source, searchFrom);
@@ -368,11 +451,11 @@ function* criticSpans(source: string, inertRegions: CodeRegion[]): IterableItera
     searchFrom = contentStart;
     if (isInsideCodeRegion(candidate.index, inertRegions) || isEscapedAt(source, candidate.index)) continue;
     const closeIdx = candidate.nested
-      ? findMatchingClose(source, contentStart)
-      : source.indexOf(candidate.close, contentStart);
+      ? closers.matching(contentStart)
+      : closers.next(candidate.close, contentStart);
     if (closeIdx === -1) continue;
     if (candidate.open === '{~~') {
-      const separatorPos = source.indexOf('~>', contentStart);
+      const separatorPos = closers.next('~>', contentStart);
       if (separatorPos === -1 || separatorPos >= closeIdx) continue;
     }
     yield { start: candidate.index, contentStart, closeIdx };

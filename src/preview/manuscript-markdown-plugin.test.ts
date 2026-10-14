@@ -16,6 +16,7 @@ import {
 } from '../test-helpers';
 import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, matchCriticHeadingPrefix } from '../critic-markup';
 import { parseMd } from '../md-to-docx';
+import { fastestRun } from '../test-timing';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -2652,4 +2653,29 @@ describe('Citations in the preview', () => {
     // seconds here searched again from each [
     expect(performance.now() - start).toBeLessThan(3000);
   });
+});
+
+describe('CriticMarkup without its closers in the preview', () => {
+  // Each opener searched the rest of the text for its closer, a comment's
+  // for its matching <<}, and a substitution's for its ~>, again where none
+  // was, so a text of many took time in the square of their number
+  const render = (text: string) => {
+    const md = new MarkdownIt({ html: true });
+    md.use(manuscriptMarkdownPlugin);
+    return md.render(text);
+  };
+  it.each([
+    // Which the block rule reads where they start a line
+    ['paragraphs that start with them', (n: number) => '{++ a\n\n'.repeat(n) + '{>> b\n\n'.repeat(n), 2],
+    ['spans in a paragraph', (n: number) => 'x {++ a {>> b {~~ c {#a>> d '.repeat(n) + '~~}\n', 0],
+  ])('renders %s in time linear in their number', (_name, input, paragraphs) => {
+    expect(render(input(2)).split('<p>').length - 1).toBe(paragraphs * 2 || 1);
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => render(text));
+    };
+    time(10000);
+    const small = time(10000);
+    expect(time(40000) / small).toBeLessThan(8);
+  }, 60000);
 });

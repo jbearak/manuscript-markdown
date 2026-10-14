@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
+import { fastestRun } from './test-timing';
 import { wrapColoredHighlight } from './formatting';
 import {
   VALID_COLOR_IDS,
@@ -128,6 +129,23 @@ describe('Delimiter extraction for editor decorations', () => {
     expect(delimiters).toContain('{++');
     expect(delimiters).toContain('++}');
   });
+});
+
+describe('Editor decorations for CriticMarkup without its closers', () => {
+  it('finds them in time linear in the text', () => {
+    // Each opener, and each in a format highlight, searched the rest of the
+    // text for its closer, a comment's for its matching <<}, again where
+    // none was, so a text of many took time in the square of their number
+    const input = (n: number) => 'x {++ a {-- b {~~ c {== d {>> e {#a>> f == g {++ h {>> i '.repeat(n);
+    expect(extractAllDecorationRanges(input(2), 'yellow').additions).toEqual([]);
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => extractAllDecorationRanges(text, 'yellow'));
+    };
+    time(10000);
+    const small = time(10000);
+    expect(time(40000) / small).toBeLessThan(8);
+  }, 60000);
 });
 
 // Feature: highlight-colors, Property 9: Default highlight color respects configuration
