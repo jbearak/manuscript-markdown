@@ -1668,6 +1668,8 @@ export function spliceFieldsIntoEntry(
 /** Merge an existing .bib (from disk) with a produced .bib (from conversion).
  *  - Existing-only entries are preserved verbatim.
  *  - Entries in both: produced text wins, but existing-only fields are spliced in.
+ *  - An entry whose key the existing file gives more than once goes where
+ *    the last was, whose text and fields the parser keeps.
  *  - Produced-only entries are appended at the end.
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
@@ -1698,8 +1700,13 @@ export function mergeBibtex(existing: string, produced: string): string {
   // file declared it where it read that entry. Without them, it warns that
   // the macro is undefined and drops the field's text.
   const declarations = existingResult.strings;
+  // Where each key's last entry starts, whose text and fields the parser
+  // keeps, so a key the file gives more than once goes where its kept text
+  // was, after each declaration the file has before it, and the entries
+  // between keep their places and the macros they read
   const entryStarts = new Map<string, number>();
-  for (const range of existingResult.ranges) if (!entryStarts.has(range.key)) entryStarts.set(range.key, range.start);
+  for (const range of existingResult.ranges) entryStarts.set(range.key, range.start);
+  const existingKeys = existingResult.ranges.filter(range => entryStarts.get(range.key) === range.start && existingParsed.has(range.key)).map(range => range.key);
   let declared = 0;
   const declareBefore = (at: number) => {
     for (; declared < declarations.length && declarations[declared].start < at; declared++) {
@@ -1707,8 +1714,9 @@ export function mergeBibtex(existing: string, produced: string): string {
     }
   };
 
-  // Iterate existing entries in their original order
-  for (const [key, existingEntry] of existingParsed) {
+  // Iterate existing entries in their original order, each at its last
+  for (const key of existingKeys) {
+    const existingEntry = existingParsed.get(key)!;
     emittedKeys.add(key);
     declareBefore(entryStarts.get(key) ?? existing.length);
 
