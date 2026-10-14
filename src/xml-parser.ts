@@ -1,6 +1,6 @@
 // One way to read XML into fast-xml-parser's nodes and to write them back,
 // for every parser and builder in src to read and write text and values as
-// XML 1.0 does. Five exports:
+// XML 1.0 does. Its exports:
 //
 // - xmlParser(options): a parser of XML as text, XmlTextParser, not bytes,
 //   that reads each reference to a character, &#9; or &#x2019;, and to one
@@ -23,6 +23,10 @@
 //   for a reader of tags as text (see xmlAttribute in xml-elements.ts).
 // - XML_ENTITIES: how many entities fast-xml-parser reads, and how long one
 //   a DOCTYPE declares can be.
+// - isXmlCharacter(code), hasNonXmlCharacter(text) and
+//   withoutNonXmlCharacters(text): XML's characters (§2.2), read by code
+//   point, which every check in src of the characters XML holds goes
+//   through, never a regular expression's u flag (see hasNonXmlCharacter).
 //
 // fast-xml-parser can't do this itself. It reads a reference to a character
 // only with htmlEntities, which reads HTML's entities too, and only after
@@ -72,6 +76,39 @@ const ENTITIES = new Map([['amp', '&'], ['lt', '<'], ['gt', '>'], ['quot', '"'],
 /** Whether a code point is one of XML's characters (XML 1.0 §2.2) */
 export const isXmlCharacter = (code: number) => code === 0x9 || code === 0xA || code === 0xD
   || code >= 0x20 && code <= 0xD7FF || code >= 0xE000 && code <= 0xFFFD || code >= 0x10000 && code <= 0x10FFFF;
+
+/** Whether text has a character XML doesn't allow (XML 1.0 §2.2), a lone
+ *  surrogate too. Read by code point, not with a regular expression's u
+ *  flag, whose reading of text depends on the engine: Bun 1.3.9's, which
+ *  CI and the CLI's builds run, read a UTF-16 unit from U+D800 to U+DBFF
+ *  or U+F800 to U+FBFF, and one from U+DC00 to U+DFFF or U+FC00 to U+FFFF
+ *  after it, as U+F8FF U+FFFE, as one character past U+FFFF, which XML
+ *  allows */
+export function hasNonXmlCharacter(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.codePointAt(i)!;
+    if (!isXmlCharacter(code)) return true;
+    if (code > 0xFFFF) i++;
+  }
+  return false;
+}
+
+/** Text without the characters XML doesn't allow (see
+ *  hasNonXmlCharacter), and how many it had */
+export function withoutNonXmlCharacters(text: string): { text: string; removed: number } {
+  let kept = '', from = 0, removed = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.codePointAt(i)!;
+    const width = code > 0xFFFF ? 2 : 1;
+    if (!isXmlCharacter(code)) {
+      kept += text.slice(from, i);
+      from = i + width;
+      removed++;
+    }
+    i += width - 1;
+  }
+  return { text: removed === 0 ? text : kept + text.slice(from), removed };
+}
 
 /** Text with each reference read as what it stands for, in one pass, so
  *  that &amp;#65; is the text &#65;: one to one of the five entities XML

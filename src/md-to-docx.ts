@@ -30,7 +30,7 @@ export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
-import { escapeXmlAttribute } from './xml-parser';
+import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters } from './xml-parser';
 import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, type Context, type Scope, type XmlNode } from './scoped-xml';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
@@ -3350,7 +3350,7 @@ const NOTE_ORIENTATION_WARNING = 'Orientation directive inside a note ignored';
 const isOrientationDirective = (token: MdToken): boolean => !!(token.landscapeOpen || token.landscapeClose || token.portraitOpen || token.portraitClose);
 const isOrphanedOrientationClose = (token: MdToken): boolean => token.type === 'paragraph' && token.runs.length === 1
   && token.runs[0].type === 'html_comment' && ORIENTATION_CLOSE_RE.test(token.runs[0].text.trim());
-const isBlank = (text: string): boolean => !/[^ \t\n]/.test(text.replace(NOT_XML_CHARACTER, ''));
+const isBlank = (text: string): boolean => !/[^ \t\n]/.test(withoutNonXmlCharacters(text).text);
 const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => isBlank(run.text));
 
 /** A code block's text as a paragraph's, in a quote, which holds no code
@@ -4631,18 +4631,15 @@ interface TemplateParts {
   sections: TemplateSections; // trailing <w:sectPr> from template document.xml, and its headers and footers
 }
 
-/** A character XML 1.0 can't hold: a control character other than a tab
- *  or line end, or U+FFFE or U+FFFF. Half a surrogate pair is one too, but
- *  JSZip writes it as U+FFFD before the pass reads the part. */
-const NOT_XML_CHARACTER = /[^\t\n\r -\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu;
-
 /** A run's text, deleted text or field code, or an equation's text */
 const TEXT_ELEMENT = /<((?:w|m):(?:t|delText|instrText|delInstrText))(\s[^>]*)?>([^<]*)<\/\1>/g;
 
 /** Remove the characters XML can't hold from the package's XML, of the
  *  parts at `paths` or all of them, as the Markdown's text, URLs or
  *  comments can have, which made a part Word can't read, and return how
- *  many */
+ *  many: a control character other than a tab or line end, or U+FFFE or
+ *  U+FFFF (see hasNonXmlCharacter). Half a surrogate pair is one too, but
+ *  JSZip writes it as U+FFFD before the pass reads the part */
 async function removeCharactersXmlCantHold(zip: import('jszip'), paths = Object.keys(zip.files)): Promise<number> {
   let removed = 0;
   for (const path of paths) {
@@ -4651,13 +4648,14 @@ async function removeCharactersXmlCantHold(zip: import('jszip'), paths = Object.
     // A template's part in UTF-16, which goes as it came
     if (bytes[0] === 0 || bytes[1] === 0 || bytes[0] === 0xFF && bytes[1] === 0xFE || bytes[0] === 0xFE && bytes[1] === 0xFF) continue;
     const xml = new TextDecoder().decode(bytes);
-    if (xml.search(NOT_XML_CHARACTER) < 0) continue;
-    const strip = (text: string) => text.replace(NOT_XML_CHARACTER, () => {
-      removed++;
-      return '';
-    });
+    if (!hasNonXmlCharacter(xml)) continue;
+    const strip = (text: string) => {
+      const kept = withoutNonXmlCharacters(text);
+      removed += kept.removed;
+      return kept.text;
+    };
     zip.file(path, strip(xml.replace(TEXT_ELEMENT, (element, tag: string, attrs = '', text: string) => {
-      if (text.search(NOT_XML_CHARACTER) < 0) return element;
+      if (!hasNonXmlCharacter(text)) return element;
       const rest = strip(text);
       // A space the character kept from the edge of the text, which Word
       // drops there without

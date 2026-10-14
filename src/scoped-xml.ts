@@ -1,5 +1,5 @@
 import { XMLValidator } from 'fast-xml-parser';
-import { isXmlCharacter, xmlBuilder, xmlParser } from './xml-parser';
+import { hasNonXmlCharacter, isXmlCharacter, xmlBuilder, xmlParser } from './xml-parser';
 
 // --- XML read by namespace ---
 // A part's XML in order, as the parser's preserveOrder gives it, read with
@@ -87,16 +87,6 @@ function forValidator(xml: string): string | undefined {
 // A character a name can have past U+FFFF, from U+10000 to U+EFFFF, as the
 // surrogates of UTF-16 that write it
 const NAME_CHARACTER_PAST_FFFF = /[\uD800-\uDB7F][\uDC00-\uDFFF]/g;
-/** Whether text has a character XML doesn't allow (XML 1.0 §2.2), a lone
- *  surrogate too, by code point */
-function hasNonXmlCharacter(text: string): boolean {
-  for (let i = 0; i < text.length; i++) {
-    const code = text.codePointAt(i)!;
-    if (!isXmlCharacter(code)) return true;
-    if (code > 0xFFFF) i++;
-  }
-  return false;
-}
 // A reference to a character, decimal or hexadecimal (XML 1.0 §4.1), as
 // xmlParser reads one
 const CHARACTER_REFERENCE = /&#(?:([0-9]+)|[xX]([0-9a-fA-F]+));/g;
