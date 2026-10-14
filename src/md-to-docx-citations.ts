@@ -501,8 +501,10 @@ function oneLine(text: string): string {
  * line, which export finds to strip (see MISSING_KEY_LINE).
  */
 export function generateMissingKeysXml(missingKeys: string[]): string {
+  // With no xml:space, which the text, starting and ending with no space,
+  // needs none of, and Word strips (dirty-flag invariant #1)
   return missingKeys.map(key =>
-    '<w:p><w:r><w:t xml:space="preserve">Citation data for @' + escapeXml(oneLine(key)) +
+    '<w:p><w:r><w:t>Citation data for @' + escapeXml(oneLine(key)) +
     ' was not found in the bibliography file.</w:t></w:r></w:p>'
   ).join('');
 }
@@ -1151,11 +1153,15 @@ export function bibliographyEntryAsShown(html: string): string {
 /**
  * Generate OOXML for a ZOTERO_BIBL field code with rendered bibliography.
  * Without an engine, the field is empty, and marks the bibliography's place.
+ * `styleSpaceBefore` is false only where the style of a paragraph with no
+ * pStyle is known to give it no space before, as the Normal of the styles
+ * export writes.
  */
 export function generateBibliographyXml(
   citeprocEngine: CiteprocEngine | undefined,
   biblData?: { uncited?: unknown[]; omitted?: unknown[]; custom?: unknown[] },
-  hangingIndent?: boolean
+  hangingIndent?: boolean,
+  styleSpaceBefore = true
 ): string {
   const biblPayload = JSON.stringify({
     uncited: biblData?.uncited || [],
@@ -1181,8 +1187,11 @@ export function generateBibliographyXml(
   // Field-begin and field-end wrapper paragraphs use single spacing with zero
   // before/after to prevent them from rendering as visible blank lines when the
   // document uses non-single line spacing (the instrText is hidden in normal
-  // view but the paragraph break still occupies vertical space).
-  const fieldPPr = '<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>';
+  // view but the paragraph break still occupies vertical space). The zero
+  // before is w:before="0" only where their style may give them space
+  // before, as a template's may. Where it gives none, the zero only repeats
+  // it, and Word strips it (dirty-flag invariant #5).
+  const fieldPPr = '<w:pPr><w:spacing' + (styleSpaceBefore ? ' w:before="0"' : '') + ' w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>';
   const fieldStart = '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
     '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_BIBL ' + escapeXml(biblPayload) + ' CSL_BIBLIOGRAPHY </w:instrText></w:r>' +
     '<w:r><w:fldChar w:fldCharType="separate"/></w:r>';

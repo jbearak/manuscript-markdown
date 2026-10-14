@@ -7543,3 +7543,63 @@ describe('hasCitations', () => {
     expect(hasCitations(md)).toBe(false);
   });
 });
+
+describe('Properties written as Word writes them', () => {
+  const bibtex = '@article{smith2020, author={Smith, J.}, title={T}, journal={J}, year={2020}}';
+  /** Each match of `pattern` in export's `part` of `md` */
+  const written = async (md: string, part: string, pattern: RegExp, templateDocx?: Uint8Array) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex, templateDocx })).docx);
+    return [...(await zip.file(part)!.async('string')).matchAll(pattern)].map(match => match[1]);
+  };
+
+  it.each([
+    ['a title paragraph with a font style, font and size',
+      '---\ntitle: T\ntitle-font-style: bold-italic-smallcaps\ntitle-font: Arial\ntitle-font-size: 20\n---\n\np\n', 'word/document.xml',
+      /<w:pStyle w:val="Title"\/><\/w:pPr><w:r>(<w:rPr>.*?<\/w:rPr>)/g,
+      '<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/><w:i/><w:caps w:val="0"/><w:smallCaps/><w:sz w:val="40"/><w:szCs w:val="40"/><w:u w:val="none"/></w:rPr>'],
+    ['a title paragraph with a font style alone',
+      '---\ntitle: T\ntitle-font-style: bold\n---\n\np\n', 'word/document.xml',
+      /<w:pStyle w:val="Title"\/><\/w:pPr><w:r>(<w:rPr>.*?<\/w:rPr>)/g,
+      '<w:rPr><w:b/><w:i w:val="0"/><w:caps w:val="0"/><w:smallCaps w:val="0"/><w:u w:val="none"/></w:rPr>'],
+    ['the Intense Quote style with a font',
+      '---\nfont: Arial\nblockquote-style: IntenseQuote\n---\n\n> q\n', 'word/styles.xml',
+      /w:styleId="IntenseQuote">[\s\S]*?(<w:rPr>.*?<\/w:rPr>)/g,
+      '<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:i/><w:color w:val="4472C4"/></w:rPr>'],
+  ])('writes the run properties of %s in schema order', async (_name, md, part, pattern, expected) => {
+    // As Word does, which puts the font first, caps before smallCaps and
+    // underline after the size, where they were in the order export added
+    // them (dirty-flag invariant #4)
+    expect(await written(md, part, pattern)).toEqual([expected]);
+  });
+
+  it('writes the bibliography field\'s paragraphs without w:before="0", which their style gives already', async () => {
+    // Their style is the Normal export writes, which has no space before,
+    // nor do the document's defaults, so Word strips the zero (dirty-flag
+    // invariant #5)
+    const md = '---\ncsl: apa\nline-spacing: double\n---\n\nA [@smith2020].\n';
+    const wrappers = /(<w:pPr>(?:(?!<\/w:pPr>).)*<\/w:pPr>)<w:r><w:fldChar w:fldCharType="(?:begin|end)"\/>/g;
+    expect(await written(md, 'word/document.xml', wrappers)).toEqual(Array(2).fill('<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'));
+    const styles = (await written(md, 'word/styles.xml', /([\s\S]*)/g))[0];
+    expect(/<w:docDefaults>[\s\S]*?<\/w:docDefaults>/.exec(styles)![0]).not.toContain('w:before');
+    expect(/w:styleId="Normal">[\s\S]*?<\/w:style>/.exec(styles)![0]).not.toContain('w:before');
+    // A template's style may give them space before, as this Normal does,
+    // which the zero takes away, so it stays there
+    const JSZip = (await import('jszip')).default;
+    const template = await JSZip.loadAsync((await convertMdToDocx('p\n')).docx);
+    const normal = '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">\n<w:name w:val="Normal"/>\n<w:pPr><w:spacing ';
+    const templateStyles = await template.file('word/styles.xml')!.async('string');
+    expect(templateStyles).toContain(normal);
+    template.file('word/styles.xml', templateStyles.replace(normal, normal + 'w:before="240" '));
+    const templateDocx = await template.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+    expect(await written(md, 'word/document.xml', wrappers, templateDocx)).toEqual(Array(2).fill('<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'));
+  });
+
+  it('writes the note of a missing citation key without xml:space', async () => {
+    // Which its text, with no space at its start or end, needs none of,
+    // and Word strips (dirty-flag invariant #1)
+    const md = '---\ncsl: apa\n---\n\nA [@smith2020] [@nokey].\n';
+    expect(await written(md, 'word/document.xml', /<w:r>(<w:t[^>]*>Citation data for @nokey .*?<\/w:t>)<\/w:r>/g))
+      .toEqual(['<w:t>Citation data for @nokey was not found in the bibliography file.</w:t>']);
+  });
+});
