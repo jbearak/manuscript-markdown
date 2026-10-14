@@ -1216,6 +1216,36 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     expect(await trip(back)).toBe(back);
   });
 
+  it.each([
+    ['a quote, before a paragraph', '<!-- style: box -->\n\n> q\n<!-- /style -->\n\np\n', '> q\n\np\n'],
+    ['an alert, before a paragraph', '<!-- style: box -->\n\n> [!NOTE]\n> q\n<!-- /style -->\n\np\n', '> [!NOTE]\n> q\n\np\n'],
+    ['a quote, before code and a paragraph', '<!-- style: box -->\n\n> q\n<!-- /style -->\n\n```\nc\n```\n\np\n', '> q\n\n```\nc\n```\n\np\n'],
+    ['a quote, after a paragraph', 'p\n\n<!-- style: box -->\n> q\n\n<!-- /style -->\n', 'p\n\n> q\n'],
+    ['nothing, before a paragraph', '> q\n<!-- style: box -->\n<!-- /style -->\n\np\n', '> q\n\np\n'],
+    ['a quote, with no blank line on either side of its fence', '<!-- style: box -->\n\n> q\n<!-- /style -->\np\n', '> q\np\n'],
+  ])('keeps the blank lines past the fences of a block of %s', async (_name, md, expected) => {
+    // Import can't write the fences of a block Word has no paragraph of in
+    // its style, and wrote the blank lines between the quote and its fence
+    // in their place, as many as the side with fewer had, which a
+    // paragraph or code right after a quote followed. It writes as many as
+    // the side with more
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
+  it.each([
+    ['a paragraph', '> a\n\n<!-- style: box -->\n> b\n<!-- style: box -->\np\n<!-- /style -->\n'],
+    ['a block on one line', '> a\n\n<!-- style: box -->\n> b\n<!-- style: box -->p<!-- /style -->\n'],
+  ])('keeps a quote right after the opening fence of a block that opens again in its style before %s', async (_name, md) => {
+    // The block goes on past its second opening fence, as Word has it, and
+    // import writes its first, which the count of the blank lines before
+    // the quote went past, as though import wrote neither
+    const back = await trip(md);
+    expect(back).toBe('> a\n\n<!-- style: box -->\n> b\np\n<!-- /style -->\n');
+    expect(await trip(back)).toBe(back);
+  });
+
   /** The style block the line of `text`, alone or after a heading's or a
    *  quote's marker, is in, in `md`, or '' for none */
   const blockOf = (md: string, text: string): string => {
