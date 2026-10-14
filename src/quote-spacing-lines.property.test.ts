@@ -104,11 +104,12 @@ function markdownOf({ blocks, trailing, tableDigits, calloutLabels }: { blocks: 
 }
 
 /** The quote spacing export records in `docx`'s custom properties, but
- *  quotes' places after sublists, which hold a hash of their text */
+ *  quotes' places after sublists and what tells quotes apart, which hold a
+ *  hash of their text */
 async function quoteSpacing(docx: Uint8Array): Promise<string[]> {
   const xml = await (await JSZip.loadAsync(docx)).file('docProps/custom.xml')?.async('string') ?? '';
   return [...xml.matchAll(/<property\b[^>]*name="(MANUSCRIPT_BLOCKQUOTE_[^"]*)"[^>]*>(?:(?!<\/property>).)*?<vt:lpwstr>([^<]*)<\/vt:lpwstr>/gs)]
-    .filter(([, name]) => !name.startsWith('MANUSCRIPT_BLOCKQUOTE_LIST_LEVELS'))
+    .filter(([, name]) => !name.startsWith('MANUSCRIPT_BLOCKQUOTE_LIST_LEVELS') && !name.startsWith('MANUSCRIPT_BLOCKQUOTE_IDENTITIES'))
     .map(([, name, value]) => name + '=' + value);
 }
 

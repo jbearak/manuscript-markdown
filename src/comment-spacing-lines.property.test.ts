@@ -160,11 +160,12 @@ const parsedSpacing = (markdown: string) => parseMd(markdown)
   .map(token => [token.blankLinesBefore, token.blankLinesAfter]);
 
 /** The comments' spacing, and the style blocks' fences', that export
- *  records in `docx`'s custom properties, and the quotes' too where `quotes` */
+ *  records in `docx`'s custom properties, and the quotes' too where `quotes`,
+ *  but what tells quotes apart, which holds a hash of their text */
 async function commentSpacing(docx: Uint8Array, quotes = false): Promise<string[]> {
   const xml = await (await JSZip.loadAsync(docx)).file('docProps/custom.xml')?.async('string') ?? '';
   return [...xml.matchAll(/<property\b[^>]*name="(MANUSCRIPT_(?:HTML_COMMENT|SENTINEL|BLOCKQUOTE)_[^"]*)"[^>]*>(?:(?!<\/property>).)*?<vt:lpwstr>([^<]*)<\/vt:lpwstr>/gs)]
-    .filter(([, name]) => quotes || !name.startsWith('MANUSCRIPT_BLOCKQUOTE_'))
+    .filter(([, name]) => (quotes || !name.startsWith('MANUSCRIPT_BLOCKQUOTE_')) && !name.startsWith('MANUSCRIPT_BLOCKQUOTE_IDENTITIES'))
     .map(([, name, value]) => name + '=' + value);
 }
 
