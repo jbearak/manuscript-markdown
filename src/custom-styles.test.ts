@@ -1258,6 +1258,19 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
   });
 
   it.each([
+    ['an opening fence', '<!-- style: box -->'],
+    ['a closing fence', '<!-- /style -->'],
+  ])('keeps a blank line between an HTML table in a block Word has no paragraph of and a quote right after %s', async (_name, fence) => {
+    // Import wrote the quote on the line after the table's, where the fence
+    // it can't write stood, so the next export read it into the table's
+    // HTML block
+    const back = await trip('<!-- style: box -->\n\n<table><tr><td>a</td></tr></table>\n\n' + fence + '\n> p1\n');
+    expect(back).toMatch(/<\/table>\n\n> p1\n$/);
+    expect(back).not.toContain('<!--');
+    expect(await trip(back)).toBe(back);
+  });
+
+  it.each([
     ['a paragraph', '> a\n\n<!-- style: box -->\n> b\n<!-- style: box -->\np\n<!-- /style -->\n'],
     ['a block on one line', '> a\n\n<!-- style: box -->\n> b\n<!-- style: box -->p<!-- /style -->\n'],
   ])('keeps a quote right after the opening fence of a block that opens again in its style before %s', async (_name, md) => {
