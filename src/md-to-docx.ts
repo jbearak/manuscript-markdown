@@ -10316,6 +10316,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       recording = false;
     }
   };
+  // The place, among those of the blocks Word has a paragraph of, of a
+  // block that one opening in a list item closed with no fence (see
+  // isImplicitStyleClose), while the blocks after it are paragraphs and
+  // quotes in list items with no custom style, which import reads in it
+  let unfenced: number | undefined;
   // Whether the list open at each level is ordered, so a quote in a list item
   // can tell whether the next item continues its list or an ancestor's
   const openListOrdered: boolean[] = [];
@@ -10339,6 +10344,41 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         state.listItemNumbers = [];
       }
       continue;
+    }
+    // Import writes a closing fence at the top level for such a block
+    // where Word's paragraphs of it end, which the source has no line of,
+    // before a paragraph or an item of the list at the top level, or a
+    // block Word can't give the block's style, which import doesn't read in
+    // the block, as it has no record of such blocks between its paragraphs
+    // (see planRun in convertDocx). That fence takes its place among the
+    // closing ones, with a blank line on each side, as import writes one
+    // between blocks, and parts two quotes it's between, as a fence on a
+    // line of its own does, so the fences and quotes after it keep their
+    // own. Word's paragraphs stay as they are: the empty ones between the
+    // quotes went in already. Before anything else, export counts nothing,
+    // as before: before a fence, past which import may read a block of its
+    // style as the same, as it does past an empty block of another, or a
+    // paragraph in a custom style in a list item or an item of a sublist,
+    // where import writes a block in the item, which ends the one at the
+    // top level with no fence there
+    if (isImplicitStyleClose(token)) {
+      if (styleBlock?.styled) unfenced = styleBlock.index;
+    } else if (unfenced !== undefined && !(token.listContinuation && (token.type === 'blockquote' || listContinuationStyleId(token, state) === 'ManuscriptListContinuation'))) {
+      const fenced = token.type === 'paragraph' && !token.listContinuation && !isStyleDirective(token) && !marksSectionOrBibliography(token)
+        || token.type === 'list_item' && (token.level ?? 1) === 1
+        || unstyledInStyleBlock(token) && !styleBlockEdges['csi' + unfenced];
+      unfenced = undefined;
+      if (fenced) {
+        sentinelGaps['csc' + sentinelCscIdx] = 1;
+        sentinelGaps['csca' + sentinelCscIdx] = 1;
+        sentinelCscIdx++;
+        const group = token.type === 'blockquote' ? token.blockquoteGroupIndex : undefined;
+        if (group !== undefined && (state.blockquoteGaps.get(group - 1) ?? -1) >= 0) {
+          state.blockquoteGaps.set(group - 1, -1);
+          state.blockquotePostContentBlankLines.set(group - 1, 1);
+          state.blockquotePreContentBlankLines.set(group, 1);
+        }
+      }
     }
     const codeAcrossFence = codeBeforeFence && token.type === 'code_block';
     if (!isStyleDirective(token)) {
@@ -10453,10 +10493,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         state.activeCustomStyle = token.customStyleOpen;
         biblAtSectionStart = biblFirst;
       } else {
-        // One that closes with no fence, which import doesn't write either,
-        // takes no place among the fences' gaps, nor does one of a block
-        // Word has no paragraph of in its style, whose fences import can't
-        // write (see recordOpeningGaps)
+        // One that closes with no fence takes its place where import writes
+        // one, if it does (see unfenced), and one of a block Word has no
+        // paragraph of in its style, whose fences import can't write (see
+        // recordOpeningGaps), none
         if (!isImplicitStyleClose(token) && styleBlock?.styled) {
           if (token.blankLinesBefore !== undefined) sentinelGaps['csc' + sentinelCscIdx] = token.blankLinesBefore;
           if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
