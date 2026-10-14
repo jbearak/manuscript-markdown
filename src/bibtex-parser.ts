@@ -1,7 +1,7 @@
 // --- Implementation notes ---
 // - Verbatim fields bypass whitespace collapsing, brace stripping, TeX decoding, NFC normalization, and serialization escaping.
-// - TeX decoding is intentionally limited to standard text accents; unknown commands remain literal.
-// - Non-command braces remain intact; braces owned by recognized accent expressions are consumed.
+// - TeX decoding reads standard text accents and the letters and symbols of text commands (\ss, \textregistered), but not the latter in names (author, editor); unknown commands remain literal.
+// - Non-command braces remain intact; braces owned by recognized accent expressions and text symbols are consumed.
 // - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly.
 // - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string).
 
@@ -126,6 +126,63 @@ const BIBTEX_LITERAL_COMMANDS: ReadonlyArray<readonly [string, string]> = [
   ['\\textasciicircum{}', '^'],
 ];
 
+// The commands of letters and symbols LaTeX prints in text, as the
+// characters it prints, as citation-js reads them. \SS isn't one: pandoc
+// drops it, as a command it doesn't know, and it stays as written, as such
+// a command does here. Nor are the commands of characters that are BibTeX's
+// or TeX's syntax, which stay as written until the reader keeps a value's
+// escapes: a brace, which the field scanner and the names' split count
+// (\textbraceleft, \textbraceright); a backslash, which starts a command
+// (\textbackslash); a dollar sign, which starts math (\textdollar); a tie
+// and a circumflex (\textasciitilde, \textasciicircum); and the quotes that
+// make a ligature in pairs (\textquotesingle, \textasciigrave). Nor the
+// commands of characters that complete markup citeproc reads in a field:
+// brackets, which make a tag of formatting with text written as it is, as
+// <i\textgreater{} does, which citeproc reads as italic and drops
+// (\textless, \textgreater), and a straight double quote, which it reads
+// as a quotation mark and curls (\textquotedbl).
+export const BIBTEX_TEXT_SYMBOLS: Readonly<Record<string, string>> = Object.freeze({
+  ss: '\u00DF', o: '\u00F8', O: '\u00D8', aa: '\u00E5', AA: '\u00C5',
+  ae: '\u00E6', AE: '\u00C6', oe: '\u0153', OE: '\u0152', l: '\u0142', L: '\u0141',
+  i: '\u0131', j: '\u0237', dh: '\u00F0', DH: '\u00D0', th: '\u00FE', TH: '\u00DE',
+  dj: '\u0111', DJ: '\u0110', ng: '\u014B', NG: '\u014A', ij: '\u0133', IJ: '\u0132',
+  textregistered: '\u00AE', copyright: '\u00A9', textcopyright: '\u00A9', texttrademark: '\u2122',
+  textservicemark: '\u2120', textcircledP: '\u2117', dag: '\u2020', ddag: '\u2021',
+  textdagger: '\u2020', textdaggerdbl: '\u2021', S: '\u00A7', P: '\u00B6',
+  textsection: '\u00A7', textparagraph: '\u00B6', pounds: '\u00A3', textsterling: '\u00A3',
+  texteuro: '\u20AC', textyen: '\u00A5', textcent: '\u00A2', textcurrency: '\u00A4',
+  textflorin: '\u0192', textendash: '\u2013', textemdash: '\u2014', textbullet: '\u2022',
+  textperiodcentered: '\u00B7', textellipsis: '\u2026', ldots: '\u2026', dots: '\u2026',
+  textquoteleft: '\u2018', textquoteright: '\u2019', textquotedblleft: '\u201C', textquotedblright: '\u201D',
+  quotesinglbase: '\u201A', quotedblbase: '\u201E', guillemotleft: '\u00AB', guillemotright: '\u00BB',
+  guillemetleft: '\u00AB', guillemetright: '\u00BB', guilsinglleft: '\u2039', guilsinglright: '\u203A',
+  textexclamdown: '\u00A1', textquestiondown: '\u00BF', textdegree: '\u00B0', textperthousand: '\u2030',
+  textpertenthousand: '\u2031', textmu: '\u00B5', textonehalf: '\u00BD', textonequarter: '\u00BC',
+  textthreequarters: '\u00BE', textonesuperior: '\u00B9', texttwosuperior: '\u00B2', textthreesuperior: '\u00B3',
+  texttimes: '\u00D7', textdiv: '\u00F7', textpm: '\u00B1', textminus: '\u2212',
+  textlnot: '\u00AC', textordfeminine: '\u00AA', textordmasculine: '\u00BA', textbrokenbar: '\u00A6',
+  textbardbl: '\u2016', textnumero: '\u2116', textcelsius: '\u2103', textohm: '\u03A9',
+  textestimated: '\u212E', textreferencemark: '\u203B', textleftarrow: '\u2190', textrightarrow: '\u2192',
+  textuparrow: '\u2191', textdownarrow: '\u2193', textasteriskcentered: '\u2217', textvisiblespace: '\u2423',
+  textasciiacute: '\u00B4', textasciidieresis: '\u00A8', textasciimacron: '\u00AF',
+  textbar: '|', textunderscore: '_',
+});
+
+// A text symbol's command, as \ss, and what ends it: an empty group, as in
+// \ss{}, or the spaces and tabs after it, which TeX reads as the command's
+// end, but not a note's line end or a no-break space, which it reads as a
+// character
+const TEXT_SYMBOL_AT = /\\([A-Za-z]+)(?![A-Za-z])(\{\}|[ \t]*)/y;
+
+/** Decode a text symbol's command at slashIndex, as \ss, \ss{} or \ss and
+ *  the spaces after it */
+function tryDecodeTextSymbolAt(input: string, slashIndex: number): DecodedCommand | undefined {
+  TEXT_SYMBOL_AT.lastIndex = slashIndex;
+  const symbol = TEXT_SYMBOL_AT.exec(input);
+  if (!symbol || !Object.prototype.hasOwnProperty.call(BIBTEX_TEXT_SYMBOLS, symbol[1])) return undefined;
+  return { value: BIBTEX_TEXT_SYMBOLS[symbol[1]], nextIndex: slashIndex + symbol[0].length };
+}
+
 const BIBTEX_SIMPLE_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
   '&': '&',
   '%': '%',
@@ -221,9 +278,14 @@ function tryDecodeAccentAt(input: string, slashIndex: number): DecodedCommand | 
   };
 }
 
-/** Decode standard BibTeX/TeX text accents while retaining every brace that is
- *  not proven to belong solely to a recognized accent expression. */
-function decodeBibtexText(input: string): string {
+/** Decode standard BibTeX/TeX text accents and text symbols while retaining
+ *  every brace that is not proven to belong solely to a recognized accent
+ *  expression or text symbol. In a list of `names`, the text symbols stay
+ *  as written, as on main: BibTeX splits the names, and reads each word's
+ *  case, before TeX reads a command, so a name would need them read once
+ *  it's split, and serializeBibtex to write back what was read, a later
+ *  step's. */
+function decodeBibtexText(input: string, names = false): string {
   let output = '';
   let index = 0;
 
@@ -233,6 +295,13 @@ function decodeBibtexText(input: string): string {
       if (grouped && input[grouped.nextIndex] === '}') {
         output += grouped.value;
         index = grouped.nextIndex + 1;
+        continue;
+      }
+
+      const symbol = names ? undefined : tryDecodeGroupedTextSymbolAt(input, index);
+      if (symbol) {
+        output += symbol.value;
+        index = symbol.nextIndex;
         continue;
       }
     }
@@ -252,6 +321,16 @@ function decodeBibtexText(input: string): string {
         continue;
       }
 
+      const symbol = names ? undefined : tryDecodeTextSymbolAt(input, index);
+      if (symbol) {
+        output += symbol.value;
+        index = symbol.nextIndex;
+        continue;
+      }
+
+      // Not a control space, \ , which stays as written, as on main: as a
+      // space, it could complete a tag citeproc reads, as in
+      // <span\ class="nocase">, as the brackets' commands could
       const escaped = BIBTEX_SIMPLE_ESCAPES[input[index + 1]];
       if (escaped !== undefined) {
         output += escaped;
@@ -265,6 +344,25 @@ function decodeBibtexText(input: string): string {
   }
 
   return output.normalize('NFC');
+}
+
+/** A text symbol alone in a group at `open`, as {\ss} or {\o }, whose
+ *  braces are its, as BibTeX writes a special character; but not with its
+ *  empty group, as {\ss{}}, which is a group of ß, nor where a command
+ *  could take the group as an argument, which keeps its braces: where the
+ *  nearest character before it but spaces ends a command's name, as in
+ *  \textsc{\O} or \textsc {\O}, or a group, any group, as in
+ *  \textcolor{red} {\O} or \texorpdfstring{\ss}{\o}, so {\l}{\L} is ł{Ł} */
+function tryDecodeGroupedTextSymbolAt(input: string, open: number): DecodedCommand | undefined {
+  let before = open;
+  while (before > 0 && (input[before - 1] === ' ' || input[before - 1] === '\t')) before--;
+  if (input[before - 1] === '}' && !isEscapedAt(input, before - 1)) return undefined;
+  let name = before;
+  while (name > 0 && isAsciiLetter(input[name - 1])) name--;
+  if (name < before && input[name - 1] === '\\' && !isEscapedAt(input, name - 1)) return undefined;
+  const symbol = tryDecodeTextSymbolAt(input, open + 1);
+  if (!symbol || input[symbol.nextIndex] !== '}' || input[symbol.nextIndex - 1] === '}') return undefined;
+  return { value: symbol.value, nextIndex: symbol.nextIndex + 1 };
 }
 
 /** A field's whitespace as BibTeX reads it: each run of spaces, tabs and
@@ -301,7 +399,7 @@ function decodeBibtexFieldValue(
   const semanticValue = braceDelimited && !AUTHOR_FIELDS.has(fieldName)
     ? collapseBibtexWhitespace(fieldName, stripOuterBraces(collapsed))
     : collapsed;
-  return decodeBibtexText(semanticValue);
+  return decodeBibtexText(semanticValue, AUTHOR_FIELDS.has(fieldName));
 }
 
 /** Undo the punctuation escapes BibTeX requires — `\&`, `\%`, `\$`, `\#`,

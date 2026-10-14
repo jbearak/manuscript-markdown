@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test';
-import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, stripOuterBraces, stripWrappingBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, BIBTEX_TEXT_SYMBOLS, stripOuterBraces, stripWrappingBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
 import { fastestRun } from './test-timing';
+import { parseAuthors } from './md-to-docx-citations';
 
 describe('BibTeX Parser', () => {
   it('parses basic entry', () => {
@@ -409,6 +410,130 @@ describe('BibTeX TeX accent decoding', () => {
       String.raw`title = {A \textasciitilde{} B \textasciicircum{} C}`
     );
     expect(parseBibtex(serialized).get('k')?.fields.get('title')).toBe('A ~ B ^ C');
+  });
+});
+
+describe('BibTeX text symbols', () => {
+  // A letter's or symbol's command, as \ss or \textregistered, stayed as it
+  // was written, so citeproc showed Stra\ss e
+  const field = (name: string, value: string) => parseBibtex('@article{k,\n  ' + name + ' = {' + value + '}\n}').get('k')?.fields.get(name);
+
+  it.each([
+    ['a letter, with the space after it, which ends its command', String.raw`Stra\ss e`, 'Stra\u00DFe'],
+    ['a letter with an empty group after it', String.raw`Stra\ss{}e`, 'Stra\u00DFe'],
+    ['a letter in a group', String.raw`Stra{\ss}e`, 'Stra\u00DFe'],
+    ['a letter in a group, with a space', String.raw`J{\o }rgensen`, 'J\u00F8rgensen'],
+    ['a capital letter', String.raw`\O{}stergaard`, '\u00D8stergaard'],
+    // Whose braces are the command's
+    ['a capital letter as a command\'s argument', String.raw`A \textsc{\O} B`, 'A \\textsc{\u00D8} B'],
+    ['a capital letter as a command\'s argument after a space', String.raw`A \textsc {\O} B`, 'A \\textsc {\u00D8} B'],
+    ['a capital letter as a command\'s second argument', String.raw`A \textcolor{red}{\O} B`, 'A \\textcolor{red}{\u00D8} B'],
+    ['a capital letter as a command\'s second argument after a space', String.raw`A \textcolor{red} {\O} B`, 'A \\textcolor{red} {\u00D8} B'],
+    ['a capital letter as a command\'s second argument after a command\'s group', String.raw`A \textcolor{\mycolor}{\O} B`, 'A \\textcolor{\\mycolor}{\u00D8} B'],
+    ['a letter as a command\'s second argument after a letter\'s group', String.raw`\texorpdfstring{\ss}{\o}`, '\\texorpdfstring{\u00DF}{\u00F8}'],
+    // Whose braces stay after any group, a letter's group or its empty
+    // group too, as it could be a command's argument
+    ['letters in groups after a letter\'s group', String.raw`{\l}{\L}`, '\u0142{\u0141}'],
+    ['a letter in a group after a letter\'s command and its empty group', String.raw`\OE{} {\l}`, '\u0152 {\u0142}'],
+    ['a letter that starts a group with more in it', String.raw`H. C. {\O rsted}`, 'H. C. {\u00D8rsted}'],
+    ['letters of other languages', String.raw`{\AA}ngstr{\"o}m \ae{} \OE{} \l{}\L{} \i{} \th{}`, '\u00C5ngstr\u00F6m \u00E6 \u0152 \u0142\u0141 \u0131 \u00FE'],
+    ['symbols', String.raw`\textregistered{} \copyright{} \texttrademark{} \dag{} \ddag{} \S{} \P{}`, '\u00AE \u00A9 \u2122 \u2020 \u2021 \u00A7 \u00B6'],
+    ['a symbol with the space after it, which ends its command', String.raw`\S 3`, '\u00A73'],
+    ['dashes and an ellipsis', String.raw`a\textendash{}b\textemdash{}c\ldots`, 'a\u2013b\u2014c\u2026'],
+    ['quotation marks', String.raw`\textquotedblleft{}a\textquotedblright{} \guillemotleft{}b\guillemotright`, '\u201Ca\u201D \u00ABb\u00BB'],
+    ['currency and units', String.raw`\pounds 5, \texteuro{}6, 20\textdegree{}C`, '\u00A35, \u20AC6, 20\u00B0C'],
+    // Whose control space stays as written (see below)
+    ['a symbol before a control space', String.raw`\dag\ y`, '\u2020\\ y'],
+  ])('reads %s as the character LaTeX prints', (_name, value, expected) => {
+    expect(field('title', value)).toBe(expected);
+  });
+
+  it.each([
+    // pandoc 3.12 drops it, as a command it doesn't know, which stays as
+    // written here
+    ['\\SS', String.raw`STRA\SS E`, String.raw`STRA\SS E`],
+    ['a longer command it doesn\'t know', String.raw`\ssx b`, String.raw`\ssx b`],
+    ['a symbol with its empty group in a group', String.raw`{\textasciicircum{}} x`, '{^} x'],
+    ['an accent on a dotless i', String.raw`\"{\i}`, '\u00EF'],
+    // The commands of characters that are BibTeX's or TeX's syntax, which
+    // stay as written until the reader keeps a value's escapes
+    ['braces', String.raw`\textbraceleft{}a\textbraceright{}`, String.raw`\textbraceleft{}a\textbraceright{}`],
+    ['a backslash', String.raw`a\textbackslash{}b`, String.raw`a\textbackslash{}b`],
+    ['a dollar sign', String.raw`\textdollar{}5 or \textdollar 6`, String.raw`\textdollar{}5 or \textdollar 6`],
+    ['a tilde and a circumflex without their empty group', String.raw`a\textasciitilde b\textasciicircum c`, String.raw`a\textasciitilde b\textasciicircum c`],
+    ['quotes that make a ligature in pairs', String.raw`\textquotesingle\textquotesingle{} \textasciigrave\textasciigrave{}`, String.raw`\textquotesingle\textquotesingle{} \textasciigrave\textasciigrave{}`],
+  ])('reads %s as before', (_name, value, expected) => {
+    expect(field('title', value)).toBe(expected);
+  });
+
+  // A lone brace's command read as a brace, which the .bib file written
+  // back held escaped, which the scanner counts, so the entry read on past
+  // its end, or ended at the brace
+  it.each([
+    ['a left brace', String.raw`A \textbraceleft{} B`],
+    ['a right brace', String.raw`A \textbraceright{} B`],
+  ])('reads %s alone as before, and writes it back so the entry reads back whole', (_name, value) => {
+    const once = parseBibtex('@article{k,\n  title = {' + value + '},\n  year = {2020}\n}');
+    expect(once.get('k')!.fields.get('title')).toBe(value);
+    const twice = parseBibtex(serializeBibtex(once)).get('k');
+    expect(twice?.fields.get('title')).toBe(value);
+    expect(twice?.fields.get('year')).toBe('2020');
+  });
+
+  // Braces read before the names were split hid the and between them
+  it('splits names at an and between brace commands', () => {
+    expect(parseAuthors(field('author', String.raw`Jane \textbraceleft{}Doe and Smith\textbraceright{}, John`)!)).toHaveLength(2);
+  });
+
+  // A bracket's command read as the bracket, so a bracket with the rest of
+  // a tag written as it is, as in <i\textgreater{}, made a tag of
+  // formatting, which citeproc read as italic, and dropped
+  it.each([
+    ['a closing bracket after the rest of a tag', String.raw`<i\textgreater{}x</i\textgreater{}`],
+    ['an opening bracket before the rest of a tag', String.raw`\textless{}i>x`],
+    ['brackets around a letter', String.raw`\textless{}i\textgreater{}x\textless{}/i\textgreater{}`],
+    ['a straight double quote', String.raw`\textquotedbl{}x\textquotedbl{}`],
+    // A control space, which, as a space, completed a tag
+    ['a control space in a tag', String.raw`A <span\ class="nocase">TEST</span> B`],
+  ])('reads %s as before', (_name, value) => {
+    expect(field('title', value)).toBe(value);
+  });
+
+  // Which TeX reads as a character, not as the command's end, and a note
+  // keeps a line end, which citeproc reads a line at a time
+  it.each([
+    ['a note\'s line end', 'note', 'A \\ss\noriginal-date: 1850', 'A \u00DF\noriginal-date: 1850'],
+    ['a no-break space', 'title', 'a \\ss\u00A0b', 'a \u00DF\u00A0b'],
+  ])('keeps %s after a letter\'s command', (_name, name, value, expected) => {
+    expect(field(name, value)).toBe(expected);
+  });
+
+  // As on main: BibTeX splits names, and reads a word's case, before TeX
+  // reads a command, and serializeBibtex would have to write a name back
+  // as it was read, a later step's
+  it.each([
+    ['author', String.raw`Gau\ss and Doe, Jane`, String.raw`Gau\ss and Doe, Jane`],
+    ['editor', String.raw`{\dh}orsteinn Meier, Hans`, String.raw`{\dh}orsteinn Meier, Hans`],
+    ['author', String.raw`{Gau\ss\ Inc.} and \\ss`, String.raw`{Gau\ss\ Inc.} and \ss`],
+  ])('reads the text symbols\' commands in %s as before', (name, value, expected) => {
+    expect(field(name, value)).toBe(expected);
+  });
+
+  it('reads a title with each text symbol\'s command back the same once it\'s written', () => {
+    for (const command of Object.keys(BIBTEX_TEXT_SYMBOLS)) {
+      for (const written of ['A \\' + command + '{} B', 'A {\\' + command + '} B', 'A \\' + command + ' B']) {
+        const once = parseBibtex('@article{k,\n  title = {' + written + '}\n}');
+        const twice = parseBibtex(serializeBibtex(once));
+        expect(twice.get('k')!.fields.get('title')).toBe(once.get('k')!.fields.get('title'));
+      }
+    }
+  });
+
+  it('writes a symbol back as its character, which reads back the same', () => {
+    const once = parseBibtex('@article{k,\n  title = {Stra\\ss e \\textregistered{}}\n}');
+    const serialized = serializeBibtex(once);
+    expect(serialized).toContain('title = {Stra\u00DFe \u00AE}');
+    expect(parseBibtex(serialized).get('k')!.fields.get('title')).toBe(once.get('k')!.fields.get('title'));
   });
 });
 
