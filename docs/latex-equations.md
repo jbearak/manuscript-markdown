@@ -168,7 +168,7 @@ To place limits above/below (instead of as subscript/superscript):
 
 `\nolimits` does the reverse and keeps the limits beside the operator. Re-import drops it, so the limits fall back to the default placement.
 
-A group in parentheses or brackets, or a `\left` and `\right` pair, right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. To put more under it, brace the body: `\prod{(1-x)y}`. Re-import adds those braces when a body from Word starts with a bracket but isn't one whole group. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
+A group in parentheses or brackets, or a `\left` and `\right` pair, right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. Otherwise the body is the one character, command or braced group after the operator, with its scripts: in `\sum_i x_i y`, only `x_i` is under the sum. To put more under it, brace the body: `\prod{(1-x)y}`. Re-import adds those braces when a body from Word is more than one piece, as an integral's `f(x)dx` comes back as `\int_0^1{f(x)dx}`, or starts with a bracket but isn't one whole group, as `(1-x)y`. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
 
 ## Functions
 

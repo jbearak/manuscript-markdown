@@ -104,6 +104,9 @@ const NARY_MAP: Map<string, string> = new Map([
   ['⋂', '\\bigcap'],
 ]);
 
+/** The commands of NARY_MAP's operators, which take a body rather than an argument */
+const NARY_COMMANDS = new Set(NARY_MAP.values());
+
 const KNOWN_FUNCTIONS = new Set([
   'sin', 'cos', 'tan', 'cot', 'sec', 'csc',
   'arcsin', 'arccos', 'arctan',
@@ -543,9 +546,10 @@ function scriptBase(latex: string): string {
   // Single LaTeX command like \alpha
   if (/^\\[a-zA-Z]+$/.test(latex)) return latex;
   // Single LaTeX command with one braced argument like \mathcal{A}. A function
-  // such as \sin{x} takes no argument, so it needs the braces: {\sin{x}}^2.
+  // such as \sin{x} takes no argument, so it needs the braces: {\sin{x}}^2,
+  // and so does an n-ary operator's body: {\prod{ab}}^2.
   const command = /^\\([a-zA-Z]+)\{[^{}]*\}$/.exec(latex);
-  if (command && !KNOWN_FUNCTIONS.has(command[1])) return latex;
+  if (command && !KNOWN_FUNCTIONS.has(command[1]) && !NARY_COMMANDS.has('\\' + command[1])) return latex;
   return '{' + latex + '}';
 }
 
@@ -679,11 +683,41 @@ function translateNary(children: XmlNode[]): string {
   const supLatex = scriptToLatex(findChild(children, 'm:sup'));
   const sub = (subHide || !subLatex) ? '' : '_' + scriptArg(subLatex);
   const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
-  const body = ommlToLatex(findChild(children, 'm:e'));
-  // Export takes a leading bracket group as the whole body, so brace a body
-  // that is more than that group (Word's ∏ over (1-x)y) to keep the rest inside.
-  const bracketed = /^(?:[([]|\\left(?![A-Za-z]))/.test(body);
-  return appendLatex(op + limits + sub + sup, bracketed && !isBracketGroup(body) ? '{' + body + '}' : body);
+  const bodyNodes = findChild(children, 'm:e');
+  const body = ommlToLatex(bodyNodes);
+  return appendLatex(op + limits + sub + sup, !body || isOperand(bodyNodes, body) ? body : '{' + body + '}');
+}
+
+/**
+ * Whether export reads `latex`, the LaTeX of Word's n-ary body `nodes`, back
+ * whole as the body: one bracket group, or one piece with its scripts. Word's
+ * pieces are its runs and structures, and a body of more, as a and b, needs
+ * braces to keep the rest inside. A run is one piece where its LaTeX is one
+ * character or command, as \alpha or \|, or a styled group such as
+ * \mathrm{ab}, but not two characters such as 12, of which export takes the
+ * 1. A delimiter of
+ * characters, as |x|, imports bare, and export takes its first | alone.
+ * Word's tracked change is one piece where its content is.
+ */
+function isOperand(nodes: XmlNode[], latex: string): boolean {
+  // Export takes a leading bracket group as the whole body, so a body that
+  // starts with a bracket is one only if it's that group, not (1-x)y or (
+  if (/^(?:[([]|\\left(?![A-Za-z]))/.test(latex)) return isBracketGroup(latex);
+  const pieces = nodes.filter(node => Object.keys(node).some(key =>
+    key === 'm:r' ? translateRun(asXmlNodes(node[key])) !== ''
+      : key === 'w:ins' || key === 'w:del' ? !isDroppedChange(asXmlNodes(node[key]))
+        : key === 'm:t' || key.startsWith('m:') && !SKIP_TAGS.has(key)));
+  if (pieces.length !== 1) return false;
+  const [piece] = pieces;
+  if (piece['m:r'] !== undefined || piece['m:t'] !== undefined) return /^(?:[^\\{}]|\\[A-Za-z]+(?:\{[^{}]*\})?|\\[^A-Za-z])$/.test(latex);
+  if (piece['m:d'] !== undefined) return latex.startsWith('\\');
+  // Export takes an insertion or deletion as the body where it would take its
+  // content, which is the LaTeX in its markup. Translating the content again
+  // would take time exponential in the depth of changes in n-ary bodies.
+  const change = trackedChange(piece);
+  if (!change) return true;
+  const markup = /^\{(\+\+|--)([\s\S]*)\1\}$/.exec(latex);
+  return markup !== null && isOperand(change.children, markup[2].trim());
 }
 
 /**
@@ -1235,13 +1269,18 @@ function ommlChildrenToLatex(children: XmlNode[]): string {
  *  {++ \! ++}, whose command Word has no form for (see keepWhitespaceChanges
  *  in latex-to-omml.ts). */
 function trackedChangeLatex(children: XmlNode[]): string {
+  return isDroppedChange(children) ? '' : ommlChildrenToLatex(children);
+}
+
+/** Whether a tracked change's content is only runs of whitespace without
+ *  xml:space="preserve", which Word drops (see trackedChangeLatex) */
+function isDroppedChange(children: XmlNode[]): boolean {
   const runs = children.filter(child => child['#text'] === undefined || String(child['#text']).trim());
-  const dropped = runs.length > 0 && runs.every(run => run['m:r'] !== undefined && asXmlNodes(run['m:r']).every(part => {
+  return runs.length > 0 && runs.every(run => run['m:r'] !== undefined && asXmlNodes(run['m:r']).every(part => {
     if (part['m:t'] === undefined) return part['m:rPr'] !== undefined || part['w:rPr'] !== undefined || (part['#text'] !== undefined && !String(part['#text']).trim());
     const attrs = (part[':@'] ?? {}) as Record<string, string | undefined>;
     return attrs['@_xml:space'] !== 'preserve' && /^[ \t\r\n]*$/.test(extractText(asXmlNodes(part['m:t'])));
   }));
-  return dropped ? '' : ommlChildrenToLatex(children);
 }
 
 /** A w:ins or w:del inside an equation: Word's record of an edit to it, which
