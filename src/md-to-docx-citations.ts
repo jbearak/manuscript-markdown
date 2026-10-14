@@ -137,14 +137,16 @@ const RPR_ORDER = [
   'em', 'lang', 'eastAsianLayout', 'specVanish', 'oMath', 'rPrChange',
 ];
 
-// A start, end or empty tag, its attributes in either quotes
-const XML_TAG_RE = /<(\/?)([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*\s*(\/?)>/g;
+// A comment, a CDATA section or a processing instruction, whose text may
+// look like tags, or else a start, end or empty tag, its attributes in
+// either quotes
+const XML_TAG_RE = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<(\/?)([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*\s*(\/?)>/g;
 
 /** The elements `xml` holds at its top level, whatever they hold, each
- *  with where it ends, or undefined where there's text, a comment or a tag
- *  left open among them */
+ *  with where it ends, and a comment, CDATA section or processing
+ *  instruction there as one of them; or undefined where there's other text,
+ *  or a tag left open, among them */
 function topLevelElements(xml: string): Array<{ end: number; element: string }> | undefined {
-  if (/<[!?]/.test(xml)) return undefined;
   const elements: Array<{ end: number; element: string }> = [];
   const open: string[] = [];
   let start = 0;
@@ -154,7 +156,9 @@ function topLevelElements(xml: string): Array<{ end: number; element: string }> 
     if (between.includes('<') || (open.length === 0 && !/^[ \t\r\n]*$/.test(between))) return undefined;
     const [tag, close, name, empty] = match;
     if (open.length === 0) start = match.index;
-    if (close) {
+    if (name === undefined) {
+      // Not markup, which goes with what holds it
+    } else if (close) {
       if (empty || open.pop() !== name) return undefined;
     } else if (!empty) {
       open.push(name);
@@ -172,8 +176,9 @@ function topLevelElements(xml: string): Array<{ end: number; element: string }> 
  * An element may hold others, as a tracked change's record does, and goes
  * with the whitespace before it, so each keeps its line where Word wrote
  * them on lines of their own. One the order doesn't know, as one of another
- * namespace, stays in its place, and the others go in order around it. Text
- * or a comment among them leaves them as they were.
+ * namespace, stays in its place, and the others go in order around it, as
+ * does a comment, a CDATA section or a processing instruction among them,
+ * which Word doesn't write there. Text among them leaves them as they were.
  */
 export function orderRPr(children: string): string {
   const elements = topLevelElements(children);

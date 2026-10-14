@@ -3361,6 +3361,11 @@ describe('the styles export takes from a template', () => {
       '<w:pPr><w:jc w:val="center"/></w:pPr>'],
     ['line spacing on Normal', 'line-spacing: double', 'Normal', '<w:name w:val="Normal"/><w:qFormat/>', '<w:rPr><w:sz w:val="24"/></w:rPr>',
       '<w:pPr><w:spacing w:after="0" w:line="480" w:lineRule="auto"/></w:pPr>'],
+    // Character spacing, w:spacing in its rPr, stays as it is
+    ['line spacing on Normal with character spacing', 'line-spacing: double', 'Normal', '<w:name w:val="Normal"/><w:qFormat/>', '<w:rPr><w:spacing w:val="20"/><w:sz w:val="24"/></w:rPr>',
+      '<w:pPr><w:spacing w:after="0" w:line="480" w:lineRule="auto"/></w:pPr>'],
+    ['line spacing on Normal with character spacing written with an end tag', 'line-spacing: double', 'Normal', '<w:name w:val="Normal"/><w:qFormat/>',
+      '<w:rPr><w:spacing w:val="20"></w:spacing><w:sz w:val="24"/></w:rPr>', '<w:pPr><w:spacing w:after="0" w:line="480" w:lineRule="auto"/></w:pPr>'],
     ['the bibliography\'s hanging indent', '', 'Bibliography', '<w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/>', '<w:rPr><w:i/></w:rPr>',
       '<w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr>'],
   ])('the pPr export adds to a style without one for %s goes in schema order', async (_name, fields, id, head, rPr, pPr) => {
@@ -3383,6 +3388,32 @@ describe('the styles export takes from a template', () => {
     const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
     expect(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), 'Bibliography')).toBe(extractStyleBlock(styles, 'Bibliography'));
     expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // A custom style without a font takes Normal's, as an XML parser reads it:
+  // a line feed written as itself a space (XML 1.0 §3.3.3), and one written
+  // as a reference a line feed, each written so that Word reads it the same
+  it.each([
+    ['a line feed', 'Times\nNew Roman', 'Times New Roman'],
+    ['a reference to a line feed', 'Times&#10;New Roman', 'Times&#xA;New Roman'],
+  ])('a custom style takes the font of a template\'s Normal written with %s as Word reads it', async (_name, font, written) => {
+    const { styles } = await exportedStyles('styles:\n  epigraph:\n    font-size: 13', ['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '"/></w:rPr>']);
+    expect(extractStyleBlock(styles, 'MsCustomEpigraph')).toContain('<w:rFonts w:ascii="' + written + '" w:hAnsi="' + written + '"/>');
+  });
+
+  // Tables are 2pt smaller than the template's Normal, whose size export
+  // reads as import does (see xmlHalfPoints), however it's spelled
+  it.each([
+    ['a plus sign', '+28'],
+    ['whitespace around it', ' 28 '],
+    ['points', '14pt'],
+  ])('tables are 2pt smaller than a template\'s Normal whose size is written with %s', async (_name, size) => {
+    const { convertDocx } = await import('./converter');
+    const { styles, docx } = await exportedStyles('', ['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:sz w:val="' + size + '"/></w:rPr>']);
+    expect(extractSzVal(extractStyleBlock(styles, 'TableParagraph')!)).toBe(24);
+    const { markdown } = await convertDocx(docx);
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.fontSize, metadata.tableFontSize]).toEqual([14, undefined]);
   });
 
   const heading = (level: number, inner: string): [string, string] => ['Heading' + level, '<w:name w:val="heading ' + level + '"/>' + inner];

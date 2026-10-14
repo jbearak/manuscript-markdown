@@ -1623,6 +1623,38 @@ describe('a template\'s numbering', () => {
     expect((await textOf(zip, 'word/numbering.xml'))!).toContain('<w:num w:numId="2"><w:abstractNumId w:val="7"/>');
   });
 
+  // The template's instance at the numId export's own take, read as import
+  // reads it, by its value (see xmlInteger), goes, so no two have one
+  it.each([
+    ['a plus sign', '+1'],
+    ['a plus sign and a leading zero', '+01'],
+  ])('gives bullets their own where its numbers\' numId 1 is written with %s', async (_name, numId) => {
+    const md = '- bullet\n\n1. one\n2. two';
+    const { docx } = await convertMdToDocx(md, { templateDocx: await listTemplate(numbering => decimalAt1(numbering).replace('<w:num w:numId="1"', () => '<w:num w:numId="' + numId + '"')) });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(body((await convertDocx(docx)).markdown)).toBe(md + '\n');
+    const numIds = [...(await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!.matchAll(/<w:num w:numId="([^"]*)"/g)].map(m => Number(m[1]));
+    expect(new Set(numIds).size).toBe(numIds.length);
+  });
+
+  // However many references to entities the numbering holds, which
+  // fast-xml-parser caps by default, it's read as the template's, whose
+  // numbers have their format
+  it('gives numbers the template\'s format where its numbering holds more than a thousand references to entities', async () => {
+    const levels = Array.from({ length: 9 }, (_, k) => '<w:lvl w:ilvl="' + k + '"><w:start w:val="1"/><w:numFmt w:val="upperLetter"/><w:lvlText w:val="&quot;"/></w:lvl>').join('');
+    const templateDocx = await listTemplate(numbering => numbering
+      .replace(/(<w:abstractNum w:abstractNumId="1"[\s\S]*?<w:numFmt w:val=")decimal"/, (_match, before: string) => before + 'lowerRoman"')
+      .replace('<w:num ', () => Array.from({ length: 120 }, (_, k) => '<w:abstractNum w:abstractNumId="' + (200 + k) + '">' + levels + '</w:abstractNum>\n').join('') + '<w:num '));
+    const md = '3. a\n4. b';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(body((await convertDocx(docx)).markdown)).toBe(md + '\n');
+    const numbering = (await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!;
+    expect(numbering).toContain('<w:numFmt w:val="lowerRoman"/>');
+    expect(numbering.match(/<w:lvlText w:val="&quot;"\/>/g)).toHaveLength(1080);
+    expect(numbering).toMatch(/<w:num w:numId="\d+"[^>]*><w:abstractNumId w:val="1"\/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="3"\/>/);
+  });
+
   // Each instance found by a search of all of them, and each style a link
   // names by a search of all the styles
   it('gives lists their own numbering beside a template\'s many that link to numbering styles in linear time', async () => {

@@ -1,5 +1,4 @@
 import MarkdownIt from 'markdown-it';
-import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import { imagePathsWithSpaces } from './image-paths';
 import { codeSpansOfSpaces } from './code-spans';
 import type Token from 'markdown-it/lib/token.mjs';
@@ -20,8 +19,8 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, preprocessGridTablesWithSourceMap, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
-import { styleFinder } from './style-element';
-import { replaceXmlElements, xmlAttribute, xmlElement, xmlInteger, xmlOn, xmlStartTag, xmlStartTags, xmlTwips } from './xml-elements';
+import { findStyleElement, styleFinder } from './style-element';
+import { otherXmlAttributes, replaceXmlElements, withXmlAttribute, xmlAttribute, xmlElement, xmlElementParts, xmlInteger, xmlLastMatch, xmlOn, xmlSearch, xmlStartTag, xmlStartTags, xmlTwips } from './xml-elements';
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
@@ -5647,10 +5646,9 @@ function fontStylePropertyOn(property: FontStyleProperty, element: string): bool
 
 /** A style's content with a pPr added where the schema orders a style's
  *  children: after its name, base and the like, and before its rPr and table
- *  properties. */
+ *  properties, found in its markup, not a comment (see xmlSearch). */
 function withStylePPr(inner: string, pPr: string): string {
-  const at = inner.search(/<w:(?:rPr|tblPr|trPr|tcPr|tblStylePr)\b/);
-  const end = at === -1 ? inner.length : at;
+  const end = xmlSearch(inner, /<w:(?:rPr|tblPr|trPr|tcPr|tblStylePr)\b/) ?? inner.length;
   return inner.slice(0, end) + pPr + inner.slice(end);
 }
 
@@ -5695,26 +5693,20 @@ const BUILT_IN_STYLES = new Map<string, { name: string; type: string }>([
 export function templateStyleIds(stylesXml: string | undefined): Map<string, string> {
   const ids = new Map<string, string>();
   if (!stylesXml) return ids;
-  let parsed: OrderedXmlNode[];
-  try {
-    // Each w:style element on its own, as XML reads it, so one written as
-    // <w:style .../> ends there; its IDs as styles.xml writes them, which
-    // export writes back
-    parsed = new XMLParser({ ...templateXmlOptions, processEntities: false }).parse(stylesXml) as OrderedXmlNode[];
-  } catch {
-    return ids;
-  }
   // The template's styles, by their types and IDs, and by their types and
-  // names, lowercased
+  // names, lowercased, each read as an XML parser reads it (see
+  // xmlElement), so one written as <w:style .../> ends there, its IDs with
+  // their character references read, as import reads them
   const byId = new Map<string, string>();
   const byName = new Map<string, string>();
-  for (const style of childNodes(parsed.find(n => 'w:styles' in n), 'w:styles')) {
-    const id = style[':@']?.['@_w:styleId'];
-    if (!('w:style' in style) || !id) continue;
+  for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
+    const id = xmlAttribute(style.tag, 'w:styleId');
+    if (!id) continue;
     // A style without a type is a paragraph style
-    const type = style[':@']?.['@_w:type'] ?? 'paragraph';
+    const type = xmlAttribute(style.tag, 'w:type') ?? 'paragraph';
     if (!byId.has(type + ' ' + id.toLowerCase())) byId.set(type + ' ' + id.toLowerCase(), id);
-    const name = childNodes(style, 'w:style').find(n => 'w:name' in n)?.[':@']?.['@_w:val']?.toLowerCase();
+    const nameTag = xmlStartTag(style.content, 'w:name');
+    const name = nameTag && xmlAttribute(nameTag.tag, 'w:val')?.toLowerCase();
     if (name !== undefined && !byName.has(type + ' ' + name)) byName.set(type + ' ' + name, id);
   }
   for (const [builtInId, { name, type }] of BUILT_IN_STYLES) {
@@ -5730,13 +5722,14 @@ export function templateStyleIds(stylesXml: string | undefined): Map<string, str
  *  other, a paragraph style's a character style and a character style's a
  *  paragraph style */
 const STYLE_REFERENCE_TYPES: Record<string, (owner: string | undefined) => string | undefined> = {
-  pStyle: () => 'paragraph',
-  rStyle: () => 'character',
-  tblStyle: () => 'table',
-  basedOn: owner => owner,
-  next: owner => owner,
-  link: owner => owner === 'paragraph' ? 'character' : owner === 'character' ? 'paragraph' : undefined,
+  'w:pStyle': () => 'paragraph',
+  'w:rStyle': () => 'character',
+  'w:tblStyle': () => 'table',
+  'w:basedOn': owner => owner,
+  'w:next': owner => owner,
+  'w:link': owner => owner === 'paragraph' ? 'character' : owner === 'character' ? 'paragraph' : undefined,
 };
+const STYLE_REFERENCE_ELEMENTS = Object.keys(STYLE_REFERENCE_TYPES);
 
 /** `xml` with each reference to a built-in style by its English ID by the
  *  template's ID for the style instead (see templateStyleIds), where it
@@ -5746,32 +5739,53 @@ const STYLE_REFERENCE_TYPES: Record<string, (owner: string | undefined) => strin
  *  paragraph style `Standard` named Normal, stays. */
 function withTemplateStyleIds(xml: string, ids: Map<string, string>): string {
   if (ids.size === 0) return xml;
-  // The type of the style the tags read so far are in, each tag on its own,
-  // so that one written as <w:style .../> holds none
-  let owner: string | undefined;
-  return xml.replace(/<w:style\b([^>]*)>|<\/w:style>|(<w:(pStyle|rStyle|tblStyle|basedOn|next|link)\s+w:val=")([^"]*)(")/g,
-    (match, styleAttrs: string | undefined, open: string | undefined, element: string, id: string, close: string) => {
-      if (styleAttrs !== undefined) {
-        // A style without a type is a paragraph style
-        owner = styleAttrs.endsWith('/') ? undefined : /\sw:type\s*=\s*"([^"]*)"/.exec(styleAttrs)?.[1] ?? 'paragraph';
-        return match;
-      }
-      if (open === undefined) {
-        owner = undefined;
-        return match;
-      }
-      const type = STYLE_REFERENCE_TYPES[element](owner);
-      return ids.has(id) && type !== undefined && BUILT_IN_STYLES.get(id)?.type === type ? open + ids.get(id) + close : match;
-    });
+  // Each reference in `part`, in a style of the type `owner` or in none,
+  // its tag read as an XML parser reads it (see xmlStartTag)
+  const references = (part: string, owner: string | undefined) => {
+    let out = '';
+    let at = 0;
+    for (const { name, tag, start, end } of xmlStartTags(part, STYLE_REFERENCE_ELEMENTS)) {
+      const id = xmlAttribute(tag, 'w:val');
+      const type = STYLE_REFERENCE_TYPES[name](owner);
+      if (id === undefined || !ids.has(id) || type === undefined || BUILT_IN_STYLES.get(id)?.type !== type) continue;
+      out += part.slice(at, start) + withXmlAttribute(tag, 'w:val', ids.get(id)!);
+      at = end;
+    }
+    return out + part.slice(at);
+  };
+  // Those in a style by its type, a style without one a paragraph style's,
+  // and the others by none, each style read as an XML parser reads it (see
+  // xmlElement), so one written as <w:style .../> holds none
+  let out = '';
+  let at = 0;
+  for (let style = xmlElement(xml, 'w:style'); style; style = xmlElement(xml, 'w:style', style.end)) {
+    const contentEnd = style.start + style.tag.length + style.content.length;
+    out += references(xml.slice(at, style.start), undefined) + style.tag
+      + references(style.content, xmlAttribute(style.tag, 'w:type') ?? 'paragraph') + xml.slice(contentEnd, style.end);
+    at = style.end;
+  }
+  return out + references(xml.slice(at), undefined);
 }
 
-/** The w:style element of the style `id` in `stylesXml`, by the template's
- *  ID for a built-in style (see templateStyleIds), where it has a body: one
- *  written as <w:style .../> has none, and the next </w:style> closes
- *  another */
-function templateStyleRegex(id: string, ids: Map<string, string>, flags = ''): RegExp {
-  const styleId = (ids.get(id) ?? id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp('(<w:style\\b[^>]*\\bw:styleId="' + styleId + '"[^>]*(?<!/)>)([\\s\\S]*?)(</w:style>)', flags);
+/** The w:style element of the style `id` in `stylesXml`, found as import
+ *  finds it (see findStyleElement), by the template's ID for a built-in
+ *  style (see templateStyleIds), as its start tag, content and end tag, and
+ *  where it starts and ends, where it has a body: one written as
+ *  <w:style .../> has none. With `anyType`, as for a character style, the
+ *  style of the ID itself is of any type. */
+function templateStyleParts(stylesXml: string, id: string, ids: Map<string, string>, anyType = false): { open: string; content: string; close: string; start: number; end: number } | undefined {
+  const found = findStyleElement(stylesXml, id, ids, anyType);
+  const style = found && xmlElement(found.element, 'w:style');
+  if (!found || !style || style.tag.length === found.element.length) return undefined;
+  const contentEnd = style.tag.length + style.content.length;
+  return { open: style.tag, content: style.content, close: found.element.slice(contentEnd), start: found.at, end: found.at + found.element.length };
+}
+
+/** Styles XML with `style` added last, before the end tag of w:styles, in
+ *  its markup, not a comment (see xmlSearch) */
+function withStyleAdded(xml: string, style: string): string {
+  const end = xmlSearch(xml, /<\/w:styles\s*>/);
+  return end !== undefined ? xml.slice(0, end) + style + xml.slice(end) : xml;
 }
 
 /**
@@ -5800,10 +5814,11 @@ function splitRecord(content: string, tag: 'pPrChange' | 'rPrChange'): [string, 
 
 /** Extract the Normal style's font size (in half-points) from styles XML. */
 function extractNormalStyleSizeHp(stylesXml: string, ids = templateStyleIds(stylesXml)): number | undefined {
-  const normalMatch = templateStyleRegex('Normal', ids).exec(stylesXml);
-  if (!normalMatch) return undefined;
-  const szMatch = /<w:sz\s+w:val="(\d+)"/.exec(setRecordsAside(normalMatch[0]).xml);
-  return szMatch ? parseInt(szMatch[1], 10) : undefined;
+  const normal = templateStyleParts(stylesXml, 'Normal', ids);
+  // Its first w:sz, read as an XML parser reads it, and its value as
+  // import reads it (see xmlHalfPoints)
+  const size = normal && xmlStartTag(setRecordsAside(normal.content).xml, 'w:sz');
+  return xmlHalfPoints(size && xmlAttribute(size.tag, 'w:val'));
 }
 
 /**
@@ -5894,10 +5909,7 @@ function withoutInheritedSizes(stylesXml: string, styleIds: string[], ids: Map<s
  * w:cstheme, and its w:hint, stay as they were.
  */
 function rFontsWithFont(rFonts: string, font: string): string {
-  // Each attribute as written, read as xmlAttribute reads it
-  const others = [...rFonts.matchAll(/\s([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')/g)]
-    .filter(([, name]) => !['w:ascii', 'w:hAnsi', 'w:asciiTheme', 'w:hAnsiTheme'].includes(name))
-    .map(([, name, value]) => ' ' + name + '=' + value).join('');
+  const others = otherXmlAttributes(rFonts, ['w:ascii', 'w:hAnsi', 'w:asciiTheme', 'w:hAnsiTheme']);
   return '<w:rFonts w:ascii="' + escapeXmlAttribute(font) + '" w:hAnsi="' + escapeXmlAttribute(font) + '"' + others + '/>';
 }
 
@@ -5943,7 +5955,7 @@ function templateWithFontOverrides(
 
   // Inject TableParagraph style if table overrides exist but the template lacks it
   if (overrides.tableSizeHp || overrides.tableFont) {
-    if (!xml.includes('w:styleId="TableParagraph"')) {
+    if (!findStyleElement(xml, 'TableParagraph', ids, true)) {
       // Insert before </w:styles>
       const tableFont = tableStyleFont(overrides);
       const tableRpr = '<w:rPr>' +
@@ -5957,7 +5969,7 @@ function templateWithFontOverrides(
         '<w:basedOn w:val="Normal"/>' +
         tableRpr +
         '</w:style>';
-      xml = xml.replace('</w:styles>', tableStyle + '</w:styles>');
+      xml = withStyleAdded(xml, tableStyle);
     }
   }
 
@@ -5971,7 +5983,7 @@ function templateWithFontOverrides(
   // a built-in style; with its ID, or a built-in style's English ID, which
   // a heading's font style goes by; and without a tracked change's record of
   // what it was, which Word doesn't show (w:rPrChange, w:pPrChange)
-  const withoutFormatChanges = (part: string) => part.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, '');
+  const withoutFormatChanges = (part: string) => replaceXmlElements(part, ['w:rPrChange', 'w:pPrChange'], () => '');
   const findTemplateStyle = styleFinder(xml);
   const builtInIds = new Map([...ids].map(([builtInId, id]) => [id, builtInId]));
   const templateStyles = new Map<string, { id: string; block: string } | undefined>();
@@ -5984,11 +5996,13 @@ function templateWithFontOverrides(
     return templateStyles.get(id);
   };
   // The document defaults' run and paragraph properties, the base of every
-  // style, without one too
-  const docDefaults = withoutFormatChanges(/<w:docDefaults\b[\s\S]*?<\/w:docDefaults>/.exec(xml)?.[0] ?? '');
-  const defaultProperties = (property: FontStyleProperty) => property === FONT_STYLE_CENTERING
-    ? /<w:pPrDefault>\s*<w:pPr>([\s\S]*?)<\/w:pPr>/.exec(docDefaults)?.[1] ?? ''
-    : /<w:rPrDefault>\s*<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(docDefaults)?.[1] ?? '';
+  // style, without one too, each element read as an XML parser reads it
+  // (see xmlElement)
+  const docDefaults = withoutFormatChanges(xmlElement(xml, 'w:docDefaults')?.content ?? '');
+  const defaultProperties = (property: FontStyleProperty) => {
+    const [defaults, properties] = property === FONT_STYLE_CENTERING ? ['w:pPrDefault', 'w:pPr'] : ['w:rPrDefault', 'w:rPr'];
+    return xmlElement(xmlElement(docDefaults, defaults)?.content ?? '', properties)?.content ?? '';
+  };
   const fontStyleOf = (styleId: string) =>
     /^Heading[1-6]$/.test(styleId) ? overrides.headingStyles?.get(styleId) : styleId === 'Title' ? overrides.titleStyles?.[0] : undefined;
   // Its attributes as XML may spell them, as import reads them
@@ -6004,7 +6018,6 @@ function templateWithFontOverrides(
    * here sets it as its font style says.
    */
   const turnsOn = (first: string | undefined, property: FontStyleProperty, seen = new Set<string>()): boolean => {
-    const element = new RegExp('<' + property.tag + '\\b[^>]*>');
     for (let id = first; id !== undefined; id = basedOn(id)) {
       const style = templateStyle(id);
       if (style === undefined || seen.has(style.id)) break;
@@ -6012,14 +6025,14 @@ function templateWithFontOverrides(
       const { block } = style;
       const fontStyle = fontStyleOf(style.id);
       if (fontStyle !== undefined) return property.wanted(fontStyle);
-      const properties = property === FONT_STYLE_CENTERING
-        ? /<w:pPr\b[^>]*>([\s\S]*?)<\/w:pPr>/.exec(block)?.[1]
-        : /<w:rPr\b[^>]*>([\s\S]*?)<\/w:rPr>/.exec(block.replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, ''))?.[1];
-      const found = element.exec(properties ?? '');
-      if (found) return fontStylePropertyOn(property, found[0]);
+      // Its pPr, or its own rPr, not one in its pPr
+      const pPr = xmlElement(block, 'w:pPr');
+      const properties = property === FONT_STYLE_CENTERING ? pPr : xmlElement(block, 'w:rPr', pPr?.end ?? 0);
+      const found = xmlStartTag(properties?.content ?? '', property.tag);
+      if (found) return fontStylePropertyOn(property, found.tag);
     }
-    const found = element.exec(defaultProperties(property));
-    return found !== null && fontStylePropertyOn(property, found[0]);
+    const found = xmlStartTag(defaultProperties(property), property.tag);
+    return found !== undefined && fontStylePropertyOn(property, found.tag);
   };
   /** Whether what a style is based on turns a font style property on */
   const inheritsOn = (styleId: string, property: FontStyleProperty) => turnsOn(basedOn(styleId), property, new Set([styleId]));
@@ -6031,17 +6044,18 @@ function templateWithFontOverrides(
       : ownOff.get(property) ?? (inheritsOn(styleId, property) ? property.off : '')).join(''));
 
   for (const styleId of allTargetIds) {
-    // Find the <w:style ...w:styleId="ID"...> ... </w:style> block, by the
-    // template's ID for a built-in style
-    const styleMatch = templateStyleRegex(styleId, ids).exec(xml);
-    if (!styleMatch) continue; // style not in template — skip silently
+    // Find the <w:style ...w:styleId="ID"...> ... </w:style> block, as
+    // import finds it, by the template's ID for a built-in style, and code's
+    // character style, CodeChar, too
+    const style = templateStyleParts(xml, styleId, ids, styleId === 'CodeChar');
+    if (!style) continue; // style not in template — skip silently
 
-    const openTag = styleMatch[1];
+    const openTag = style.open;
     // What the style is now changes, and the records of its tracked changes
     // go as they were
-    const records = setRecordsAside(styleMatch[2]);
+    const records = setRecordsAside(style.content);
     let innerContent = records.xml;
-    const closeTag = styleMatch[3];
+    const closeTag = style.close;
 
     const isCodeStyle = CODE_STYLE_IDS.has(styleId);
     const isTableStyle = TABLE_STYLE_IDS.has(styleId);
@@ -6085,9 +6099,11 @@ function templateWithFontOverrides(
     if (font === undefined && sizeHp === undefined && fontStyleOverride === undefined) continue;
     // An empty pPr or rPr, self-closing, goes, for what's written here to go
     // in a container of its own, once, or nowhere (dirty-flag invariant #5),
-    // but not one a tracked change records, which needs it
-    innerContent = innerContent.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)|<w:[pr]Pr\b[^>]*\/>/g,
-      (element, change?: string) => change ? element : '');
+    // but not one a tracked change records, which is set aside (see
+    // setRecordsAside)
+    for (const name of ['w:pPr', 'w:rPr']) {
+      innerContent = replaceXmlElements(innerContent, [name], element => xmlStartTag(element, name)?.empty ? '' : element);
+    }
     if (sizeHp !== undefined && (isHeading || isTitle)) sizedStyleIds.push(styleId);
 
     // Build the replacement fragments
@@ -6106,27 +6122,28 @@ function templateWithFontOverrides(
       // Centered, or left where the style's base centers it
       const jc = FONT_STYLE_CENTERING.wanted(fontStyleOverride) ? FONT_STYLE_CENTERING.on
         : inheritsOn(styleId, FONT_STYLE_CENTERING) ? FONT_STYLE_CENTERING.off : '';
-      const pPrMatch = /(<w:pPr\b[^>]*>)([\s\S]*?)(<\/w:pPr>)/.exec(innerContent);
-      if (pPrMatch) {
-        let pPrContent = pPrMatch[2];
+      // Read as an XML parser reads it, as each element here (see xmlElement)
+      const pPr = xmlElementParts(innerContent, 'w:pPr');
+      if (pPr) {
+        let pPrContent = pPr.content;
         // Remove any existing w:jc element, then insert it before what the
         // schema puts after it: spacing → ind → jc → textDirection →
         // textAlignment → outlineLvl and the rest.
         // A font style that isn't centered keeps the style's own w:jc that
         // doesn't center, which may undo the centering of its base, in place
         // of an explicit off
-        pPrContent = pPrContent.replace(/<w:jc\b[^>]*(?:\/>|><\/w:jc>)/g, element =>
-          !FONT_STYLE_CENTERING.wanted(fontStyleOverride) && !fontStylePropertyOn(FONT_STYLE_CENTERING, element) ? element : '');
-        if (jc && !/<w:jc\b/.test(pPrContent)) {
-          const at = /<w:(?:textDirection|textAlignment|textboxTightWrap|outlineLvl|divId|cnfStyle|rPr|sectPr|pPrChange)\b/.exec(pPrContent)?.index ?? pPrContent.length;
+        pPrContent = replaceXmlElements(pPrContent, ['w:jc'], element =>
+          !FONT_STYLE_CENTERING.wanted(fontStyleOverride) && !fontStylePropertyOn(FONT_STYLE_CENTERING, xmlStartTag(element, 'w:jc')!.tag) ? element : '');
+        if (jc && !xmlStartTag(pPrContent, 'w:jc')) {
+          const at = xmlSearch(pPrContent, /<w:(?:textDirection|textAlignment|textboxTightWrap|outlineLvl|divId|cnfStyle|rPr|sectPr|pPrChange)\b/) ?? pPrContent.length;
           pPrContent = pPrContent.slice(0, at) + jc + pPrContent.slice(at);
         }
         // A pPr that held only the w:jc goes with it (dirty-flag invariant #5),
         // but not one that holds a tracked change's record, which needs it,
         // last, after a w:jc added at the end
         const [ownPPr, pPrRecord] = splitRecord(pPrContent, 'pPrChange');
-        const newPPr = ownPPr.trim() || pPrRecord ? pPrMatch[1] + ownPPr + pPrRecord + pPrMatch[3] : '';
-        innerContent = innerContent.slice(0, pPrMatch.index) + newPPr + innerContent.slice(pPrMatch.index + pPrMatch[0].length);
+        const newPPr = ownPPr.trim() || pPrRecord ? pPr.open + ownPPr + pPrRecord + pPr.close : '';
+        innerContent = innerContent.slice(0, pPr.start) + newPPr + innerContent.slice(pPr.end);
       } else if (jc) {
         // No pPr block — insert one
         innerContent = withStylePPr(innerContent, '<w:pPr>' + jc + '</w:pPr>');
@@ -6135,14 +6152,11 @@ function templateWithFontOverrides(
 
     // Skip past any <w:pPr>...</w:pPr> block so we match the style-level
     // <w:rPr>, not one nested inside paragraph properties.
-    const pPrClose = innerContent.indexOf('</w:pPr>');
-    const rPrSearchStart = pPrClose !== -1 ? pPrClose + '</w:pPr>'.length : 0;
-    const rPrRegex = /(<w:rPr\b[^>]*>)([\s\S]*?)(<\/w:rPr>)/;
-    const rPrMatch = rPrRegex.exec(innerContent.slice(rPrSearchStart));
+    const rPr = xmlElementParts(innerContent, 'w:rPr', xmlElement(innerContent, 'w:pPr')?.end ?? 0);
 
-    if (rPrMatch) {
+    if (rPr) {
       // Modify existing <w:rPr> content
-      const [ownRPr, rPrRecord] = splitRecord(rPrMatch[2], 'rPrChange');
+      const [ownRPr, rPrRecord] = splitRecord(rPr.content, 'rPrChange');
       let rPrContent = ownRPr;
 
       if (font !== undefined && rFontsEl !== undefined) {
@@ -6158,22 +6172,11 @@ function templateWithFontOverrides(
         }
       }
 
-      if (szEl !== undefined) {
-        // Replace existing w:sz or append
-        if (/<w:sz\b[^/]*\/>/.test(rPrContent)) {
-          rPrContent = rPrContent.replace(/<w:sz\b[^/]*\/>/, () => szEl);
-        } else {
-          rPrContent = rPrContent + szEl;
-        }
-      }
-
-      if (szCsEl !== undefined) {
-        // Replace existing w:szCs or append
-        if (/<w:szCs\b[^/]*\/>/.test(rPrContent)) {
-          rPrContent = rPrContent.replace(/<w:szCs\b[^/]*\/>/, () => szCsEl);
-        } else {
-          rPrContent = rPrContent + szCsEl;
-        }
+      // Replace existing w:sz and w:szCs or append
+      for (const [tag, element] of [['w:sz', szEl], ['w:szCs', szCsEl]] as const) {
+        if (element === undefined) continue;
+        const size = xmlElement(rPrContent, tag);
+        rPrContent = size ? rPrContent.slice(0, size.start) + element + rPrContent.slice(size.end) : rPrContent + element;
       }
 
       // Apply font-style overrides (bold, italic, underline) for headings and title
@@ -6185,10 +6188,12 @@ function templateWithFontOverrides(
         // a style written on lines of its own comes back the same
         const ownOff = new Map<FontStyleProperty, string>();
         for (const property of FONT_STYLE_RUN_PROPERTIES) {
-          rPrContent = rPrContent.replace(new RegExp('\\s*<' + property.tag + '\\b[^>]*(?:/>|></' + property.tag + '>)', 'g'), element => {
-            if (!property.wanted(fontStyleOverride) && !fontStylePropertyOn(property, element)) ownOff.set(property, element);
-            return '';
-          });
+          let at = 0;
+          for (let element = xmlElement(rPrContent, property.tag, at); element; element = xmlElement(rPrContent, property.tag, at)) {
+            at = rPrContent.slice(0, element.start).trimEnd().length;
+            if (!property.wanted(fontStyleOverride) && !fontStylePropertyOn(property, element.tag)) ownOff.set(property, rPrContent.slice(at, element.end));
+            rPrContent = rPrContent.slice(0, at) + rPrContent.slice(element.end);
+          }
         }
         rPrContent = fontStyleRunElements(styleId, fontStyleOverride, ownOff) + rPrContent;
       }
@@ -6200,10 +6205,8 @@ function templateWithFontOverrides(
       // An rPr that held only what the style override removed goes with it
       // (dirty-flag invariant #5), but not one that holds a tracked change's
       // record, which needs it
-      const newRPr = rPrContent.trim() || rPrRecord ? rPrMatch[1] + rPrContent + rPrRecord + rPrMatch[3] : '';
-      const matchStart = rPrSearchStart + rPrMatch.index;
-      const matchEnd = matchStart + rPrMatch[0].length;
-      innerContent = innerContent.slice(0, matchStart) + newRPr + innerContent.slice(matchEnd);
+      const newRPr = rPrContent.trim() || rPrRecord ? rPr.open + rPrContent + rPrRecord + rPr.close : '';
+      innerContent = innerContent.slice(0, rPr.start) + newRPr + innerContent.slice(rPr.end);
     } else {
       // No <w:rPr> section — insert one
       let rPrContent = fontStyleOverride !== undefined ? fontStyleRunElements(styleId, fontStyleOverride) : '';
@@ -6214,20 +6217,17 @@ function templateWithFontOverrides(
     }
 
     innerContent = records.restore(innerContent);
-    xml = xml.slice(0, styleMatch.index) + openTag + innerContent + closeTag + xml.slice(styleMatch.index + styleMatch[0].length);
+    xml = xml.slice(0, style.start) + openTag + innerContent + closeTag + xml.slice(style.end);
   }
 
   // Inject custom styles before </w:styles>
   if (customStyles) {
-    // Derive bodyFontStr from template's Normal style for custom style inheritance
-    const normalMatch = xml.match(templateStyleRegex('Normal', ids));
-    let bodyFontStr = '';
-    if (normalMatch) {
-      const rFontsMatch = setRecordsAside(normalMatch[0]).xml.match(/<w:rFonts\s+[^>]*w:ascii="([^"]+)"[^>]*>/);
-      if (rFontsMatch) {
-        bodyFontStr = '<w:rFonts w:ascii="' + escapeXmlAttribute(rFontsMatch[1]) + '" w:hAnsi="' + escapeXmlAttribute(rFontsMatch[1]) + '"/>';
-      }
-    }
+    // Derive bodyFontStr from template's Normal style for custom style
+    // inheritance, its first w:rFonts read as an XML parser reads it
+    const normal = templateStyleParts(xml, 'Normal', ids);
+    const normalRFonts = normal && xmlStartTag(setRecordsAside(normal.content).xml, 'w:rFonts');
+    const normalFont = normalRFonts && xmlAttribute(normalRFonts.tag, 'w:ascii');
+    const bodyFontStr = normalFont ? '<w:rFonts w:ascii="' + escapeXmlAttribute(normalFont) + '" w:hAnsi="' + escapeXmlAttribute(normalFont) + '"/>' : '';
     const localSzPair = (hp: number) => '<w:sz w:val="' + hp + '"/><w:szCs w:val="' + hp + '"/>';
     const seenIds = new Set<string>();
     for (const [name, def] of Object.entries(customStyles)) {
@@ -6235,12 +6235,14 @@ function templateWithFontOverrides(
       if (seenIds.has(sid)) continue;
       seenIds.add(sid);
       const newStyleXml = customStyleXml(name, def, bodyFontStr, localSzPair, property => turnsOn('Normal', property));
-      // Replace existing custom style or inject new one
-      const existingRe = new RegExp('<w:style\\b[^>]*w:styleId="' + sid + '"[^>]*>[\\s\\S]*?</w:style>\\n?');
-      if (existingRe.test(xml)) {
-        xml = xml.replace(existingRe, () => newStyleXml);
+      // Replace existing custom style, of any type, as it's found, in its
+      // place, before what follows it as it was, whitespace or a comment,
+      // or inject new one
+      const existing = findStyleElement(xml, sid, ids, true);
+      if (existing) {
+        xml = xml.slice(0, existing.at) + newStyleXml.replace(/\n$/, '') + xml.slice(existing.at + existing.element.length);
       } else {
-        xml = xml.replace('</w:styles>', () => newStyleXml + '</w:styles>');
+        xml = withStyleAdded(xml, newStyleXml);
       }
     }
   }
@@ -6271,48 +6273,42 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
   // The template's IDs for the built-in styles, which its styles are found by
   const ids = templateStyleIds(xml);
 
-  // Patch Normal style's w:spacing
-  const normalMatch = templateStyleRegex('Normal', ids).exec(xml);
-  if (normalMatch) {
-    let inner = normalMatch[2];
-    const spacingRegex = /<w:spacing\b[^/]*\/>/;
+  // Patch Normal style's paragraph spacing, the w:spacing of its pPr, not
+  // the character spacing of the same name in its rPr, each element read as
+  // an XML parser reads it (see xmlElement)
+  const normal = templateStyleParts(xml, 'Normal', ids);
+  if (normal) {
+    let inner = normal.content;
     const newSpacing = '<w:spacing w:after="' + afterVal + '" w:line="' + lsTwips + '" w:lineRule="auto"/>';
-    if (spacingRegex.test(inner)) {
-      inner = inner.replace(spacingRegex, newSpacing);
+    const pPr = xmlElementParts(inner, 'w:pPr');
+    if (pPr) {
+      // In place of its spacing, or else after pBdr if present to maintain
+      // required pBdr → spacing → ind order (dirty-flag invariant)
+      const spacing = xmlElement(pPr.content, 'w:spacing');
+      const at = spacing?.start ?? xmlElement(pPr.content, 'w:pBdr')?.end ?? 0;
+      const content = pPr.content.slice(0, at) + newSpacing + pPr.content.slice(spacing?.end ?? at);
+      inner = inner.slice(0, pPr.start) + pPr.open + content + pPr.close + inner.slice(pPr.end);
     } else {
-      // Insert spacing into pPr or add pPr
-      const pPrMatch = /(<w:pPr\b[^>]*>)([\s\S]*?)(<\/w:pPr>)/.exec(inner);
-      if (pPrMatch) {
-        // Insert after pBdr if present to maintain required pBdr → spacing → ind order (dirty-flag invariant)
-        const pBdrEnd = /<\/w:pBdr>/.exec(pPrMatch[2]);
-        const insertContent = pBdrEnd
-          ? pPrMatch[2].slice(0, pBdrEnd.index + pBdrEnd[0].length) + newSpacing + pPrMatch[2].slice(pBdrEnd.index + pBdrEnd[0].length)
-          : newSpacing + pPrMatch[2];
-        inner = inner.slice(0, pPrMatch.index) + pPrMatch[1] + insertContent + pPrMatch[3] + inner.slice(pPrMatch.index + pPrMatch[0].length);
-      } else {
-        inner = withStylePPr(inner, '<w:pPr>' + newSpacing + '</w:pPr>');
-      }
+      inner = withStylePPr(inner, '<w:pPr>' + newSpacing + '</w:pPr>');
     }
-    xml = xml.slice(0, normalMatch.index) + normalMatch[1] + inner + normalMatch[3] + xml.slice(normalMatch.index + normalMatch[0].length);
+    xml = xml.slice(0, normal.start) + normal.open + inner + normal.close + xml.slice(normal.end);
   }
 
   // Patch pPrDefault w:spacing to match
-  const pPrDefaultRegex = /(<w:pPrDefault>[\s\S]*?<w:pPr>)([\s\S]*?)(<\/w:pPr>[\s\S]*?<\/w:pPrDefault>)/;
-  const pPrDefaultMatch = pPrDefaultRegex.exec(xml);
-  if (pPrDefaultMatch) {
-    let pPrContent = pPrDefaultMatch[2];
-    const spacingRegex = /<w:spacing\b[^/]*\/>/;
+  const pPrDefault = xmlElement(xml, 'w:pPrDefault');
+  const defaultPPr = pPrDefault && xmlElementParts(pPrDefault.content, 'w:pPr');
+  if (pPrDefault && defaultPPr) {
     const newSpacing = '<w:spacing w:after="160" w:line="' + lsTwips + '" w:lineRule="auto"/>';
-    if (spacingRegex.test(pPrContent)) {
-      pPrContent = pPrContent.replace(spacingRegex, newSpacing);
-    } else {
-      pPrContent = newSpacing + pPrContent;
-    }
-    xml = xml.slice(0, pPrDefaultMatch.index) + pPrDefaultMatch[1] + pPrContent + pPrDefaultMatch[3] + xml.slice(pPrDefaultMatch.index + pPrDefaultMatch[0].length);
+    const spacing = xmlElement(defaultPPr.content, 'w:spacing');
+    const pPrContent = spacing
+      ? defaultPPr.content.slice(0, spacing.start) + newSpacing + defaultPPr.content.slice(spacing.end)
+      : newSpacing + defaultPPr.content;
+    const at = pPrDefault.start + pPrDefault.tag.length;
+    xml = xml.slice(0, at + defaultPPr.start) + defaultPPr.open + pPrContent + defaultPPr.close + xml.slice(at + defaultPPr.end);
   }
 
-  // Inject or patch Bibliography style
-  if (!xml.includes('w:styleId="' + (ids.get('Bibliography') ?? 'Bibliography') + '"')) {
+  // Inject or patch Bibliography style, of any type, as it's found
+  if (!findStyleElement(xml, 'Bibliography', ids, true)) {
     const bibStyle = '<w:style w:type="paragraph" w:styleId="Bibliography">' +
       '<w:name w:val="Bibliography"/>' +
       '<w:basedOn w:val="Normal"/>' +
@@ -6320,50 +6316,44 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
       (bibliographyHangingIndent !== false ? '<w:ind w:left="720" w:hanging="720"/>' : '') +
       '</w:pPr>' +
       '</w:style>';
-    xml = xml.replace('</w:styles>', bibStyle + '</w:styles>');
+    xml = withStyleAdded(xml, bibStyle);
   } else {
     // Template already defines Bibliography — merge w:left/w:hanging into its w:ind
-    const bibMatch = templateStyleRegex('Bibliography', ids).exec(xml);
-    if (bibMatch) {
-      let inner = bibMatch[2];
+    const bib = templateStyleParts(xml, 'Bibliography', ids, true);
+    if (bib) {
+      let inner = bib.content;
       const wantHanging = bibliographyHangingIndent !== false;
-      const pPrMatch = /(<w:pPr\b[^>]*>)([\s\S]*?)(<\/w:pPr>)/.exec(inner);
-      if (pPrMatch) {
-        let pPrContent = pPrMatch[2];
-        const existingInd = /<w:ind\b([^/]*)\/>/g.exec(pPrContent);
+      const pPr = xmlElementParts(inner, 'w:pPr');
+      if (pPr) {
+        let pPrContent = pPr.content;
+        const existingInd = xmlElement(pPrContent, 'w:ind');
         if (existingInd) {
           // Merge: strip w:left/w:hanging, then re-add if wanted (preserves other attrs like w:right)
-          let attrs = existingInd[1]
-            .replace(/\s*w:left="[^"]*"/g, '')
-            .replace(/\s*w:hanging="[^"]*"/g, '');
-          if (wantHanging) {
-            attrs += ' w:left="720" w:hanging="720"';
-          }
-          const merged = attrs.trim() ? '<w:ind ' + attrs.trim() + '/>' : '';
-          pPrContent = pPrContent.replace(existingInd[0], merged);
+          const attrs = otherXmlAttributes(existingInd.tag, ['w:left', 'w:hanging']) + (wantHanging ? ' w:left="720" w:hanging="720"' : '');
+          const merged = attrs ? '<w:ind' + attrs + '/>' : '';
+          pPrContent = pPrContent.slice(0, existingInd.start) + merged + pPrContent.slice(existingInd.end);
         } else if (wantHanging) {
           // No existing w:ind — insert after w:spacing for dirty-flag ordering (pBdr → spacing → ind)
           const indEl = '<w:ind w:left="720" w:hanging="720"/>';
-          const spacingEnd = /<\/w:spacing>|<w:spacing\b[^/]*\/>/.exec(pPrContent);
-          if (spacingEnd) {
-            const pos = spacingEnd.index + spacingEnd[0].length;
-            pPrContent = pPrContent.slice(0, pos) + indEl + pPrContent.slice(pos);
+          const spacing = xmlElement(pPrContent, 'w:spacing');
+          if (spacing) {
+            pPrContent = pPrContent.slice(0, spacing.end) + indEl + pPrContent.slice(spacing.end);
           } else {
-            const insertBefore = /<w:jc\b|<w:outlineLvl\b|<w:pPrChange\b/.exec(pPrContent);
-            pPrContent = insertBefore
-              ? pPrContent.slice(0, insertBefore.index) + indEl + pPrContent.slice(insertBefore.index)
+            const insertBefore = xmlSearch(pPrContent, /<w:jc\b|<w:outlineLvl\b|<w:pPrChange\b/);
+            pPrContent = insertBefore !== undefined
+              ? pPrContent.slice(0, insertBefore) + indEl + pPrContent.slice(insertBefore)
               : pPrContent + indEl;
           }
         }
         // A pPr that held only the indent goes, as Word strips an empty one
         // (dirty-flag invariant #5)
-        const pPr = pPrContent.trim() ? pPrMatch[1] + pPrContent + pPrMatch[3] : '';
-        inner = inner.slice(0, pPrMatch.index) + pPr + inner.slice(pPrMatch.index + pPrMatch[0].length);
+        const newPPr = pPrContent.trim() ? pPr.open + pPrContent + pPr.close : '';
+        inner = inner.slice(0, pPr.start) + newPPr + inner.slice(pPr.end);
       } else if (wantHanging) {
         // No pPr exists yet — add one
         inner = withStylePPr(inner, '<w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr>');
       }
-      xml = xml.slice(0, bibMatch.index) + bibMatch[1] + inner + bibMatch[3] + xml.slice(bibMatch.index + bibMatch[0].length);
+      xml = xml.slice(0, bib.start) + bib.open + inner + bib.close + xml.slice(bib.end);
     }
   }
 
@@ -6402,7 +6392,8 @@ function rawHtmlTextElements(run: MdRun, tag: 'w:t' | 'w:delText'): string {
 /** A template's styles with export's own, where it lacks them */
 function ensureManuscriptStyles(xml: string): string {
   for (const [id, style] of [['ManuscriptListContinuation', LIST_CONTINUATION_STYLE_XML], [RAW_HTML_STYLE_ID, RAW_HTML_STYLE_XML]]) {
-    if (!new RegExp('<w:style\\b[^>]*\\bw:styleId\\s*=\\s*(["\'])' + id + '\\1').test(xml)) xml = xml.replace('</w:styles>', style + '</w:styles>');
+    // One of any type, as it's found
+    if (!findStyleElement(xml, id, new Map(), true)) xml = withStyleAdded(xml, style);
   }
   return xml;
 }
@@ -6415,23 +6406,18 @@ export function applyAlertColorsToTemplate(stylesXml: string, scheme: ColorSchem
   let xml = records.xml;
 
   for (const [styleId, alertType] of Object.entries(ALERT_STYLE_ID_TO_TYPE)) {
-    const styleRegex = new RegExp(
-      '(<w:style\\b[^>]*\\bw:styleId="' + styleId + '"[^>]*>)([\\s\\S]*?)(</w:style>)'
-    );
-    const styleMatch = styleRegex.exec(xml);
-    if (!styleMatch) continue;
-
-    const openTag = styleMatch[1];
-    let innerContent = styleMatch[2];
-    const closeTag = styleMatch[3];
+    // Each element read as an XML parser reads it (see xmlElement)
+    const style = templateStyleParts(xml, styleId, new Map());
+    if (!style) continue;
 
     // Replace w:color on the w:left border element
-    innerContent = innerContent.replace(
-      /(<w:left\b[^>]*\bw:color=")[0-9A-Fa-f]{6}("[^>]*\/>)/,
-      (_match, before, after) => before + colors[alertType] + after
-    );
+    let innerContent = style.content;
+    const left = xmlStartTag(innerContent, 'w:left');
+    if (left && /^[0-9A-Fa-f]{6}$/.test(xmlAttribute(left.tag, 'w:color') ?? '')) {
+      innerContent = innerContent.slice(0, left.start) + withXmlAttribute(left.tag, 'w:color', colors[alertType]) + innerContent.slice(left.end);
+    }
 
-    xml = xml.slice(0, styleMatch.index) + openTag + innerContent + closeTag + xml.slice(styleMatch.index + styleMatch[0].length);
+    xml = xml.slice(0, style.start) + style.open + innerContent + style.close + xml.slice(style.end);
   }
 
   return records.restore(xml);
@@ -6841,31 +6827,42 @@ function randomHex8(): string {
   return Math.floor(Math.random() * 0xFFFFFFFF).toString(16).toUpperCase().padStart(8, '0');
 }
 
-type OrderedXmlNode = Record<string, unknown> & { ':@'?: Record<string, string> };
-
-const templateXmlOptions = {
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  preserveOrder: true,
-  parseTagValue: false,
-  parseAttributeValue: false,
-  trimValues: false,
-  suppressEmptyNode: true,
-};
+type OrderedXmlNode = XmlNode;
 
 const childNodes = (node: OrderedXmlNode | undefined, name: string): OrderedXmlNode[] =>
   ((node?.[name] ?? []) as OrderedXmlNode[]);
 
 const intAttr = (node: OrderedXmlNode, name: string): number => parseInt(node[':@']?.['@_' + name] ?? '', 10);
 
-/** A template's numbering root and its w:num instances, parsed, as XML allows them to be written. */
+/** A template's numbering root and its w:num instances, parsed, as XML
+ *  allows them to be written, with their character references read, as
+ *  &#49; for 1, however many (see parseOrdered) */
 function parseTemplateNumbering(xml: string): { root: OrderedXmlNode; nums: OrderedXmlNode[] } | undefined {
-  try {
-    const root = (new XMLParser(templateXmlOptions).parse(xml) as OrderedXmlNode[]).find(n => 'w:numbering' in n);
-    return root && { root, nums: childNodes(root, 'w:numbering').filter(n => 'w:num' in n) };
-  } catch {
-    return undefined;
-  }
+  const root = parseOrdered(xml)?.find(n => 'w:numbering' in n);
+  return root && { root, nums: childNodes(root, 'w:numbering').filter(n => 'w:num' in n) };
+}
+
+// Whitespace, comments, CDATA sections and processing instructions, from
+// where it's set to read: what goes with what's before it in markup
+const NOT_MARKUP_RUN = /(?:\s|<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>)*/y;
+
+/** Where the whitespace, comments, CDATA sections and processing
+ *  instructions after `at` in `xml` end */
+function afterNotMarkup(xml: string, at: number): number {
+  NOT_MARKUP_RUN.lastIndex = at;
+  NOT_MARKUP_RUN.exec(xml);
+  return NOT_MARKUP_RUN.lastIndex;
+}
+
+/** Where a template's numbering takes the instances and abstract numbering
+ *  export adds, each in its markup, not a comment (see xmlSearch): before
+ *  numIdMacAtCleanup, which ends the part, or else its end tag, and after
+ *  its last abstract numbering and the whitespace and comments after it,
+ *  or else before its first instance */
+function numberingEnds(xml: string): { instancesAt?: number; abstractAt?: number } {
+  const instancesAt = xmlSearch(xml, /<w:numIdMacAtCleanup\b/) ?? xmlLastMatch(xml, /<\/w:numbering\s*>/)?.index;
+  const lastAbstract = xmlLastMatch(xml, /<\/w:abstractNum\s*>/);
+  return { instancesAt, abstractAt: lastAbstract ? afterNotMarkup(xml, lastAbstract.index + lastAbstract.text.length) : xmlSearch(xml, /<w:num\b/) ?? instancesAt };
 }
 
 /**
@@ -6892,11 +6889,28 @@ function styleNumIds(templateStyles?: string): Set<number> {
   return used;
 }
 
-const NUM_ELEMENT = /<w:num\b[^>]*?\bw:numId\s*=\s*["'](\d+)["'][^>]*?(?:\/>|>[\s\S]*?<\/w:num\s*>)\s*/g;
+/** A template's numbering without each instance whose numId `drops`, and
+ *  the whitespace after it, each read as an XML parser reads it (see
+ *  xmlElement), its numId by its value, as import reads it (see
+ *  xmlInteger). A comment, CDATA section or processing instruction after
+ *  it stays, without the whitespace around it. */
+function withoutNums(xml: string, drops: (numId: number) => boolean): string {
+  let out = '';
+  let at = 0;
+  for (let num = xmlElement(xml, 'w:num'); num; num = xmlElement(xml, 'w:num', num.end)) {
+    const numId = xmlInteger(xmlAttribute(num.tag, 'w:numId'));
+    if (numId === undefined || !drops(numId)) continue;
+    const end = afterNotMarkup(xml, num.end);
+    const kept = (xml.slice(num.end, end).match(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g) ?? []).join('');
+    out += xml.slice(at, num.start) + kept;
+    at = end;
+  }
+  return out + xml.slice(at);
+}
 
 /** A template's numbering without the instances the document can't use. */
 function withoutUnusedNums(xml: string, used: Set<number>): string {
-  return xml.replace(NUM_ELEMENT, (num, numId: string) => used.has(parseInt(numId, 10)) ? num : '');
+  return withoutNums(xml, numId => !used.has(numId));
 }
 
 type ListKind = 'bullet' | 'decimal';
@@ -7094,13 +7108,12 @@ function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[]
   const numbering = parseTemplateNumbering(xml);
   const { instance, abstractNumId } = orderedListInstance(numbering, numId);
   // w:num entries go before numIdMacAtCleanup, which ends the part
-  const at = /<w:numIdMacAtCleanup\b/.exec(xml)?.index ?? [...xml.matchAll(/<\/w:numbering\s*>/g)].pop()?.index;
+  const at = numberingEnds(xml).instancesAt;
   if (!numbering || abstractNumId === undefined || !Number.isInteger(abstractNumId) || at === undefined) return undefined;
-  const builder = new XMLBuilder(templateXmlOptions);
   const levelOverrides = new Map<number, string>();
   for (const n of instance) {
     const ilvl = intAttr(n, 'w:ilvl');
-    if ('w:lvlOverride' in n && Number.isInteger(ilvl)) levelOverrides.set(ilvl, builder.build(childNodes(n, 'w:lvlOverride')) as string);
+    if ('w:lvlOverride' in n && Number.isInteger(ilvl)) levelOverrides.set(ilvl, buildOrdered(childNodes(n, 'w:lvlOverride')));
   }
   // Durable IDs only where the template declares their namespace
   const durableId = numbering.root[':@']?.['@_xmlns:w16cid'] !== undefined;
@@ -7140,7 +7153,7 @@ function defaultAbstractNumXml(kind: 'bullet' | 'decimal', abstractNumId: number
  */
 function withOwnNums(xml: string, own: Map<number, ListKind>): string {
   if (own.size === 0) return xml;
-  xml = xml.replace(NUM_ELEMENT, (num, numId: string) => own.has(parseInt(numId, 10)) ? '' : num);
+  xml = withoutNums(xml, numId => own.has(numId));
   const numbering = parseTemplateNumbering(xml);
   if (!numbering) return xml;
   const abstractNumIds = childNodes(numbering.root, 'w:numbering').filter(n => 'w:abstractNum' in n).map(n => intAttr(n, 'w:abstractNumId'));
@@ -7155,9 +7168,7 @@ function withOwnNums(xml: string, own: Map<number, ListKind>): string {
   }
   // Abstract numbering goes before the instances, which go before
   // numIdMacAtCleanup, which ends the part
-  const end = /<w:numIdMacAtCleanup\b/.exec(xml)?.index ?? [...xml.matchAll(/<\/w:numbering\s*>/g)].pop()?.index;
-  const lastAbstract = [...xml.matchAll(/<\/w:abstractNum\s*>\s*/g)].pop();
-  const abstractAt = lastAbstract ? lastAbstract.index! + lastAbstract[0].length : /<w:num\b/.exec(xml)?.index ?? end;
+  const { instancesAt: end, abstractAt } = numberingEnds(xml);
   if (end === undefined || abstractAt === undefined) return xml;
   return xml.slice(0, abstractAt) + abstractNums + xml.slice(abstractAt, end) + nums + xml.slice(end);
 }
