@@ -1179,6 +1179,27 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
   });
 
   it.each([
+    ['a heading, with no blank line by its fences', 'x\n\n<!-- style: box -->\n# h\n<!-- /style -->\n\ny\n\n<!-- style: note -->\n\np\n\n<!-- /style -->\n',
+      'x\n\n# h\n\ny\n\n<!-- style: note -->\n\np\n\n<!-- /style -->\n'],
+    ['a heading, before two blank lines', 'x\n\n<!-- style: box -->\n\n# h\n\n<!-- /style -->\n\ny\n\n\n<!-- style: note -->\n\np\n\n<!-- /style -->\n',
+      'x\n\n# h\n\ny\n\n\n<!-- style: note -->\n\np\n\n<!-- /style -->\n'],
+    ['nothing', 'x\n\n<!-- style: box -->\n<!-- /style -->\n\ny\n\n<!-- style: note -->\n\np\n\n<!-- /style -->\n',
+      'x\n\ny\n\n<!-- style: note -->\n\np\n\n<!-- /style -->\n'],
+    ['a comment\'s body Word gets no paragraph of', 'x {#1}a{/1}\n\n<!-- style: box -->\n{#1>>c<<}\n<!-- /style -->\n\ny\n\n<!-- style: note -->\n\np\n\n<!-- /style -->\n',
+      'x {==a==}{>>c<<}\n\ny\n\n<!-- style: note -->\n\np\n\n<!-- /style -->\n'],
+    ['paragraphs, which opens again in its style', '<!-- style: box -->\n\np\n<!-- style: box -->\nq\n\n<!-- /style -->\n\ny\n\n<!-- style: note -->\nr\n<!-- /style -->\n',
+      '<!-- style: box -->\n\np\n\nq\n\n<!-- /style -->\n\ny\n\n<!-- style: note -->\nr\n<!-- /style -->\n'],
+  ])('keeps the blank lines by the fences of a style block after one of %s', async (_name, md, expected) => {
+    // Import writes no fence of a block Word has no paragraph of in its
+    // style, nor the second opening fence of one, and the next block's
+    // fences took the blank lines recorded for those, which export
+    // numbered among the fences
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
+  it.each([
     ['ends with code, with no closing fence', '<!-- style: box -->\n\np\n\n```\na\n```\n', '<!-- style: box -->\n\np\n\n```\na\n```\n\n<!-- /style -->\n'],
     ['is opened twice, with no fence between, and starts with code', '<!-- style: box -->\n\n<!-- style: box -->\n\n```\na\n```\n\n- i\n', '<!-- style: box -->\n\n```\na\n```\n\n- i\n\n<!-- /style -->\n'],
   ])('keeps code in a block that %s', async (_name, md, expected) => {

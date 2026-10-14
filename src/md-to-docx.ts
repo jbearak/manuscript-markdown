@@ -10238,6 +10238,16 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   let sentinelLoIdx = 0, sentinelLcIdx = 0, sentinelPoIdx = 0, sentinelPcIdx = 0;
   let sentinelCsoIdx = 0, sentinelCscIdx = 0;
   const sentinelGaps: Record<string, number> = {};
+  // The blank lines around a style block's opening fence, at the place
+  // among the fences import writes, once the block has a paragraph in its
+  // style. Import finds a block by those, so it writes no fence of one
+  // without, and takes no place for it, and only the first of a block that
+  // opens again in its style (see startsStyleBlock)
+  const recordOpeningGaps = (fence: MdToken): void => {
+    if (fence.blankLinesBefore !== undefined) sentinelGaps['cso' + sentinelCsoIdx] = fence.blankLinesBefore;
+    if (fence.blankLinesAfter !== undefined) sentinelGaps['csoa' + sentinelCsoIdx] = fence.blankLinesAfter;
+    sentinelCsoIdx++;
+  };
   // A style block's blocks Word can't give its style, as a heading, a
   // quote, code, a table or a thematic break, which keep their own. Import
   // can't tell them from those before or after the block by their style,
@@ -10254,7 +10264,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // blocks it has had before that and since its last, whether it has had
   // such blocks between its paragraphs, and the blocks outside it before it
   const styleBlockEdges: Record<string, number> = {};
-  let styleBlock: { style: string; index?: number; styled: boolean; lead: number; trail: number; inner: boolean; before: number } | undefined;
+  let styleBlock: { style: string; index?: number; styled: boolean; lead: number; trail: number; inner: boolean; before: number; fence: MdToken } | undefined;
   let blocksShown = 0;
   // The block of a style closed last, with only such blocks after it, and
   // such blocks outside any since the last block
@@ -10359,6 +10369,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
           styleBlock.inner = true;
           record('csi' + styleBlock.index, 1);
         }
+        if (!styleBlock.styled) recordOpeningGaps(styleBlock.fence);
         styleBlock.styled = true;
         styleBlock.trail = 0;
         closedBlock = undefined;
@@ -10421,22 +10432,22 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         // Validate that the style is declared in frontmatter
         state.warnings.push('Custom style "' + token.customStyleOpen + '" used in <!-- style: --> directive but not declared in frontmatter styles.');
       } else if (token.customStyleOpen) {
-        if (token.blankLinesBefore !== undefined) sentinelGaps['cso' + sentinelCsoIdx] = token.blankLinesBefore;
-        if (token.blankLinesAfter !== undefined) sentinelGaps['csoa' + sentinelCsoIdx] = token.blankLinesAfter;
         // One of the style of the block open, which no fence closed, goes on
-        // in it in Word, and one of another ends it
+        // in it in Word, and one of another ends it. Its gaps wait for the
+        // block's first paragraph in its style (see recordOpeningGaps)
         if (startsStyleBlock(styleBlock?.style, token.customStyleOpen)) {
           closeStyleBlock();
-          styleBlock = { style: token.customStyleOpen, styled: false, lead: 0, trail: 0, inner: false, before: unitsOutside };
+          styleBlock = { style: token.customStyleOpen, styled: false, lead: 0, trail: 0, inner: false, before: unitsOutside, fence: token };
           unitsOutside = 0;
         }
-        sentinelCsoIdx++;
         state.activeCustomStyle = token.customStyleOpen;
         biblAtSectionStart = biblFirst;
       } else {
         // One that closes with no fence, which import doesn't write either,
-        // takes no place among the fences' gaps
-        if (!isImplicitStyleClose(token)) {
+        // takes no place among the fences' gaps, nor does one of a block
+        // Word has no paragraph of in its style, whose fences import can't
+        // write (see recordOpeningGaps)
+        if (!isImplicitStyleClose(token) && styleBlock?.styled) {
           if (token.blankLinesBefore !== undefined) sentinelGaps['csc' + sentinelCscIdx] = token.blankLinesBefore;
           if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
           sentinelCscIdx++;
