@@ -1494,6 +1494,82 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     expect(await trip(back)).toBe(back);
   });
 
+  it.each([
+    ['opening a landscape section at the document\'s start',
+      '<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      '<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n'],
+    ['opening a portrait section at the document\'s start',
+      '<!-- style: box -->\n\n<!-- portrait -->\n\np1\n\n<!-- /portrait -->\n\n<!-- /style -->\n',
+      '<!-- portrait -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /portrait -->\n'],
+    ['opening a section at the document\'s start, two blank lines before it',
+      '<!-- style: box -->\n\n\n<!-- landscape -->\n\np1\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      '<!-- landscape -->\n\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n'],
+    ['opening a section at the document\'s start that starts with a heading',
+      '<!-- style: box -->\n\n<!-- landscape -->\n\n\n## h\n\np1\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      '<!-- landscape -->\n\n<!-- style: box -->\n\n\n## h\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n'],
+    ['opening a section after a paragraph, with other blank lines around each fence',
+      'p0\n\n\n<!-- style: box -->\n\n<!-- landscape -->\n\n\n\np1\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      'p0\n\n\n<!-- landscape -->\n\n<!-- style: box -->\n\n\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n'],
+    ['ending where a section does, with other blank lines around each fence',
+      'p0\n\n<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n\n<!-- /landscape -->\n\n<!-- /style -->\n\n\n\np2\n',
+      'p0\n\n<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n\n<!-- /style -->\n\n<!-- /landscape -->\n\n\n\np2\n'],
+    ['closing right after a section\'s opening fence',
+      'p0\n\n<!-- style: box -->\n\np1\n\n\n<!-- landscape -->\n\n<!-- /style -->\n\n\np2\n\n<!-- /landscape -->\n',
+      'p0\n\n<!-- style: box -->\n\np1\n\n\n<!-- /style -->\n\n<!-- landscape -->\n\n\np2\n\n<!-- /landscape -->\n'],
+    ['opening right before a section\'s closing fence',
+      'p0\n\n<!-- landscape -->\n\np1\n\n<!-- style: box -->\n\n<!-- /landscape -->\n\n\np2\n\n<!-- /style -->\n',
+      'p0\n\n<!-- landscape -->\n\np1\n\n<!-- /landscape -->\n\n<!-- style: box -->\n\n\np2\n\n<!-- /style -->\n'],
+  ])('keeps the blank lines around a style block\'s fence and a section\'s right beside it, with the block %s', async (_name, md, expected) => {
+    // Import writes the two fences the other way around, as Word's section
+    // break comes before the block's first paragraph, or after its last.
+    // Each fence took its own blank lines with it, so the lines between
+    // them went before the first, and those before the first between them:
+    // at the document's start, none
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
+  it.each([
+    ['no frontmatter', ''],
+    ['a title in the frontmatter', '---\ntitle: T\nstyles:\n  box:\n    font-style: italic\n---\n'],
+  ])('keeps the blank line between a style block\'s opening fence and a section\'s at the document\'s start with %s', async (_name, frontmatter) => {
+    // Which the block's fence's blank lines before it, none, took the place
+    // of, as above
+    const md = frontmatter + '<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n<!-- /landscape -->\n\n<!-- /style -->\n';
+    const back = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(back).toBe(frontmatter + '<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n');
+    expect((await convertDocx((await convertMdToDocx(back)).docx)).markdown).toBe(back);
+  });
+
+  it.each([
+    ['a section that closes right before the block\'s closing fence, in a block with a heading',
+      '<!-- style: box -->\n\np1\n\n## h\n\np2\n\n<!-- landscape -->\n\np3\n\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      '<!-- style: box -->\n\np1\n\n## h\n\np2\n\n<!-- /style -->\n\n<!-- landscape -->\n\n<!-- style: box -->\np3\n\n<!-- /style -->\n\n\n<!-- /landscape -->\n'],
+    ['a block that opens right before a section, after a block with a heading and a section',
+      '<!-- style: box -->\n\np1\n\n## h\n\np2\n\n<!-- landscape -->\n\np3\n\n<!-- /landscape -->\n\n<!-- /style -->\n\n<!-- style: note -->\n\n\n<!-- portrait -->\n\np4\n\n<!-- /portrait -->\n\n<!-- /style -->\n',
+      '<!-- style: box -->\n\np1\n\n## h\n\np2\n\n<!-- /style -->\n\n<!-- landscape -->\n\n<!-- style: box -->\n\n\np3\n\n<!-- /style -->\n\n<!-- /landscape -->\n\n\n<!-- portrait -->\n\n<!-- style: note -->\np4\n\n<!-- /style -->\n\n<!-- /portrait -->\n'],
+    ['a block that opens right before a section, after the bibliography\'s place in a block with a heading',
+      '<!-- style: box -->\n\np1\n\n## h\n\n<!-- references -->\n\np2\n\n<!-- /style -->\n\n<!-- style: note -->\n\n\n<!-- portrait -->\n\np3\n\n<!-- /portrait -->\n\n<!-- /style -->\n',
+      '<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n## h\n\n<!-- references -->\n\n<!-- style: box -->\n\n\np2\n\n<!-- /style -->\n\n\n<!-- portrait -->\n\n<!-- style: note -->\np3\n\n<!-- /style -->\n\n<!-- /portrait -->\n'],
+    ['a block that opens right before a section, after two blocks of a style import reads as one past a section in a block',
+      '<!-- style: box -->\n\np0\n\n<!-- landscape -->\n\np1\n\n<!-- /landscape -->\n\np2\n\n<!-- /style -->\n\n<!-- style: box -->\n\np3\n\n<!-- /style -->\n\n<!-- style: note -->\n\n\n<!-- portrait -->\n\np4\n\n<!-- /portrait -->\n\n<!-- /style -->\n',
+      '<!-- style: box -->\n\np0\n\n<!-- /style -->\n\n<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n\n<!-- style: box -->\n\np2\n\np3\n\n<!-- /style -->\n\n\n<!-- portrait -->\n\n<!-- style: note -->\n\np4\n\n<!-- /style -->\n\n<!-- /portrait -->\n'],
+    ['a block that opens right before a section, after a block with a heading between its paragraphs past a section in a block',
+      '<!-- style: box -->\n\np0\n\n<!-- landscape -->\n\np1\n\n<!-- /landscape -->\n\n<!-- /style -->\n\n<!-- style: note -->\n\np2\n\n## h\n\np3\n\n<!-- /style -->\n\n<!-- style: box -->\n\n\n<!-- portrait -->\n\np4\n\n<!-- /portrait -->\n\n<!-- /style -->\n',
+      '<!-- style: box -->\n\np0\n\n<!-- /style -->\n\n<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n\n<!-- style: note -->\n\np2\n\n<!-- /style -->\n\n## h\n\n<!-- style: note -->\n\n\np3\n\n<!-- /style -->\n\n\n<!-- portrait -->\n\n<!-- style: box -->\np4\n\n<!-- /style -->\n\n<!-- /portrait -->\n'],
+  ])('keeps the blank lines around the style fences as before where import writes fences export has no place for, with %s', async (_name, md, expected) => {
+    // Import closes the block at a section break where it holds a heading,
+    // and opens it again, and ends a block at such blocks between its
+    // paragraphs where export stops recording them, with fences export
+    // places none for, and writes none between two blocks it reads as one,
+    // which export places both of, so the places past them aren't the
+    // fences export counts, and export swaps no blank lines there
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
   it('imports many style blocks with no blank line around their fences in linear time', async () => {
     // Four times as many take about four times as long, not sixteen. The
     // check for an HTML block before each fence read the output back to its
