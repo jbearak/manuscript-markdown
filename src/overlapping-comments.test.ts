@@ -734,7 +734,9 @@ describe('Overlapping comments: where the bodies go', () => {
   test.each([
     ['a quote right after them', '> ' + seen + '\n' + bodies + '\n> next', quoted + '\n\n> next'],
     ['a quote after a blank line', '> ' + seen + '\n\n' + bodies + '\n> next', quoted + '\n\n> next'],
-    ['an alert', '> ' + seen + '\n\n' + bodies + '\n> [!NOTE]\n> next', quoted + '\n> [!NOTE]\n> next'],
+    // With the blank line before the bodies, which Word gets no paragraph
+    // of, as without them, or with them in the quote
+    ['an alert', '> ' + seen + '\n\n' + bodies + '\n> [!NOTE]\n> next', quoted + '\n\n> [!NOTE]\n> next'],
   ])('keep %s apart from the quote they go into', async (_, md, back) => {
     expect(await imported(md)).toBe(back);
     // A blank line between two quotes keeps them two, as without bodies

@@ -1224,6 +1224,7 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     ['nothing, before a paragraph', '> q\n<!-- style: box -->\n<!-- /style -->\n\np\n', '> q\n\np\n'],
     ['a quote, with no blank line on either side of its fence', '<!-- style: box -->\n\n> q\n<!-- /style -->\np\n', '> q\np\n'],
     ['a comment\'s body Word gets no paragraph of and a quote, before a paragraph', 'x {#c1}a{/c1}\n\n<!-- style: box -->\n\n{#c1>>@A | body<<}\n\n> q\n<!-- /style -->\n\np\n', 'x {==a==}{>>@A | body<<}\n\n> q\n\np\n'],
+    ['only a comment\'s body Word gets no paragraph of, right after a quote, before a paragraph', 'x {#c1}a{/c1}\n\n> q\n<!-- style: box -->\n{#c1>>@A | body<<}\n<!-- /style -->\n\np\n', 'x {==a==}{>>@A | body<<}\n\n> q\n\np\n'],
   ])('keeps the blank lines past the fences of a block of %s', async (_name, md, expected) => {
     // Import can't write the fences of a block Word has no paragraph of in
     // its style, and wrote the blank lines between the quote and its fence

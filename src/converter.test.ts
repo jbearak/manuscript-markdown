@@ -14655,6 +14655,24 @@ describe('Blockquote round-trip', () => {
     const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
     expect(once).toBe('> Q\n\nP[^1]\n\n[^1]: Note.\n');
   });
+
+  test.each([
+    ['after a quote, before a paragraph', 'x {#c1}a{/c1}\n\n> q\n{#c1>>@A | body<<}\n\np\n', 'x {==a==}{>>@A | body<<}\n\n> q\n\np\n'],
+    ['after an alert, before a paragraph', 'x {#c1}a{/c1}\n\n> [!NOTE]\n> q\n{#c1>>@A | body<<}\n\np\n', 'x {==a==}{>>@A | body<<}\n\n> [!NOTE]\n> q\n\np\n'],
+    ['after a paragraph, before a quote', 'x {#c1}a{/c1}\n\np0\n\n{#c1>>@A | body<<}\n> q\n', 'x {==a==}{>>@A | body<<}\n\np0\n\n> q\n'],
+    ['after a quote in a list item, before the next item', 'x {#c1}a{/c1}\n\n- a\n\n  > q\n  {#c1>>@A | body<<}\n\n- b\n', 'x {==a==}{>>@A | body<<}\n\n- a\n\n  > q\n\n- b\n'],
+    ['after a quote the comment is on, before a paragraph', '> {#1}q{/1}\n{#1>>c<<}\n\np\n', '> {==q==}{>>c<<}\n\np\n'],
+    ['after a paragraph the comment is on, before a quote', 'A {#1}x{/1}\n\n{#1>>c<<}\n> q\n', 'A {==x==}{>>c<<}\n\n> q\n'],
+    ['after a quote, with no blank line on either side', 'x {#c1}a{/c1}\n\n> q\n{#c1>>@A | body<<}\np\n', 'x {==a==}{>>@A | body<<}\n\n> q\np\n'],
+  ])('keeps the blank lines past a comment\'s body Word gets no paragraph of, right %s', async (_name, md, expected) => {
+    // Export counted the blank lines beside the quote to the body's line,
+    // which import writes with its comment, and none were between them.
+    // It counts past it, as many as the side with more
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(strip(once)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
 });
 
 describe('A quote after a deeper one', () => {
