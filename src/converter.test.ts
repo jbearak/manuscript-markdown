@@ -15616,10 +15616,12 @@ describe('a line of display math that would start a Markdown block', () => {
   test.each([
     ['in a quote', '> ', '> ' + fence + '\n> \\begin{gathered}\n> a \\\\\n>     > b\n> \\end{gathered}\n> ' + fence + '\n'],
     ['in a list item', '  ', '- a\n\n  ' + fence + '\n  \\begin{gathered}\n  a \\\\\n      - b\n  \\end{gathered}\n  ' + fence + '\n'],
+    ['in a style block', '', '---\nstyles:\n  box:\n    italic: true\n---\n\n<!-- style: box -->\n\n' + fence + '\n\\begin{gathered}\na \\\\\n    - b \\\\\n    ~~~ c\n\\end{gathered}\n' + fence + '\n\n<!-- /style -->\n\nAfter.\n'],
   ])('comes back indented %s', async (_name, _prefix, md) => {
     expect(await equations(md)).toBe(1);
     const back = await roundTrip(md);
-    expect(back).toBe(md);
+    expect(back).toBe(strip(md));
+    expect(await equations(back)).toBe(1);
   });
 
   // Rows of an equation from Word that start as Markdown blocks do, among
