@@ -5144,6 +5144,47 @@ function withoutSpaceAtLineStart(text: string, payloads: string[]): { text: stri
   return { text: out + text.slice(from), payloads: kept };
 }
 
+/** The Markdown of each hidden comment's run in `items`, in order, as
+ *  rendering writes it in a paragraph's text, or a table cell's (`cell`) */
+function commentPayloads(items: ContentItem[], cell = false): string[] {
+  return items.flatMap((item, k) => item.type === 'html_comment' ? [markdownComment(item.text, items[k + 1]?.type === 'html_comment', cell)] : []);
+}
+
+/** `text`, the text of a paragraph, a heading, a note or a table cell,
+ *  which `payloads`, the Markdown of its hidden comments' runs, in order,
+ *  may start, with those before the first thing it shows without the
+ *  whitespace outside their comments, which Word hides, and the text
+ *  would show, as the tab of <!-- a -->\t<!-- b --> rest, or as a
+ *  reference, as the space of a run " <!-- a -->" before z, which
+ *  keepParagraphWhitespace writes so at the text's start (see
+ *  withoutSpaceAtLineStart). Only where the line goes on after them, and
+ *  `reads`, export's reading of the text without that whitespace, holds
+ *  each comment as it was, inline, as it reads a heading's, a table cell's
+ *  and an alert's, but not a paragraph's that comments start, which it
+ *  reads as an HTML block, which shows them as text, so there it stays.
+ *  Not comments alone, which a block holds, as one of a first line that
+ *  ends with one does, which hides its text, and whose whitespace is its
+ *  own, but where the text reads them inline whatever goes after them
+ *  (`alone`), as a heading's and a table cell's do. Nor a line end between
+ *  them, whose lines stay apart, nor where the text holds one of them other
+ *  than its payload, as rendering wrote it (see keepCommentInParagraph) */
+function withoutLeadingCommentSpace(text: string, payloads: string[], reads: (text: string, payloads: string[]) => boolean, alone = false): string {
+  if (payloads.length === 0 || !/^[ \t]*<!--/.test(text)) return text;
+  // The end of the comments before the first thing shown, each as its
+  // payload
+  let at = 0;
+  for (const payload of payloads) {
+    const found = text.indexOf(payload, at);
+    const gap = text.slice(at, found === -1 ? undefined : found);
+    if (/^[ \t]*<!--/.test(gap)) return text;
+    if (found === -1 || /[^ \t]/.test(gap)) break;
+    at = found + payload.length;
+  }
+  if (!alone && !/^[ \t]*[^\s]/.test(text.slice(at))) return text;
+  const inline = withoutSpaceAtLineStart(text, payloads);
+  return inline.text !== text && inline.text.split('\n').length === text.split('\n').length && reads(inline.text, inline.payloads) ? inline.text : text;
+}
+
 /** The rest of the line after a line break that the hidden comment at
  *  segment[i], before `end`, starts, as export would read it after a <br>:
  *  the Markdown in a paragraph of its hidden comments (`payloads`, see
@@ -10795,7 +10836,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           ? runs.map(item => item.type === 'text' && item.formatting?.bold
             ? { ...item, formatting: { ...item.formatting, bold: false } }
             : item)
-          : runs), false);
+          : runs, true), false);
         const html = renderHtmlCellParagraph(items);
         if (html !== undefined) {
           paragraphs.push(html);
@@ -11062,7 +11103,8 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
           : cell.paragraphs[0];
         // Its line breaks at its end too, which renderInlineSegment drops
         // for a grid table's, as a cell of one line holds them as Word's
-        const r = renderInlineRange(joinSplitComments(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), !!renderOpts?.htmlCells), 0, comments, { cell: true }, ranges.renderOpts);
+        const cellItems = joinSplitComments(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), !!renderOpts?.htmlCells);
+        const r = renderInlineRange(cellItems, 0, comments, { cell: true }, ranges.renderOpts);
         // A line break, which a cell's one line can't hold, as <br>, which a
         // cell reads as one, but not a line end in code, an equation or a
         // comment, which isn't one
@@ -11074,6 +11116,10 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
         }
         text += r.text.slice(from);
         if (text.includes('\n')) { rollback(); return null; }
+        // Comments that start the cell, as a paragraph's (see
+        // withoutLeadingCommentSpace), which its line reads inline, as
+        // after text
+        text = withoutLeadingCommentSpace(text, commentPayloads(cellItems, true), (text, kept) => readsCommentsInline('x' + text, kept), true);
         // Escape pipes for GFM table cells, which take the backslash before
         // a pipe for the table's, and leave the rest to the cell's Markdown:
         // a backslash of Word's before it, which escapeMarkdownChars doubled,
@@ -11312,7 +11358,8 @@ function tryRenderGridTable(
                 ? { ...item, formatting: { ...item.formatting, bold: false } }
                 : item)
           : para;
-        const r = renderInlineSegment(mergeConsecutiveRuns(withoutHiddenCommentSpace(items)), comments, ranges.renderOpts, { cell: true });
+        const cellItems = mergeConsecutiveRuns(withoutHiddenCommentSpace(items));
+        const r = renderInlineSegment(cellItems, comments, ranges.renderOpts, { cell: true });
         // Split on newlines within a paragraph (e.g. hard breaks).
         // Strip the backslash of the break that ends each line but the last —
         // grid table cells treat bare newlines as hard breaks, so the
@@ -11325,7 +11372,9 @@ function tryRenderGridTable(
         // A line starts no HTML block in a cell, so the spaces before a
         // comment that starts one after a break are the padding's, as before
         // text, unless they're references
-        const kept = keepParagraphWhitespace(r.text, true, true, true);
+        // Comments that start the cell's paragraph, as a pipe table's (see
+        // withoutLeadingCommentSpace), as export reads its text inline too
+        const kept = keepParagraphWhitespace(withoutLeadingCommentSpace(r.text, commentPayloads(cellItems, true), (text, payloads) => readsCommentsInline('x' + text, payloads), true), true, true, true);
         const afterBreaks = new Set(lineStartsAfterBreaks(kept, true));
         const paraLines = kept.split('\n');
         let lineEnd = -1;
@@ -13372,9 +13421,12 @@ function trackedBreakMarks(values: unknown): TrackedBreakMarks {
  *  an alert's label, where their whitespace may be the indent of an HTML
  *  block, whose comment the paragraph would show without it, nor in a code
  *  block's lines, whose text is as Word has it, nor where a line end is
- *  outside a comment. So too for a table cell's paragraph, whose start is
- *  as a paragraph's */
-function withoutHiddenCommentSpace(content: ContentItem[]): ContentItem[] {
+ *  outside a comment; once the text is rendered, that at its start goes
+ *  where the line goes on after them (see withoutLeadingCommentSpace). So
+ *  too for a table cell's paragraph, whose start is as a paragraph's, but
+ *  in an HTML table's (`html`), where every line's start is as after
+ *  text, as the browser starts no block at a comment */
+function withoutHiddenCommentSpace(content: ContentItem[], html = false): ContentItem[] {
   const empty = (item: ContentItem | undefined) => item?.type === 'text' && item.text === '';
   // Whether an item ends or starts with what isn't whitespace, as the text
   // the comments would join
@@ -13384,19 +13436,19 @@ function withoutHiddenCommentSpace(content: ContentItem[]): ContentItem[] {
     && (item.type !== 'text' || /^\S/.test(item.text) && !item.text.startsWith('\\\n'));
   let out: ContentItem[] | undefined;
   // Whether something shown goes before on the line, and in a code block
-  let shown = false;
+  let shown = html;
   let code = false;
   for (let i = 0; i < content.length;) {
     const item = content[i];
     if (isMarkdownBlockEdge(item)) {
-      shown = false;
+      shown = html;
       code = item.type === 'para' && !!item.isCodeBlock;
     }
     if (item.type !== 'html_comment') {
       out?.push(item);
       if (item.type === 'text') {
         const line = item.text.lastIndexOf('\n');
-        shown = /[^ \t\n]/.test(item.text.slice(line + 1)) || shown && line === -1;
+        shown = html || /[^ \t\n]/.test(item.text.slice(line + 1)) || shown && line === -1;
       } else if (showsInline(item)) {
         shown = true;
       }
@@ -13427,7 +13479,7 @@ function withoutHiddenCommentSpace(content: ContentItem[]): ContentItem[] {
       pushAll(out, run);
     }
     // A line end outside the comments starts a line, whose start they are
-    if (lineEnds) shown = false;
+    if (lineEnds) shown = html;
     i = end + 1;
   }
   return out ?? content;
@@ -15782,6 +15834,7 @@ function buildMarkdownOnce(
     // which export doesn't count among the comments of their own that take
     // an index for their blank lines (annotateHtmlCommentIndices).
     const amongOwnComments = !pendingAlertPrefixStrip && !paragraphNested && !paragraphHeading;
+    const afterAlertMarker = pendingAlertPrefixStrip !== undefined;
     // One no para item started, as one a comment starts that starts a
     // section, as the first paragraph has none, writes the separator the
     // fence before it left, a block of comments alone or not, and before its
@@ -15864,7 +15917,7 @@ function buildMarkdownOnce(
     // read as text, as one with a blank line in it, which only the block
     // holds, or as more than it, as one that ends in ---> with the next.
     const items = mergedContent.slice(i, rendered.nextIndex);
-    const payloads = items.flatMap((item, k) => item.type === 'html_comment' ? [markdownComment(item.text, items[k + 1]?.type === 'html_comment')] : []);
+    const payloads = commentPayloads(items);
     // A block of comments and line breaks gives back runs that are each one
     // comment, as export splits it at each one's first -->, so a paragraph
     // mustn't merge those; others, as Word split, it may
@@ -15876,6 +15929,8 @@ function buildMarkdownOnce(
     // where `alone`, the text is the runs alone
     const hidesText = (text: string, alone: boolean) => alone && /\S/.test(outsideComments(payloads.join('')))
       && /^<!--[\s\S]*?-->\s*$/.test(text.trim());
+    // Whether the text is the runs alone, but for whitespace
+    const runsAlone = (text: string) => text.replace(/\s/g, '') === payloads.join('').replace(/\s/g, '');
     const withEdges = (text: string) => {
       const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(text)?.[0] ?? '' : '';
       let indentColumns = 0;
@@ -15899,6 +15954,29 @@ function buildMarkdownOnce(
       const ended = atEnd && !isInParagraphMath(next) ? withoutEndSpaces(edged) : edged;
       return mathFollows ? beforeParagraphMath(ended) : ended;
     };
+    // Comments that start the text of a heading, with text after them on
+    // their line, go without the whitespace their runs hold outside them,
+    // which Word hides, and the heading would show (see
+    // withoutLeadingCommentSpace). Those that start a paragraph's, a
+    // quote's or a list item's keep it where export would read the line
+    // without it as an HTML block, which shows the comments as text, as
+    // the check of its reading finds. So do
+    // those that start an alert's text, which Word starts on the line after
+    // its label: on the line after the marker, where four spaces go before
+    // them (see below), or on its line, after it, where its paragraph reads
+    // them inline, as a heading does. But only where the first one's run
+    // starts with a space or tab, as the others went without theirs after
+    // the label's line break, where that reads them inline (see
+    // breakBeforeComment), and their runs' Markdown, as the items hold it,
+    // may be other than the text's, as <!-- a -->\t before \trest
+    const alertLine = alertMarkerLineEnd === undefined ? undefined : output[alertMarkerLineEnd] ?? '';
+    const alertNextLine = alertLine !== undefined && /^\n[^\n]*$/.test(alertLine);
+    const readsInline = !!paragraphHeading || alertLine === ' ';
+    if (atStart && (!afterAlertMarker || alertLine !== undefined && /^[ \t]/.test(payloads[0] ?? '')) && !hidesText(textOut, runsAlone(textOut))) {
+      const runs = textOut;
+      textOut = withoutLeadingCommentSpace(textOut, payloads, (text, kept) =>
+        readsCommentsInline((alertNextLine ? 'a\n    ' : alertLine === ' ' ? 'a ' : paragraphHeading ? '# ' : '') + text, kept, !blockKeepsRuns(runs), paragraphHeading), readsInline);
+    }
     // Its paragraph's Markdown goes on from an alert's marker's line where
     // the text starts on the next (see alertMarkerLineEnd), and on to the
     // lines of an equation in it and comment bodies after it. A block it
@@ -16032,9 +16110,8 @@ function buildMarkdownOnce(
     // comments, which Word hides, and a paragraph would show, as the space
     // of <!-- a --> <!-- b -->, goes, as after a <br> (see lineAfterBreak).
     // Runs after text are as withoutHiddenCommentSpace left them
-    const firstLine = alertMarkerLineEnd !== undefined && /^\n[^\n]*$/.test(output[alertMarkerLineEnd] ?? '') ? textOut.split('\n', 1)[0] : '';
-    const runsAlone = textOut.replace(/\s/g, '') === payloads.join('').replace(/\s/g, '');
-    if (/\S/.test(firstLine) && !readsAsParagraph('a\n' + firstLine) && payloads.length > 0 && !hidesText(textOut, runsAlone)) {
+    const firstLine = alertNextLine ? textOut.split('\n', 1)[0] : '';
+    if (/\S/.test(firstLine) && !readsAsParagraph('a\n' + firstLine) && payloads.length > 0 && !hidesText(textOut, runsAlone(textOut))) {
       const inline = withoutSpaceAtLineStart(textOut, payloads);
       if (readsCommentsInline('a\n    ' + inline.text, inline.payloads, !blockKeepsRuns(textOut))) textOut = '    ' + inline.text;
     }
