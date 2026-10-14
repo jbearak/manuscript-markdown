@@ -15624,11 +15624,23 @@ function buildMarkdownOnce(
     }
 
     if (item.type === 'bibliography_marker') {
-      // After the line ends its empty paragraph wrote, as the after-gap of
+      // After the blank lines the source had before it, which export
+      // records with the fences' (see emitSentinelSep). Without those,
+      // after the line ends its empty paragraph wrote, as the after-gap of
       // a fence or a comment of its own before it, which export kept, as a
-      // line end alone, or else a blank line
-      if (output.length > 0 && trailingNewlines() === 0) output.push('\n\n');
+      // line end alone, or else a blank line. After an HTML block that only
+      // a blank line ends, as an HTML table import wrote for a table Word
+      // merged cells of, a blank line at least, as before a style block's
+      // fence, which the block would take in
+      if (!emitSentinelSep('ref0') && output.length > 0 && trailingNewlines() === 0) output.push('\n\n');
+      fenceAfterHtmlBlock();
       output.push('<!-- references -->');
+      pastFence = output.length;
+      // And those after it, which the next block takes, as after a fence
+      if (sentinelGaps?.['refa0'] !== undefined) {
+        lastWasSectionSentinel = true;
+        lastSentinelAfterGapKey = 'refa0';
+      }
       endListContext();
       lastAlertParagraphKey = undefined;
       pendingAlertPrefixStrip = undefined;

@@ -5136,6 +5136,60 @@ describe('Sentinel gap round-trip', () => {
   });
 
   test.each([
+    ['a paragraph', 'Text.\n'],
+    ['a heading', '## Heading\n'],
+    ['a list', '- item\n'],
+    ['a table', '| a |\n| --- |\n| 1 |\n'],
+    ['a quote', '> Quoted.\n'],
+  ])('keeps the blank lines between %s and a references marker after it, and the block after the marker', async (_name, before) => {
+    // Export recorded none, as it does around a fence, so each came back as
+    // one, but after a quote, whose own record kept those before it
+    for (const after of ['After.\n', '- after\n', '| b |\n| --- |\n| 2 |\n', '> After.\n']) {
+      for (const [gapBefore, gapAfter] of [['\n', '\n\n'], ['\n\n', '\n'], ['\n\n', '\n\n\n']]) {
+        const md = before + gapBefore + '<!-- references -->\n' + gapAfter + after;
+        const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+        expect([md, once]).toEqual([md, md]);
+      }
+    }
+  });
+
+  const markerBibtex = '@article{key1, author={Smith, John}, title={Title}, journal={J}, year={2020}}';
+  const htmlTable = '<table>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n';
+  test.each([
+    ['at the document\'s start, with nothing to list', '<!-- references -->\n\n\nAfter.\n', undefined, undefined],
+    ['with a bibliography to show', '---\ncsl: apa\n---\nA [@key1].\n\n\n<!-- references -->\n\n\nAfter.\n', markerBibtex, undefined],
+    ['after an HTML table', 'A.\n\n' + htmlTable + '\n<!-- references -->\n\nAfter.\n', undefined, undefined],
+    ['after an HTML table, two blank lines on each side', 'A.\n\n' + htmlTable + '\n\n<!-- references -->\n\n\nAfter.\n', undefined, undefined],
+    ['after an HTML block', 'A.\n\n<div>x</div>\n\n\n<!-- references -->\n\n\nAfter.\n', undefined, undefined],
+    ['after a comment of its own', 'A.\n\n<!-- c -->\n\n\n<!-- references -->\n\nAfter.\n', undefined, undefined],
+    ['that ends a landscape section with no closing fence', 'A.\n\n<!-- landscape -->\n\nB.\n\n\n<!-- references -->\n', undefined, 'A.\n\n<!-- landscape -->\n\nB.\n\n\n<!-- references -->\n\n<!-- /landscape -->\n'],
+    ['at the start of a landscape section with no closing fence', 'A.\n\n<!-- landscape -->\n\n<!-- references -->\n\n\nB.\n', undefined, 'A.\n\n<!-- landscape -->\n\n<!-- references -->\n\n\nB.\n\n<!-- /landscape -->\n'],
+  ])('keeps the blank lines around a references marker %s', async (_name, md, bibtex, expected) => {
+    const once = (await convertDocx((await convertMdToDocx(md, { bibtex })).docx)).markdown;
+    expect(once).toBe(expected ?? md);
+    expect((await convertDocx((await convertMdToDocx(once, { bibtex })).docx)).markdown).toBe(once);
+  });
+
+  test('puts a blank line between a references marker and an HTML table Word merged cells of right before it', async () => {
+    // Export recorded no blank line before the marker, after the pipe
+    // table, and import wrote none after the HTML table it writes for one
+    // whose cells Word merged, which then took the marker in, so the next
+    // export put the bibliography at the end
+    const md = '---\ncsl: apa\n---\nA [@key1].\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n<!-- references -->\n\nAfter.\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex: markerBibtex })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const merged = xml.replace(/<w:tc><w:tcPr>/, '<w:tc><w:tcPr><w:gridSpan w:val="2"/>').replace(/(<\/w:tc>)<w:tc>(?:(?!<\/w:tc>).)*<\/w:tc>/, '$1');
+    expect(merged).toContain('w:gridSpan');
+    zip.file('word/document.xml', merged);
+    const once = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(once).toContain('</table>\n\n<!-- references -->\n\nAfter.\n');
+    const again = (await convertMdToDocx(once, { bibtex: markerBibtex })).docx;
+    const xml2 = await (await JSZip.loadAsync(again)).file('word/document.xml')!.async('string');
+    expect(xml2.indexOf('ZOTERO_BIBL')).toBeLessThan(xml2.indexOf('After.'));
+    expect((await convertDocx(again)).markdown).toBe(once);
+  });
+
+  test.each([
     ['the closing fence of a landscape section', 'Text\n\n<!-- landscape -->\n\nWide\n\n<!-- /landscape -->\n'],
     ['the closing fence of a style block', '<!-- style: quote -->\nQuoted.\n<!-- /style -->\n'],
     ['a comment of its own', 'Text.\n\n<!-- c -->\n'],
@@ -14836,7 +14890,8 @@ describe('Blockquote round-trip', () => {
     expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
   });
   test.each([
-    ['the bibliography\'s place, after two blank lines', 'A\n\n> q\n| a |\n| --- |\n| 1 |\n\n\n<!-- references -->\n\nB\n', 'A\n\n> q\n\n| a |\n| --- |\n| 1 |\n\n<!-- references -->\n\nB\n'],
+    // Which keeps its own blank lines, as a fence does
+    ['the bibliography\'s place, after two blank lines', 'A\n\n> q\n| a |\n| --- |\n| 1 |\n\n\n<!-- references -->\n\nB\n', 'A\n\n> q\n\n| a |\n| --- |\n| 1 |\n\n\n<!-- references -->\n\nB\n'],
     ['the bibliography\'s place', 'A\n\n> q\n| a |\n| --- |\n| 1 |\n\n<!-- references -->\n\nB\n', 'A\n\n> q\n\n| a |\n| --- |\n| 1 |\n\n<!-- references -->\n\nB\n'],
     ['a paragraph', 'A\n\n> q\n| a |\n| --- |\n| 1 |\n\nP\n', 'A\n\n> q\n\n| a |\n| --- |\n| 1 |\n\nP\n'],
     ['a paragraph, after an alert', '> [!NOTE]\n> a\n| t |\n| --- |\n| 1 |\n\nP\n', '> [!NOTE]\n> a\n\n| t |\n| --- |\n| 1 |\n\nP\n'],
