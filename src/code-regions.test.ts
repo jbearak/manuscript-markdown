@@ -269,6 +269,39 @@ describe('computeMarkdownRegions with tables', () => {
 	});
 });
 
+describe('computeMarkdownRegions with inline HTML', () => {
+	const inlineHtml = (text: string) => computeMarkdownRegions(text, { html: 'all', inlineHtml: true }).inlineHtmlRegions
+		.map(region => text.slice(region.start, region.end));
+
+	test('holds the comments and tags in a paragraph\'s, a heading\'s, a quote\'s, a list item\'s and a note\'s text', () => {
+		const text = 'a <!-- x --> b <span title="y">c</span>\n\n# h <!-- z -->\n\nS <i>\n===\n\n> q <b\n> c="d">\n\n- i <!-- j -->\n\nA[^1]\n\n[^1]: n <!-- k\nl -->\n';
+		expect(inlineHtml(text)).toEqual(['<!-- x -->', '<span title="y">', '</span>', '<!-- z -->', '<i>', '<b\n> c="d">', '<!-- j -->', '<!-- k\nl -->']);
+		expect(computeMarkdownRegions(text, { html: 'all' }).inlineHtmlRegions).toEqual([]);
+		expect(computeMarkdownRegions(text, { inlineHtml: true }).inlineHtmlRegions).toEqual([]);
+	});
+
+	test('holds an empty comment alone, as markdown-it reads it', () => {
+		expect(inlineHtml('a <!--> x --> <!---> y -->')).toEqual(['<!-->', '<!--->']);
+	});
+
+	test('leaves out escaped HTML, a comment that doesn\'t end, and what isn\'t a comment or a tag', () => {
+		expect(inlineHtml('a \\<!-- x --> \\\\<!-- y --> <!-- open <?pi ?> <!DOCTYPE x> <![CDATA[ x ]]>')).toEqual(['<!-- y -->']);
+	});
+
+	test('leaves out HTML that a construct from before it can end in', () => {
+		// As a code span from a backtick before it, whose end leaves the
+		// rest of the HTML text
+		const ends = ['`', '$', ']', ')', '==', '++}', '--}', '~~}', '<<}', '~>'];
+		expect(inlineHtml('a ' + ends.map(end => '<!-- ' + end + ' -->').join(' ') + ' <!-- ok --> <b c="`">')).toEqual(['<!-- ok -->']);
+	});
+
+	test('leaves out HTML in code, an HTML block, a table\'s row, and text whose lines it can\'t map', () => {
+		expect(inlineHtml('    <!-- code -->\n\n<div>\n<!-- block -->\n</div>\n\n| <!-- a --> | b |\n|---|---|\n')).toEqual([]);
+		// The heading's closing #s end its line, after its text
+		expect(inlineHtml('# h <!-- a --> ##\n')).toEqual([]);
+	});
+});
+
 describe('call-site code-region filtering skips code regions', () => {
 	test('inline code with addition: `{++added++}` — no addition ranges', () => {
 		const text = '`{++added++}`';

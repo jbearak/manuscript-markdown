@@ -508,3 +508,110 @@ describe('CriticMarkup\'s markers in a pipe table\'s cells', () => {
     expect(time(16_000) / time(4_000)).toBeLessThan(8);
   }, 30000);
 });
+
+describe('CriticMarkup\'s openers in raw HTML in a paragraph\'s text', () => {
+  async function roundTrip(md: string): Promise<{ markdown: string; placeholder: boolean; revision: boolean }> {
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+    let placeholder = false;
+    let revision = false;
+    for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+      const xml = await zip.file(part)?.async('string') ?? '';
+      if (xml.includes('')) placeholder = true;
+      if (/<w:(?:ins|del) /.test(xml)) revision = true;
+    }
+    const imported = await convertDocx(docx);
+    return { markdown: imported.markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim(), placeholder, revision };
+  }
+
+  it.each([
+    ['an insertion\'s opener in a comment', 'z <!-- {++ -->\n{++real++}', 'z <!-- {++ --> {++real++}'],
+    ['one in a tag\'s attribute', 'z <span title="{++">x</span>\n{++real++}', 'z <span title="{++">x</span> {++real++}'],
+    ['one before a blank line', 'z <!-- {++ -->\n\n{++real++}', 'z <!-- {++ -->\n\n{++real++}'],
+    ['one at the end of a comment\'s line', 'z <!-- {++\n-->\n{++real++}', 'z <!-- {++\n--> {++real++}'],
+    ['a deletion\'s', 'z <!-- {-- -->\n{--real--}', 'z <!-- {-- --> {--real--}'],
+    ['a substitution\'s', 'z <!-- {~~ -->\n{~~a~>b~~}', 'z <!-- {~~ --> {~~a~>b~~}'],
+    ['a comment\'s', 'z <!-- {>> -->\n{++real++} c<<}', 'z <!-- {>> --> {++real++} c<<}'],
+    ['one in a heading', '# z <!-- {++ -->\n\n{++real++}', '# z <!-- {++ -->\n\n{++real++}'],
+    ['one in a setext heading', 'z <!-- {++ -->\n===\n\n{++real++}', '# z <!-- {++ -->\n\n{++real++}'],
+    ['one in a list item', '- z <!-- {++ -->\n  {++real++}', '- z <!-- {++ --> {++real++}'],
+    ['one in a quote', '> z <!-- {++ -->\n> {++real++}', '> z <!-- {++ --> {++real++}'],
+    ['one in a tag over a quote\'s lines', '> z <span\n> title="{++">x</span>\n> {++real++}', '> z <span\n> title="{++">x</span> {++real++}'],
+    ['one in a note', 'A[^1]\n\n[^1]: z <!-- {++ -->\n    {++real++}', 'A[^1]\n\n[^1]: z <!-- {++ --> {++real++}'],
+    // Which open and close no equation
+    ['one between escaped dollar signs', 'Costs \\$5, z <!-- {++ -->\n{++real++} or \\$6', 'Costs $5, z <!-- {++ --> {++real++} or $6'],
+    // A table's cell holds one line, so the table rule leaves the opener alone
+    ['one in a table\'s cell, as before', '| h <!-- {++ --> | k |\n|---|---|\n| {++real++} | d |', '| h <!-- {++ --> | k |\n| --- | --- |\n| {++real++} | d |'],
+  ])('reads %s as text, as markdown-it does', async (_name, md, expected) => {
+    // Preprocessing paired the opener with the closer of the span after it
+    // and wrote the line ends between as placeholders, which went to Word
+    // and the preview, and came back
+    const once = await roundTrip(md);
+    expect(once.placeholder).toBe(false);
+    expect(once.revision).toBe(true);
+    expect(once.markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+    expect(renderWithPlugin(md)).not.toContain('');
+  });
+
+  it('renders the span after an opener in a comment in the preview', () => {
+    expect(renderWithPlugin('z <!-- {++ -->\n{++real++}')).toContain('<p>z <!-- {++ -->\n<ins class="manuscript-markdown-addition">real</ins></p>');
+  });
+
+  it.each([
+    ['an escaped <', 'z \\<!-- {--b -->\n\nc--}', 'z \\<!-- {--b -->\n\nc--}'],
+    ['an empty comment', 'z <!--> {--b -->\n\nc--}', 'z <!--> {--b -->\n\nc--}'],
+    ['a code span with <!-- in it', 'z `<!--` {--b -->\n\nc--}', 'z `<!--` {--b -->\n\nc--}'],
+    ['a code span that ends in a comment', '`a <!-- ` {--b -->\n\nc--}', '`a <!-- ` {--b -->\n\nc--}'],
+    ['an insertion that ends in a comment', '{++a <!-- ++} {--b -->\n\nc--}', '{++a \\<!-- ++} {--b -->\n\nc--}'],
+    ['a tag, with the opener after it', 'z <b>{--b</b>\n\nc--}', 'z {--**b&lt;/b&gt;**\n\n**c**--}'],
+  ])('reads an opener after %s as a span\'s, as before', async (_name, md, expected) => {
+    // markdown-it reads no HTML around the opener
+    const once = await roundTrip(md);
+    expect(once.placeholder).toBe(false);
+    expect(once.revision).toBe(true);
+    expect(once.markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+    expect(renderWithPlugin(md)).toContain('<del class="manuscript-markdown-deletion">c</del>');
+  });
+
+  it.each([
+    // Export reads CriticMarkup in an equation as the equation's change, and
+    // no HTML there
+    ['in an equation', '$x <y z={++w >\n\nv++}$', '$x <y z={++w >\n\nv++}$', 1, 1],
+    // The math's reads paired the comment's dollar sign with the equation's
+    ['in an equation after a $ in a comment', 'z <!-- $ --> $\\alpha <y z={++w >\n\nv++}$', 'z <!-- $ --> $\\alpha <y z={++w >\n\nv++}$', 1, 1],
+    // And the equation reaches the HTML's block over a blank line a span
+    // before it joins
+    ['in an equation over blocks a span joins, after a $ in a comment', 'z <!-- $ --> $\\alpha {++a\n\nb++} <y z={--w >\n\nv--}$',
+      'z <!-- $ --> $\\alpha {++a\n\nb++} <y z={--w >\n\nv--}$', 1, 1],
+    // Each side of a substitution is read on its own, so the comment in the
+    // old text doesn't end in it
+    ['in a substitution\'s new text, after a comment from its old text', '{~~old <!-- ~>before{++\nnew -->++}~~}', '{~~old \\<!-- ~>before\n\nnew -->~~}', 2, 0],
+  ])('reads an opener in HTML %s as a span\'s, as before', async (_name, md, expected, paragraphs, equations) => {
+    // The HTML region held the opener, so its span's lines weren't joined:
+    // the equation was two paragraphs of text, and the substitution's
+    // opener at a line's end wasn't moved to a paragraph of its own
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr'));
+    expect(body.match(/<w:p[ >]/g)).toHaveLength(paragraphs);
+    expect((body.match(/<m:oMath>/g) ?? []).length).toBe(equations);
+    expect(body).toContain('<w:ins ');
+    const once = await roundTrip(md);
+    expect(once.placeholder).toBe(false);
+    expect(once.markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+    const html = renderWithPlugin(md);
+    expect(html).not.toContain('\uE000');
+    expect(html).toMatch(/<(?:ins|del) class="manuscript-markdown-(?:addition|deletion)">(?:<span class="manuscript-markdown-math-fallback">w &gt;|new --&gt;)/);
+  });
+
+  it('reads many comments and tags in a paragraph\'s text in linear time', () => {
+    const time = (lines: number) => {
+      const text = 'z ' + '<span title="{++">x</span> <!-- {++ --> <a b="` <!-- {++\n'.repeat(lines) + '\n{++real++}\n';
+      return fastestRun(() => preprocessCriticMarkup(text));
+    };
+    expect(time(16_000) / time(4_000)).toBeLessThan(8);
+  }, 30000);
+});

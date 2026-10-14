@@ -142,6 +142,10 @@ interface CriticBlockAnalysis {
   // each table, as two can touch, as a table and one in a quote after it,
   // but for one in math (see tablesOutsideMath)
   tableRegions: CodeRegion[];
+  // The raw HTML in a paragraph's or a heading's text, as z <!-- {++ -->,
+  // where an opener is text, as markdown-it reads the HTML first, but whose
+  // code and equations the inert regions' readers read as text's
+  inlineHtmlRegions: CodeRegion[];
 }
 
 /** `tableRegions` but for those a dollar math span with a line end
@@ -174,6 +178,26 @@ function tablesOutsideMath(source: string, tableRegions: CodeRegion[], inertRegi
     while (next < overLines.length && overLines[next].start < table.end) reach = Math.max(reach, overLines[next++].end);
     return reach <= table.start;
   });
+}
+
+/** `regions` but for those with a dollar sign before them and another
+ *  after them, anywhere in `source`, but for escaped ones, which open and
+ *  close no equation. Export reads CriticMarkup in an equation as the
+ *  equation's change and no HTML there, as in $x <y z={++w >, a blank line
+ *  and v++}$, and an equation can reach a block from another over the
+ *  blocks CriticMarkup spans join, or open where a read of the math pairs
+ *  the dollar sign with another, as one in a comment before it. So any
+ *  region an equation could hold is left as on main. A region holds no
+ *  dollar sign (see constructEndsAt in code-regions.ts), so an equation
+ *  that holds any of it holds all of it, from before it to after it */
+function outsideDollars(source: string, regions: CodeRegion[]): CodeRegion[] {
+  if (regions.length === 0) return regions;
+  let first = source.indexOf('$');
+  while (first !== -1 && isEscapedAt(source, first)) first = source.indexOf('$', first + 1);
+  if (first === -1) return regions;
+  let last = source.lastIndexOf('$');
+  while (isEscapedAt(source, last)) last = source.lastIndexOf('$', last - 1);
+  return regions.filter(region => first >= region.end || last < region.start);
 }
 
 /** The spans of `spans`, in order, with a line end, read from the end of
@@ -232,16 +256,18 @@ function computeCriticBlockAnalysis(
   content: string,
   includeLists = false,
 ): CriticBlockAnalysis | CriticLeadingBreakAnalysis {
-  const { codeRegions, htmlRegions, listRegions, tableRegions } = computeMarkdownRegions(content, {
+  const { codeRegions, htmlRegions, listRegions, tableRegions, inlineHtmlRegions } = computeMarkdownRegions(content, {
     html: 'all',
     includeLists,
     includeTables: true,
+    inlineHtml: true,
   });
   const inertRegions = mergeRegions([...codeRegions, ...htmlRegions]);
   const analysis: CriticBlockAnalysis = {
     source: content,
     inertRegions,
     tableRegions: tablesOutsideMath(content, tableRegions, inertRegions),
+    inlineHtmlRegions: outsideDollars(content, inlineHtmlRegions),
   };
   return includeLists ? { ...analysis, listRegions } : analysis;
 }
@@ -255,7 +281,7 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
   // a new paragraph. Authors commonly put the opener at the end of the prior
   // paragraph's last line; a single source newline otherwise remains a soft
   // break and incorrectly pulls that paragraph into the revision.
-  const { source: markdown, inertRegions, listRegions, tableRegions } = analysis;
+  const { source: markdown, inertRegions, listRegions, tableRegions, inlineHtmlRegions } = analysis;
   const mathRegions = computeDollarMathRegions(markdown, inertRegions);
   const closers = criticCloserSearch(markdown);
   const edits: LineEdit[] = [];
@@ -279,7 +305,7 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
   const transformed = markdown.replace(
     /(\{\+\+|\{--|\{~~|\{==|\{>>)(\n(?:[ \t]*(?:>[ \t]*)?\n)?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
     (full, open: string, leadingBreak: string, nextPrefix: string, offset: number) => {
-      if (isInsideCodeRegion(offset, inertRegions) || isEscapedAt(markdown, offset) ||
+      if (isInsideCodeRegion(offset, inertRegions) || isInsideCodeRegion(offset, inlineHtmlRegions) || isEscapedAt(markdown, offset) ||
           isInsideCodeRegion(offset, mathRegions) || isInsideCodeRegion(offset, listRegions)) return full;
       const contentStart = offset + open.length;
       const closePos = open === '{>>'
@@ -573,14 +599,15 @@ function findNextCriticOpener(src: string, pos: number): CriticOpener | undefine
  * line's, which count the source's lines.
  */
 /** The CriticMarkup spans of `analysis`'s source in one pass from the left:
- *  from an opener not escaped nor in code or an HTML block, to its closer,
+ *  from an opener not escaped nor in code, an HTML block or raw HTML in a
+ *  paragraph's text (see inlineHtmlRegions), to its closer,
  *  the first after it but for a comment's, which is past its replies. An
  *  opener in a table's cell pairs only with a closer on its line (see
  *  isInTableCell). A span with a line end, whose lines preprocessing joins,
  *  takes the tables it reaches out of their rows, so the openers after it
  *  are read with the end of the last. */
 function* criticSpans(analysis: CriticBlockAnalysis): IterableIterator<{ start: number; contentStart: number; closeIdx: number }> {
-  const { source, inertRegions, tableRegions } = analysis;
+  const { source, inertRegions, tableRegions, inlineHtmlRegions } = analysis;
   const closers = criticCloserSearch(source);
   let searchFrom = 0;
   // The end of the line of the last opener read, and of the last span
@@ -593,7 +620,8 @@ function* criticSpans(analysis: CriticBlockAnalysis): IterableIterator<{ start: 
 
     const contentStart = candidate.index + candidate.open.length;
     searchFrom = contentStart;
-    if (isInsideCodeRegion(candidate.index, inertRegions) || isEscapedAt(source, candidate.index)) continue;
+    if (isInsideCodeRegion(candidate.index, inertRegions) || isInsideCodeRegion(candidate.index, inlineHtmlRegions)
+      || isEscapedAt(source, candidate.index)) continue;
     const closeIdx = candidate.nested
       ? closers.matching(contentStart)
       : closers.next(candidate.close, contentStart);
