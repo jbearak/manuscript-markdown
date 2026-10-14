@@ -1808,25 +1808,26 @@ function droppedBlocksOf(tokens: MdToken[], source: (line: number) => number): D
   return { before, after };
 }
 
-/** Adds to `dropped` the fences of each style block at the top level of
- *  `tokens` that Word has no paragraph of in its style, as one of only
- *  quotes, headings, code, tables or thematic breaks, which keep their own
- *  (see unstyledInStyleBlock), or of nothing. Import can't write those
- *  fences, as it finds the block by its paragraphs, so the blank lines on
- *  either side of one are those of the blocks beside it, as for a block a
- *  list item drops */
-function addUnshownStyleFences(tokens: MdToken[], source: (line: number) => number, dropped: DroppedLines): void {
+/** Adds to `dropped` the lines of `tokens` at the top level Word gets
+ *  nothing of where they are, which import writes nothing for there: the
+ *  fences of each style block that Word has no paragraph of in its style,
+ *  as one of only quotes, headings, code, tables or thematic breaks, which
+ *  keep their own (see unstyledInStyleBlock), or of nothing, as import
+ *  finds a block by its paragraphs, and each paragraph of comment bodies
+ *  only that Word doesn't get, whose bodies import writes with their
+ *  comments. So the blank lines on either side of one are those of the
+ *  blocks beside it, as for a block a list item drops */
+function addLinesWordLacks(tokens: MdToken[], source: (line: number) => number, dropped: DroppedLines): void {
+  const drop = ([start, end]: [number, number]) => {
+    const from = source(start);
+    const to = source(end);
+    if (from >= to) return;
+    dropped.before.set(to, from);
+    dropped.after.set(from, to);
+  };
   let open: { style: string; fences: Array<[number, number]>; shown: boolean } | undefined;
   const close = () => {
-    if (open && !open.shown) {
-      for (const [start, end] of open.fences) {
-        const from = source(start);
-        const to = source(end);
-        if (from >= to) continue;
-        dropped.before.set(to, from);
-        dropped.after.set(from, to);
-      }
-    }
+    if (open && !open.shown) open.fences.forEach(drop);
     open = undefined;
   };
   // A paragraph of comment bodies only that Word doesn't get is no
@@ -1835,7 +1836,12 @@ function addUnshownStyleFences(tokens: MdToken[], source: (line: number) => numb
   const omitsCommentBodies = commentBodiesOmitted(tokens);
   let prev: MdToken | undefined;
   for (const [at, token] of tokens.entries()) {
-    if (omitsCommentBodies(at, prev)) continue;
+    if (omitsCommentBodies(at, prev)) {
+      // Not one split from a block, whose lines are the block's (see
+      // splitPart), which Word gets the rest of
+      if (token.sourceRange && !token.splitPart) drop(token.sourceRange);
+      continue;
+    }
     prev = token;
     const run = token.type === 'paragraph' && !token.listContinuation && token.runs.length === 1 ? token.runs[0] : undefined;
     const fence = run?.type === 'html_comment' ? styleFence(run.text) : undefined;
@@ -1933,7 +1939,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
   // Past the blocks list items dropped, so that the blank lines on either
   // side of one are the quote's
   const dropped = droppedBlocksOf(tokens, source);
-  addUnshownStyleFences(tokens, source, dropped);
+  addLinesWordLacks(tokens, source, dropped);
   const blankRunPastDropped = (from: number, step: 1 | -1) => blankLinesPastDropped(sourceLines, dropped, from, step);
   groups.forEach((group, g) => {
     if (!group) return;
