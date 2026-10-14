@@ -21837,9 +21837,6 @@ describe('HTML comments between Word runs', () => {
 
   test.each([
     ['at its paragraph\'s start', comment(' <!-- b --> ') + run('rest'), '&#32;<!-- b --> rest'],
-    // Whose label export writes, after which the comment would start the
-    // body's line, and an HTML block, which showed it
-    ['at the start of an alert\'s text', comment(' <!-- b --> ') + run('rest'), '> [!NOTE]\n> &#32;<!-- b --> rest', '> [!NOTE]\n> XX'],
     ['after a line break', run('a') + '<w:r><w:br/></w:r>' + comment('    <!-- b --> ') + run('rest'), 'a\\\n&#32;&#32;&#32;&#32;<!-- b --> rest'],
   ])('keeps the spaces of a comment\'s run %s, at a line\'s start', async (_name, runs, md, template = 'XX') => {
     // Which may be the indent of the HTML block export wrote it as, and
@@ -21850,6 +21847,79 @@ describe('HTML comments between Word runs', () => {
     const again = (await convertMdToDocx(markdown)).docx;
     expect((await shown(again)).join('')).not.toContain('&lt;!--');
     expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test('drops the spaces of a comment\'s run at the start of an alert\'s text, which its paragraph reads it in', async () => {
+    // Its line goes after four spaces, which keep the comment from starting
+    // an HTML block, so the space of its run, which Word hid, but the
+    // paragraph showed, before rest, goes too
+    const docx = await withRuns(comment(' <!-- b --> ') + run('rest'), '> [!NOTE]\n> XX');
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe('> [!NOTE]\n>     <!-- b -->rest\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  describe('drops the whitespace outside comments in the hidden runs that start', () => {
+    /** The text Word shows in each paragraph, with its tabs: the runs'
+     *  that aren't hidden */
+    const visible = async (docx: Uint8Array) => {
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)]
+        .map(p => [...p[0].matchAll(/<w:r(?: [^>]*)?>([\s\S]*?)<\/w:r>/g)].filter(r => !r[1].includes('<w:vanish/>'))
+          .map(r => [...r[1].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:tab\/>/g)].map(t => t[1] ?? '\t').join('')).join(''))
+        .filter(Boolean);
+    };
+    // The runs, and the Markdown of the first, which the text holds
+    const cases: Array<[string, string]> = [
+      [comment('<!-- a -->\t<!-- b -->') + run(' rest'), '<!-- a --><!-- b --> rest'],
+      [comment('<!-- a -->') + comment(' <!-- b -->') + run('rest'), '<!-- a --><!-- b -->rest'],
+      [comment(' <!-- a -->') + run('rest'), '<!-- a -->rest'],
+      [comment('<!-- a --> ') + run('rest'), '<!-- a -->rest'],
+    ];
+    // Comments alone, which each of these lines reads inline, and shows the
+    // space of
+    const alone: Array<[string, string]> = [[comment('<!-- a --> <!-- b -->'), '<!-- a --><!-- b -->']];
+    // Each line reads the comments that start it inline, as a paragraph's
+    // doesn't: a paragraph's, a quote's, a list item's and a note's keep
+    // the whitespace, as without it export reads the line as an HTML block.
+    // And all but the line after an alert's marker read them inline before
+    // nothing else too, where the space before them goes
+    const templates: Array<[string, string, boolean]> = [
+      ['a heading', '# XX', true],
+      ['an alert\'s text on the line after its marker', '> [!NOTE]\n> XX', false],
+      ['an alert\'s text on its marker\'s line', '> [!NOTE] XX', true],
+      ['a pipe table\'s cell', '| a |\n|---|\n| XX |', true],
+      ['a grid table\'s cell', '+----+\n| XX |\n+----+', true],
+      ['an HTML table\'s cell', '<table><tr><td colspan="2">XX</td></tr><tr><td>a</td><td>b</td></tr></table>', true],
+    ];
+    test.each(templates)('%s', async (_name, template, aloneInline) => {
+      for (const [runs, md] of [...cases, ...alone, ...aloneInline ? [[comment(' <!-- a -->'), '<!-- a -->']] : []]) {
+        const docx = await withRuns(runs, template);
+        const markdown = strip((await convertDocx(docx)).markdown);
+        // The comments' Markdown, as the cell's HTML has it, with a
+        // reference for a space the browser would drop
+        expect(markdown).toContain(template.startsWith('<table>') ? md.replace(/ rest$/, '&#32;rest') : md);
+        const again = (await convertMdToDocx(markdown)).docx;
+        expect(await visible(again)).toEqual(await visible(docx));
+        expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+      }
+    });
+
+    test('as Word shows them, whatever the runs and the place they start', async () => {
+      const space = fc.constantFrom('', ' ', '\t', '  ');
+      // Hidden runs of comments with whitespace around and between them,
+      // and the text after them
+      const hidden = fc.array(fc.tuple(space, fc.constantFrom('<!-- a -->', '<!-- b --> <!-- c -->', '<!-- d -->\t<!-- e -->'), space), { minLength: 1, maxLength: 3 });
+      await fc.assert(fc.asyncProperty(fc.constantFrom(...templates.map(([, template]) => template)), hidden, fc.constantFrom('rest', ' rest', '\trest'), async (template, runs, text) => {
+        const docx = await withRuns(runs.map(([before, comments, after]) => comment(before + comments + after)).join('') + run(text), template);
+        const markdown = strip((await convertDocx(docx)).markdown);
+        const again = (await convertMdToDocx(markdown)).docx;
+        expect(await visible(again)).toEqual(await visible(docx));
+        expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+      }), { numRuns: 300 });
+    }, 60_000);
   });
 
   test.each([
