@@ -447,6 +447,15 @@ export function findUncitableBibKeys(ranges: readonly BibtexSourceRange[]): Bibt
 	return ranges.filter(range => !isCitableKey(range.key));
 }
 
+/** The entries of a .bib file, as the parser read them (`ranges`), that give
+ *  a field more than once, which BibTeX reads the first of, but biber and
+ *  this extension the last (see BibtexSourceRange.repeatedFields) */
+export function findRepeatedBibFields(
+	ranges: readonly BibtexSourceRange[],
+): Array<BibtexSourceRange & { repeatedFields: string[] }> {
+	return ranges.filter((range): range is BibtexSourceRange & { repeatedFields: string[] } => range.repeatedFields !== undefined);
+}
+
 export function findBibKeyAtOffset(parsedBib: ParsedBibData, offset: number): string | undefined {
 	for (const [key, start] of parsedBib.keyOffsets) {
 		if (offset >= start && offset <= start + key.length) {

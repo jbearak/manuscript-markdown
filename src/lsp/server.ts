@@ -29,7 +29,7 @@ import {
 	TextDocuments,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { BibtexEntry, parseBibtexWithRaw } from '../bibtex-parser';
+import { BibtexEntry, BibtexSourceRange, parseBibtexWithRaw } from '../bibtex-parser';
 import { isCitableKey } from '../citation-syntax';
 
 // --- Implementation notes ---
@@ -53,6 +53,7 @@ import {
 	findBibFileFieldAtLine,
 	findBibKeyAtOffset,
 	findCitekeyAtOffset,
+	findRepeatedBibFields,
 	findUncitableBibKeys,
 	findUsagesForKey,
 	formatFileEntryMarkdown,
@@ -947,14 +948,24 @@ function invalidateBibCache(uri: string): void {
 }
 
 /** Report each key of a .bib document that no citation can cite, as one
- *  with a ;, a ] or a backtick (see findUncitableBibKeys) */
+ *  with a ;, a ] or a backtick (see findUncitableBibKeys), and each whose
+ *  entry gives a field more than once (see findRepeatedBibFields) */
 function validateBibKeys(doc: TextDocument): void {
-	const diagnostics: Diagnostic[] = findUncitableBibKeys(parseBibtexWithRaw(doc.getText()).ranges).map(range => ({
+	const ranges = parseBibtexWithRaw(doc.getText()).ranges;
+	const atKey = (range: BibtexSourceRange, message: string): Diagnostic => ({
 		severity: DiagnosticSeverity.Warning,
 		range: Range.create(doc.positionAt(range.keyStart), doc.positionAt(range.keyEnd)),
-		message: 'Citation key "' + range.key + '" can\'t be cited from Markdown: a citation doesn\'t read a key with a ;, a ] or a backtick whole.',
+		message,
 		source: 'manuscript-markdown',
-	}));
+	});
+	const diagnostics: Diagnostic[] = findUncitableBibKeys(ranges).map(range => atKey(range,
+		'Citation key "' + range.key + '" can\'t be cited from Markdown: a citation doesn\'t read a key with a ;, a ] or a backtick whole.'));
+	for (const range of findRepeatedBibFields(ranges)) {
+		const names = range.repeatedFields.map(name => '"' + name + '"').join(', ');
+		const fields = range.repeatedFields.length === 1 ? 'field ' + names : 'fields ' + names;
+		diagnostics.push(atKey(range,
+			'Entry "' + range.key + '" gives the ' + fields + ' more than once: BibTeX reads the first, but biber and this extension read the last.'));
+	}
 	bibKeyDiagnostics.set(doc.uri, diagnostics);
 	publishDiagnostics(doc.uri);
 }

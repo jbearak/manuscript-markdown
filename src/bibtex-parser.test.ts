@@ -1825,3 +1825,98 @@ describe('citation keys', () => {
     expect(mergeBibtex(existing, merged)).toBe(merged);
   });
 });
+
+describe('entry types', () => {
+  // Which the parser read as a word, as \w+, right after the @, where
+  // BibTeX reads an identifier there (bibtex.web's scan_identifier), after
+  // any white space: so an entry whose type has a hyphen, a colon, a period
+  // or a letter of another language, or white space after its @, was no
+  // entry; and a type that starts with a digit, which BibTeX reads as none,
+  // was one
+  it.each([
+    ['a hyphen', '@my-type{k, title = {T}}', [['k', 'my-type', 'T']]],
+    ['a colon and a period', '@x:y.z{k, title = {T}}', [['k', 'x:y.z', 'T']]],
+    ['a letter of another language', '@artículo{k, title = {T}}', [['k', 'artículo', 'T']]],
+    ['white space after its @, and line ends', '@ article\n{k, title = {T}}', [['k', 'article', 'T']]],
+    ['a hyphen, in parens', '@my-type(k, title = {T})', [['k', 'my-type', 'T']]],
+    ['a digit at its start', '@2article{k, title = {T}}\n@book{b, title = {U}}', [['b', 'book', 'U']]],
+    // Guards: a type of letters, and an @ in prose before an entry
+    ['letters', '@Article{k, title = {T}}', [['k', 'article', 'T']]],
+    ['an @ in prose before an entry', 'Write to me@example.com.\n@book{b, title = {U}}', [['b', 'book', 'U']]],
+  ])('reads an entry whose type has %s as BibTeX does', (_name, input, expected) => {
+    expect([...parseBibtex(input)].map(([key, entry]) => [key, entry.type, entry.fields.get('title')])).toEqual(expected);
+  });
+
+  // Which found the body of an entry whose type has a hyphen by `@\w+`, so
+  // found none: the merge wrote a field it copies from its parsed value, a
+  // macro as text, and Zotero link refused to edit the entry
+  it('copies and edits the fields of an entry whose type has a hyphen', () => {
+    const existing = '@my-type{k,\n  title = {T},\n  month = jan\n}';
+    expect(extractRawField(existing, 'month')).toBe('  month = jan,');
+    expect(mergeBibtex(existing, '@my-type{k,\n  title = {T}\n}')).toBe(existing);
+    expect(scanBibtexEntryBody('@my-type{k,\n  doi = {10.1/a}\n}')).toMatchObject({ unbalanced: false });
+  });
+
+  it('reads the type of an entry with white space after its @ where it is, for Zotero link', () => {
+    const raw = '@ my-type{k,\n  doi = {10.1/a}\n}';
+    const { entryType, fields } = scanBibtexEntryBody(raw);
+    expect(entryType).toEqual({ raw: 'my-type', start: 2, end: 9 });
+    expect(fields.map(field => field.name)).toEqual(['doi']);
+  });
+
+  // Which took a header whose type has a hyphen for no header, so the line
+  // end that told which the file's are was read from the entry after it
+  it('ends the text after an entry at a header whose type has a hyphen', () => {
+    expect(detectBibtexEol('@article{a, note = {x\ny}}   @my-type{b, t = {A\r\nB}}'))
+      .toBe(detectBibtexEol('@article{a, note = {x\ny}}   @book{b, t = {A\r\nB}}'));
+  });
+
+  // Each @ in a run of an identifier's characters, which BibTeX reads in
+  // one, is read once
+  it.each([
+    ['in the text between entries', (n: number) => '@x'.repeat(n) + '\n@book{b, title = {U}}'],
+    ['after an entry, before a line end', (n: number) => '@article{a, note = {x\ny}}' + '@x'.repeat(n) + '\r\n'],
+    ['that start with digits', (n: number) => '@1x'.repeat(n) + '\n@book{b, title = {U}}'],
+  ])('reads a run of @s %s in linear time', (_name, text) => {
+    const time = (n: number) => {
+      const input = text(n);
+      // Each run reads the text ten times, as one read takes too little
+      // time for a pause to be lost in it
+      return fastestRun(() => {
+        for (let k = 0; k < 10; k++) {
+          parseBibtex(input);
+          detectBibtexEol(input);
+        }
+      }, 5);
+    };
+    // At sizes where a run takes long enough that the timer's noise
+    // doesn't decide the ratio, and a quadratic read still takes seconds
+    time(16000);
+    const small = time(16000);
+    expect(time(64000) / small).toBeLessThan(8);
+  }, 30000);
+});
+
+describe('repeated fields', () => {
+  // BibTeX reads the first of a field given twice and warns ("I'm ignoring
+  // k's extra "title" field"), but biber reads the last, with no warning, as
+  // Text::BibTeX stores each value under its name in turn, and this parser
+  // reads the last as biber does. Each name an entry gives more than once is
+  // reported, once, as BibTeX compares names, in lower case
+  it.each([
+    ['a field given twice', '@article{k, title = {A}, title = {B}}', ['title'], 'B'],
+    ['a field given twice, in other cases', '@article{k, title = {A}, TITLE = {B}}', ['title'], 'B'],
+    ['a field given three times', '@article{k, title = {A}, title = {B}, title = "C"}', ['title'], 'C'],
+    ['two fields each given twice', '@article{k, year = 1, title = {A}, year = 2, title = {B}}', ['year', 'title'], 'B'],
+    ['no field given twice', '@article{k, title = {A}, year = 2020}', undefined, 'A'],
+  ])('reports %s', (_name, text, repeated, title) => {
+    const { parsed, ranges } = parseBibtexWithRaw(text);
+    expect(ranges[0].repeatedFields).toEqual(repeated);
+    expect(parsed.get('k')?.fields.get('title')).toBe(title);
+  });
+
+  it('reports a repeated field for each entry that has one', () => {
+    const { ranges } = parseBibtexWithRaw('@article{a, title = {A}}\n@book{b, note = {x}, note = {y}}\n@misc{c, Note = 1, note = 2}');
+    expect(ranges.map(range => range.repeatedFields)).toEqual([undefined, ['note'], ['note']]);
+  });
+});

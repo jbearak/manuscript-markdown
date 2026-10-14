@@ -2,6 +2,8 @@ import { describe, it, expect } from 'bun:test';
 import * as formatting from './formatting';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as fc from 'fast-check';
+import { readCitationItems } from './citation-syntax';
 
 describe('Command Handler Unit Tests', () => {
   
@@ -359,5 +361,105 @@ describe('Syntax grammar invariants', () => {
     const commentWithIdRule = grammar?.repository?.comment_with_id;
     expect(commentWithIdRule).toBeDefined();
     expect(commentWithIdRule.contentName).toMatch(/^meta\.comment/);
+  });
+});
+
+describe('Syntax grammar citation keys', () => {
+  const grammar = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json'), 'utf-8'));
+  const rule = grammar.repository.citation_list;
+  // A pattern of the grammar's as a JS regex: Oniguruma's possessive
+  // quantifiers as greedy ones, which match the same here, and \G, where
+  // the begin pattern's match ended, as right after the [ a line starts
+  // with, which each line here does
+  const asRegExp = (source: string, flags: string) => new RegExp(source.replace(/([+*?])\+/g, '$1').replace(/\\G/g, '(?<=^\\[)'), flags);
+  const KEY_SCOPE = 'support.function.citation.manuscript-markdown';
+
+  /** The keys the grammar colors in `line`, a citation on one line, each
+   *  with where it starts: from after the [ its begin pattern reads, at
+   *  each step the earliest match of its end or of a pattern in it, its
+   *  end first where they tie, as vscode-textmate scans, from where the
+   *  last ended; and of each match, the text in the key's scope, but for
+   *  the @ that starts it */
+  const coloredKeys = (line: string): Array<[number, string]> => {
+    if (!asRegExp(rule.begin, 'yu').test(line)) return [];
+    const end = asRegExp(rule.end, 'gdu');
+    const patterns = (rule.patterns as Array<{ match: string; name?: string; captures?: Record<string, { name?: string }> }>)
+      .map(pattern => ({ ...pattern, regex: asRegExp(pattern.match, 'gdu') }));
+    const keys: Array<[number, string]> = [];
+    for (let at = 1; at < line.length;) {
+      end.lastIndex = at;
+      let best = end.exec(line);
+      let bestPattern: (typeof patterns)[number] | undefined;
+      for (const pattern of patterns) {
+        pattern.regex.lastIndex = at;
+        const match = pattern.regex.exec(line);
+        if (match && (!best || match.index < best.index)) {
+          best = match;
+          bestPattern = pattern;
+        }
+      }
+      if (!best || !bestPattern) break;
+      const ranges: Array<[number, number]> = bestPattern.name === KEY_SCOPE ? [best.indices![0]] : [];
+      for (const [group, capture] of Object.entries(bestPattern.captures ?? {})) {
+        const range = best.indices![Number(group)];
+        if (capture.name === KEY_SCOPE && range && range[0] < range[1]) ranges.push(range);
+      }
+      ranges.sort((a, b) => a[0] - b[0]);
+      if (ranges.length > 0) {
+        const start = line[ranges[0][0]] === '@' ? ranges[0][0] + 1 : ranges[0][0];
+        const stop = ranges[ranges.length - 1][1];
+        const first = ranges.find(range => range[1] > start);
+        if (first && start < stop) keys.push([Math.max(start, first[0]), line.slice(Math.max(start, first[0]), stop)]);
+      }
+      at = Math.max(best.index + best[0].length, at + 1);
+    }
+    return keys;
+  };
+  // The keys export reads in it, each with where it starts (see
+  // readCitationItem)
+  const readKeys = (line: string): Array<[number, string]> => readCitationItems(line.slice(1, line.indexOf(']')))
+    .filter(item => item.markStart !== -1 && item.key)
+    .map(item => [1 + item.itemStart + item.keyStart, item.key]);
+
+  // Which colored a key's letters, digits, _, : and -, so only smith of
+  // smith.2020, where export reads a key to its item's comma
+  it.each([
+    ['a period', '[@smith.2020]'],
+    ['a slash, after a prefix, before a locator', '[see @a/b, p. 3]'],
+    ['letters of another language', '[@\u00E9t\u00E9; -@b2]'],
+    ['an @ in it, and an @ in a prefix', '[me@x.com @a@b]'],
+    ['a space after its @', '[@ smith]'],
+    ['an @ in its locator', '[@a, see @b; @c]'],
+    ['an @ after a [ in its locator', '[@a, [ @b]'],
+    ['an @ after a [ that starts an item', '[@a; [@b; x [@c]'],
+  ])('colors a key with %s as export reads it', (_name, line) => {
+    expect(coloredKeys(line)).toEqual(readKeys(line));
+    expect(coloredKeys(line).length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The grammar colors each key of a citation on one line as export reads
+   * it (see readCitationItem): after the @ at its item's start or after a
+   * space, to its item's comma, without the spaces at its edges, and none
+   * in a prefix or a locator.
+   */
+  it('colors each key of a citation as export reads it', () => {
+    const word = fc.array(fc.constantFrom('a', 'Z', '0', '_', '.', '/', ':', '-', '+', "'", '\u00E9', '@', '[', '`', '\\', '#', '$', '&'), { minLength: 1, maxLength: 4 })
+      .map(chars => chars.join(''));
+    const words = fc.array(word, { minLength: 1, maxLength: 3 }).map(parts => parts.join(' '));
+    const item = fc.tuple(fc.option(words, { nil: undefined }), fc.constantFrom('', '-'), fc.constantFrom('', ' '), words, fc.option(words, { nil: undefined }), fc.constantFrom('', ' '))
+      .map(([prefix, dash, space, key, locator, pad]) => pad + (prefix ? prefix + ' ' : '') + dash + '@' + space + key + (locator ? ', ' + locator : '') + pad);
+    fc.assert(
+      fc.property(fc.array(item, { minLength: 1, maxLength: 3 }), items => {
+        const line = '[' + items.join(';') + ']';
+        // A citation the grammar reads as one, at its [
+        if (!asRegExp(rule.begin, 'yu').test(line)) return true;
+        const colored = coloredKeys(line);
+        const read = readKeys(line);
+        if (JSON.stringify(colored) !== JSON.stringify(read)) throw new Error(JSON.stringify(line) + ' colored ' + JSON.stringify(colored) + ', not ' + JSON.stringify(read));
+        return true;
+      }),
+      { numRuns: 3000 }
+    );
   });
 });

@@ -8437,6 +8437,33 @@ describe('Zotero items with the same title and year', () => {
   });
 });
 
+describe('Zotero citation keys no citation can cite', () => {
+  const body = (field: string) => wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">x </w:t></w:r>' + field + '</w:p>');
+  const fieldOf = (itemData: object) => zoteroFieldOf([{ id: 1, uris: ['http://zotero.org/users/1/items/AAAAAAA1'], itemData: { id: 1, ...itemData } }]);
+
+  // Import keeps an item's stored key even where no citation reads it whole:
+  // a key it made in its place could be the key of another item's entry in
+  // the stored .bib, or empty
+  test('cites an item by its stored key where the key import would make is a stored entry\'s', async () => {
+    const customXml = '<?xml version="1.0"?>'
+      + '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+      + '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="MANUSCRIPT_BIB_DATA_1">'
+      + '<vt:lpwstr>@article{smith2020test,\n  title = {Another},\n}\n</vt:lpwstr>'
+      + '</property>'
+      + '</Properties>';
+    const field = fieldOf({ type: 'article-journal', title: 'Test', author: [{ family: 'Smith', given: 'Alice' }], issued: { 'date-parts': [['2020']] }, 'citation-key': 'bad`key' });
+    const result = await convertDocx(await buildSyntheticDocx(body(field), { 'docProps/custom.xml': customXml }));
+    expect(result.markdown).toBe('x [@bad`key]\n');
+    expect([...parseBibtex(result.bibtex).keys()]).toEqual(['smith2020test', 'bad`key']);
+  });
+
+  test('cites an undated item by its stored key where import would make it no key', async () => {
+    const field = fieldOf({ type: 'book', title: 'T', author: [{ family: '张' }], 'citation-key': 'a`b' });
+    const result = await convertDocx(await buildSyntheticDocx(body(field)), 'authorYear');
+    expect(result.markdown).toBe('x [@a`b]\n');
+  });
+});
+
 describe('Zotero items cited in more than one field', () => {
   const body = (fields: string[]) => wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">x </w:t></w:r>'
     + fields.join('<w:r><w:t xml:space="preserve"> and </w:t></w:r>') + '</w:p>');

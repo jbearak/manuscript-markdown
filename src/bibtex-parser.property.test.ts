@@ -482,3 +482,87 @@ describe('BibTeX merge into entries with no fields', () => {
     );
   });
 });
+
+describe('BibTeX entry types and repeated fields', () => {
+  /**
+   * An entry's header is read where bibtex.web reads one: from each @, white
+   * space, the type, which scan_identifier reads, a run of characters none of
+   * which id_class makes illegal (the controls, the space and "#%'(),={})
+   * that doesn't start with a digit, white space, and a { or (. Where that
+   * fails, BibTeX reads on for the next @ from where it failed: where the type
+   * should start, or the character after it that is none of these. The
+   * parser reads a space other than ASCII's, as a no-break space, as white
+   * space, which BibTeX doesn't (see BIBTEX_IDENTIFIER_CHAR), so this does
+   * too. With no { or ( in the type, as the entry's { is the only one, and no
+   * %, which the parser reads a comment after.
+   */
+  it('reads an entry where bibtex.web reads its header, and not where it does not', () => {
+    const illegal = new Set(['"', '#', '%', "'", '(', ')', ',', '=', '{', '}']);
+    const isWhite = (c: string | undefined) => c !== undefined && /\s/.test(c);
+    const isIdentifierChar = (c: string) => c.charCodeAt(0) > 31 && !isWhite(c) && !illegal.has(c);
+    const bibtexReadsHeader = (text: string) => {
+      let p = 0;
+      for (;;) {
+        const at = text.indexOf('@', p);
+        if (at === -1) return false;
+        p = at + 1;
+        while (isWhite(text[p])) p++;
+        const typeStart = p;
+        if (p < text.length && !/[0-9]/.test(text[p])) {
+          while (p < text.length && isIdentifierChar(text[p])) p++;
+        }
+        if (p === typeStart) continue;
+        while (isWhite(text[p])) p++;
+        if (text[p] === '{' || text[p] === '(') return true;
+      }
+    };
+    const char = fc.constantFrom('a', 'Z', '1', '-', ':', '.', '_', '+', '@', '!', '\u00E9', '\u00A0', ' ', '\t', '\n', '"', '#', "'", ')', ',', '=', '}', '\u0001');
+    fc.assert(
+      fc.property(fc.array(char, { maxLength: 8 }).map(chars => chars.join('')), type => {
+        const text = '@' + type + '{k, title = {A}}';
+        const header = bibtexReadsHeader(text);
+        if (parseBibtex(text).has('k') !== header) throw new Error(JSON.stringify(type) + (header ? ' read no entry' : ' read an entry'));
+        return true;
+      }),
+      { numRuns: 5000 }
+    );
+  });
+
+  /**
+   * An entry that gives a field more than once, in any case, reads the last
+   * of each, as biber does, and reports the names given more than once, in
+   * lower case, in the order of each one's second.
+   */
+  it('reads the last of a repeated field and reports the names given more than once', () => {
+    const field = fc.record({
+      name: fc.constantFrom('title', 'Title', 'TITLE', 'year', 'Year', 'note', 'a-b'),
+      value: fc.constantFrom('A', 'B', '1', 'x y'),
+    });
+    fc.assert(
+      fc.property(fc.array(field, { minLength: 1, maxLength: 8 }), fields => {
+        const text = '@misc{k, ' + fields.map(f => f.name + ' = {' + f.value + '}').join(', ') + '}';
+        const { parsed, ranges } = parseBibtexWithRaw(text);
+        const last = new Map<string, string>();
+        const seen = new Set<string>();
+        const repeated: string[] = [];
+        for (const f of fields) {
+          const name = f.name.toLowerCase();
+          if (seen.has(name) && !repeated.includes(name)) repeated.push(name);
+          seen.add(name);
+          last.set(name, f.value);
+        }
+        const entry = parsed.get('k');
+        if (!entry) throw new Error(text + ' read no entry');
+        for (const [name, value] of last) {
+          if (entry.fields.get(name) !== value) throw new Error(text + ' read ' + name + ' as ' + entry.fields.get(name) + ', not ' + value);
+        }
+        const reported = ranges[0].repeatedFields;
+        if (JSON.stringify(reported) !== JSON.stringify(repeated.length > 0 ? repeated : undefined)) {
+          throw new Error(text + ' reported ' + JSON.stringify(reported) + ', not ' + JSON.stringify(repeated));
+        }
+        return true;
+      }),
+      { numRuns: 2000 }
+    );
+  });
+});
