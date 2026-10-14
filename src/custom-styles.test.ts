@@ -846,15 +846,66 @@ describe('Custom Styles — List items', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
-  it('keeps the blank lines of the fences after two blocks of a style the bibliography\'s place parts, as before', async () => {
+  const fencesAfter = 'D.\n\n<!-- style: box -->\n\n\nE.\n\n\n<!-- /style -->\n\nF.\n';
+  const parted = (text: string, style = 'box') => '<!-- style: ' + style + ' -->\n\n' + text + '\n\n<!-- /style -->\n\n';
+  it.each([
+    ['at the end of the first', parted('B.\n\n<!-- references -->') + parted('C.'), parted('B.') + '<!-- references -->\n\n' + parted('C.')],
+    ['before the first paragraph of the second', parted('B.') + parted('<!-- references -->\n\nC.'), parted('B.') + '<!-- references -->\n\n' + parted('C.')],
+    ['before the first paragraph of the second, after a quote between those of the first', parted('B.\n\n> q\n\nB2.') + parted('<!-- references -->\n\nC.'), parted('B.\n\n> q\n\nB2.') + '<!-- references -->\n\n' + parted('C.')],
+  ])('keeps the blank lines of the fences after two blocks of a style the bibliography\'s place parts, %s', async (_name, md, expected) => {
     // Import closes the block at the bibliography's place and opens another
     // after it, so it writes both fences there, and each fence keeps its
-    // own place
-    const after = 'D.\n\n<!-- style: box -->\n\n\nE.\n\n\n<!-- /style -->\n\nF.\n';
-    const md = twoStyles + '<!-- style: box -->\n\nB.\n\n<!-- references -->\n\n<!-- /style -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n' + after;
-    const expected = twoStyles + '<!-- style: box -->\n\nB.\n\n<!-- /style -->\n\n<!-- references -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n' + after;
+    // own place: it reads neither block as going on from the other
+    const markdown = (await convertDocx((await convertMdToDocx(twoStyles + md + fencesAfter)).docx)).markdown;
+    expect(markdown).toBe(twoStyles + expected + fencesAfter);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  it.each([
+    ['between two paragraphs', parted('B.\n\n<!-- references -->\n\nC.'), parted('B.\n\n<!-- /style -->\n\n<!-- references -->\n\n<!-- style: box -->\n\nC.')],
+    ['with two blank lines on each side', parted('B.\n\n\n<!-- references -->\n\n\nC.'), parted('B.\n\n<!-- /style -->\n\n\n<!-- references -->\n\n\n<!-- style: box -->\n\nC.')],
+    ['before an item of a list', parted('B.\n\n<!-- references -->\n\n- C.'), parted('B.\n\n<!-- /style -->\n\n<!-- references -->\n\n<!-- style: box -->\n\n- C.')],
+    ['after an item of a list', parted('- B.\n\n<!-- references -->\n\nC.'), parted('- B.\n\n<!-- /style -->\n\n<!-- references -->\n\n<!-- style: box -->\n\nC.')],
+    ['and a section after it', parted('B.\n\n<!-- references -->\n\nC.\n\n<!-- landscape -->\n\nL.\n\n<!-- /landscape -->\n\nC2.'),
+      parted('B.\n\n<!-- /style -->\n\n<!-- references -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n\n<!-- landscape -->\n\n<!-- style: box -->\n\nL.\n\n<!-- /style -->\n\n<!-- /landscape -->\n\n<!-- style: box -->\n\nC2.')],
+    ['before a block of another style and one of its style', parted('B.\n\n<!-- references -->\n\nC.') + parted('X.', 'note') + parted('Y.'),
+      parted('B.\n\n<!-- /style -->\n\n<!-- references -->\n\n<!-- style: box -->\n\nC.') + parted('X.', 'note') + parted('Y.')],
+  ])('keeps the blank lines of the fences after a style block with the bibliography\'s place in it, %s', async (_name, md, expected) => {
+    // Import closes the block at the bibliography's place and opens it
+    // again after it, as at a section's fence, with fences export counted
+    // no place for, so each fence after took the blank lines of the one
+    // before it, or none
+    const markdown = (await convertDocx((await convertMdToDocx(twoStyles + md + fencesAfter)).docx)).markdown;
+    expect(markdown).toBe(twoStyles + expected + fencesAfter);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  it('writes the opening fence after the bibliography\'s place in a style block that runs to the document\'s end with a blank line after it', async () => {
+    // Export counted no place for it, so it had no blank line after it
+    const md = twoStyles + '<!-- style: box -->\n\nB.\n\n<!-- references -->\n\nC.\n';
     const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
-    expect(markdown).toBe(expected);
+    expect(markdown).toBe(twoStyles + '<!-- style: box -->\n\nB.\n\n<!-- /style -->\n\n<!-- references -->\n\n<!-- style: box -->\n\nC.\n\n<!-- /style -->\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  const noteAfter = 'D.\n\n<!-- style: note -->\n\n\nN.\n\n\n<!-- /style -->\n\nF.\n';
+  it.each([
+    ['a section\'s fence before the bibliography\'s place in its block', 'A.\n\n<!-- style: box -->\n\n<!-- landscape -->\n\nL.\n\n<!-- /landscape -->\n\n<!-- references -->\n\nP9.\n\n<!-- /style -->\n\n' + parted('P16.'),
+      'A.\n\n<!-- landscape -->\n\n<!-- style: box -->\n\nL.\n\n<!-- /style -->\n\n<!-- /landscape -->\n\n<!-- references -->\n\n' + parted('P9.\n\nP16.'), fencesAfter],
+    ['a block of only a heading before them', parted('# H') + parted('B.\n\n<!-- references -->\n\nC.') + parted('C2.'), '# H\n\n' + parted('B.') + '<!-- references -->\n\n' + parted('C.\n\nC2.'), fencesAfter],
+    ['a section\'s fence in the first, before a block with the bibliography\'s place', parted('C.\n\n<!-- landscape -->\n\nL.\n\n<!-- /landscape -->\n\nP16.') + parted('P17.') + 'G.\n\n' + parted('B.\n\n<!-- references -->\n\nP9.'),
+      parted('C.\n\n<!-- /style -->\n\n<!-- landscape -->\n\n<!-- style: box -->\n\nL.\n\n<!-- /style -->\n\n<!-- /landscape -->\n\n<!-- style: box -->\n\nP16.\n\nP17.') + 'G.\n\n' + parted('B.') + '<!-- references -->\n\n' + parted('P9.'), fencesAfter],
+    ['the second ending in a section after the bibliography\'s place, before another', 'Z.\n\n' + parted('A.') + parted('B.\n\n<!-- references -->\n\n<!-- landscape -->\n\nL.\n\n<!-- /landscape -->') + parted('C4.'),
+      'Z.\n\n' + parted('A.\n\nB.') + '<!-- references -->\n\n<!-- landscape -->\n\n' + parted('L.') + '<!-- /landscape -->\n\n' + parted('C4.'), noteAfter],
+    ['a block of only the bibliography\'s place before them, the second with a quote between its paragraphs', 'Z.\n\n' + parted('<!-- references -->') + parted('A.') + parted('B.\n\n> q\n\nC.'),
+      'Z.\n\n<!-- references -->\n\n' + parted('A.\n\nB.') + '> q\n\n' + parted('C.'), noteAfter],
+  ])('keeps the blank lines of the fences, as before, in a document with the bibliography\'s place in a style block and two blocks of a style import reads as one, with %s', async (_name, md, expected, after) => {
+    // Import writes no fences between such blocks, and the places they
+    // take as two where export can't count blocks as import does made up
+    // for those of the fences import writes at the bibliography's place,
+    // which export counts none for in such a document, as before
+    const markdown = (await convertDocx((await convertMdToDocx(twoStyles + md + after)).docx)).markdown;
+    expect(markdown).toBe(twoStyles + expected + after);
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
