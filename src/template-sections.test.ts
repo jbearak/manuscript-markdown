@@ -569,6 +569,24 @@ describe('a template\'s headers and footers', () => {
     expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS]);
   });
 
+  // A sectPr holds elements alone, with whitespace between them (CT_SectPr),
+  // so what else the template's last one holds as text, a CDATA section's or
+  // other, goes from each section export writes, in it and in a property of
+  // it, and its properties stay
+  it.each([
+    ['a CDATA section', '<![CDATA[<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>]]>'],
+    ['other text', 'stray'],
+  ])('leave out %s the template\'s last section holds', async (_name, text) => {
+    const templateDocx = await editTemplate(await headerTemplate(), 'word/document.xml', xml => xml.replace('<w:cols w:space="720"/><w:titlePg/>',
+      () => text + '<w:pgBorders>' + text + '<w:top w:val="single" w:sz="4" w:space="24" w:color="auto"/></w:pgBorders>\n  <w:cols w:space="720"/><w:titlePg/>'));
+    const { docx } = await convertMdToDocx(LANDSCAPE_MD, { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    const sectPrs = [...(await textOf(await JSZip.loadAsync(docx), 'word/document.xml'))!.matchAll(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g)].map(([sectPr]) => sectPr);
+    expect(sectPrs.length).toBeGreaterThan(1);
+    for (const sectPr of sectPrs) expect(sectPr.replace(/<[^>]*>/g, '').trim()).toBe('');
+    expect(sectPrs[sectPrs.length - 1]).toContain('<w:pgBorders><w:top w:val="single" w:sz="4" w:space="24" w:color="auto"/></w:pgBorders>');
+  });
+
   // Its numId read as import reads it, by its value (see xmlInteger)
   it.each([
     ['a plus sign', '+3'],
