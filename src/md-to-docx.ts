@@ -825,6 +825,19 @@ export function directiveRest(comment: string): string | undefined {
   return reads ? '' : undefined;
 }
 
+// The start of each comment export or a preprocessor of its may read as a
+// directive, valid or not: a section's (see ORIENTATION_OPEN_RE and
+// orientation-scan.ts), a style block's fence (style-fence.ts), a table's,
+// an embed (EMBED_RE in embed-preprocess.ts), references or an indent
+const DIRECTIVE_START_RE = /<!--\s*(?:\/?(?:landscape|portrait|style)|table-|embed:|references|bibliography|indent|no-indent)/i;
+
+/** Whether Markdown `text` holds, anywhere, a comment that starts as a
+ *  directive does, which export may read as one where the comment is a
+ *  block of its own, as it reads any of them (see directiveRest) */
+export function holdsDirective(text: string): boolean {
+  return DIRECTIVE_START_RE.test(text);
+}
+
 /** Whether export reads Markdown `text` as one paragraph over all its lines */
 export function readsAsParagraph(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
@@ -896,6 +909,31 @@ export function readsCommentsInline(text: string, payloads: string[], merge = fa
   const expected = alone.flat();
   return whole && read.length === expected.length && read.every((comment, k) => comment === expected[k])
     || merge && read.join('') === payloads.join('');
+}
+
+/** What export reads of Markdown `markdown`, a paragraph's as import may
+ *  write it: the text of its HTML comments, which Word hides, and the text
+ *  Word shows, both without whitespace, with each line break in it as a
+ *  NUL, which no text holds, so where each is goes with the text, or null
+ *  where it reads anything but paragraphs of text, line breaks and
+ *  comments, as a heading, a list, code, raw HTML, an equation or a
+ *  tracked change. A line end in a paragraph, which Word shows as a space,
+ *  is whitespace. Read before a paragraph of its own, a z, to which a
+ *  directive before it applies, which export then takes out, so its
+ *  comment is in neither */
+export function exportReads(markdown: string): { hidden: string; shown: string } | null {
+  let hidden = '';
+  let shown = '';
+  for (const token of parseMd(markdown + '\n\nz\n', [])) {
+    if (token.type !== 'paragraph') return null;
+    for (const run of token.runs) {
+      if (run.type === 'html_comment') hidden += run.text;
+      else if (run.type === 'text' && !run.rawHtml) shown += run.text;
+      else if (run.type === 'hardbreak') shown += '\0';
+      else if (run.type !== 'softbreak') return null;
+    }
+  }
+  return { hidden: hidden.replace(/\s+/g, ''), shown: shown.replace(/\s+/g, '') };
 }
 
 /** The blocks export reads in Markdown `markdown`, each with its kind and

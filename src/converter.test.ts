@@ -38,7 +38,8 @@ import {
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
 import { fastestRun, fastestRunAsync } from './test-timing';
-import { annotateHtmlCommentIndices, convertMdToDocx, parseMd, templateStyleIds } from './md-to-docx';
+import { annotateHtmlCommentIndices, convertMdToDocx, directiveRest, exportReads, holdsDirective, parseMd, templateStyleIds } from './md-to-docx';
+import { parseEmbedDirective } from './embed-preprocess';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractAllDecorationRanges } from './highlight-colors';
@@ -21258,21 +21259,152 @@ describe('HTML comments between Word runs', () => {
     expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
   });
   test.each([
-    ['a blank line', '<!-- a\n\nb -->', 'Source\\\n<!-- a\n\nb -->'],
+    // In an HTML block of its own after the paragraph, which the break ends
+    ['a blank line', '<!-- a\n\nb -->', 'Source<br>\n\n<!-- a\n\nb -->'],
     // Which a paragraph holds with the line indented
     ['a rule', '<!-- a\n---\nb -->', 'Source<br><!-- a\n    ---\nb -->'],
     ['a heading', '<!-- a\n# b -->', 'Source<br><!-- a\n    # b -->'],
     // Which keeps its lines as they are in the block
-    ['a heading and a blank line', '<!-- a\n# b\n\nc -->', 'Source\\\n<!-- a\n# b\n\nc -->'],
+    ['a heading and a blank line', '<!-- a\n# b\n\nc -->', 'Source<br>\n\n<!-- a\n# b\n\nc -->'],
   ])('keeps a comment with %s in it after a line break hidden', async (_name, text, md) => {
-    // In the block it starts where a paragraph doesn't hold it after a
-    // <br>, which showed its text
+    // In the block it started after the \ and line end, the \ was the
+    // paragraph's text, which the next export showed
     const docx = await withRuns(run('Source') + lineBreak + commentLines(text));
     const markdown = strip((await convertDocx(docx)).markdown);
     expect(markdown).toBe(md + '\n');
     const again = (await convertMdToDocx(markdown)).docx;
-    expect((await shown(again)).join('')).not.toContain('&lt;!--');
+    expect((await shown(again)).join('')).toBe('Source');
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
   });
+
+  /** The line breaks Word shows: those of runs that aren't hidden */
+  const shownBreaks = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).matchAll(/<w:r>([\s\S]*?)<\/w:r>/g)]
+    .filter(([, inner]) => !inner.includes('<w:vanish/>')).reduce((count, [, inner]) => count + (inner.match(/<w:br\/>/g) ?? []).length, 0);
+  test.each([
+    // Whose line ends, outside the comment, Word hides, as the block does
+    ['with a line end after it in its run', 'XX', commentLines('<!-- a\n\nb -->\n'), 'Source<br>\n\n<!-- a\n\nb -->', ['Source']],
+    ['with a line end before it in its run', 'XX', commentLines('\n<!-- a\n\nb -->'), 'Source<br>\n\n<!-- a\n\nb -->', ['Source']],
+    ['with spaces around it in its run', 'XX', comment('  <!-- a\n\nb -->\t'), 'Source<br>\n\n<!-- a\n\nb -->', ['Source']],
+    // Each in a block of its own, as a block ends at its first line with a -->
+    ['after another comment', 'XX', comment('<!-- c -->') + commentLines('<!-- a\n\nb -->'), 'Source<br>\n\n<!-- c -->\n\n<!-- a\n\nb -->', ['Source']],
+    ['before the next paragraph', 'XX\n\nnext', commentLines('<!-- a\n\nb -->'), 'Source<br>\n\n<!-- a\n\nb -->\n\nnext', ['Source', 'next']],
+    ['after bold text', '**XX**', commentLines('<!-- a\n\nb -->'), '**Source**<br>\n\n<!-- a\n\nb -->', ['<w:b/>Source']],
+  ])('keeps a comment with a blank line in it after a line break at its paragraph\'s end hidden, %s', async (_name, md, runs, expected, words) => {
+    // In the block it started after the \ and line end, the \ was the
+    // paragraph's text, which the next export showed
+    for (const alwaysUseCommentIds of [false, true]) {
+      const source = run('Source', md.startsWith('**') ? '<w:b/>' : '');
+      let docx = await withRuns(source + lineBreak + runs, md);
+      for (let trip = 0; trip < 2; trip++) {
+        const markdown = strip((await convertDocx(docx, undefined, { alwaysUseCommentIds })).markdown);
+        expect(markdown).toBe(expected + '\n');
+        docx = (await convertMdToDocx(markdown)).docx;
+        expect(await shown(docx)).toEqual(words);
+        expect(await shownBreaks(docx)).toBe(1);
+      }
+    }
+  });
+
+  test.each([
+    // Which a block would take in, and show
+    ['before text', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->') + run('rest'), 'Source\\\n<!-- a\n\nb -->rest'],
+    ['before a line break', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->') + lineBreak, 'Source\\\n<!-- a\n\nb --><br>'],
+    // Which Word shows, at the line's start
+    ['after a space Word shows', 'XX', run('Source') + lineBreak + run(' ') + commentLines('<!-- a\n\nb -->'), 'Source\\\n <!-- a\n\nb -->'],
+    ['after spaces in its run', 'XX', run('Source') + lineBreak + commentLines('    <!-- a\n\nb -->'), 'Source\\\n&#32;&#32;&#32;&#32;<!-- a\n\nb -->'],
+    // Which export would read alone as a directive
+    ['before a directive', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb --><!-- indent -->'), 'Source\\\n<!-- a\n\nb --><!-- indent -->'],
+    // Text the hidden run holds between comments, and an empty comment
+    ['with hidden text before it', 'XX', run('Source') + lineBreak + commentLines('<!-- c -->x<!-- a\n\nb -->'), 'Source\\\n<!-- c -->x<!-- a\n\nb -->'],
+    ['after an empty comment', 'XX', run('Source') + lineBreak + commentLines('<!--><!-- a\n\nb -->'), 'Source\\\n<!--><!-- a\n\nb -->'],
+    ['after one that ends in --->', 'XX', run('Source') + lineBreak + commentLines('<!-- m ---><!-- a\n\nb -->'), 'Source\\\n<!-- m ---><!-- a\n\nb -->'],
+    // Whitespace Word shows after it, which blocks of their own would lose
+    ['before a tab Word shows and another comment', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->') + run('\t') + comment('<!-- c -->'), 'Source\\\n<!-- a\n\nb -->\t<!-- c -->'],
+    ['before a space Word shows and another comment', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->') + run(' ') + comment('<!-- c -->'), 'Source\\\n<!-- a\n\nb --> <!-- c -->'],
+    ['before a tab Word shows at its paragraph\'s end', 'XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->') + run('\t'), 'Source\\\n<!-- a\n\nb -->\t'],
+    ['in a paragraph with an equation', 'XX', run('Source ') + '<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>' + lineBreak + commentLines('<!-- a\n\nb -->'), 'Source $x$\\\n<!-- a\n\nb -->'],
+    ['in a heading', '# XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->'), '# Source\\\n<!-- a\n\nb -->'],
+    ['in a list item', '- XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->'), '- Source\\\n<!-- a\n\nb -->'],
+    ['in a quote', '> XX', run('Source') + lineBreak + commentLines('<!-- a\n\nb -->'), '> Source\\\n> <!-- a\n>\n> b -->'],
+  ])('writes a comment with a blank line in it after a line break as main does, %s', async (_name, md, runs, expected) => {
+    // Where import writes no HTML block of its own for it (see
+    // breakBeforeComment), or doesn't read the paragraph back alone (see
+    // plainParagraphs)
+    expect(strip((await convertDocx(await withRuns(runs, md))).markdown)).toBe(expected + '\n');
+  });
+
+  /** The sections of a document Word has, as each ends at a w:sectPr */
+  const sections = async (docx: Uint8Array) => ((await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).match(/<w:sectPr\b/g) ?? []).length;
+  test.each([
+    // Which export gave the table after the paragraph
+    ['a table\'s font', 'XX\n\n| a |\n| - |\n| 1 |', '<!-- table-font: Courier New -->', async (docx: Uint8Array) => /<w:tbl>(?:(?!<\/w:tbl>)[\s\S])*Courier New/.test(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))],
+    // Which closed the section the paragraph is in, before the next one
+    ['a section\'s end', '<!-- landscape -->\n\nXX\n\nnext\n\n<!-- /landscape -->', '<!-- /landscape -->', sections],
+    // Which export's preprocessing expands, with a file there
+    ['an embed', 'XX', '<!-- embed: t.csv -->', async (docx: Uint8Array) => (await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).includes('<w:tbl>')],
+  ])('writes a comment with a blank line in it after a line break, before one that is %s directive, as main does', async (_name, md, directive, reads) => {
+    // In a block of its own, export read the comment as a directive, which
+    // the paragraph, read alone, doesn't show
+    const docx = await withRuns(run('Source') + lineBreak + commentLines('<!-- c\n\nd -->' + directive), md);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toContain('Source\\\n<!-- c\n\nd -->' + directive + '\n');
+    const embedResolver = { readFile: () => new TextEncoder().encode('h\n1\n'), resolveRelative: (_base: string, relative: string) => relative };
+    const again = (await convertMdToDocx(markdown, { embedResolver, documentPath: '/doc/paper.md' })).docx;
+    expect(await reads(again)).toBe(await reads(docx));
+  });
+
+  test.each([
+    '<!-- landscape -->', '<!-- /portrait -->', '<!-- style: Title -->', '<!-- /style -->', '<!-- style: Title -->Text<!-- /style -->',
+    '<!-- table-font: Courier New -->', '<!-- table-font-size: 9 -->', '<!-- table-orientation: landscape -->', '<!-- table-col-widths: 1 2 -->',
+    '<!-- table-digits: 2 -->', '<!-- table-decimal-mark: comma -->', '<!-- table-digit-grouping: none -->',
+    '<!-- references -->', '<!-- bibliography -->', '<!-- indent -->', '<!-- no-indent -->', '<!-- embed: t.csv -->',
+  ])('takes %s, which export reads as a directive, for one before writing comments in blocks of their own', directive => {
+    expect(directiveRest(directive) !== undefined || parseEmbedDirective(directive) !== null).toBe(true);
+    // With space in it, and anywhere in a comment, after a blank line
+    expect(holdsDirective(directive.replace('<!-- ', '<!--\t'))).toBe(true);
+    expect(holdsDirective('<!-- a\n\n' + directive)).toBe(true);
+  });
+
+  test.each([
+    ['a line break', 'Source\\\nmore', 'Source\0more'],
+    ['a <br>', 'Source<br>more', 'Source\0more'],
+    ['a <br> at its paragraph\'s end, before a comment\'s block', 'Source<br>\n\n<!-- a\n\nb -->', 'Source\0'],
+    // Which Word shows as a space
+    ['a line end', 'Source\nmore', 'Sourcemore'],
+  ])('reads where %s is in a paragraph as export reads it back', (_name, md, shown) => {
+    // So a paragraph that loses one Word shows doesn't read as Word has it
+    expect(exportReads(md)?.shown).toBe(shown + 'z');
+  });
+
+  /** A paragraph's items: text, and hidden comments, as `<!--` starts */
+  const paragraphItems = (...texts: string[]): ContentItem[] => [{ type: 'para' }, ...texts.map((text): ContentItem => text.startsWith('<!--')
+    ? { type: 'html_comment', text, commentIds: new Set() } : { type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING })];
+  test.each([
+    // Each read back as export reads it
+    ['a comment with a blank line in it after a line break', () => paragraphItems('Source\\\n', '<!-- a\n\nb -->')],
+    // Each read back, and written again as main writes it
+    ['such a comment before a directive', () => paragraphItems('Source\\\n', '<!-- a\n\nb --><!-- indent -->')],
+  ])('writes many paragraphs of %s in linear time', (_name, paragraph) => {
+    // Four times the paragraphs take about four times as long, not sixteen
+    const time = (n: number) => {
+      const items = Array.from({ length: n }, paragraph).flat();
+      return fastestRun(() => buildMarkdown(items, new Map()));
+    };
+    const small = time(800);
+    expect(time(3200) / small).toBeLessThan(8);
+  }, 60000);
+
+  test.each([
+    ['before a comment with a blank line in it', (n: number) => paragraphItems('Source', '\\\n'.repeat(n), '<!-- a\n\nb -->')],
+    ['each before such a comment and text', (n: number) => paragraphItems('Source', ...Array.from({ length: n }, () => ['\\\n', '<!-- a\n\nb -->', 'A']).flat(), '\\\n', '<!-- a\n\nb -->')],
+  ])('writes a paragraph of many line breaks %s in linear time', (_name, paragraph) => {
+    const time = (n: number) => {
+      const items = paragraph(n);
+      return fastestRun(() => buildMarkdown(items, new Map()));
+    };
+    const small = time(4000);
+    expect(time(16000) / small).toBeLessThan(8);
+  }, 60000);
 
   test.each([
     ['between two comments in their run', comment('<!-- a -->secret<!-- b -->'), '<!-- a -->secret<!-- b -->'],
