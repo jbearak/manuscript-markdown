@@ -787,6 +787,43 @@ describe('Custom Styles — List items', () => {
       .toEqual(await between('<!-- style: box -->\n- a\n\n  > q\n- b\n'));
   });
 
+  it.each([
+    ['a quote', '> p2\n'],
+    ['a paragraph', 'p2\n'],
+    ['an item of the list', '- i2\n'],
+    ['a quote and a style block', '> p2\n\n<!-- style: note -->\n\n\np3\n\n\n<!-- /style -->\n\n\np4\n'],
+  ])('writes the fence of a style block a block in a list item of only a quote closes, before %s, with a blank line on each side', async (_name, after) => {
+    // Import writes the fence after the item, where the block's paragraphs
+    // end in Word, which the source has no line of. Export counted no place
+    // for it among the closing fences, so it took the blank lines of the
+    // next one, or none, and the fences after it each those of the one
+    // after, and a quote after it its own blank lines again, as if after
+    // the quote in the item
+    const md = twoStyles + '<!-- style: box -->\n\n- i0\n\n  <!-- style: box -->\n\n  > i1\n\n' + after;
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(markdown).toBe(twoStyles + '<!-- style: box -->\n\n- i0\n\n  > i1\n\n<!-- /style -->\n\n' + after);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  const itemQuote = '<!-- style: box -->\n\n- i0\n\n  <!-- style: box -->\n\n  > i1\n\n';
+  const sameBlock = 'p2\n\n\n<!-- /style -->\n\n\np3\n';
+  it.each([
+    ['a block of its style', itemQuote + '<!-- style: box -->\n\n' + sameBlock, itemQuote.replace('  <!-- style: box -->\n\n', '') + sameBlock],
+    ['a block of its style opened twice', itemQuote + '<!-- style: box -->\n\n<!-- style: box -->\n\n' + sameBlock, itemQuote.replace('  <!-- style: box -->\n\n', '') + sameBlock],
+    ['an empty block of another style and a block of its style', itemQuote + '<!-- style: note -->\n<!-- /style -->\n\n<!-- style: box -->\n\n' + sameBlock, itemQuote.replace('  <!-- style: box -->\n\n', '') + sameBlock],
+    ['a quote and a block of its style, after a heading between its paragraphs', '<!-- style: box -->\n\np0\n\n## h\n\n- i0\n\n  <!-- style: box -->\n\n  > i1\n\n> q\n\n<!-- style: box -->\n\n' + sameBlock,
+      '<!-- style: box -->\n\np0\n\n## h\n\n- i0\n\n  > i1\n\n> q\n\n' + sameBlock],
+  ])('writes no fence after a style block a block in a list item of only a quote closes, before %s, which import reads as the same', async (_name, md, expected) => {
+    // Word has nothing between the blocks' paragraphs, or only blocks it
+    // can't give their style, as between a block's paragraphs, so import
+    // reads them as one block, and writes no fence between them. Export
+    // counts no place for one, so the block's closing fence keeps its own
+    // blank lines
+    const markdown = (await convertDocx((await convertMdToDocx(twoStyles + md)).docx)).markdown;
+    expect(markdown).toBe(twoStyles + expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
   const listInBlockWarning = 'List inside a style block in a list item exported without the style (not supported). Move the style block outside the list for round-trip fidelity.';
   const nestedWarning = 'Nested <!-- style: --> directives are not supported; outer style "box" closed implicitly.';
 
