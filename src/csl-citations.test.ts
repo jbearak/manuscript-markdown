@@ -1165,3 +1165,60 @@ describe('Bibliography marker placement', () => {
     expect(bodyCitation.properties.plainCitation).toBe('(2)');
   });
 });
+
+describe('Character references in a source\'s fields', () => {
+  /** XML's text with its references read once, as XML reads them */
+  const xmlText = (text: string) => text.replace(/&(amp|lt|gt|quot|apos);/g, (_reference, name: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" })[name]!);
+  /** Word's text of each paragraph of export's document for `bibtex`, the
+   *  citations' and the bibliography's, with the plain text each citation's
+   *  field records for Zotero */
+  const wordText = async (bibtex: string, keys: string[]) => {
+    const JSZip = (await import('jszip')).default;
+    const md = '---\ncsl: apa\n---\n\n' + keys.map(key => '[@' + key + ']').join(' ') + '\n';
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx)).file('word/document.xml')!.async('string');
+    const paragraphs = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)]
+      .map(paragraph => [...paragraph[0].matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(text => xmlText(text[1])).join(''))
+      .filter(text => text.trim() !== '');
+    const plain = [...xml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)].map(field => JSON.parse(xmlText(field[1])).properties.plainCitation);
+    return { paragraphs, plain };
+  };
+
+  test.each([
+    ['&amp;', '@article{k, author={Smith, J.}, title={Cats &amp; dogs}, journal={J}, year={2020}}',
+      ['(Smith, 2020)', 'Smith, J. (2020). Cats &amp; dogs. J.']],
+    ['&lt;', '@article{k, author={Smith, J.}, title={Love &lt;3}, journal={J}, year={2020}}',
+      ['(Smith, 2020)', 'Smith, J. (2020). Love &lt;3. J.']],
+    ['a numeric &#38;', '@article{k, author={Smith, J.}, title={A &#38; B}, journal={J}, year={2020}}',
+      ['(Smith, 2020)', 'Smith, J. (2020). A &#38; B. J.']],
+    // Which a citation with no author shows too
+    ['&amp; and &lt;, in a citation', '@misc{k, title={Only &amp; title &lt;x&gt;}, year={2018}}',
+      ['(Only &amp; Title &lt;X&gt;, 2018)', 'Only &amp; title &lt;x&gt; (2018).']],
+  ])('shows a title with %s as it is written', async (_name, bibtex, expected) => {
+    // citeproc writes the title's & as &#38;, which was read again with
+    // the rest after it, so &#38;lt; was <, not &lt;
+    const { paragraphs, plain } = await wordText(bibtex, ['k']);
+    expect(paragraphs).toEqual(expected);
+    expect(plain).toEqual([expected[0]]);
+  });
+
+  test('shows a citation\'s text with no style to write it as the source has it', async () => {
+    // Export writes it of the source's fields, not of citeproc's HTML, but
+    // read it as HTML, so &amp; there was &, and a name without its ;, as
+    // &copy, would be ©
+    const JSZip = (await import('jszip')).default;
+    const bibtex = '@article{k, author={{AT&copy Co &amp; Sons}}, title={T}, journal={J}, year={2020}}';
+    const md = '---\ncsl: no-such-style\n---\n\nA [@k].\n';
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx)).file('word/document.xml')!.async('string');
+    const text = [...xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(match => xmlText(match[1])).join('');
+    expect(text).toBe('A (AT&copy Co &amp; Sons 2020).');
+    const field = /CSL_CITATION\s+(.*?)\s*<\/w:instrText>/.exec(xml);
+    expect(JSON.parse(xmlText(field![1])).properties.plainCitation).toBe('(AT&copy Co &amp; Sons 2020)');
+  });
+
+  test('shows a plain & and accented names as before', async () => {
+    const bibtex = '@article{k, author={M{\\"u}ller, Ann and Øster, Bo}, title={Cats \\& dogs}, journal={J}, year={2019}}';
+    const { paragraphs, plain } = await wordText(bibtex, ['k']);
+    expect(paragraphs).toEqual(['(Müller & Øster, 2019)', 'Müller, A., & Øster, B. (2019). Cats & dogs. J.']);
+    expect(plain).toEqual(['(Müller & Øster, 2019)']);
+  });
+});
