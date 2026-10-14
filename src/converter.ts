@@ -14740,6 +14740,13 @@ function buildMarkdownOnce(
   };
   let lastBlockquoteGroupIndex: number | undefined;
   let pendingPostContentGroupIndex: number | undefined;
+  // Real content outside a quote, a heading, a list, code or a table, ends
+  // the quote group before it: the blank lines the source had after the
+  // quote were those before it, which aren't the next paragraph's
+  const endQuoteGroup = (): void => {
+    lastBlockquoteGroupIndex = undefined;
+    pendingPostContentGroupIndex = undefined;
+  };
   // Where the last quote paragraph's text ends in output, once the next
   // block starts, which a quote after it adjoins where nothing import
   // writes goes between them (see quoteGroupGap)
@@ -15299,9 +15306,7 @@ function buildMarkdownOnce(
         pendingPostContentGroupIndex = item.blockquoteGroupIndex;
         quoteEnds = true;
       } else if (item.headingLevel || item.listMeta || item.isCodeBlock) {
-        // Real non-blockquote content resets the tracking
-        lastBlockquoteGroupIndex = undefined;
-        pendingPostContentGroupIndex = undefined;
+        endQuoteGroup();
       }
 
       // Track blockquote type for boundary detection (plain↔alert, alert↔alert).
@@ -15790,6 +15795,7 @@ function buildMarkdownOnce(
           }
         }
         endListContext();
+        endQuoteGroup();
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
@@ -15811,6 +15817,7 @@ function buildMarkdownOnce(
       lastTableJoin = tableResult.join;
       tableIndex++;
       endListContext();
+      endQuoteGroup();
       lastAlertParagraphKey = undefined;
       pendingAlertPrefixStrip = undefined;
       pendingAlertInlinePrefixForHardBreak = undefined;
