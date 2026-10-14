@@ -9221,6 +9221,41 @@ function startsStyleBlock(openStyle: string | undefined, style: string): boolean
   return openStyle !== style;
 }
 
+/** Whether the style block of `style` that opens at tokens[at] holds a
+ *  section's fence, at which import closes it and opens it again once it
+ *  has a paragraph in its style after, and nothing else import may end it
+ *  at: no block Word can't give its style (see unstyledInStyleBlock), nor
+ *  the bibliography's place, up to its closing fence or the document's
+ *  end, and not a block of another style or one in a list item, which
+ *  would close it there (see startsStyleBlock and isImplicitStyleClose).
+ *  Nor a section's opening fence with no closing one after it, which
+ *  import writes no fence for, nor ends the block at */
+function splitsAtSections(tokens: MdToken[], at: number, style: string): boolean {
+  let sections = false;
+  for (let j = at + 1; j < tokens.length; j++) {
+    const token = tokens[j];
+    if (token.customStyleOpen) {
+      if (startsStyleBlock(style, token.customStyleOpen)) return false;
+    } else if (token.customStyleClose) {
+      return sections && !isImplicitStyleClose(token);
+    } else if (token.bibliographyMarker || unstyledInStyleBlock(token)) {
+      return false;
+    } else if (marksSectionOrBibliography(token)) {
+      if ((token.landscapeOpen || token.portraitOpen) && !closesSection(tokens, j)) return false;
+      sections = true;
+    }
+  }
+  return sections;
+}
+
+/** Whether the section a fence opens at tokens[at] has a closing fence */
+function closesSection(tokens: MdToken[], at: number): boolean {
+  for (let j = at + 1; j < tokens.length; j++) {
+    if (isOrientationDirective(tokens[j])) return !!(tokens[j].landscapeClose || tokens[j].portraitClose);
+  }
+  return false;
+}
+
 /**
  * Tokens with each quote paragraph of comment bodies only moved into the
  * paragraph of its quote before it, or else the one after, which takes its
@@ -10274,7 +10309,12 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // blocks it has had before that and since its last, whether it has had
   // such blocks between its paragraphs, and the blocks outside it before it
   const styleBlockEdges: Record<string, number> = {};
-  let styleBlock: { style: string; index?: number; styled: boolean; lead: number; trail: number; inner: boolean; before: number; fence: MdToken } | undefined;
+  // A block that splitsAtSections, which import writes as a block of its
+  // own for each part between them Word has a paragraph of in its style,
+  // has those apart, and whether import closed it at a section's fence
+  // since its last such paragraph, with no place counted yet for that
+  // closing fence
+  let styleBlock: { style: string; index?: number; styled: boolean; lead: number; trail: number; inner: boolean; before: number; fence: MdToken; sections: boolean; cut: boolean } | undefined;
   let blocksShown = 0;
   // The block of a style closed last, with only such blocks after it, and
   // such blocks outside any since the last block
@@ -10341,6 +10381,15 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.blockquotePostContentBlankLines.set(group - 1, 1);
       state.blockquotePreContentBlankLines.set(group, 1);
     }
+  };
+  /** The place among the opening fences of the fence import writes where a
+   *  block goes on after a section's fence, with no blank lines of its own
+   *  before it, so import writes the section fence's there, and a blank
+   *  line after it. The closing fence import wrote before the section's
+   *  takes its place first (see placeUnfencedClose) */
+  const placeUnfencedOpen = (): void => {
+    sentinelGaps['csoa' + sentinelCsoIdx] = 1;
+    sentinelCsoIdx++;
   };
   // Whether the list open at each level is ordered, so a quote in a list item
   // can tell whether the next item continues its list or an ancestor's
@@ -10432,7 +10481,12 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
           record('csi' + styleBlock.index, 1);
         }
         if (!styleBlock.styled) recordOpeningGaps(styleBlock.fence);
+        else if (styleBlock.cut) {
+          placeUnfencedClose();
+          placeUnfencedOpen();
+        }
         styleBlock.styled = true;
+        styleBlock.cut = false;
         styleBlock.trail = 0;
         closedBlock = undefined;
       } else if (styleBlock) {
@@ -10440,6 +10494,13 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         // as at a section break, but which has one only between two
         // sections (see breakSection)
         if (token.bibliographyMarker) recording = false;
+        // A section's fence, before which import closes the block, where
+        // Word has had a paragraph of it. Where the block has one after it,
+        // import opens it again, and that closing fence has no line of the
+        // source's. Where it has none, that's the last one import writes
+        // for the block, which takes the place, and the blank lines, of the
+        // block's own
+        else if (styleBlock.sections && styleBlock.styled) styleBlock.cut = true;
       } else {
         // Anything else outside a block ends import's run of them, as a
         // comment's hidden paragraph does too
@@ -10504,7 +10565,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
           // export counts nothing
           unfencedBeforeBlock = !!styleBlock?.styled;
           closeStyleBlock();
-          styleBlock = { style: token.customStyleOpen, styled: false, lead: 0, trail: 0, inner: false, before: unitsOutside, fence: token };
+          styleBlock = { style: token.customStyleOpen, styled: false, lead: 0, trail: 0, inner: false, before: unitsOutside, fence: token, sections: splitsAtSections(tokens, ti, token.customStyleOpen), cut: false };
           unitsOutside = 0;
         }
         state.activeCustomStyle = token.customStyleOpen;
@@ -10513,7 +10574,9 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         // One that closes with no fence takes its place where import writes
         // one, if it does (see unfenced), and one of a block Word has no
         // paragraph of in its style, whose fences import can't write (see
-        // recordOpeningGaps), none
+        // recordOpeningGaps), none. One import closed at a section's fence
+        // since its last paragraph in its style takes the place of that
+        // closing fence (see splitsAtSections)
         if (!isImplicitStyleClose(token) && styleBlock?.styled) {
           if (token.blankLinesBefore !== undefined) sentinelGaps['csc' + sentinelCscIdx] = token.blankLinesBefore;
           if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
