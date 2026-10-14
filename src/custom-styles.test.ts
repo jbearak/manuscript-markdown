@@ -1237,6 +1237,24 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
   });
 
   it.each([
+    ['a paragraph', 'p2\n'],
+    ['a heading and a paragraph', '## h\n\np2\n'],
+    ['a paragraph, after a quote the block ends with', 'p2\n', '> q\n\n'],
+    ['a comment and a heading', '<!-- c -->\n\n## h\n'],
+    ['a list', '- i2\n'],
+  ])('keeps the blank lines by the fences after a style block that one of another style opening in it closes, which holds %s', async (_name, inner, tail = '') => {
+    // Import writes a closing fence where the block's style ends, before
+    // the next one's paragraph in its own, which the source has no line
+    // of. Export counted no place for it among the closing fences, so it
+    // took the blank lines of the next block's closing fence, and that one
+    // those of the one after it
+    const md = '<!-- style: box -->\n\np1\n\n' + tail + '<!-- style: note -->\n\n' + inner + '\n<!-- /style -->\n\n\n<!-- style: box -->\n\np3\n\n\n<!-- /style -->\n\n\np4\n';
+    const back = await trip(md);
+    expect(back).toBe(md.replace('<!-- style: note -->', '<!-- /style -->\n\n<!-- style: note -->'));
+    expect(await trip(back)).toBe(back);
+  });
+
+  it.each([
     ['ends with code, with no closing fence', '<!-- style: box -->\n\np\n\n```\na\n```\n', '<!-- style: box -->\n\np\n\n```\na\n```\n\n<!-- /style -->\n'],
     ['is opened twice, with no fence between, and starts with code', '<!-- style: box -->\n\n<!-- style: box -->\n\n```\na\n```\n\n- i\n', '<!-- style: box -->\n\n```\na\n```\n\n- i\n\n<!-- /style -->\n'],
   ])('keeps code in a block that %s', async (_name, md, expected) => {
