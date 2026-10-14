@@ -36,6 +36,10 @@ const SPLIT_KINDS: readonly string[] = ['mathComment', 'breakComment', 'mathQuot
 // which can go around a comment split from its block in the 'spaced'
 // variant (see markdownOf)
 const PLAIN_KINDS: readonly string[] = ['para', 'code', 'latex', 'grid', 'definition', 'critic', 'moved', 'mathComment', 'breakComment'];
+// The blocks Word has no paragraph of in a style block's style: code, a
+// table and a quote keep their own (see unstyledInStyleBlock in
+// md-to-docx.ts), and export takes out notes and their definitions
+const UNSTYLED_KINDS: readonly string[] = ['code', 'grid', 'quote', 'mathQuote', 'note', 'definition'];
 const D = '$'.repeat(2);
 
 const blockArb: fc.Arbitrary<Block> = fc.oneof(
@@ -59,12 +63,37 @@ const isComment = (block: Block | undefined) => block?.kind === 'comment' || blo
 
 /** The Markdown of `blocks`, with the lines like comments' in the blocks
  *  preprocessing rewrites `as` written, with x for their text, or each such
- *  block a line of text, but those export splits and one right after a
- *  comment export splits from its paragraph, and `trailing` blank lines at
- *  the end. Or 'spaced', as written, with a blank line more on each side
- *  of a block a comment is split from, between blocks in PLAIN_KINDS */
+ *  block a line of text, but those export splits, one right after a
+ *  comment export splits from its paragraph, and code, a table or a quote
+ *  in a style block Word has no paragraph of in its style, and `trailing`
+ *  blank lines at the end. Or 'spaced', as written, with a blank line more
+ *  on each side of a block a comment is split from, between blocks in
+ *  PLAIN_KINDS */
 function markdownOf({ frontmatter, blocks, trailing }: { frontmatter: boolean; blocks: Array<{ block: Block; blank: number }>; trailing: number }, as: 'written' | 'x' | 'line' | 'spaced'): string {
   let n = 0;
+  // Whether each block is in a style block of only blocks in
+  // UNSTYLED_KINDS, whose fences import can't write, so export records no
+  // blank lines of them (see recordOpeningGaps in md-to-docx.ts). A line
+  // there would be a paragraph in the block's style, and the fences' blank
+  // lines would be recorded. An opening fence while a block is open goes on
+  // in it, as they're all of one style
+  const unstyled: boolean[] = [];
+  let members: number[] | undefined;
+  let styled = false;
+  const closeBlock = () => {
+    for (const k of members ?? []) unstyled[k] = !styled;
+    members = undefined;
+  };
+  blocks.forEach(({ block }, k) => {
+    if (block.kind === 'open') {
+      if (!members) { members = []; styled = false; }
+    } else if (block.kind === 'close') closeBlock();
+    else if (members) {
+      members.push(k);
+      if (!UNSTYLED_KINDS.includes(block.kind)) styled = true;
+    }
+  });
+  closeBlock();
   const plain = (k: number) => k < 0 || k >= blocks.length || PLAIN_KINDS.includes(blocks[k].block.kind);
   // Where a blank line is on each side already, so the blocks stay apart
   const spaced = (k: number) => as === 'spaced' && k >= 0 && k < blocks.length
@@ -86,9 +115,12 @@ function markdownOf({ frontmatter, blocks, trailing }: { frontmatter: boolean; b
     // with no blank line between, would go on with the comment's paragraph,
     // which the comment would then not end, so Word would have it in a
     // paragraph with the line, and not alone, where a code block, an HTML
-    // block, a grid table or a quote there ends the paragraph
+    // block, a grid table or a quote there ends the paragraph. Code, a
+    // table or a quote in a style block of only blocks in UNSTYLED_KINDS
+    // stays too, as a line would give the block a paragraph in its style
     else if (as === 'line' && block.kind !== 'latexComment' && !SPLIT_KINDS.includes(block.kind)
-      && !(blank === 0 && (blocks[k - 1]?.block.kind === 'mathComment' || blocks[k - 1]?.block.kind === 'breakComment'))) {
+      && !(blank === 0 && (blocks[k - 1]?.block.kind === 'mathComment' || blocks[k - 1]?.block.kind === 'breakComment'))
+      && !(unstyled[k] && (block.kind === 'code' || block.kind === 'grid' || block.kind === 'quote'))) {
       // A note's definition stays one, which Word gets nothing of
       text = block.kind === 'definition' ? '[^d' + n++ + ']: x' : 'x' + n++;
     } else {
@@ -211,6 +243,20 @@ describe('Comment spacing through preprocessing', () => {
     // comment is the second
     const spacing = await commentSpacing((await convertMdToDocx(markdownOf(document, 'written'))).docx);
     expect(spacing).toContain('MANUSCRIPT_HTML_COMMENT_AFTER_GAPS_1={"1":0}');
+    await expectSameSpacing(document);
+  });
+
+  test('is the same with a style block of only code, whose fences it records no blank lines of', async () => {
+    // The property below found this: the variant with each block a line
+    // had a paragraph in the block's style, whose fences import writes, so
+    // export recorded their blank lines. The variant keeps the code
+    const document: Document = {
+      frontmatter: false,
+      blocks: [{ block: { kind: 'open' }, blank: 0 }, { block: { kind: 'code' }, blank: 0 }, { block: { kind: 'close' }, blank: 0 }, { block: { kind: 'mathComment' }, blank: 0 }],
+      trailing: 0,
+      lineEnd: '\r\n',
+    };
+    expect(await commentSpacing((await convertMdToDocx(markdownOf(document, 'written'))).docx)).toEqual([]);
     await expectSameSpacing(document);
   });
 
