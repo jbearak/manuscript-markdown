@@ -820,27 +820,89 @@ export function splitAuthorString(authorString: string): string[] {
   return result.filter(s => s.length > 0);
 }
 
+// Where BibTeX splits a name: at a comma, or else at whitespace between
+// its words, which a no-break space isn't
+const NAME_COMMA = /,/y;
+const NAME_SPACE = /[ \t\n\r\f]+/y;
+
+/** `name` split where `at` matches outside its groups, as BibTeX splits a
+ *  name, so a group is one word. Like BibTeX, it counts every brace, one a
+ *  backslash escapes too, which the parsed value holds as a brace. */
+function splitOutsideGroups(name: string, at: RegExp): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < name.length; i++) {
+    if (name[i] === '{') depth++;
+    else if (name[i] === '}') depth = Math.max(0, depth - 1);
+    else if (depth === 0) {
+      at.lastIndex = i;
+      const match = at.exec(name);
+      if (!match) continue;
+      parts.push(name.slice(start, i));
+      start = i + match[0].length;
+      i = start - 1;
+    }
+  }
+  parts.push(name.slice(start));
+  return parts;
+}
+
+/** Whether `name` is one group from end to end, as {World Health
+ *  Organization}, which BibTeX reads as a last name of one word, and
+ *  citeproc takes as an organization's, a literal */
+function isOneGroup(name: string): boolean {
+  if (!name.startsWith('{')) return false;
+  let depth = 0;
+  for (let i = 0; i < name.length; i++) {
+    if (name[i] === '{') depth++;
+    else if (name[i] === '}' && --depth === 0) return i === name.length - 1;
+  }
+  return false;
+}
+
+/** A part of a name, its given or family name, as BibTeX's output shows
+ *  it: its groups without their braces. A part that holds a command, a \
+ *  anywhere, as \textsc{Smith} or {\sc Doe}, keeps every brace as written,
+ *  since reading a command's arguments is a later step's */
+function namePartAsShown(part: string): string {
+  let shown = part;
+  if (!part.includes('\\')) {
+    const dropped = new Set<number>();
+    const open: number[] = [];
+    for (let i = 0; i < part.length; i++) {
+      if (part[i] === '{') open.push(i);
+      else if (part[i] === '}') {
+        const at = open.pop();
+        if (at === undefined) continue;
+        dropped.add(at);
+        dropped.add(i);
+      }
+    }
+    shown = '';
+    for (let i = 0; i < part.length; i++) if (!dropped.has(i)) shown += part[i];
+  }
+  return shown.replace(/[ \t\n\r\f]+/g, ' ').trim();
+}
+
 export function parseAuthors(authorString: string): CiteprocName[] {
   const authors = splitAuthorString(authorString);
   return authors.map(author => {
-    // Institutional/corporate author: wrapped in braces (after BibTeX parser
-    // stripped the outer field braces, institutional names arrive as {Name}).
-    if (author.startsWith('{') && author.endsWith('}')) {
-      return { literal: author.slice(1, -1) };
+    // Institutional/corporate author: one group (after BibTeX parser
+    // stripped the outer field braces, institutional names arrive as {Name})
+    if (isOneGroup(author)) return { literal: author.slice(1, -1) };
+    // Family name before the first comma outside groups, and the given name
+    // after it
+    const commaParts = splitOutsideGroups(author, NAME_COMMA);
+    if (commaParts.length > 1) {
+      return { family: namePartAsShown(commaParts[0]), given: namePartAsShown(commaParts.slice(1).join(',')) };
     }
-    const commaPos = author.indexOf(',');
-    if (commaPos !== -1) {
-      const family = author.slice(0, commaPos).trim();
-      const given = author.slice(commaPos + 1).trim();
-      return { family, given };
+    // Else the last word is the family name, a group one word
+    const words = splitOutsideGroups(author, NAME_SPACE).filter(word => word !== '');
+    if (words.length >= 2) {
+      return { family: namePartAsShown(words[words.length - 1]), given: namePartAsShown(words.slice(0, -1).join(' ')) };
     }
-    const parts = author.split(' ');
-    if (parts.length >= 2) {
-      const given = parts.slice(0, -1).join(' ');
-      const family = parts[parts.length - 1];
-      return { family, given };
-    }
-    return { family: author };
+    return { family: namePartAsShown(author) };
   });
 }
 
@@ -867,14 +929,10 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
 
     let text: string;
     if (!keySuppressed && author) {
-      const firstAuthor = splitAuthorString(author)[0] || author.trim();
-      if (firstAuthor.startsWith('{') && firstAuthor.endsWith('}')) {
-        // Institutional author — use the full name
-        text = firstAuthor.slice(1, -1);
-      } else {
-        const commaPos = firstAuthor.indexOf(',');
-        text = commaPos !== -1 ? firstAuthor.slice(0, commaPos).trim() : firstAuthor.split(' ').pop() || firstAuthor;
-      }
+      // The first author's family name, or an institution's whole name, as
+      // citeproc's data has it (see parseAuthors)
+      const first = parseAuthors(author)[0];
+      text = first ? first.literal ?? first.family ?? '' : author.trim();
     } else if (keySuppressed) {
       // suppress-author: year only, no author name
       text = '';

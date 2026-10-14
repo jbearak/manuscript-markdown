@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
 import JSZip from 'jszip';
-import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, createCiteprocEngine, renderBibliography, renderCitationText, textElements } from './md-to-docx-citations';
+import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, buildItemData, createCiteprocEngine, renderBibliography, renderCitationText, textElements } from './md-to-docx-citations';
 import { BibtexEntry, parseBibtex } from './bibtex-parser';
 import { parseMd, convertMdToDocx, type MdRun } from './md-to-docx';
 import { fastestRun } from './test-timing';
@@ -1028,5 +1028,68 @@ describe('orderRPr', () => {
       expect(ordered.replace(/[^ \t\r\n]/g, '').length).toBe(children.replace(/[^ \t\r\n]/g, '').length);
       expect(ordered.length).toBe(children.length);
     }), { numRuns: 200 });
+  });
+});
+
+describe('BibTeX names with groups', () => {
+  // A group in a name split at its spaces, as the words of a name do, and
+  // at a comma in it, so its braces didn't pair, and citeproc showed them.
+  // BibTeX reads a group as one word, and splits a name only outside groups
+  const names = (author: string) => buildItemData(parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b')!).author;
+
+  it.each([
+    ['a group of words as the family name', 'Ludwig {van Beethoven}', [{ family: 'van Beethoven', given: 'Ludwig' }]],
+    ['a group of words as the given name', '{Mary Ann} Evans', [{ family: 'Evans', given: 'Mary Ann' }]],
+    ['groups as each name', '{Barnes} {Noble}', [{ family: 'Noble', given: 'Barnes' }]],
+    ['a comma in a group', '{Smith, Jones} Associates', [{ family: 'Associates', given: 'Smith, Jones' }]],
+    ['a group of words as the family name, before a comma', '{van Beethoven}, Ludwig', [{ family: 'van Beethoven', given: 'Ludwig' }]],
+    ['a group of words as the given name, after a comma', 'Smith, {John Paul}', [{ family: 'Smith', given: 'John Paul' }]],
+    ['a comma in a group, before a comma', '{Smith, Jones}, Ann', [{ family: 'Smith, Jones', given: 'Ann' }]],
+    // BibTeX counts a brace a backslash escapes as a brace, as main's
+    // parsed value, which reads \} as }, does too
+    ['a group that an escaped brace ends', String.raw`{ACME \} Research \{ Division}`, [{ family: 'Division', given: 'ACME Research' }]],
+    // A group that starts with a command keeps its braces, as a part with a
+    // command does
+    ['a group that starts with a command', 'Jane {\\sc Doe}', [{ family: '{\\sc Doe}', given: 'Jane' }]],
+  ])('reads %s as one word', (_name, author, expected) => {
+    expect(names(author)).toEqual(expected);
+  });
+
+  it.each([
+    ['an organization\'s name, whole, with a comma and "and"', '{Barnes and Noble, Inc.}', [{ literal: 'Barnes and Noble, Inc.' }]],
+    ['an organization\'s name among others', '{Barnes and Noble, Inc.} and Smith, Jane', [{ literal: 'Barnes and Noble, Inc.' }, { family: 'Smith', given: 'Jane' }]],
+    ['a family name of two words a no-break space joins', 'Gabriel García Márquez', [{ family: 'García Márquez', given: 'Gabriel' }]],
+    ['an and between no-break spaces', 'Smith and Jones', [{ family: 'Smith and Jones' }]],
+    ['a command\'s argument', 'John \\textsc{Smith}', [{ family: '\\textsc{Smith}', given: 'John' }]],
+    // A part of a name that holds a command keeps every brace as written
+    ['a command\'s optional argument before its arguments', '\\textcolor[HTML]{000000}{Smith}, John', [{ family: '\\textcolor[HTML]{000000}{Smith}', given: 'John' }]],
+    ['a command\'s empty argument before another', '\\href{}{Smith}, John', [{ family: '\\href{}{Smith}', given: 'John' }]],
+    ['a command\'s optional argument and an argument', '\\cmd[a]{b}, John', [{ family: '\\cmd[a]{b}', given: 'John' }]],
+    ['a command\'s two empty arguments', '\\cmd{}{}, John', [{ family: '\\cmd{}{}', given: 'John' }]],
+    ['a command\'s optional argument that holds a brace', '\\cmd[{a]b}]{c}, John', [{ family: '\\cmd[{a]b}]{c}', given: 'John' }]],
+    ['a command whose name ends in a star', '\\enquote*{Smith}, John', [{ family: '\\enquote*{Smith}', given: 'John' }]],
+    ['a command\'s optional argument that holds an escaped ]', '\\cmd[\\]]{Smith}, John', [{ family: '\\cmd[\\]]{Smith}', given: 'John' }]],
+  ])('reads %s as before', (_name, author, expected) => {
+    expect(names(author)).toEqual(expected);
+  });
+
+  it.each([
+    ['Ludwig {van Beethoven}', '(van Beethoven 2019)'],
+    ['{Barnes and Noble, Inc.}', '(Barnes and Noble, Inc. 2019)'],
+    ['{van} Beethoven, Ludwig', '(van Beethoven 2019)'],
+    ['{Smith, Jones} Associates', '(Associates 2019)'],
+  ])('writes the family name of %s in the text of a citation citeproc can\'t write', (author, expected) => {
+    const entries = parseBibtex('@book{b,\n  author = {' + author + '},\n  year = {2019}\n}\n');
+    expect(generateFallbackText(['b'], entries)).toBe(expected);
+  });
+
+  it('shows a group in a name without its braces in a bibliography', () => {
+    const bib = '@book{b,\n  author = {Ludwig {van Beethoven} and {Barnes and Noble, Inc.}},\n  title = {T},\n  publisher = {P},\n  year = {2019}\n}\n';
+    const engine = createCiteprocEngine(parseBibtex(bib), 'apa')!;
+    engine.updateItems(['b']);
+    const html = renderBibliography(engine)!.entries[0];
+    expect(html).toContain('van Beethoven, L.');
+    expect(html).toContain('Barnes and Noble, Inc.');
+    expect(html).not.toMatch(/[{}]/);
   });
 });
