@@ -556,6 +556,65 @@ describe('a template\'s headers and footers', () => {
     }
   });
 
+  // CDATA in the last section is text to an XML parser, though it looks
+  // like the body's end tag, written here as the real one isn't, or a page
+  it.each([
+    ['the body\'s end tag', '</w:body>'],
+    ['a landscape page', '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'],
+  ])('go in the last section where it holds CDATA that looks like %s', async (_name, text) => {
+    const templateDocx = await editTemplate(await headerTemplate(), 'word/document.xml', xml => xml.replace('</w:body>', '</w:body\n>')
+      .replace(/<w:sectPr\b[^>]*>(?![\s\S]*<w:sectPr\b)/, sectPr => sectPr + '<![CDATA[' + text + ']]>'));
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS]);
+  });
+
+  // Its numId read as import reads it, by its value (see xmlInteger)
+  it.each([
+    ['a plus sign', '+3'],
+    ['whitespace around it', ' 3 '],
+  ])('keep the numbering of a header\'s list whose numId is written with %s', async (_name, numId) => {
+    const templateDocx = await editTemplate(await headerTemplate({ headerList: 'direct' }), 'word/header3.xml',
+      xml => xml.replace('<w:numId w:val="3"/>', () => '<w:numId w:val="' + numId + '"/>'));
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    const zip = await JSZip.loadAsync(docx);
+    expect((await textOf(zip, 'word/header3.xml'))!).toContain('<w:numId w:val="' + numId + '"/>');
+    expect((await textOf(zip, 'word/numbering.xml'))!).toContain('<w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>');
+  });
+
+  // The header's drawing ID read by its value, as an xsd:unsignedInt's, so
+  // it's no other drawing's
+  it('give a header\'s drawing whose ID is written with a plus sign an ID of its own', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'template-sections-'));
+    try {
+      writeFileSync(join(dir, 'a.png'), PNG);
+      const templateDocx = await editTemplate(await headerTemplate(), 'word/header1.xml', xml => xml.replace('<wp:docPr id="1"', '<wp:docPr id="+1"'));
+      const { docx } = await convertMdToDocx('![a](a.png)', { templateDocx, sourceDir: dir });
+      expect(await packageProblems(docx)).toEqual([]);
+      const zip = await JSZip.loadAsync(docx);
+      expect((await textOf(zip, 'word/document.xml'))!).toContain('<wp:docPr id="1"');
+      expect((await textOf(zip, 'word/header1.xml'))!).toContain('<wp:docPr id="2"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // An attribute's references read as XML reads them, where export gives a
+  // header's relationships new IDs, so one to no character of XML's, which
+  // isn't well-formed, stays as written
+  it('keep a header whose relationships take new IDs and whose attribute holds a reference to no character of XML\'s', async () => {
+    let templateDocx = await editTemplate(await headerTemplate(), 'word/header1.xml', xml => xml.replace('<w:p>', '<w:p w:rsidR="&#x110000;">').replace('r:embed="rId1"', 'r:embed="rId5"'));
+    templateDocx = await editTemplate(templateDocx, 'word/_rels/header1.xml.rels', xml => xml.replace('Id="rId1"', 'Id="rId5"'));
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS]);
+    const zip = await JSZip.loadAsync(docx);
+    const header = (await textOf(zip, 'word/header1.xml'))!;
+    expect(header).toContain('<w:p w:rsidR="&#x110000;">');
+    expect(header).toContain('r:embed="rId1"');
+    expect((await textOf(zip, 'word/_rels/header1.xml.rels'))!).toContain('Id="rId1"');
+  });
+
   it('drop a header\'s references to the template\'s comments and notes, which export doesn\'t keep', async () => {
     const templateDocx = await editTemplate(await headerTemplate(), 'word/header2.xml', xml => xml.replace('<w:r><w:t>FIRST HEADER</w:t></w:r>',
       '<w:commentRangeStart w:id="0"/><w:r><w:t>FIRST HEADER</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r><w:r><w:footnoteReference w:id="1"></w:footnoteReference></w:r>'));
@@ -1703,5 +1762,26 @@ describe('a template header\'s DOCPROPERTY fields', () => {
     expect(properties.slice(0, -2).every(m => /^(MANUSCRIPT|ZOTERO)_/.test(m[2]))).toBe(true);
     expect(properties.length).toBeGreaterThan(2);
     expect(custom).not.toContain('Unshown');
+  });
+
+  // A field's code read as XML reads it: a reference to no character of
+  // XML's, or to an entity XML doesn't declare, as &AMP;, stays as written,
+  // so the field names no property the template has
+  it.each([
+    ['a reference to no character of XML\'s', '&#x110000;'],
+    ['an entity XML doesn\'t declare', '&AMP;'],
+  ])('show no property where a field\'s code holds %s', async (_name, reference) => {
+    let templateDocx = await editTemplate(await headerTemplate(), 'word/footer2.xml', xml => xml.replace('<w:r><w:t>FIRST FOOTER</w:t></w:r>',
+      '<w:fldSimple w:instr=" DOCPROPERTY &quot;A ' + reference + ' B&quot; "><w:r><w:t>42</w:t></w:r></w:fldSimple>'));
+    templateDocx = await editTemplate(templateDocx, 'docProps/custom.xml', () => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
+      '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="A &amp; B"><vt:i4>42</vt:i4></property></Properties>');
+    templateDocx = await editTemplate(templateDocx, '_rels/.rels', xml => xml.replace('</Relationships>',
+      '<Relationship Id="rId9" Type="' + REL + 'custom-properties" Target="docProps/custom.xml"/></Relationships>'));
+    templateDocx = await editTemplate(templateDocx, '[Content_Types].xml', xml => xml.replace('</Types>',
+      '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/></Types>'));
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS.replace('FIRST FOOTER', '42')]);
+    expect((await textOf(await JSZip.loadAsync(docx), 'docProps/custom.xml')) ?? '').not.toContain('name="A &amp; B"');
   });
 });
