@@ -8,6 +8,8 @@ import {
   buildCitationKeyMap,
 } from './converter';
 import type { ZoteroCitation, CitationMetadata } from './converter';
+import { parseBibtex } from './bibtex-parser';
+import { buildItemData } from './md-to-docx-citations';
 
 /**
  * Feature: zotero-citation-roundtrip
@@ -393,5 +395,42 @@ describe('Feature: zotero-citation-roundtrip, Property 6: Locator sanitization',
 
     const results = citationPandocKeys(citation, keyMap);
     expect(results).toEqual([`@${baseKey}`]);
+  });
+});
+
+describe('A name generateBibTeX writes', () => {
+  // A particle's words start with a lowercase letter, which is how BibTeX
+  // knows a von part. A dropping particle is the von part, as pandoc reads
+  // one, and a non-dropping particle goes in a group with the family name
+  const upper = fc.constantFrom('García', 'Vega', 'Smith', 'Smith-Jones', 'Élodie', 'Mary-Ann', 'Ng', 'O\'Brien');
+  const lower = fc.constantFrom('y', 'de', 'la', 'van', 'der', 'von', 'ten', 'del', 'ébène', 'and', 'al-Hassan');
+  const particleWord = fc.constantFrom('y', 'de', 'la', 'van', 'der', 'von', 'ten', 'del', 'ébène');
+  // A non-dropping particle that joins the family name with no space, as
+  // d'Artagnan and al-Hassan
+  const attachedWord = fc.constantFrom("d'", 'd\u2019', 'al-');
+  const words = (word: fc.Arbitrary<string>) => fc.array(word, { minLength: 1, maxLength: 3 }).map(w => w.join(' '));
+  const name = fc.record({
+    family: words(fc.oneof(upper, lower)),
+    given: fc.option(words(fc.oneof(upper, lower)), { nil: undefined }),
+    'non-dropping-particle': fc.option(fc.oneof(words(particleWord), attachedWord), { nil: undefined }),
+    'dropping-particle': fc.option(words(particleWord), { nil: undefined }),
+    suffix: fc.option(fc.constantFrom('Jr', 'Jr.', 'III', 'Jr., PhD'), { nil: undefined }),
+  });
+  const defined = (o: Record<string, string | undefined>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v));
+
+  it('reads back as the same parts, with a non-dropping particle in the family name', () => {
+    fc.assert(fc.property(name, author => {
+      const citations: ZoteroCitation[] = [{
+        plainCitation: '(T)',
+        items: [{ authors: [defined(author)], title: 'T', year: '2020', journal: 'J', volume: '', pages: '', doi: '', type: 'book', fullItemData: {} }],
+      }];
+      const [entry] = parseBibtex(generateBibTeX(citations, buildCitationKeyMap(citations))).values();
+      expect((buildItemData(entry).author ?? []).map(defined)).toEqual([defined({
+        family: [author['non-dropping-particle'], author.family].filter(Boolean).join(/['\u2019-]$/.test(author['non-dropping-particle'] ?? '') ? '' : ' '),
+        given: author.given,
+        'dropping-particle': author['dropping-particle'],
+        suffix: author.suffix,
+      })]);
+    }), { numRuns: 500 });
   });
 });

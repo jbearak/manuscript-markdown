@@ -37,6 +37,7 @@ import {
   extractCalloutLabels,
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
+import { buildItemData } from './md-to-docx-citations';
 import { fastestRun, fastestRunAsync } from './test-timing';
 import { annotateHtmlCommentIndices, convertMdToDocx, directiveRest, exportReads, holdsDirective, noteNumberText, parseMd, templateStyleIds } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
@@ -7380,6 +7381,138 @@ describe('Zotero citation roundtrip', () => {
     const citations = await extractZoteroCitations(docx);
     expect(citations[0].items[0].zoteroKey).toBeUndefined();
     expect(citations[0].items[0].zoteroUri).toBe('http://zotero.org/bad/path');
+  });
+
+  // Import wrote a name's family and given names alone, so where it wrote
+  // a .bib file from the citations' data, as for a citation copied to
+  // another document, a particle and a suffix went
+  test.each([
+    ['Ludwig van Beethoven', 'van Beethoven, Ludwig'],
+    ['Jean de La Fontaine', 'de La Fontaine, Jean'],
+    ['Smith, Jr, John', 'Smith, Jr, John'],
+    ['King, Jr., Martin Luther', 'King, Jr., Martin Luther'],
+    ['van der Waals, Johannes', 'van der Waals, Johannes'],
+    ['Charles Louis Xavier Joseph de la Vall{\\\'e}e Poussin', 'de la Vall\u00e9e Poussin, Charles Louis Xavier Joseph'],
+    ['Jean-Paul de la Fontaine', 'de la Fontaine, Jean-Paul'],
+    // A family name that starts with a lowercase word, in a group, so
+    // BibTeX doesn't read the word as a particle
+    ['Ludwig {van Beethoven}', '{van Beethoven}, Ludwig'],
+    // A family name with a command, after a particle
+    [String.raw`Ludwig van \textsc{Beethoven}`, String.raw`van \\textsc\{Beethoven\}, Ludwig`],
+  ])('writes %s back as it was read, through export and import', async (author, expected) => {
+    const bibtex = '@book{b,\n  author = {' + author + '},\n  title = {T},\n  year = {2019}\n}\n';
+    const { docx } = await convertMdToDocx('A [@b].', { bibtex });
+    const citations = await extractZoteroCitations(docx);
+    const bib = generateBibTeX(citations, buildCitationKeyMap(citations));
+    expect(bib).toContain('author = {' + expected + '}');
+    expect(buildItemData([...parseBibtex(bib).values()][0]).author).toEqual(buildItemData(parseBibtex(bibtex).get('b')!).author);
+  });
+
+  test.each([
+    ['Ludwig beethoven', 'beethoven, Ludwig'],
+    ['Ludwig van', 'van, Ludwig'],
+    ['Ludwig {van} Beethoven', 'Beethoven, Ludwig van'],
+    ['John Smith-Jones', 'Smith-Jones, John'],
+    ['Jean-Paul Sartre', 'Sartre, Jean-Paul'],
+    // Which export read as the particle al and the family name Hassan, so
+    // import wrote al Hassan, Ali
+    ['Ali al-Hassan', 'al-Hassan, Ali'],
+    ['al-Hassan, Ali', 'al-Hassan, Ali'],
+    ['Smith-Jones', 'Smith-Jones'],
+    ['Plato', 'Plato'],
+    ['{Barnes and Noble, Inc.}', '{Barnes and Noble, Inc.}'],
+    // A part with a command keeps its braces, as the name read had them
+    [String.raw`Hans {\O}rsted Meier`, String.raw`Meier, Hans \{\\O\}rsted`],
+    [String.raw`\L{}ukasz Kowalski`, String.raw`Kowalski, \\L\{\}ukasz`],
+    [String.raw`John \textsc{Smith}`, String.raw`\\textsc\{Smith\}, John`],
+    [String.raw`Jane {\sc Doe}`, String.raw`\{\\sc Doe\}, Jane`],
+    // Which it read as a von part once escaped, so it put the family name in
+    // a group, which showed, as the reader keeps a part's braces where it
+    // has a command
+    [String.raw`{\textsc{Smith}} Jones, John`, String.raw`\{\\textsc\{Smith\}\} Jones, John`],
+    // Which it put in another group, for the comma or and in its own, so
+    // the braces built up on each trip
+    [String.raw`{Smith, \textsc{Jones}}, John`, String.raw`\{Smith, \\textsc\{Jones\}\}, John`],
+    [String.raw`{Smith and \textsc{Jones}}, John`, String.raw`\{Smith and \\textsc\{Jones\}\}, John`],
+    // An apostrophe, which ends no word
+    ["D'Angelo, Anna", "D'Angelo, Anna"],
+    ["d'Artagnan, Jean", "d'Artagnan, Jean"],
+  ])('writes %s back as before, through export and import', async (author, expected) => {
+    const bibtex = '@book{b,\n  author = {' + author + '},\n  title = {T},\n  year = {2019}\n}\n';
+    const { docx } = await convertMdToDocx('A [@b].', { bibtex });
+    const citations = await extractZoteroCitations(docx);
+    const bib = generateBibTeX(citations, buildCitationKeyMap(citations));
+    expect(bib).toContain('author = {' + expected + '}');
+    expect(buildItemData([...parseBibtex(bib).values()][0]).author).toEqual(buildItemData(parseBibtex(bibtex).get('b')!).author);
+  });
+
+  test('writes a Zotero name\'s non-dropping particle in a group with its family name', async () => {
+    // Which kept Gogh, Vincent alone. In a group, BibTeX reads van Gogh as
+    // the family name, which citeproc shows as Zotero's data has it, van
+    // Gogh, V. in apa, as pandoc does
+    const field = zoteroFieldOf([{
+      id: 1,
+      itemData: { id: 1, type: 'book', title: 'T', author: [{ family: 'Gogh', given: 'Vincent', 'non-dropping-particle': 'van' }], issued: { 'date-parts': [['2020']] } },
+    }]);
+    const { bibtex } = await convertDocx(await buildSyntheticDocx(wrapDocumentXml('<w:p>' + field + '</w:p>')));
+    expect(bibtex).toContain('author = {{van Gogh}, Vincent}');
+    expect(buildItemData([...parseBibtex(bibtex).values()][0]).author).toEqual([{ family: 'van Gogh', given: 'Vincent' }]);
+  });
+
+  test.each([
+    ['a non-dropping particle', { family: 'Gogh', given: 'Vincent', 'non-dropping-particle': 'van' }, '{van Gogh}, Vincent'],
+    ['a dropping particle', { family: 'Beethoven', given: 'Ludwig', 'dropping-particle': 'van' }, 'van Beethoven, Ludwig'],
+    ['a suffix', { family: 'King', given: 'Martin Luther', suffix: 'Jr.' }, 'King, Jr., Martin Luther'],
+    ['a suffix with no given name', { family: 'King', suffix: 'Jr.' }, 'King, Jr.,'],
+    // In a group, which King, Jr., PhD, John would read back as the suffix
+    // Jr. and the given name PhD, John
+    ['a suffix with a comma', { family: 'King', given: 'John', suffix: 'Jr., PhD' }, 'King, {Jr., PhD}, John'],
+    ['a family name with an and', { family: 'Smith and Sons', given: 'John' }, '{Smith and Sons}, John'],
+    // In a group, which García y Vega, Juan would read back as the particle
+    // García y and the family name Vega
+    ['a family name whose words BibTeX reads as a particle', { family: 'García y Vega', given: 'Juan' }, '{García y Vega}, Juan'],
+    ['a family name after a particle', { family: 'García y Vega', given: 'Juan', 'dropping-particle': 'de' }, 'de {García y Vega}, Juan'],
+    // With a comma after it, which García García would read back as the
+    // given name García and the family name García
+    ['a family name of two words with no given name', { family: 'García García' }, 'García García,'],
+    ['an and at the start of a given name', { family: 'Vega', given: 'and Juan' }, 'Vega, {and Juan}'],
+    // Which it joined to the family name with a space, as d' Artagnan
+    ['a non-dropping particle that ends in an apostrophe', { family: 'Artagnan', given: 'Jean', 'non-dropping-particle': "d'" }, "d'Artagnan, Jean"],
+    ['a non-dropping particle that ends in a typographic apostrophe', { family: 'Artagnan', given: 'Jean', 'non-dropping-particle': 'd\u2019' }, 'd\u2019Artagnan, Jean'],
+    ['a non-dropping particle that ends in a hyphen', { family: 'Hassan', given: 'Ali', 'non-dropping-particle': 'al-' }, 'al-Hassan, Ali'],
+    ['a family name a hyphen joins to a lowercase word', { family: 'al-Hassan', given: 'Ali' }, 'al-Hassan, Ali'],
+    ['a family name with an apostrophe', { family: "D'Angelo", given: 'Anna' }, "D'Angelo, Anna"],
+    // Which it read as a von part once escaped, and put in a group, which
+    // showed
+    ['a family name with a command in a group', { family: String.raw`{\textsc{Smith}} Jones`, given: 'John' }, String.raw`\{\\textsc\{Smith\}\} Jones, John`],
+    ['a family name with a command, after a particle', { family: String.raw`\textsc{Beethoven}`, given: 'Ludwig', 'dropping-particle': 'van' }, String.raw`van \\textsc\{Beethoven\}, Ludwig`],
+  ])('generateBibTeX writes %s of a name in the field\'s data as BibTeX reads it', (_name, author, expected) => {
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(T)',
+      items: [{ authors: [author], title: 'T', year: '2020', journal: 'J', volume: '', pages: '', doi: '', type: 'book', fullItemData: { editor: [author] } }],
+    }];
+    const bib = generateBibTeX(citations, buildCitationKeyMap(citations));
+    expect(bib).toContain('author = {' + expected + '}');
+    expect(bib).toContain('editor = {' + expected + '}');
+    const read = buildItemData([...parseBibtex(bib).values()][0]);
+    const { 'non-dropping-particle': particle, ...rest } = author as Record<string, string>;
+    const asRead = particle ? { ...rest, family: particle + (/['\u2019-]$/.test(particle) ? '' : ' ') + rest.family } : rest;
+    expect(read.author).toEqual([asRead]);
+    expect(read.editor).toEqual([asRead]);
+  });
+
+  // A group around it would show, as the reader keeps a part's braces where
+  // it has a command, so it's written as BibTeX reads it, which reads van
+  // as a von part, the dropping particle
+  test('generateBibTeX writes a non-dropping particle before a family name with a command as a von part', () => {
+    const author = { family: String.raw`\textsc{Gogh}`, given: 'Vincent', 'non-dropping-particle': 'van' };
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(T)',
+      items: [{ authors: [author], title: 'T', year: '2020', journal: 'J', volume: '', pages: '', doi: '', type: 'book', fullItemData: {} }],
+    }];
+    const bib = generateBibTeX(citations, buildCitationKeyMap(citations));
+    expect(bib).toContain(String.raw`author = {van \\textsc\{Gogh\}, Vincent}`);
+    expect(buildItemData([...parseBibtex(bib).values()][0]).author).toEqual([{ family: String.raw`\textsc{Gogh}`, given: 'Vincent', 'dropping-particle': 'van' }]);
   });
 
   test('generateBibTeX emits zotero-key and zotero-uri when present', () => {

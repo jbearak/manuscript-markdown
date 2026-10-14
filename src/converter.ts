@@ -17,6 +17,7 @@ import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { readCitationItems } from './citation-syntax';
+import { bibtexNameParts } from './md-to-docx-citations';
 import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -168,8 +169,18 @@ export interface CommentReply {
   date: string;
 }
 
+/** A name in CSL's data, with the parts of it the .bib file keeps */
+export interface CslName {
+  family?: string;
+  given?: string;
+  literal?: string;
+  'non-dropping-particle'?: string;
+  'dropping-particle'?: string;
+  suffix?: string;
+}
+
 export interface CitationMetadata {
-  authors: Array<{ family?: string; given?: string; literal?: string }>;
+  authors: CslName[];
   title: string;
   year: string;
   journal: string;
@@ -2121,10 +2132,13 @@ function parseCslAuthors(value: unknown): CitationMetadata['authors'] {
   if (!Array.isArray(value)) return [];
   return value.flatMap(author => {
     if (!isRecord(author)) return [];
-    const parsed: CitationMetadata['authors'][number] = {};
-    if (typeof author.family === 'string' && author.family.trim()) parsed.family = author.family;
-    if (typeof author.given === 'string' && author.given.trim()) parsed.given = author.given;
-    if (typeof author.literal === 'string' && author.literal.trim()) parsed.literal = author.literal;
+    const parsed: CslName = {};
+    // A particle and a suffix too, as Zotero and export write them, which
+    // the name in the .bib file keeps (see serializeAuthor)
+    for (const key of ['family', 'given', 'literal', 'non-dropping-particle', 'dropping-particle', 'suffix'] as const) {
+      const part = author[key];
+      if (typeof part === 'string' && part.trim()) parsed[key] = part;
+    }
     return Object.keys(parsed).length > 0 ? [parsed] : [];
   });
 }
@@ -16539,10 +16553,50 @@ export function mapCSLTypeToBibtex(cslType: string, genre?: string): string {
   }
 }
 
-/** Serialize a single CSL name entry to BibTeX author format. */
-function serializeAuthor(a: { family?: string; given?: string; literal?: string }): string {
-  if (a.literal) return `{${escapeBibtex(a.literal)}}`;
-  return [a.family, a.given].filter((s): s is string => Boolean(s)).map(escapeBibtex).join(', ');
+/** A CSL name in BibTeX's form, von Last, First, or von Last, Jr, First,
+ *  which parseAuthors reads back as the same parts: a dropping particle as
+ *  the von part, as pandoc reads one, and a suffix as the Jr part. A
+ *  non-dropping particle goes with the family name, in a group where BibTeX
+ *  would read it as a von part, so it stays with the family name, as it
+ *  does where a style inverts the name. */
+function serializeAuthor(a: CslName): string {
+  if (a.literal) return '{' + escapeBibtex(a.literal) + '}';
+  // Each part, in a group where BibTeX would split the name, or the names,
+  // in it: at a comma or an and, as in King, {Jr., PhD}, John, an and at a
+  // part's edge too, since a space joins it to the next part. But a part
+  // with a command, a \ anywhere, never gets a group, for this or any other
+  // reason: the reader keeps every brace in such a part (see
+  // namePartAsShown), so one would show, and build up on each trip. As the
+  // reader reads it, in the parsed value, where an escape reads as what it
+  // escapes, and as written, escaped.
+  type NamePart = { text: string; group: boolean };
+  const part = (text: string): NamePart => ({ text, group: !text.includes('\\') && /,|(?:^|\s)and(?:\s|$)/i.test(text) });
+  const asRead = (p: NamePart) => p.group ? '{' + p.text + '}' : p.text;
+  const asWritten = (p: NamePart) => p.group ? '{' + escapeBibtex(p.text) + '}' : escapeBibtex(p.text);
+  const particle = a['dropping-particle'] ? part(a['dropping-particle']) : undefined;
+  const particleRead = particle ? asRead(particle) : '';
+  // A non-dropping particle joins the family name with no space after an
+  // apostrophe or a hyphen, as d' and al- do, as CSL joins them
+  const nonDropping = a['non-dropping-particle'];
+  const family = part(nonDropping && a.family ? nonDropping + (/['\u2019-]$/.test(nonDropping) ? '' : ' ') + a.family : nonDropping ?? a.family ?? '');
+  // The family name in a group too where BibTeX would read its words, after
+  // the particle, otherwise: as a von part of their own, as García y of
+  // García y Vega, whose y is lowercase, or as the particle's, as a
+  // non-dropping van's. But not one with a command (see part), which reads
+  // as BibTeX reads it.
+  const read = bibtexNameParts([particleRead, asRead(family)].filter(Boolean).join(' ') + ', x');
+  if (family.text && !family.group && !family.text.includes('\\') && (read.von !== particleRead || read.last !== asRead(family))) family.group = true;
+  const parts = family.text ? [particle, family] : [particle];
+  const last = parts.flatMap(p => p ? [asWritten(p)] : []).join(' ');
+  const lastRead = parts.flatMap(p => p ? [asRead(p)] : []).join(' ');
+  const first = a.given ? asWritten(part(a.given)) : '';
+  if (a.suffix) return last + ', ' + asWritten(part(a.suffix)) + ',' + (first ? ' ' + first : '');
+  if (first || !last) return [last, first].filter(Boolean).join(', ');
+  // With no given name, a comma after the family name where BibTeX would
+  // read its first words as a given name, as the first García of García
+  // García, or a group alone as an organization's name
+  const alone = bibtexNameParts(lastRead);
+  return lastRead.startsWith('{') || alone.first || alone.von !== particleRead ? last + ',' : last;
 }
 
 /** CSL fields whose values are verbatim identifiers — not LaTeX text.
@@ -16610,7 +16664,7 @@ export function generateBibTeX(
     // Editor from fullItemData
     const editorData = meta.fullItemData?.editor;
     if (Array.isArray(editorData) && editorData.length > 0) {
-      const editorStr = editorData.map(serializeAuthor).join(' and ');
+      const editorStr = parseCslAuthors(editorData).map(serializeAuthor).join(' and ');
       if (editorStr) { fields.push(`  editor = {${editorStr}}`); }
       alreadyEmitted.add('editor');
     }

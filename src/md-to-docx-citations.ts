@@ -7,6 +7,13 @@ export interface CiteprocName {
   family?: string;
   given?: string;
   literal?: string;
+  // BibTeX's von part, as pandoc reads it, which a style shows with the
+  // given name where it inverts a name, as apa's Beethoven, L. van
+  'dropping-particle'?: string;
+  // BibTeX's Jr part
+  suffix?: string;
+  // Set where the reader read a particle or a suffix (see withNamesAsRead)
+  'static-particles'?: boolean;
 }
 
 export interface CiteprocItemData {
@@ -372,6 +379,20 @@ export async function createCiteprocEngineAsync(
   return engine ? { engine } : {};
 }
 
+/** An item's data as citeproc gets it, with each name the reader read a
+ *  particle or a suffix in marked so citeproc doesn't read its particles
+ *  again: it would take a lowercase word at the end of the given name for
+ *  a dropping particle, as paul in de Smith, John paul, in place of de. A
+ *  name with neither keeps citeproc's reading, which splits a family name a
+ *  group kept whole, as {van Gogh}, into its particle and the rest. */
+function withNamesAsRead(item: CiteprocItemData): CiteprocItemData {
+  const asRead = (names: CiteprocName[]) => names.map(name => name['dropping-particle'] || name.suffix ? { ...name, 'static-particles': true } : name);
+  const read = { ...item };
+  if (item.author) read.author = asRead(item.author);
+  if (item.editor) read.editor = asRead(item.editor);
+  return read;
+}
+
 function buildEngine(
   entries: Map<string, BibtexEntry>,
   styleXml: string,
@@ -383,7 +404,7 @@ function buildEngine(
   // Build CSL-JSON item map keyed by citation key
   const items = new Map<string, CiteprocItemData>();
   for (const [key, entry] of entries) {
-    const itemData = buildItemData(entry);
+    const itemData = withNamesAsRead(buildItemData(entry));
     itemData.id = key;
     items.set(key, itemData);
   }
@@ -545,7 +566,8 @@ function buildCitationFieldCode(
     const key = keys[i];
     const entry = entries.get(key);
     if (!entry) continue;
-    const itemData = buildItemData(entry);
+    // As citeproc gets it here, for Zotero's, where it refreshes the field
+    const itemData = withNamesAsRead(buildItemData(entry));
     itemData['citation-key'] = key;        // preserve citekey for round-trip
 
     // Defect 4: assign stable id via itemIdMap
@@ -820,10 +842,10 @@ export function splitAuthorString(authorString: string): string[] {
   return result.filter(s => s.length > 0);
 }
 
-// Where BibTeX splits a name: at a comma, or else at whitespace between
-// its words, which a no-break space isn't
+// Where BibTeX splits a name: at a comma, and into its words at whitespace
+// or a hyphen, one character at a time, but not at a no-break space
 const NAME_COMMA = /,/y;
-const NAME_SPACE = /[ \t\n\r\f]+/y;
+const NAME_WORD_BREAK = /[ \t\n\r\f-]/y;
 
 /** `name` split where `at` matches outside its groups, as BibTeX splits a
  *  name, so a group is one word. Like BibTeX, it counts every brace, one a
@@ -885,24 +907,137 @@ function namePartAsShown(part: string): string {
   return shown.replace(/[ \t\n\r\f]+/g, ' ').trim();
 }
 
+/** A word of a name, and what came before it, a space or a hyphen */
+interface NameWord { text: string; separator: string }
+
+/** The words of a part of a name, outside its groups. Between two words
+ *  BibTeX keeps the first of the characters between them (bibtex.web,
+ *  "Name-process a sep_char"), so in John Smith -Jones a space comes
+ *  before Jones, and in John Smith- Jones a hyphen */
+function nameWords(part: string): NameWord[] {
+  const words: NameWord[] = [];
+  let between = '';
+  let at = 0;
+  for (const piece of splitOutsideGroups(part, NAME_WORD_BREAK)) {
+    if (piece) {
+      words.push({ text: piece, separator: between });
+      between = '';
+    }
+    at += piece.length;
+    const char = part[at++];
+    if (char !== undefined && between === '') between = char === '-' ? '-' : ' ';
+  }
+  return words;
+}
+
+/** The words of a name as BibTeX joins them, each after what came before it */
+const joinWords = (words: NameWord[]): string => words.map((word, k) => (k > 0 ? word.separator : '') + word.text).join('');
+
+// The commands of letters whose case BibTeX's table gives: lowercase, as
+// \ss, which starts a von part, or uppercase, as \O
+const LOWERCASE_LETTER_COMMANDS: ReadonlySet<string> = new Set(['oe', 'ae', 'aa', 'o', 'l', 'i', 'j', 'ss']);
+const UPPERCASE_LETTER_COMMANDS: ReadonlySet<string> = new Set(['OE', 'AE', 'AA', 'O', 'L']);
+
+/** The index of the } that closes the group whose { is at `open` in
+ *  `text`, counting every brace, as BibTeX does, or the text's length */
+function groupEnd(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}' && --depth === 0) return i;
+  }
+  return text.length;
+}
+
+/** Whether a word of a name starts BibTeX's von part, as van and de do:
+ *  its first letter outside groups is lowercase (bibtex.web,
+ *  von_token_found). A group, as {van}, has no case, so the letters after
+ *  it decide, unless it starts with a command, as {\ss} or {\'e}, a
+ *  special character, whose letter decides. The parser has read most
+ *  accents as their letters already, as é. */
+function isVonWord(word: string): boolean {
+  for (let i = 0; i < word.length; i++) {
+    if (word[i] === '{') {
+      const end = groupEnd(word, i);
+      if (word[i + 1] === '\\') {
+        const command = /^[A-Za-z]*/.exec(word.slice(i + 2, end))![0];
+        if (LOWERCASE_LETTER_COMMANDS.has(command)) return true;
+        if (UPPERCASE_LETTER_COMMANDS.has(command)) return false;
+        const letter = /\p{L}/u.exec(word.slice(i + 2 + command.length, end))?.[0];
+        return letter !== undefined && /\p{Ll}/u.test(letter);
+      }
+      i = end;
+    } else if (/\p{L}/u.test(word[i])) {
+      return /\p{Ll}/u.test(word[i]);
+    }
+  }
+  return false;
+}
+
+/** Where the von part of a name's `count` runs of words, from `start`,
+ *  ends and its last part starts: after its last von run before the last */
+function vonEnd(count: number, start: number, isVon: (run: number) => boolean): number {
+  let end = count - 1;
+  while (end > start && !isVon(end - 1)) end--;
+  return Math.max(start, end);
+}
+
+/**
+ * A BibTeX name's parts as BibTeX reads them: First von Last, von Last,
+ * First, or von Last, Jr, First. The von part is the words from the first
+ * that starts with a lowercase letter, or from the start of a name with a
+ * comma, to the last such word before the last word, and the last part
+ * the words after, so de la Vallée Poussin's last part is Vallée Poussin.
+ * Without a von part, the last part is the last word. Words a hyphen
+ * joins count as one word here, where BibTeX splits them, so a von part
+ * starts and ends only at whitespace: al-Hassan and Smith-Jones stay family
+ * names, as they were, and Jean-Paul a given name. Parts after a third,
+ * which BibTeX warns of, are dropped, as pandoc drops them.
+ */
+export function bibtexNameParts(name: string): { first: string; von: string; last: string; jr: string } {
+  const parts = splitOutsideGroups(name, NAME_COMMA);
+  const words = nameWords(parts[0]);
+  // Where each run of words that hyphens join starts. A run is von where
+  // its first word is
+  const starts = words.flatMap((word, k) => k === 0 || word.separator !== '-' ? [k] : []);
+  const count = starts.length;
+  const isVon = (run: number) => isVonWord(words[starts[run]].text);
+  const runs = (from: number, to: number) =>
+    joinWords(words.slice(starts[from] ?? words.length, starts[to] ?? words.length));
+  if (parts.length > 1) {
+    const end = vonEnd(count, 0, isVon);
+    const jr = parts.length > 2 ? parts[1] : '';
+    return { first: parts[parts.length > 2 ? 2 : 1], von: runs(0, end), last: runs(end, count), jr };
+  }
+  let start = starts.slice(0, -1).findIndex((_, run) => isVon(run));
+  let end: number;
+  if (start < 0) {
+    start = Math.max(0, count - 1);
+    end = start;
+  } else {
+    end = vonEnd(count, start, isVon);
+  }
+  return { first: runs(0, start), von: runs(start, end), last: runs(end, count), jr: '' };
+}
+
 export function parseAuthors(authorString: string): CiteprocName[] {
   const authors = splitAuthorString(authorString);
   return authors.map(author => {
     // Institutional/corporate author: one group (after BibTeX parser
     // stripped the outer field braces, institutional names arrive as {Name})
     if (isOneGroup(author)) return { literal: author.slice(1, -1) };
-    // Family name before the first comma outside groups, and the given name
-    // after it
-    const commaParts = splitOutsideGroups(author, NAME_COMMA);
-    if (commaParts.length > 1) {
-      return { family: namePartAsShown(commaParts[0]), given: namePartAsShown(commaParts.slice(1).join(',')) };
-    }
-    // Else the last word is the family name, a group one word
-    const words = splitOutsideGroups(author, NAME_SPACE).filter(word => word !== '');
-    if (words.length >= 2) {
-      return { family: namePartAsShown(words[words.length - 1]), given: namePartAsShown(words.slice(0, -1).join(' ')) };
-    }
-    return { family: namePartAsShown(author) };
+    // A group is one word, so Ludwig {van Beethoven}'s last part is van
+    // Beethoven. The von part is citeproc's dropping particle, as pandoc
+    // reads it, and the Jr part its suffix.
+    const { first, von, last, jr } = bibtexNameParts(author);
+    const name: CiteprocName = { family: namePartAsShown(last) };
+    const given = namePartAsShown(first);
+    const particle = namePartAsShown(von);
+    const suffix = namePartAsShown(jr);
+    if (given) name.given = given;
+    if (particle) name['dropping-particle'] = particle;
+    if (suffix) name.suffix = suffix;
+    return name;
   });
 }
 
