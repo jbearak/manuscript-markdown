@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { scanOrientationDirectives } from './orientation-scan';
+import { closingFenceAtEnd, scanOrientationDirectives } from './orientation-scan';
 
 describe('scanOrientationDirectives', () => {
   it('returns empty for matched pair', () => {
@@ -185,8 +185,9 @@ describe('scanOrientationDirectives', () => {
     const grid = '  +---+\n  | x |\n  +---+\n';
     it.each([
       ['a pair', '- a\n\n' + grid + '\n  <!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n', [], 1],
-      ['an opener alone', '- a\n\n' + grid + '\n  <!-- landscape -->\n\nB.\n', ['unclosed landscape <!-- landscape -->'], 0],
-      ['an opener on the line after the table', '- a\n' + grid + '  <!-- landscape -->\n\nB.\n', ['unclosed landscape <!-- landscape -->'], 0],
+      // Which export closes at the document's end, with the warning
+      ['an opener alone', '- a\n\n' + grid + '\n  <!-- landscape -->\n\nB.\n', ['unclosed landscape <!-- landscape -->'], 1],
+      ['an opener on the line after the table', '- a\n' + grid + '  <!-- landscape -->\n\nB.\n', ['unclosed landscape <!-- landscape -->'], 1],
     ])('reads %s after a grid table in a list item as the document\'s, as export does', async (_, text, expected, sections) => {
       expect(kinds(text)).toEqual(expected);
       const { convertMdToDocx } = await import('./md-to-docx');
@@ -276,5 +277,27 @@ describe('scanOrientationDirectives', () => {
       expect.objectContaining({ kind: 'nested', directiveName: 'portrait', relatedName: 'landscape' }),
       expect.objectContaining({ kind: 'crossed', directiveName: 'portrait', relatedName: 'landscape' }),
     ]);
+  });
+});
+
+describe('closingFenceAtEnd', () => {
+  it.each([
+    ['a section left open', 'A.\n\n<!-- landscape -->\n\nB.\n', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n'],
+    ['a section left open, past the blank lines at the end', 'A.\n\n<!-- portrait -->\n\nB.  \n\n \n', 'A.\n\n<!-- portrait -->\n\nB.  \n\n<!-- /portrait -->\n'],
+    ['a section an opener of the other kind ends, which export reads as the open one', '<!-- landscape -->\n\nA.\n\n<!-- portrait -->\n\nB.', '<!-- landscape -->\n\nA.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n'],
+    ['a section a closer ends', '<!-- landscape -->\n\nA.\n\n<!-- /landscape -->\n', undefined],
+    ['a section a closer of the other kind ends, which export ends there', '<!-- landscape -->\n\nA.\n\n<!-- /portrait -->\n', undefined],
+    ['an opener a list item drops', '- a\n\n  <!-- landscape -->\n', undefined],
+    ['an opener in a note', 'A[^1]\n\n[^1]: n\n\n    <!-- landscape -->\n', undefined],
+    ['a section that ends in code with no closing fence, which would hold the fence', '<!-- landscape -->\n\n```\nk\n', undefined],
+    ['a section that ends in an HTML comment with no end', '<!-- landscape -->\n\n<!-- c\n', undefined],
+    ['a section that holds code with a comment\'s start and no end', '<!-- landscape -->\n\n```\n<!--\n```\n\nB.\n', undefined],
+    ['a section that holds inline code with a comment\'s start and no end', '<!-- landscape -->\n\nUse `<!--` here.\n', undefined],
+    ['a section after code with a comment\'s start, which its opener ends', '```\n<!--\n```\n\n<!-- landscape -->\n\nB.\n', '```\n<!--\n```\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n'],
+  ])('closes %s as export reads it', (_name, text, closed) => {
+    // Export reads the document as if this fence ended it, where it reads
+    // the fence there as a directive at the top level
+    const closing = closingFenceAtEnd(text);
+    expect(closing && text.slice(0, closing.end) + closing.fence).toBe(closed);
   });
 });

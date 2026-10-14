@@ -40,6 +40,7 @@ const blockParser = new MarkdownIt({ html: true });
 // ORIENTATION_OPEN_RE in md-to-docx.ts)
 const DIRECTIVE_BLOCK_RE = /^<!--\s*(\/?)(landscape|portrait)\s*-->$/i;
 const DIRECTIVE_RE = /<!--\s*\/?(?:landscape|portrait)\s*-->/gi;
+const OPENER_RE = /<!--\s*(?:landscape|portrait)\s*-->/i;
 // A note's definition, as extractFootnoteDefinitions in md-to-docx.ts reads one
 const NOTE_DEFINITION_RE = /^\[\^[a-zA-Z0-9_-]+\]:\s?/;
 const NOTE_CONTINUATION_RE = /^(?: {4}|\t)/;
@@ -182,6 +183,39 @@ function directivesOf(text: string): Directive[] {
     pushAll(directives, blockDirectives(source, text, k => (lineStarts[noteBody[k].line] ?? text.length) + noteBody[k].skip, true));
   }
   return directives;
+}
+
+/**
+ * Where `text` would end, and the closing fence after it, for a section
+ * export leaves open at its end, as `<!-- landscape -->` with no closing
+ * fence after it: the text past its last line that holds more than
+ * whitespace, then a blank line and the fence. Export reads the directives
+ * at the top level so (see md-to-docx.ts's pass that turns them into
+ * sections): an opener opens its section, and ends any open one, and a
+ * closer of either kind ends the open one, or is a comment where none is.
+ * Not where export would read the fence there as no directive of its own
+ * at the top level, as in code or an HTML block the document ends in. Nor
+ * where the text has a `<!--` with no `-->` after it, anywhere, in code
+ * too, whose comment the fence's `-->` would end for a step that reads the
+ * text as it is, as the one that finds LaTeX environments outside comments
+ * does (see latex-env-preprocess.ts).
+ */
+export function closingFenceAtEnd(text: string): { end: number; fence: string } | undefined {
+  if (!OPENER_RE.test(text)) return undefined;
+  // The last directive export reads at the top level of `from`
+  const lastOf = (from: string): Directive | undefined => {
+    const top = directivesOf(from).filter(directive => directive.where === 'top').sort((a, b) => a.start - b.start);
+    return top[top.length - 1];
+  };
+  const last = lastOf(text);
+  if (!last || last.close || text.lastIndexOf('<!--') > text.lastIndexOf('-->')) return undefined;
+  let end = text.length;
+  for (let lineStart = text.lastIndexOf('\n', end - 1); lineStart !== -1 && /^[ \t]*$/.test(text.slice(lineStart + 1, end)); lineStart = text.lastIndexOf('\n', end - 1)) {
+    end = lineStart;
+  }
+  const fence = '\n\n<!-- /' + last.name + ' -->\n';
+  const after = lastOf(text.slice(0, end) + fence);
+  return after?.close && after.start === end + 2 ? { end, fence } : undefined;
 }
 
 /**

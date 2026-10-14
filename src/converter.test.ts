@@ -17796,6 +17796,74 @@ describe('A section at the end of the document', () => {
     expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
   });
 
+  const boxStyle = '---\nstyles:\n  box:\n    font-style: italic\n---\n';
+  test.each([
+    ['a landscape section', 'A.\n\n<!-- landscape -->\n\nB.\n', 'landscape', true],
+    ['a portrait section', 'A.\n\n<!-- portrait -->\n\nB.\n', 'portrait', false],
+    ['a landscape section that is all of the document', '<!-- landscape -->\n\nB.\n', 'landscape', false],
+    ['a landscape section of only the bibliography\'s place', 'A.\n\n<!-- landscape -->\n\n<!-- references -->\n', 'landscape', true],
+    ['a landscape section that ends with a comment', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- c -->\n', 'landscape', true],
+    ['an empty landscape section', 'A.\n\n<!-- landscape -->\n', 'landscape', false],
+    ['a landscape section that ends with blank lines', 'A.\n\n<!-- landscape -->\n\nB.\n\n  \n\n', 'landscape', true],
+    ['a landscape section that ends with a quote', 'A.\n\n<!-- landscape -->\n\n> B.\n', 'landscape', true],
+    ['a landscape section that ends with an alert', 'A.\n\n<!-- landscape -->\n\n> [!NOTE]\n> B.\n', 'landscape', true],
+    ['a landscape section that ends with a list', 'A.\n\n<!-- landscape -->\n\n- B.\n- C.\n', 'landscape', true],
+    ['a landscape section that ends with a table', 'A.\n\n<!-- landscape -->\n\n| a |\n| --- |\n| 1 |\n', 'landscape', true],
+    ['a landscape section that ends with a style block', boxStyle + 'A.\n\n<!-- landscape -->\n\n<!-- style: box -->\n\nB.\n\n<!-- /style -->\n', 'landscape', true],
+    ['a landscape section that ends in a style block left open', boxStyle + 'A.\n\n<!-- landscape -->\n\n<!-- style: box -->\n\nB.\n', 'landscape', true],
+  ])('ends %s with no closing fence at the end of the document, as its closing fence would', async (_, md, fence, landscape) => {
+    // Export warned of it, but gave the section the template's page and no
+    // break, so it was part of the section before, and import wrote no
+    // fences, as if it weren't there. Word now gets what it gets where a
+    // closing fence ends the document, after a blank line, and import
+    // writes that fence
+    const closed = md.replace(/(?:\n[ \t]*)*$/, '') + '\n\n<!-- /' + fence + ' -->\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings.some(w => w.startsWith('Unclosed <!-- ' + fence + ' -->'))).toBe(true);
+    // But for the revision IDs, which are random
+    const reference = (await convertMdToDocx(closed)).docx;
+    const xml = await documentXml(docx);
+    const withoutRsids = (text: string) => text.replace(/ w:rsid\w*="[0-9A-F]+"/g, '');
+    expect(withoutRsids(xml)).toBe(withoutRsids(await documentXml(reference)));
+    const custom = async (docx: Uint8Array) => (await JSZip.loadAsync(docx)).file('docProps/custom.xml')?.async('string');
+    expect(await custom(docx)).toBe(await custom(reference));
+    expect(xml.slice(xml.lastIndexOf('<w:sectPr')).includes('w:orient="landscape"')).toBe(landscape);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(md1).toBe((await convertDocx(reference)).markdown);
+    expect(strip(md1)).toEndWith('\n\n<!-- /' + fence + ' -->\n');
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
+  test.each([
+    ['code with a comment\'s start, before an equation', 'A.\n\n<!-- landscape -->\n\n```\n<!--\n```\n\n\\begin{equation}\nx\n\\end{equation}\n',
+      'A.\n\n<!-- landscape -->\n\n```\n<!--\n```\n\n$' + '$\nx\n$' + '$\n\n<!-- /landscape -->\n', true],
+    ['inline code with a comment\'s start', 'A.\n\n<!-- landscape -->\n\nUse `<!--` here.\n', 'A.\n\n<!-- landscape -->\n\nUse `<!--` here.\n\n<!-- /landscape -->\n', false],
+  ])('ends a landscape section that holds %s with no closing fence at the end of the document, reading the rest as before', async (_, md, expected, equation) => {
+    // A closing fence after it would end that comment for a step that reads
+    // the source as it is, as the one that finds LaTeX environments outside
+    // comments, which read the equation as the comment's and wrote it as
+    // text. Export ends the section after the last block instead
+    const { docx } = await convertMdToDocx(md);
+    const xml = await documentXml(docx);
+    expect(xml.includes('<m:oMath')).toBe(equation);
+    expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toContain('w:orient="landscape"');
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
+  test('ends a landscape section that ends in code with no closing fence at the end of the document', async () => {
+    // A closing fence after it would be the code's, so export ends the
+    // section after the code
+    const md = 'A.\n\n<!-- landscape -->\n\n```\nk\n';
+    const { docx } = await convertMdToDocx(md);
+    const xml = await documentXml(docx);
+    expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toContain('w:orient="landscape"');
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe('A.\n\n<!-- landscape -->\n\n```\nk\n```\n\n<!-- /landscape -->\n');
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
   test('reads a Word document whose last section is landscape, which has the body\'s properties', async () => {
     // As Word writes one: the section before ends at its last paragraph, and
     // the last section's properties are the body's, which import didn't read
@@ -17943,6 +18011,23 @@ describe('A section at the end of the document', () => {
       expect(xml.slice(xml.indexOf('B.'))).not.toContain('</w:sectPr></w:pPr>');
       const md1 = (await convertDocx(docx)).markdown;
       expect(strip(md1)).toBe(md);
+      expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+    });
+
+    test.each([
+      ['a portrait section', 'A.\n\n<!-- portrait -->\n\nB.\n', 'portrait', '<w:pgSz w:w="12240" w:h="15840"/>'],
+      ['a landscape section', 'A.\n\n<!-- landscape -->\n\nB.\n', 'landscape', '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'],
+    ])('gives %s with no closing fence at the end of the document its own page, not the template\'s', async (_, md, fence, page) => {
+      // Export gave it the template's landscape page, which import read as
+      // the template's, so it wrote no fences
+      const templateDocx = await landscapeTemplate();
+      const closed = md + '\n<!-- /' + fence + ' -->\n';
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toContain(page);
+      expect(await (await JSZip.loadAsync(docx)).file('docProps/custom.xml')?.async('string') ?? '').not.toContain('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_');
+      const md1 = (await convertDocx(docx)).markdown;
+      expect(strip(md1)).toBe(closed);
       expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
     });
 
