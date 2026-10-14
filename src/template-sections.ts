@@ -72,8 +72,8 @@
 //   The core and app properties, as Title or Company, stay export's.
 
 import type JSZip from 'jszip';
-import { escapeXmlAttribute, xmlBuilder, xmlParser } from './xml-parser';
-import { xmlOn, xmlTwips } from './xml-elements';
+import { escapeXmlAttribute, xmlAttributeValue, xmlBuilder, xmlParser, xmlTextValue } from './xml-parser';
+import { withXmlAttribute, xmlAttribute, xmlInteger, xmlLastMatch, xmlOn, xmlStartTags, xmlTwips } from './xml-elements';
 import { EXPORT_CONTEXT, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, NO_COMPATIBILITY, ORDERED_OPTIONS, WORDPROCESSINGML, WORD_UNDERSTOOD_NAMESPACES, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, expandName, expandedNameOf, isElement, isIgnored, isNamed, moved, nameOf, parseOrdered, readsChoice, scopeIn, sectPrPropertyOf, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
 
 interface Relationship {
@@ -285,14 +285,14 @@ export function withRelationshipIds(xml: string, ids: Map<string, string> | unde
   const relationshipPrefixes = new Set<string>(), officePrefixes = new Set<string>();
   for (const [tag] of xml.matchAll(TAG)) {
     for (const [, , prefix, name, , double, single] of tag.matchAll(ATTRIBUTE)) {
-      const namespace = prefix === 'xmlns' ? decodeEntities(double ?? single) : undefined;
+      const namespace = prefix === 'xmlns' ? xmlAttributeValue(double ?? single!) : undefined;
       if (namespace !== undefined && RELATIONSHIPS_NAMESPACES.has(namespace)) relationshipPrefixes.add(name);
       else if (namespace === OFFICE_NAMESPACE) officePrefixes.add(name);
     }
   }
   return xml.replace(TAG, tag => tag.startsWith('<!') ? tag : tag.replace(ATTRIBUTE,
     (attribute, space: string, prefix: string | undefined, name: string, equals: string, double: string | undefined, single: string | undefined) => {
-      const id = ids.get(decodeEntities(double ?? single!));
+      const id = ids.get(xmlAttributeValue(double ?? single!));
       const namesOne = prefix !== undefined && (relationshipPrefixes.has(prefix) || officePrefixes.has(prefix) && name === 'relid');
       if (id === undefined || !namesOne) return attribute;
       const quote = double === undefined ? "'" : '"';
@@ -374,22 +374,20 @@ function sectPrsOf(documentXml: string): Array<{ xml: string; around: Context }>
   return sectPrs;
 }
 
-const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
-const decodeEntities = (text: string) => text.replace(/&(amp|lt|gt|quot|apos);|&#(x[0-9a-f]+|\d+);/gi,
-  (_, name: string | undefined, code: string | undefined) => name ? ENTITIES[name.toLowerCase()] : String.fromCodePoint(code![0] === 'x' || code![0] === 'X' ? parseInt(code!.slice(1), 16) : parseInt(code!, 10)));
-
 /** The properties a part's DOCPROPERTY fields name, simple fields' and
- *  those whose code runs hold, in pieces, between begin and separate */
+ *  those whose code runs hold, in pieces, between begin and separate, each
+ *  code with its references read as an XML parser reads them (see
+ *  xmlAttributeValue and xmlTextValue) */
 function docPropertyNames(xml: string): string[] {
   const codes: string[] = [];
-  for (const m of xml.matchAll(/<w:fldSimple\b[^>]*?\sw:instr\s*=\s*(["'])([\s\S]*?)\1/g)) codes.push(decodeEntities(m[2]));
+  for (const m of xml.matchAll(/<w:fldSimple\b[^>]*?\sw:instr\s*=\s*(["'])([\s\S]*?)\1/g)) codes.push(xmlAttributeValue(m[2]));
   const open: Array<{ code: string; done: boolean }> = [];
   for (const m of xml.matchAll(/<w:fldChar\b[^>]*?\sw:fldCharType\s*=\s*["'](begin|separate|end)["']|<w:instrText\b[^>]*>([^<]*)<\/w:instrText\s*>/g)) {
     const field = open[open.length - 1];
     if (m[1] === 'begin') {
       open.push({ code: '', done: false });
     } else if (m[1] === undefined) {
-      if (field && !field.done) field.code += decodeEntities(m[2]);
+      if (field && !field.done) field.code += xmlTextValue(m[2]);
     } else if (field) {
       // A field's code ends at its separator, or at its end without one
       if (!field.done) codes.push(field.code);
@@ -403,10 +401,23 @@ function docPropertyNames(xml: string): string[] {
   });
 }
 
-const NUM_ID = /<w:numId\b[^>]*?\sw:val\s*=\s*(["'])(\d+)\1/g;
 /** A reference to a comment or a note, which the template's other parts hold */
 const COMMENT_OR_NOTE = /<w:(commentRangeStart|commentRangeEnd|commentReference|footnoteReference|endnoteReference)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1\s*>)/g;
-const DOC_PR_ID = /(<wp:docPr\b[^>]*?\sid\s*=\s*)(["'])\d+\2/g;
+
+/** A part's XML with each drawing's ID (wp:docPr's id) from `next` on, as
+ *  `next` gives them, each tag read as an XML parser reads it (see
+ *  xmlStartTags), and each ID by its value, however it's written (see
+ *  xmlInteger), so that one written +1 takes a new one too */
+function withDocPrIds(xml: string, next: () => number): string {
+  let out = '';
+  let at = 0;
+  for (const { tag, start, end } of xmlStartTags(xml, ['wp:docPr'])) {
+    if (xmlInteger(xmlAttribute(tag, 'id')) === undefined) continue;
+    out += xml.slice(at, start) + withXmlAttribute(tag, 'id', String(next()));
+    at = end;
+  }
+  return out + xml.slice(at);
+}
 
 
 // The section properties export gives sections of its own, which the
@@ -585,7 +596,12 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
     if (/\.xml$/i.test(path) || /xml$/.test(part.contentType ?? '')) {
       part.xml = decodeXml(part.data);
       if (!numberingOnly) {
-        for (const m of part.xml.matchAll(NUM_ID)) result.numIds.add(parseInt(m[2], 10));
+        // Each numId by its value, as import reads it (see xmlInteger), so
+        // that one written +3 or with whitespace around it is in use
+        for (const { tag } of xmlStartTags(part.xml, ['w:numId'])) {
+          const numId = xmlInteger(xmlAttribute(tag, 'w:val'));
+          if (numId !== undefined) result.numIds.add(numId);
+        }
         for (const name of docPropertyNames(part.xml)) shownProperties.add(name.toLowerCase());
       }
     }
@@ -596,8 +612,10 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
   };
 
   const documentXml = await read('word/document.xml') ?? '';
-  const bodyClose = documentXml.lastIndexOf('</w:body>');
-  const sectPrs = sectPrsOf(bodyClose < 0 ? documentXml : documentXml.slice(0, bodyClose)).map(({ xml, around }) => {
+  // The body's end tag, however it's written, and not one a comment, CDATA
+  // section or processing instruction holds (see xmlLastMatch)
+  const bodyClose = xmlLastMatch(documentXml, /<\/w:body\s*>/)?.index;
+  const sectPrs = sectPrsOf(bodyClose === undefined ? documentXml : documentXml.slice(0, bodyClose)).map(({ xml, around }) => {
     // None that breaks Namespaces in XML where it is, which Word refuses
     const node = parseOrdered(xml, around.scope)?.find(isElement);
     return node && { node, around };
@@ -780,8 +798,8 @@ export function addTemplateSectionParts(
     // New IDs for its relationships, which only an XML part, whose
     // references to them export rewrites, takes
     const ids = part.xml === undefined ? undefined : part.rels?.ids;
-    const xml = part.xml === undefined ? undefined : withRelationshipIds(part.xml, ids)
-      .replace(COMMENT_OR_NOTE, '').replace(DOC_PR_ID, (_, before: string, quote: string) => before + quote + (nextDocPrId++) + quote);
+    const xml = part.xml === undefined ? undefined
+      : withDocPrIds(withRelationshipIds(part.xml, ids).replace(COMMENT_OR_NOTE, ''), () => nextDocPrId++);
     zip.file(target, xml !== undefined && xml !== part.xml ? asUtf8(xml) : part.data);
     if (part.rels) addRels(target, part.rels, ids);
     if (!part.contentType) continue;

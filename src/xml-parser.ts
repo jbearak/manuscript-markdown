@@ -21,6 +21,8 @@
 //   double quotes, for XML built as text.
 // - xmlAttributeValue(value): an attribute's value as xmlParser reads it,
 //   for a reader of tags as text (see xmlAttribute in xml-elements.ts).
+// - xmlTextValue(text): text between tags as xmlParser reads it, for a
+//   reader of XML as text (see docPropertyNames in template-sections.ts).
 // - XML_ENTITIES: how many entities fast-xml-parser reads, and how long one
 //   a DOCTYPE declares can be.
 // - isXmlCharacter(code), hasNonXmlCharacter(text) and
@@ -131,6 +133,12 @@ function decoded(text: string): string {
  *  of a tag it reads, so that both read a template's the same */
 export const xmlAttributeValue = (value: string): string => decoded(value.replace(/\r\n?|[\t\n]/g, ' '));
 
+/** Text between tags, as written, as XML reads it: a carriage return and
+ *  line feed, or a carriage return alone, a line feed (XML 1.0 §2.11), and
+ *  then each reference read (see decoded). The parser reads each text so,
+ *  as it's given text whose line ends are line feeds already */
+export const xmlTextValue = (text: string): string => decoded(text.replace(/\r\n?/g, '\n'));
+
 // What holds no markup, each by how it starts and ends: a comment, an
 // instruction and a character data section
 const NO_MARKUP = [['<!--', '-->'], ['<?', '?>'], ['<![CDATA[', ']]>']] as const;
@@ -169,7 +177,7 @@ class ReferenceParser extends XMLParser {
       processEntities: { ...XML_ENTITIES, tagFilter: () => false },
       htmlEntities: false,
       attributeValueProcessor: (_name, value) => xmlAttributeValue(value),
-      tagValueProcessor: (_name, value) => decoded(value),
+      tagValueProcessor: (_name, value) => xmlTextValue(value),
     });
     // A section kept apart is given no processor
     this.sectionsAsText = !options.cdataPropName;

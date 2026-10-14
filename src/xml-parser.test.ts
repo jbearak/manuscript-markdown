@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import JSZip from 'jszip';
 import { convertDocx, extractZoteroPrefs } from './converter';
 import { convertMdToDocx } from './md-to-docx';
-import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters, xmlBuilder, xmlParser } from './xml-parser';
+import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters, xmlBuilder, xmlParser, xmlTextValue } from './xml-parser';
 import { fastestRun } from './test-timing';
 import { xmlAttribute } from './xml-elements';
 
@@ -54,6 +54,20 @@ describe('a parser xmlParser builds', () => {
   ])('reads %s in an attribute as xmlAttribute does', (_name, value) => {
     const [a] = xmlParser(OPTIONS).parse('<a b="' + value + '"/>');
     expect(xmlAttribute('<a b="' + value + '"/>', 'b')).toBe(a[':@']['@_b']);
+  });
+
+  // xmlTextValue, which reads a template's field codes, reads text as the
+  // parser does, and each as XML reads it
+  it.each([
+    ['a tab, line feed and carriage return written as themselves', '1\t2\n3\r4', '1\t2\n3\n4'],
+    ['a line end of a carriage return and a line feed', '1\r\n2', '1\n2'],
+    ['each written as a reference', '1&#9;2&#xA;3&#13;4', '1\t2\n3\r4'],
+    ['references that are no character of XML\'s, or to no entity XML declares', '&#0;&#x110000;&nbsp;&AMP;&#X43;', '&#0;&#x110000;&nbsp;&AMP;C'],
+    ['an escaped reference', '&amp;#65;&amp;amp;', '&#65;&amp;'],
+  ])('reads %s in text as xmlTextValue does', (_name, text, expected) => {
+    const [a] = xmlParser(OPTIONS).parse('<a>' + text + '</a>');
+    expect(xmlTextValue(text)).toBe(expected);
+    expect(a.a[0]['#text']).toBe(expected);
   });
 
   it('reads more than a thousand references to entities, which fast-xml-parser\'s default limit refuses', () => {
