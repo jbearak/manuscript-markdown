@@ -543,6 +543,28 @@ describe('mergeBibtex', () => {
     expect(mergeBibtex(existing, '@article{k,\n  title = {Title}\n}')).toBe(merged);
   });
 
+  // Which wrote an entry whose key the existing file gives more than once,
+  // whose last text and fields the parser keeps, where its first was, so
+  // before a declaration only the last follows, of a macro it then used
+  // before BibTeX had read it, or before one that declares a macro again,
+  // whose value it then read otherwise. It goes where its last was, and
+  // each other entry and declaration stays where it was
+  it.each([
+    ['twice, with a macro declared between them', '@article{k, title = {A}}\n@string{j = "J"}\n@article{k, journal = j}', '@article{k,\n  title = {Title}\n}',
+      '@string{j = "J"}\n\n@article{k,\n  title = {Title},\n  journal = j\n}'],
+    ['twice, with a macro declared between them, the last with the produced field', '@article{k, title = {A}}\n@string{x = {X}}\n@article{k, title = {Title}, note = x}', '@article{k,\n  title = {Title}\n}',
+      '@string{x = {X}}\n\n@article{k,\n  title = {Title},\n  note = x\n}'],
+    ['twice, with a macro declared between them, which the produced file lacks', '@article{k, title = {A}}\n@string{j = "J"}\n@article{k, journal = j}', '@article{p,\n  title = {P}\n}',
+      '@string{j = "J"}\n\n@article{k, journal = j}\n\n@article{p,\n  title = {P}\n}'],
+    ['twice, with a macro declared again between them, after an entry that uses it', '@string{x = {1}}\n@article{k, title = {A}}\n@book{b, note = x}\n@string{x = {2}}\n@article{k, note = x}', '@article{k,\n  title = {Title}\n}',
+      '@string{x = {1}}\n\n@book{b, note = x}\n\n@string{x = {2}}\n\n@article{k,\n  title = {Title},\n  note = x\n}'],
+    ['three times, among other entries', '@book{a, note = {A}}\n@article{k, title = {1}}\n@book{b, note = {B}}\n@article{k, title = {2}}\n@string{j = "J"}\n@book{c, note = {C}}\n@article{k, journal = j}\n@book{d, note = {D}}', '@article{k,\n  title = {Title}\n}',
+      '@book{a, note = {A}}\n\n@book{b, note = {B}}\n\n@string{j = "J"}\n\n@book{c, note = {C}}\n\n@article{k,\n  title = {Title},\n  journal = j\n}\n\n@book{d, note = {D}}'],
+  ])('merges an entry the file gives %s, where its last was', (_name, existing, produced, merged) => {
+    expect(mergeBibtex(existing, produced)).toBe(merged);
+    expect(mergeBibtex(merged, produced)).toBe(merged);
+  });
+
   it('keeps the declarations between many entries in linear time', () => {
     const time = (n: number) => {
       const text = Array.from({ length: n }, (_, k) => '@string{m' + k + ' = {x}}\n@article{e' + k + ', note = m' + k + '}').join('\n');
