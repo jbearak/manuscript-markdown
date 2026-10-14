@@ -15604,7 +15604,9 @@ describe('a line of display math that would start a Markdown block', () => {
     ['a row of nonbreaking spaces', '\\begin{aligned}\nx &= 1 \\\\\n    ~~~ &= 2\n\\end{aligned}'],
     ['a row starting with >', '\\begin{gathered}\na \\\\\n    > b\n\\end{gathered}'],
     ['rows starting with list markers and #', '\\begin{gathered}\na \\\\\n    - b \\\\\n    + c \\\\\n    # d \\\\\n    1. e\n\\end{gathered}'],
-    ['a row of bars', '\\begin{aligned}\nx &= 1 \\\\\n    |y| &= 2\n\\end{aligned}'],
+    ['a table\'s header row before its delimiter row', '\\begin{gathered}\na \\\\\n    |b| \\\\\n|-|-\n\\end{gathered}'],
+    ['a list\'s first item that opens a tracked change over lines', '    - {++a\nb++} c'],
+    ['rows starting with an HTML block\'s tag', '\\begin{gathered}\na \\\\\n    <div> b \\\\\n    </td>\n\\end{gathered}'],
   ])('comes back indented, so it stays in the equation: %s', async (_name, latex) => {
     const md = fence + '\n' + latex + '\n' + fence + '\n\nAfter.\n';
     expect(await equations(md)).toBe(1);
@@ -15624,10 +15626,75 @@ describe('a line of display math that would start a Markdown block', () => {
     expect(await equations(back)).toBe(1);
   });
 
+  // A line that starts no block in a paragraph, as markdown-it reads it,
+  // ends no equation, so it comes back as written, where an indent in
+  // \text{} would show
+  test.each([
+    ['a line of one tag', '\\begin{gathered}\na \\\\\n<x>\n\\end{gathered}'],
+    ['a row of bars before no delimiter row', '\\begin{aligned}\nx &= 1 \\\\\n|y| &= 2\n\\end{aligned}'],
+    ['bars in text', '\\text{a\n|b|}'],
+    // Export reads a tracked change's lines as one (see preprocessCriticMarkup)
+    ['a list\'s first item a tracked change goes on into', 'x {++a\n- b++}'],
+    ['a list\'s first item but 1 and an empty item', '\\begin{gathered}\na \\\\\n2. b \\\\\n+\n\\end{gathered}'],
+  ])('that starts no block in a paragraph comes back as written: %s', async (_name, latex) => {
+    const md = fence + '\n' + latex + '\n' + fence + '\n\nAfter.\n';
+    const back = await roundTrip(md);
+    expect(back).toBe(md);
+    expect(await equations(back)).toBe(1);
+  });
+
+  // An equation a tracked change wraps whole is in a CriticMarkup span,
+  // whose lines export reads as one (see preprocessCriticMarkup), so none
+  // ends its paragraph, and none takes an indent, which in \text{} would go
+  // into the equation's text
+  const mathText = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<m:t[^>]*>[^<]*<\/m:t>/g) ?? []).map(t => t.replace(/<[^>]+>/g, '')).join('');
+  };
+  const wrapped = (lines: string) => fence + '\n\\text{' + lines + '}\n' + fence;
+  test.each([
+    ['an addition', '{++' + wrapped('a\n- b') + '++}\n\nAfter.\n', '{++' + wrapped('a\n- b') + '++}\n\nAfter.\n'],
+    ['a deletion', '{--' + wrapped('a\n- b') + '--}\n\nAfter.\n', '{--' + wrapped('a\n- b') + '--}\n\nAfter.\n'],
+    ['an addition after text', 'Text {++' + wrapped('a\n- b') + '++} more.\n', 'Text\n\n{++' + wrapped('a\n- b') + '++}\n\n&#32;more.\n'],
+    // Each side, which import writes as a deletion and an addition
+    ['a substitution, on each side', '{~~' + wrapped('a\n- b') + '~>' + wrapped('c\n- d') + '~~}\n\nAfter.\n',
+      '{--' + wrapped('a\n- b') + '--}\n{++' + wrapped('c\n- d') + '++}\n\nAfter.\n'],
+  ])('in %s comes back as written, as its text is', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await mathText(back)).toBe(await mathText(md));
+  });
+
+  // Import writes no highlight around an equation, so its line comes back
+  // indented, where the next export would end the equation there
+  test('in a highlight stays one equation', async () => {
+    const back = await roundTrip('{==' + wrapped('a\n- b') + '==}\n\nAfter.\n');
+    expect(await equations(back)).toBe(1);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Each line's place among the tracked changes' spans in the equation came
+  // from a scan of every span, in time in the square of its rows
+  test('of an equation whose rows each hold tracked changes reads in linear time', async () => {
+    const two = (await convertMdToDocx(fence + '\n\\begin{aligned}\nx &= {++a++} {++b++} {++c++} \\\\\nx &= {++a++} {++b++} {++c++}\n\\end{aligned}\n' + fence + '\n')).docx;
+    const zip = await JSZip.loadAsync(two);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const row = /<m:e>[\s\S]*?<\/m:e>/.exec(xml)![0];
+    // The equation with `n` such rows, each change with an ID of its own
+    const withRows = async (n: number) => {
+      let id = 0;
+      zip.file('word/document.xml', xml.replace(/<m:eqArr>[\s\S]*<\/m:eqArr>/, () => '<m:eqArr>' + Array.from({ length: n }, () => row.replace(/w:id="\d+"/g, () => 'w:id="' + id++ + '"')).join('') + '</m:eqArr>'));
+      return zip.generateAsync({ type: 'uint8array' });
+    };
+    const [small, large] = [await withRows(8000), await withRows(32000)];
+    expect((await convertDocx(small)).markdown.split('x &= {++a++} {++b++} {++c++}')).toHaveLength(8001);
+    expect(await fastestRunAsync(() => convertDocx(large)) / await fastestRunAsync(() => convertDocx(small))).toBeLessThan(8);
+  }, 30000);
+
   // Rows of an equation from Word that start as Markdown blocks do, among
   // others, each indented in the Markdown it starts from
   test('of any rows stays one equation through Word and back', async () => {
-    const row = fc.constantFrom('a', '~~~ b', '~~~', '- b', '+ b', '* b', '# b', '> b', '1. b', '|b|', '<b', '---', '===');
+    const row = fc.constantFrom('a', '~~~ b', '~~~', '- b', '+ b', '* b', '# b', '> b', '1. b', '|b|', '|-|-', '<b', '<div>', '<x>', '2. b', '+', '---', '===');
     await fc.assert(fc.asyncProperty(fc.array(row, { minLength: 1, maxLength: 4 }), async rows => {
       const md = fence + '\n\\begin{gathered}\n' + rows.map(text => '    ' + text).join(' \\\\\n') + '\n\\end{gathered}\n' + fence + '\n\nAfter.\n';
       const back = await roundTrip(md);

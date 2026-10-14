@@ -18,7 +18,7 @@ import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type Tabl
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { readCitationItems } from './citation-syntax';
 import { bibtexNameParts } from './md-to-docx-citations';
-import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
+import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -8049,20 +8049,57 @@ function revisionsEqual(a: RevisionInfo | undefined, b: RevisionInfo | undefined
 // Avoid literal '$$' — tool text-replacement corrupts '$' in replacement
 // strings. See CLAUDE.md "Template literal corruption" rule.
 const MATH_FENCE = '$'.repeat(2);
-/** Display math of `latex` between its fences, as its own lines. */
-function displayMathBlock(latex: string): string {
-  return MATH_FENCE + '\n' + keepLinesInEquation(canonicalizeDisplayMathLatex(latex)) + '\n' + MATH_FENCE;
+/** Display math of `latex` between its fences, as its own lines, those
+ *  that would end its paragraph indented (see keepLinesInEquation), but in
+ *  a CriticMarkup span (`inSpan`), whose lines export reads as one (see
+ *  preprocessCriticMarkup), where none ends it. */
+function displayMathBlock(latex: string, inSpan = false): string {
+  const lines = canonicalizeDisplayMathLatex(latex);
+  return MATH_FENCE + '\n' + (inSpan ? lines : keepLinesInEquation(lines)) + '\n' + MATH_FENCE;
 }
 
-/** `latex`, display math's lines, with each that would start a Markdown
- *  block indented by four spaces, as a row of ~~~ that would open a code
- *  block, or one that starts with - that would start a list (see
- *  breaksParagraph). Such a line ends the paragraph, and so the equation, on
- *  export, where indented, it goes on the paragraph, as code can't interrupt
- *  one, and LaTeX ignores the indent. A LaTeX environment's line is the
- *  equation's own there. */
+/** Display math of `latex`, in a span of `rev` where it has one (see
+ *  wrapWithRevision), its lines as written there (see displayMathBlock) */
+function revisedDisplayMathBlock(latex: string, rev?: RevisionInfo): string {
+  const block = displayMathBlock(latex, true);
+  const revised = wrapWithRevision(block, rev);
+  return revised !== block ? revised : displayMathBlock(latex);
+}
+
+/** `latex`, display math's lines, with each that would end the paragraph
+ *  it's in indented by four spaces (see endsParagraph in md-to-docx.ts), as
+ *  a row of ~~~ that would open a code block, one that starts with - and a
+ *  space that would start a list, or a row of bars before a table's
+ *  delimiter row. Such a line ends the paragraph, and so the equation, on
+ *  export, where indented, it goes on the paragraph, as code can't
+ *  interrupt one, and LaTeX ignores the indent. A line that starts no
+ *  block in a paragraph, as a line of one tag such as <x>, a list's first
+ *  item but 1, or a row of bars before no delimiter row, stays as it is,
+ *  as in text, where an indent would show, and so does one a CriticMarkup
+ *  span goes on into. Each line is read before the next as written, which
+ *  a table's delimiter row, indented, isn't. None is in an HTML table's
+ *  cell, which export reads as HTML. */
 function keepLinesInEquation(latex: string): string {
-  return latex.split('\n').map(line => breaksParagraph(line) && !/^[ \t]*\\begin\{/.test(line) ? '    ' + line : line).join('\n');
+  if (!readsMarkdown) return latex;
+  const lines = latex.split('\n');
+  // The lines export's block parse reads: each from a line on through the
+  // line ends a CriticMarkup span holds, which it reads as the span's, one
+  // line (see preprocessCriticMarkup), by the index of its first. Spans as
+  // export finds them in the equation, between its fences
+  const fenced = MATH_FENCE + '\n', starts: number[] = [];
+  const spans = criticPayloadRanges(fenced + latex + '\n' + MATH_FENCE).map(([from, to]) => [from - fenced.length, to - fenced.length]).sort(([a], [b]) => a - b);
+  // A line end is in a span where the furthest any span that starts
+  // before it reaches is past it, in one pass over the spans in order
+  let next = 0, reach = -Infinity, lineEnd = -1;
+  for (let i = 0; i < lines.length; lineEnd += lines[i].length + 1, i++) {
+    for (; next < spans.length && spans[next][0] <= lineEnd; next++) reach = Math.max(reach, spans[next][1]);
+    if (i === 0 || reach <= lineEnd) starts.push(i);
+  }
+  const read = (k: number) => lines.slice(starts[k], starts[k + 1]).join(' ');
+  for (let k = starts.length - 1; k >= 0; k--) {
+    if (endsParagraph(read(k), k + 1 < starts.length ? read(k + 1) : MATH_FENCE)) lines[starts[k]] = '    ' + lines[starts[k]];
+  }
+  return lines.join('\n');
 }
 
 function canonicalizeDisplayMathLatex(latex: string): string {
@@ -8982,8 +9019,9 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
     return markdownLink(text, item.href);
   }
   if (item.type === 'citation') return citationSeparator(precedingText, item) + citationText(item);
+  // In the substitution's span
   return item.display
-    ? displayMathBlock(item.latex)
+    ? displayMathBlock(item.latex, true)
     : '$' + item.latex + '$';
 }
 
@@ -16045,8 +16083,7 @@ function buildMarkdownOnce(
         // Ensure blank line before display math
         output.push('\n\n');
       }
-      const mathBlock = displayMathBlock(item.latex);
-      const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
+      const commented = displayMathWithComments(revisedDisplayMathBlock(item.latex, item.revision), item);
       // Text after the equation in its paragraph goes on from the closing
       // fence, so a body there would come before it
       const next = mergedContent[i + 1];
@@ -16699,8 +16736,7 @@ function buildMarkdownOnce(
             pushInline(inlinePart(part.text, !!item.inParagraph));
             pushAll(paragraphBodies, part.deferredComments);
           }
-          const mathBlock = displayMathBlock(item.latex);
-          const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
+          const commented = displayMathWithComments(revisedDisplayMathBlock(item.latex, item.revision), item);
           if (item.inParagraph && paragraphPart !== undefined) {
             // In place of the space export wrote for the line's end, or after
             // the line end of a line break that ends the text

@@ -900,6 +900,16 @@ export function startsHtmlBlock(text: string): boolean {
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
 }
 
+/** Whether Markdown `line`, after a paragraph's line and before `next`,
+ *  ends the paragraph as export reads it: starts a block of its own, as a
+ *  list's first item, a quote or a code fence, or a table whose delimiter
+ *  row `next` is, or makes the paragraph a heading, as its underline */
+export function endsParagraph(line: string, next: string): boolean {
+  citationTextMd ??= createMarkdownIt();
+  const first = citationTextMd.parse('a\n' + line + '\n' + next, {})[0];
+  return first?.type !== 'paragraph_open' || (first.map?.[1] ?? 0) < 2;
+}
+
 /** What of a comment, a block of its own, export doesn't read as a
  *  directive, where it reads it as one: the text a style's goes around on
  *  its line, as in <!-- style: Title -->Text<!-- /style -->, or else none.
