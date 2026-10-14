@@ -66,6 +66,8 @@ including empty lines.++}
 
 Blank lines inside additions and deletions separate paragraphs in the preview and Word export. Inline formatting continues across those paragraph boundaries. A single newline stays within the same paragraph.
 
+A pipe table's cell holds one line, so a change over a line end can't start in one. Its opener there is text, and the table stays a table: in `| a {++ | b |`, the `{++` is text. An opener at the start of a table's first line, before its first cell's text, starts the change before the table, which then takes the table's lines as its text: `{>>a | b`, with `--- | ---` and `c | d<<}` on the lines after, is a comment. So is one in a table whose lines a change before it already takes. Lines in an equation that only look like a table, as between two `$$` lines, are the equation's, and a change over them works as anywhere in an equation.
+
 ## Nesting Rules
 
 - CriticMarkup patterns **cannot be nested** within the same type

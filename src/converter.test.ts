@@ -4161,6 +4161,24 @@ describe('Comments with more than one line', () => {
     expect(markdown.slice(table.length)).toBe('</table>\n\n{#1>>@A (2024-01-15 10:30) | one\n\ntwo<<}\n\nA b c.');
   });
 
+  test.each([['---'], ['|:-:|']])('leaves a comment of one line, %s, in a cell of a table only HTML holds after its anchor, as before', async text => {
+    // Its line read as a table's delimiter row, which took ID syntax, and
+    // the next import dropped the body after the HTML table. A comment's
+    // first line follows its {>> and makes no table
+    const md = '<table>\n  <tr>\n    <td colspan="2">h</td>\n  </tr>\n  <tr>\n    <td>XX</td>\n    <td>y</td>\n  </tr>\n</table>\n\nA {==b==}' + body(text) + ' c.';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const start = '<w:commentRangeStart w:id="0"/>';
+    const end = /<w:commentRangeEnd w:id="0"\/>(<w:r>(?:(?!<\/w:r>).)*?<w:commentReference w:id="0"\/><\/w:r>)/.exec(xml)!;
+    xml = xml.replace(start, '').replace(end[0], '')
+      .replace(/<w:r>(?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>/, run => start + run + '<w:commentRangeEnd w:id="0"/>' + end[1]);
+    zip.file('word/document.xml', xml);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toContain('<p>{==XX==}' + body(text) + '</p>');
+    expect(markdown.slice(markdown.indexOf('</table>'))).toBe('</table>\n\nA b c.');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('writes a comment whose text starts with a break in ID syntax', async () => {
     // After {==b==}, export took the {>> before the break for an opener at
     // a line's end, and moved the body to a paragraph of its own
@@ -4780,6 +4798,29 @@ describe('A Word comment on an HTML comment', () => {
     expect((await paragraphs(exported)).filter(p => p !== '' && p !== 'x')).toEqual(['A.', shown, '«»†', 'B z.']);
     // The comment's text as it was, with no indent before its second line
     expect(await (await JSZip.loadAsync(exported)).file('word/comments.xml')!.async('string')).toMatch(/>one<\/w:t>(?:(?!two)[\s\S])*<w:br\/>(?:(?!two)[\s\S])*>two</);
+  });
+
+  test.each([
+    ['a line of ***', '***', '<!-- a\n***\nb -->\n\n{>>@A (2024-01-15 10:30) | a | b\n--- | ---\nc | d<<}'],
+    ['a blank line', '', '<!-- a\n\nb -->\n\n{>>@A (2024-01-15 10:30) | a | b\n--- | ---\nc | d<<}'],
+    // Which its paragraph reads back, in ID syntax as before
+    ['a line a paragraph holds', 'x', '{#1}<!-- a\nx\nb -->{/1}\n{#1>>@A (2024-01-15 10:30) | a | b\n--- | ---\nc | d<<}'],
+  ])('writes one whose lines make a table, on a comment with %s, as before, which export reads', async (_name, line, md) => {
+    // Not in the ID syntax such a comment takes elsewhere, which before the
+    // block made it a paragraph, as for any comment on one. After the block,
+    // its opener starts the first line of the table its lines make
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nXX\n\nB {#1}z{/1}.\n\n{#1>>@A (2024-01-15 10:30) | a | b\n--- | ---\nc | d<<}\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const reference = /<w:r>(?:(?!<w:r>)[\s\S])*?<w:commentReference w:id="0"\/><\/w:r>/.exec(xml)![0];
+    const edited = xml.replace(start, '').replace(end, '').replace(reference, '')
+      .replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, start + lines('<!-- a', line, 'b -->') + end + reference);
+    expect(edited).toContain(reference);
+    zip.file('word/document.xml', edited);
+    const md1 = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(md1).toBe('A.\n\n' + md + '\n\nB z.\n');
+    const exported = (await convertMdToDocx(md1)).docx;
+    expect(strip((await convertDocx(exported)).markdown)).toBe(md1);
+    expect(await (await JSZip.loadAsync(exported)).file('word/comments.xml')!.async('string')).toMatch(/>a \| b<\/w:t>(?:(?!c \| d)[\s\S])*<w:br\/>(?:(?!c \| d)[\s\S])*>--- \| ---<\/w:t>(?:(?!c \| d)[\s\S])*<w:br\/>(?:(?!c \| d)[\s\S])*>c \| d</);
   });
 
   test('puts a blank line after the paragraph of one whose text has lines, after an HTML block the next paragraph had none after', async () => {
@@ -9812,6 +9853,17 @@ describe('Word text that reads as Markdown', () => {
     };
     const small = time(20000);
     expect(time(80000) / small).toBeLessThan(8);
+  }, 30000);
+
+  test('writes a Word comment with a long indent on a line in linear time', () => {
+    // Whether a line of the comment reads as a table's delimiter row tried
+    // each split of the indent between the spaces before and after a pipe
+    const time = (n: number) => {
+      const comments = new Map([['1', { author: 'A', text: 'note\n' + ' '.repeat(n) + 'x', date: '' }]]);
+      return fastestRun(() => buildMarkdown([{ type: 'text', text: 'anchor', commentIds: new Set(['1']), formatting: DEFAULT_FORMATTING }], comments));
+    };
+    const small = time(16000);
+    expect(time(64000) / small).toBeLessThan(8);
   }, 30000);
 
   test.each([

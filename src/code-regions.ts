@@ -36,6 +36,9 @@ export interface MarkdownRegions {
 	 *  its own end, sorted (see endsListInPlace) */
 	outerItemRegions: CodeRegion[];
 	itemClosedStarts: number[];
+	/** With `includeTables`, each pipe table's lines, sorted, not merged
+	 *  with one it touches */
+	tableRegions: CodeRegion[];
 }
 
 export interface MarkdownRegionOptions {
@@ -47,6 +50,7 @@ export interface MarkdownRegionOptions {
 	 *  is (see exportsLiterally in html-blocks.ts), for literalHtmlRegions */
 	literalHtml?: (content: string) => boolean;
 	includeLists?: boolean;
+	includeTables?: boolean;
 	/** With `html`, read a quote as ending before a line with text that
 	 *  doesn't start as a quote's line does, as export does, which puts a
 	 *  blank line before each (see deLazifyBlockquotesWithLines in
@@ -194,6 +198,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	const htmlBlockRegions: CodeRegion[] = [];
 	const literalHtmlRegions: HtmlBlockRegion[] = [];
 	const listRegions: CodeRegion[] = [];
+	const tableRegions: CodeRegion[] = [];
 	const outerItemRegions: CodeRegion[] = [];
 	const itemClosedStarts: number[] = [];
 	// The list items and quotes each token is in, innermost last
@@ -241,6 +246,9 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		const isHtml = options?.html !== undefined && token.type === 'html_block' &&
 			(options.html === 'all' || !HTML_COMMENT_ONLY_RE.test(token.content.trim()));
 		const isList = options?.includeLists === true && token.type === 'list_item_open';
+		if (options?.includeTables && token.type === 'table_open') {
+			tableRegions.push({ start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length });
+		}
 		if (!isCode && !isHtml && !isList) continue;
 
 		const start = lineStarts[token.map[0]] ?? text.length;
@@ -271,6 +279,8 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		listRegions: options?.includeLists ? mergeRegions(listRegions) : [],
 		outerItemRegions,
 		itemClosedStarts,
+		// In the order of the tokens, which is the text's
+		tableRegions,
 	};
 }
 

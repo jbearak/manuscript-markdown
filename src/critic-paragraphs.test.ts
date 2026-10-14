@@ -2,7 +2,9 @@ import { describe, expect, it } from 'bun:test';
 import JSZip from 'jszip';
 import { convertMdToDocx, parseMd } from './md-to-docx';
 import { convertDocx } from './converter';
+import { preprocessCriticMarkup } from './critic-markup';
 import { createMarkdownItWithPlugin, renderWithPlugin } from './test-helpers';
+import { fastestRun } from './test-timing';
 
 const example = '{++This is a sentence.\n\nThis sentence is in another paragraph.\n++}';
 
@@ -280,4 +282,229 @@ describe('tracked paragraph marks', () => {
     // Export moves a break that opens a span with text outside it
     expect(await roundTrip('Kept.{++\n\nNew.++}')).toBe('Kept.\n\n{++New.++}');
   });
+});
+
+describe('CriticMarkup\'s markers in a pipe table\'s cells', () => {
+  async function roundTrip(md: string): Promise<{ markdown: string; table: boolean; placeholder: boolean }> {
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const imported = await convertDocx(docx);
+    return {
+      markdown: imported.markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim(),
+      table: xml.includes('<w:tbl>'),
+      placeholder: xml.includes(''),
+    };
+  }
+  const comments = async (source: string) => {
+    const { docx } = await convertMdToDocx(source);
+    return (await (await JSZip.loadAsync(docx)).file('word/comments.xml')?.async('string')) ?? '';
+  };
+
+  it.each([
+    ['an opener in a cell before a later row\'s closer', '| a {++ | b |\n|---|---|\n| {++c++} | d |', '| a \\{++ | b |\n| --- | --- |\n| {++c++} | d |'],
+    ['an opener at a row\'s end', '| a | b {++\n|---|---|\n| c | d++} |', '| a | b \\{++ |\n| --- | --- |\n| c | d+\\+} |'],
+    ['a comment\'s opener', '| a {>> | b |\n|---|---|\n| c<<} | d |', '| a \\{>> | b |\n| --- | --- |\n| c<<} | d |'],
+    ['a span in a cell', '| a {++b++} | c |\n|---|---|\n| d | e |', '| a {++b++} | c |\n| --- | --- |\n| d | e |'],
+    // An equation on one line leaves the table a table
+    ['an opener in a cell after an equation in it', '| $x$ {++ | b |\n|---|---|\n| {++c++} | d |', '| $x$ \\{++ | b |\n| --- | --- |\n| {++c++} | d |'],
+  ])('keeps the table with %s, as markdown-it reads its cells', async (_name, md, expected) => {
+    // Preprocessing paired the opener with a closer past the cell's end and
+    // wrote the line ends between as placeholders, which took the rows out
+    // of the table, all one paragraph
+    const once = await roundTrip(md);
+    expect(once.table).toBe(true);
+    expect(once.placeholder).toBe(false);
+    expect(once.markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+  });
+
+  it.each([
+    ['in a display equation', '$$\nx {++a | b\n--- | ---\nc | d++}\n$$', '$$\nx {++a | b\n--- | ---\nc | d++}\n$$'],
+    ['in a bare LaTeX environment', '\\begin{equation}\nx {++a | b\n--- | ---\nc | d++}\n\\end{equation}', '$$\nx {++a | b\n--- | ---\nc | d++}\n$$'],
+    ['in an inline equation over lines', 'Text $a {++b | c\n--- | ---\nd | e++}$ after.', 'Text $a {++b | c\n--- | ---\nd | e++}$ after.'],
+    // The block parse reads the closer's line as code, which the math
+    // spans that leave code alone didn't read
+    ['in a display equation whose closing $$ is indented four spaces', '$$\nx {++a | b\n--- | ---\nc | d++}\n    $$', '$$\nx {++a | b\n--- | ---\nc | d++}\n$$'],
+    // Read with the code's $$ too, the equation's opener closed a span
+    // from it, and its closer opened one
+    // Export reads a run of more than two dollars as a display delimiter
+    // too, where the math spans, of two alone, read none
+    ['in a display equation closed with $$$', '$$\nx {++a | b\n--- | ---\nc | d++}\n$$$', '$$\nx {++a | b\n--- | ---\nc | d++}\n$$$'],
+    ['in a display equation opened and closed with $$$', '$$$\nx {++a | b\n--- | ---\nc | d++}\n$$$', '$$\n$\nx {++a | b\n--- | ---\nc | d++}\n$$$'],
+    ['in a display equation after $$ in a code block', '```\n$$\n```\n\n$$\nx {++a | b\n--- | ---\nc | d++}\n$$', '```\n$$\n```\n\n$$\nx {++a | b\n--- | ---\nc | d++}\n$$'],
+  ])('keeps an insertion whose lines look like a table %s in the equation, as before', async (_name, md, expected) => {
+    // The block parse, which reads no math, read a table there, and the
+    // opener in its cell as text, so export and the preview made a table
+    // of the equation's lines, with its $$ and the markers as text
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toContain('<w:tbl>');
+    expect(xml).toContain('<m:oMath');
+    expect(xml).toContain('<w:ins ');
+    expect((await roundTrip(md)).markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+    const html = renderWithPlugin(md);
+    expect(html).not.toContain('<table');
+    expect(html).toContain('<ins class="manuscript-markdown-addition">');
+  });
+
+  it('leaves an opener in a merged cell of an HTML table, before a later row\'s closer, as before', async () => {
+    // An HTML table is an HTML block, whose CriticMarkup preprocessing
+    // leaves alone, and the table rule doesn't read
+    const md = '<table>\n  <tr>\n    <td colspan="2">a {++b</td>\n  </tr>\n  <tr>\n    <td>c++}</td>\n    <td>d</td>\n  </tr>\n</table>';
+    const expected = '<table>\n  <tr>\n    <td colspan="2">\n      <p>a {++b</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>c++}</p>\n    </td>\n    <td>\n      <p>d</p>\n    </td>\n  </tr>\n</table>';
+    const once = await roundTrip(md);
+    expect(once.table).toBe(true);
+    expect(once.placeholder).toBe(false);
+    expect(once.markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+  });
+
+  it('renders the table with an opener in a cell before a later row\'s closer in the preview', () => {
+    const html = renderWithPlugin('| a {++ | b |\n|---|---|\n| {++c++} | d |');
+    expect(html).toContain('<th>a {++</th>');
+    expect(html).toContain('<td><ins class="manuscript-markdown-addition">c</ins></td>');
+  });
+
+  it.each([
+    ['moved there from the end of the line before', 'Before.{>>\na | b\n--- | ---\nc | d<<}', 'Before.\n\n{>>a | b\n--- | ---\nc | d<<}'],
+    ['alone in its paragraph', '{>>a | b\n--- | ---\nc | d<<}', '{>>a | b\n--- | ---\nc | d<<}'],
+    ['in a quote', '> {>>a | b\n> --- | ---\n> c | d<<}', '> {>>a | b\n> --- | ---\n> c | d<<}'],
+  ])('reads a comment\'s opener at the start of a table\'s first line, %s, as before the table', async (_name, md, expected) => {
+    // As a cell's text, the comment's lines were a table, and the markers
+    // text in it
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+    expect(await zip.file('word/document.xml')!.async('string')).not.toContain('<w:tbl>');
+    expect(await zip.file('word/comments.xml')!.async('string')).toContain('a | b');
+    expect((await roundTrip(md)).markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+    const html = renderWithPlugin(md);
+    expect(html).toContain('manuscript-markdown-comment-indicator');
+    expect(html).not.toContain('<table>');
+  });
+
+  it('reads a comment\'s opener at the start of a quoted table\'s first line as before it, after a table it touches', async () => {
+    // Merged with the first table's lines, the opener read as in its cell
+    const md = 'a | b\n--- | ---\nc | d\n> {>>x | y\n> --- | ---\n> z | w<<}';
+    const expected = '| a | b |\n| --- | --- |\n| c | d |\n> {>>x | y\n> --- | ---\n> z | w<<}';
+    expect(await comments(md)).toContain('x | y');
+    const once = await roundTrip(md);
+    expect(once.table).toBe(true);
+    expect(once.markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+    const html = renderWithPlugin(md);
+    expect(html).toContain('<td>d</td>');
+    expect(html).toContain('<blockquote>\n<p><span class="manuscript-markdown-comment-indicator"');
+  });
+
+  it('reads an opener in a table that a comment before it takes the lines of as a span\'s', async () => {
+    // The comment's lines are joined, which leaves the table's rows a
+    // paragraph's, so the opener is in no cell, and the insertion's blank
+    // line is the span's
+    const md = '{>>a | b\n--- | ---\nc | d<<} {++one\n\ntwo++}';
+    const once = await roundTrip(md);
+    expect(once.table).toBe(false);
+    expect(once.placeholder).toBe(false);
+    expect(once.markdown).toBe(md);
+    const { docx } = await convertMdToDocx(md);
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).toContain('<w:ins ');
+    expect(renderWithPlugin(md)).toContain('<p><ins class="manuscript-markdown-addition">two</ins></p>');
+  });
+
+  it('moves an opener at a line\'s end in a table that a comment before it takes the lines of to a paragraph of its own', async () => {
+    // Read as in the table's cell, it stayed, so its line end went into the
+    // insertion, and the text before it, Kept., into its paragraph
+    const md = '{>>a | b\n--- | ---\nc | d<<} Kept.{++\nNew.++}';
+    const expected = '{>>a | b\n--- | ---\nc | d<<} Kept.\n\n{++New.++}';
+    expect(preprocessCriticMarkup(md)).toEndWith(' Kept.\n\n{++New.++}');
+    expect((await roundTrip(md)).markdown).toBe(expected);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+  });
+
+  it.each([
+    ['after text', 'Before {#1}anchor{/1}\n\n{#1>>a | b\n--- | ---\nc | d<<}', 'Before {#1}anchor{/1}\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    ['after a heading\'s text', '# Head {#1}anchor{/1}\n\n{#1>>a | b\n--- | ---\nc | d<<}', '# Head {#1}anchor{/1}\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    ['after a list item\'s text', '- item {#1}anchor{/1}\n\n{#1>>a | b\n--- | ---\nc | d<<}', '- item {#1}anchor{/1}\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    ['after text with a | on its first line', 'x | y {#1}anchor{/1}\n\n{#1>>a\n--- | ---\nc | d<<}', 'x | y {#1}anchor{/1}\n{#1>>a\n--- | ---\nc | d<<}'],
+    // A list item's marker or a heading's #, before the comment on its
+    // line, makes the opener a cell's
+    ['on no text at a list item\'s start', '- {#1}{/1}text\n\n{#1>>a | b\n--- | ---\nc | d<<}', '- {#1}{/1}text\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    ['on no text at an ordered list item\'s start', '1. {#1}{/1}text\n\n{#1>>a | b\n--- | ---\nc | d<<}', '1. {#1}{/1}text\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    ['on no text at a heading\'s start', '# {#1}{/1}Head\n\n{#1>>a | b\n--- | ---\nc | d<<}', '# {#1}{/1}Head\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    // After the label Word shows, which import drops, so in ID syntax it
+    // didn't need
+    ['on no text at the start of an alert\'s first paragraph', '> [!NOTE]\n> {>>a | b\n> --- | ---\n> c | d<<} after.', '> [!NOTE]\n> {#1}{/1} after.\n> {#1>>a | b\n> --- | ---\n> c | d<<}'],
+    ['on a space alone in its paragraph', 'Before\n\n{#1} {/1}\n\n{#1>>a | b\n--- | ---\nc | d<<}', 'Before\n\n{#1} {/1}\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    // Where the line written before the body differs from the paragraph's
+    // text: an alert's marker, a closing $$, and a heading's line break
+    ['in an alert\'s first paragraph', '> [!NOTE]\n> Before {#1}anchor{/1}\n\n{#1>>a | b\n--- | ---\nc | d<<}', '> [!NOTE]\n> Before {#1}anchor{/1}\n> {#1>>a | b\n> --- | ---\n> c | d<<}'],
+    ['after a display equation in its paragraph', 'x\n$$\ny\n$$\nBefore {#1}anchor{/1}\n\n{#1>>a | b\n--- | ---\nc | d<<}', 'x\n$$\ny\n$$&#32;Before {#1}anchor{/1}\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    ['after a heading\'s line break', '# a<br>b {#1}anchor{/1}\n\n{#1>>a | b\n--- | ---\nc | d<<}', '# a<br>b {#1}anchor{/1}\n{#1>>a | b\n--- | ---\nc | d<<}'],
+    ['before text with an == in it, as the body has', 'Before {#1}anchor{/1} x\\==y\n\n{#1>>a | b\n--- | ---\nx==y<<}', 'Before {#1}anchor{/1} x\\==y\n{#1>>a | b\n--- | ---\nx==y<<}'],
+    ['with a reply', 'Before {#1}anchor{/1}\n\n{#1>>a | b\n--- | ---\nc | d\n  {>>reply<<}\n<<}', 'Before {#1}anchor{/1}\n{#1>>a | b\n--- | ---\nc | d\n  {>>reply<<}\n<<}'],
+    ['whose reply has the delimiter row', 'Before {#1}anchor{/1}\n\n{#1>>note\n  {>>a | b\n  --- | ---<<}\n<<}', 'Before {#1}anchor{/1}\n{#1>>note\n  {>>a | b\n  --- | ---<<}\n<<}'],
+  ])('writes a Word comment whose lines make a table %s in ID syntax, which export reads', async (_name, md, expected) => {
+    // Import wrote the body after its anchor, as {==anchor==}{>>a | b, whose
+    // lines markdown-it reads as a table with the opener in a cell, which
+    // export reads as text, and dropped the comment
+    const lines = md.includes('reply') ? /reply|a \| b/g : /--- \| ---/g;
+    expect(await comments(md)).toMatch(lines);
+    const once = await roundTrip(md);
+    expect(once.markdown).toBe(expected);
+    expect(once.table).toBe(false);
+    expect(await comments(once.markdown)).toBe(await comments(md));
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+  });
+
+  it.each([
+    ['of lines that make no table', 'Before {==anchor==}{>>a | b\nc | d<<}'],
+    ['of one line that reads as a delimiter row', 'Before {==anchor==}{>>--- | ---<<}'],
+    // Its body starts the table's first line, where it opens before the table
+    ['on no text at a paragraph\'s start', 'Before\n\n{>>a | b\n--- | ---\nc | d<<} after'],
+    ['on no text in a quote', '> {#1}{/1}\n\n{#1>>a | b\n--- | ---\nc | d<<}', '> {>>a | b\n> --- | ---\n> c | d<<}'],
+    ['on no text at the start of an alert\'s second paragraph', '> [!NOTE]\n> Text.\n>\n> {>>a | b\n> --- | ---\n> c | d<<} after.'],
+  ])('writes a Word comment %s after its anchor, as before', async (_name, md, expected = md) => {
+    const once = await roundTrip(md);
+    expect(once.markdown).toBe(expected);
+    expect(once.table).toBe(false);
+    expect(await comments(expected)).toBe(await comments(md));
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+  });
+
+  it.each([
+    ['after text', 'Before {#1}anchor{/1}\n{#1>>note<<}{>>REPLY<<}', 'Before {#1}anchor{/1}\n{#1>>note\n  {>>a | b\n--- | ---\nc | d<<}\n<<}', 1],
+    ['after text, after another reply', 'Before {#1}anchor{/1}\n{#1>>note<<}{>>one<<}{>>REPLY<<}', 'Before {#1}anchor{/1}\n{#1>>note\n  {>>one<<}\n  {>>a | b\n--- | ---\nc | d<<}\n<<}', 2],
+    ['on no text at a paragraph\'s start', 'Before\n\n{#1}{/1} after.\n{#1>>note<<}{>>REPLY<<}', 'Before\n\n{>>note\n  {>>a | b\n--- | ---\nc | d<<}\n<<} after.', 1],
+  ])('writes a Word comment\'s replies in a row, one of whose lines make a table, %s as replies in its body, which export reads', async (_name, md, expected, replies) => {
+    // As {>>note<<}{>>a | b, the reply's opener was in the cell of the
+    // table its lines make, which export read as text, and dropped the reply
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    expect(xml).toContain('>REPLY<');
+    zip.file('word/comments.xml', xml.replace('>REPLY<', '>a | b</w:t><w:br/><w:t xml:space="preserve">--- | ---</w:t><w:br/><w:t xml:space="preserve">c | d<'));
+    const once = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    expect(once).toBe(expected);
+    const next = await JSZip.loadAsync((await convertMdToDocx(once)).docx);
+    expect(await next.file('word/document.xml')!.async('string')).not.toContain('<w:tbl>');
+    expect(await next.file('word/comments.xml')!.async('string')).toMatch(/>a \| b<\/w:t>(?:(?!c \| d)[\s\S])*<w:br\/>(?:(?!c \| d)[\s\S])*>--- \| ---<\/w:t>(?:(?!c \| d)[\s\S])*<w:br\/>(?:(?!c \| d)[\s\S])*>c \| d</);
+    expect((await next.file('word/commentsExtended.xml')!.async('string')).match(/w15:paraIdParent=/g)).toHaveLength(replies);
+    expect((await roundTrip(expected)).markdown).toBe(expected);
+  });
+
+  it('reads many openers in a table\'s cells before a later closer in linear time', () => {
+    const time = (rows: number) => {
+      const text = '| a | b |\n|---|---|\n' + '| {++ | x |\n'.repeat(rows) + '\nz ++}\n';
+      return fastestRun(() => preprocessCriticMarkup(text));
+    };
+    expect(time(20_000) / time(5_000)).toBeLessThan(8);
+  }, 30000);
+
+  it('reads many comments with one in them in a table\'s cells before later closers in linear time', () => {
+    const time = (rows: number) => {
+      const text = '| a | b |\n|---|---|\n' + '| {>> {>>x<<} | y |\n'.repeat(rows) + '\n' + 'z <<}\n'.repeat(rows);
+      return fastestRun(() => preprocessCriticMarkup(text));
+    };
+    expect(time(16_000) / time(4_000)).toBeLessThan(8);
+  }, 30000);
 });
