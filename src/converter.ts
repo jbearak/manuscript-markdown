@@ -16618,9 +16618,11 @@ export function getLocalTimezoneOffset(): string {
 
 // BibTeX generation
 
-/** Escape normalized metadata directly using the shared BibTeX text policy. */
-export function escapeBibtex(s: string): string {
-  return escapeBibtexText(s);
+/** Escape normalized metadata directly using the shared BibTeX text policy,
+ *  which, in `names`, writes no empty group between hyphens or quotes (see
+ *  escapeBibtexText). */
+export function escapeBibtex(s: string, names = false): string {
+  return escapeBibtexText(s, names);
 }
 
 /** Map CSL type back to the most appropriate BibTeX entry type. */
@@ -16652,7 +16654,7 @@ export function mapCSLTypeToBibtex(cslType: string, genre?: string): string {
  *  would read it as a von part, so it stays with the family name, as it
  *  does where a style inverts the name. */
 function serializeAuthor(a: CslName): string {
-  if (a.literal) return '{' + escapeBibtex(a.literal) + '}';
+  if (a.literal) return '{' + escapeBibtex(a.literal, true) + '}';
   // Each part, in a group where BibTeX would split the name, or the names,
   // in it: at a comma or an and, as in King, {Jr., PhD}, John, an and at a
   // part's edge too, since a space joins it to the next part. But a part
@@ -16664,7 +16666,7 @@ function serializeAuthor(a: CslName): string {
   type NamePart = { text: string; group: boolean };
   const part = (text: string): NamePart => ({ text, group: !text.includes('\\') && /,|(?:^|\s)and(?:\s|$)/i.test(text) });
   const asRead = (p: NamePart) => p.group ? '{' + p.text + '}' : p.text;
-  const asWritten = (p: NamePart) => p.group ? '{' + escapeBibtex(p.text) + '}' : escapeBibtex(p.text);
+  const asWritten = (p: NamePart) => p.group ? '{' + escapeBibtex(p.text, true) + '}' : escapeBibtex(p.text, true);
   const particle = a['dropping-particle'] ? part(a['dropping-particle']) : undefined;
   const particleRead = particle ? asRead(particle) : '';
   // A non-dropping particle joins the family name with no space after an

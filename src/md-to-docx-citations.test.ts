@@ -1042,6 +1042,35 @@ describe('BibTeX ties, empty groups and \\url in names', () => {
   });
 });
 
+describe('BibTeX dashes and quotes in citeproc\'s data', () => {
+  const names = (author: string) => buildItemData(parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b')!).author;
+
+  // Names stay as main reads them (see 'BibTeX ties, empty groups and \url
+  // in names')
+  it.each([
+    ['dashes and quotes', "Smith--Jones, ``Ann''", [{ family: 'Smith-Jones', given: "``Ann''" }]],
+    ['an em dash', 'Smith---Jones', [{ family: 'Smith-Jones' }]],
+    ['two apostrophes', "O''Brien, Ann", [{ family: "O''Brien", given: 'Ann' }]],
+  ])('reads %s in a name as before', (_name, author, expected) => {
+    expect(names(author)).toEqual(expected);
+  });
+
+  // citeproc showed 1--10, ``A'' and 1990--2000---now as written
+  it('shows dashes and quotes in a bibliography as TeX prints them', () => {
+    const bib = "@article{b,\n  author = {Doe, Ann},\n  title = {``A'' and 1990--2000---now},\n  journal = {J},\n  volume = {3},\n  number = {1--2},\n  pages = {1--10},\n  year = {2019}\n}\n";
+    const engine = createCiteprocEngine(parseBibtex(bib), 'apa')!;
+    engine.updateItems(['b']);
+    expect(renderBibliography(engine)!.entries[0]).toContain('“A” and 1990–2000—now. <i>J</i>, <i>3</i>(1–2), 1–10.');
+  });
+
+  it('shows a page range with a hyphen as before', () => {
+    const bib = '@article{b,\n  author = {Doe, Ann},\n  title = {T},\n  journal = {J},\n  pages = {1-10},\n  year = {2019}\n}\n';
+    const engine = createCiteprocEngine(parseBibtex(bib), 'apa')!;
+    engine.updateItems(['b']);
+    expect(renderBibliography(engine)!.entries[0]).toContain('<i>J</i>, 1–10.');
+  });
+});
+
 describe('orderRPr', () => {
   it('puts run properties in schema order', () => {
     expect(orderRPr('<w:i/><w:b/><w:vertAlign w:val="superscript"/><w:smallCaps/><w:highlight w:val="red"/><w:sz w:val="18"/>'))

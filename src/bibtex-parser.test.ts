@@ -634,6 +634,56 @@ describe('BibTeX ties, empty groups and \\url', () => {
   }, 30000);
 });
 
+describe('BibTeX dashes and quotes', () => {
+  // TeX's ligatures, as -- and ``, stayed as written, so citeproc showed
+  // 1990--2000 and ``Title''
+  const field = (name: string, value: string) => parseBibtex('@article{k,\n  ' + name + ' = {' + value + '}\n}').get('k')?.fields.get(name);
+
+  it.each([
+    ['an en dash', 'title', 'A--B', 'A\u2013B'],
+    ['an em dash', 'title', 'A---B', 'A\u2014B'],
+    ['four hyphens, an em dash and a hyphen', 'title', 'A----B', 'A\u2014-B'],
+    ['double quotes', 'title', "``A'' B", '\u201CA\u201D B'],
+    ['a dash and quotes in a group', 'title', "x {``a--b''}", 'x {\u201Ca\u2013b\u201D}'],
+    ['a page range', 'pages', '1--10', '1\u201310'],
+    ['a dash in a field other than a title', 'publisher', 'A--B', 'A\u2013B'],
+    // An empty group breaks a ligature, as import writes one
+    ['hyphens an empty group parts', 'title', 'a-{}-b-{}-{}-c', 'a--b---c'],
+    ['quotes an empty group parts', 'title', "`{}`a'{}'", "``a''"],
+  ])('reads %s as TeX prints it', (_name, name, value, expected) => {
+    expect(field(name, value)).toBe(expected);
+  });
+
+  it.each([
+    ['a hyphen', 'a-b c - d', 'a-b c - d'],
+    ['single quotes', "`a' b's", "`a' b's"],
+    ['dashes and quotes in math', "$a--b''$ c", "$a--b''$ c"],
+    ['a dash in a \\url\'s argument', String.raw`\url{a--b''}`, "a--b''"],
+    ['a discretionary hyphen before a hyphen', String.raw`a\--b`, String.raw`a\--b`],
+  ])('reads %s as before', (_name, value, expected) => {
+    expect(field('title', value)).toBe(expected);
+  });
+
+  // As on main: names would need them read once they're split, and
+  // serializeBibtex to write them back as they were read, a later step's
+  it.each([
+    ['author', "Smith--Jones, ``Ann''"],
+    ['editor', 'Smith---Jones'],
+  ])('keeps dashes and quotes in %s as written', (name, value) => {
+    expect(field(name, value)).toBe(value);
+  });
+
+  it('writes hyphens and quotes that TeX would join so they read back the same, but not in names', () => {
+    const value = "a--b ``c'' d---e";
+    const serialized = serializeBibtex(new Map([['k', { type: 'article', key: 'k', fields: new Map([['title', value], ['author', 'Smith--Jones, Ann']]) }]]));
+    expect(serialized).toContain("title = {a-{}-b `{}`c'{}' d-{}-{}-e}");
+    expect(serialized).toContain('author = {Smith--Jones, Ann}');
+    const fields = parseBibtex(serialized).get('k')!.fields;
+    expect(fields.get('title')).toBe(value);
+    expect(fields.get('author')).toBe('Smith--Jones, Ann');
+  });
+});
+
 describe('BibTeX field whitespace', () => {
   // A value wrapped across lines kept its line end and indentation, which
   // citeproc writes as no-break spaces, so the bibliography showed a gap
