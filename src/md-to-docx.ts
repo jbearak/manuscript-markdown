@@ -4,7 +4,7 @@ import { imagePathsWithSpaces } from './image-paths';
 import { codeSpansOfSpaces } from './code-spans';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXml, escapeXmlText, textElements, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, HIDDEN_PARAGRAPH_PPR, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXmlText, textElements, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, HIDDEN_PARAGRAPH_PPR, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -31,6 +31,7 @@ export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
+import { escapeXmlAttribute } from './xml-parser';
 import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, type Context, type Scope, type XmlNode } from './scoped-xml';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
@@ -4908,7 +4909,7 @@ function parseTemplateMargins(sectPrXml: string | undefined): string {
 function sectPrNamespaces(sectPr: XmlNode): string {
   const compatibility = new Set(attributesOf(sectPr, EXPORT_NAMESPACES).filter(({ namespace }) => namespace === MARKUP_COMPATIBILITY).map(({ key }) => key));
   return Object.entries(sectPr[':@'] ?? {}).filter(([key]) => key === '@_xmlns' || key.startsWith('@_xmlns:') || compatibility.has(key))
-    .map(([key, value]) => ' ' + key.slice('@_'.length) + '="' + escapeXml(value) + '"').join('');
+    .map(([key, value]) => ' ' + key.slice('@_'.length) + '="' + escapeXmlAttribute(value) + '"').join('');
 }
 
 // The start of export's document, whose namespaces, EXPORT_NAMESPACES, a
@@ -5321,7 +5322,7 @@ function contentTypesXml(opts: ContentTypesOptions): string {
     }
   }
   for (const [ext, ct] of templateDefaults ?? []) {
-    xml += '<Default Extension="' + escapeXml(ext) + '" ContentType="' + escapeXml(ct) + '"/>\n';
+    xml += '<Default Extension="' + escapeXmlAttribute(ext) + '" ContentType="' + escapeXmlAttribute(ct) + '"/>\n';
   }
   xml += '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\n';
   xml += '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>\n';
@@ -5361,7 +5362,7 @@ function contentTypesXml(opts: ContentTypesOptions): string {
     xml += '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>\n';
   }
   for (const [part, ct] of templateOverrides ?? []) {
-    xml += '<Override PartName="/' + escapeXml(part) + '" ContentType="' + escapeXml(ct) + '"/>\n';
+    xml += '<Override PartName="/' + escapeXmlAttribute(part) + '" ContentType="' + escapeXmlAttribute(ct) + '"/>\n';
   }
   xml += '</Types>';
   return xml;
@@ -5469,7 +5470,7 @@ export const TABLE_FONT_SLOTS = ['ascii', 'hAnsi'] as const;
 
 /** A w:rFonts setting `font` as a table's (see TABLE_FONT_SLOTS) */
 export function tableRFonts(font: string): string {
-  return '<w:rFonts' + TABLE_FONT_SLOTS.map(slot => ' w:' + slot + '="' + escapeXml(font) + '"').join('') + '/>';
+  return '<w:rFonts' + TABLE_FONT_SLOTS.map(slot => ' w:' + slot + '="' + escapeXmlAttribute(font) + '"').join('') + '/>';
 }
 
 /** Whether export writes a table's font, `font`, its directive's or else
@@ -5897,7 +5898,7 @@ function rFontsWithFont(rFonts: string, font: string): string {
   const others = [...rFonts.matchAll(/\s([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')/g)]
     .filter(([, name]) => !['w:ascii', 'w:hAnsi', 'w:asciiTheme', 'w:hAnsiTheme'].includes(name))
     .map(([, name, value]) => ' ' + name + '=' + value).join('');
-  return '<w:rFonts w:ascii="' + escapeXml(font) + '" w:hAnsi="' + escapeXml(font) + '"' + others + '/>';
+  return '<w:rFonts w:ascii="' + escapeXmlAttribute(font) + '" w:hAnsi="' + escapeXmlAttribute(font) + '"' + others + '/>';
 }
 
 /**
@@ -6092,7 +6093,7 @@ function templateWithFontOverrides(
     // Build the replacement fragments
     const rFontsEl = font === undefined ? undefined
       : isTableStyle ? tableRFonts(font)
-      : '<w:rFonts w:ascii="' + escapeXml(font) + '" w:hAnsi="' + escapeXml(font) + '"/>';
+      : '<w:rFonts w:ascii="' + escapeXmlAttribute(font) + '" w:hAnsi="' + escapeXmlAttribute(font) + '"/>';
     const szEl = sizeHp !== undefined
       ? '<w:sz w:val="' + sizeHp + '"/>'
       : undefined;
@@ -6224,7 +6225,7 @@ function templateWithFontOverrides(
     if (normalMatch) {
       const rFontsMatch = setRecordsAside(normalMatch[0]).xml.match(/<w:rFonts\s+[^>]*w:ascii="([^"]+)"[^>]*>/);
       if (rFontsMatch) {
-        bodyFontStr = '<w:rFonts w:ascii="' + escapeXml(rFontsMatch[1]) + '" w:hAnsi="' + escapeXml(rFontsMatch[1]) + '"/>';
+        bodyFontStr = '<w:rFonts w:ascii="' + escapeXmlAttribute(rFontsMatch[1]) + '" w:hAnsi="' + escapeXmlAttribute(rFontsMatch[1]) + '"/>';
       }
     }
     const localSzPair = (hp: number) => '<w:sz w:val="' + hp + '"/><w:szCs w:val="' + hp + '"/>';
@@ -6484,14 +6485,14 @@ function customStyleXml(
   // rPr: style flags, font and size, in schema order (see orderRPr)
   const styleStr = FONT_STYLE_RUN_PROPERTIES.map(fontStyleElement).join('');
   const fontStr = def.font
-    ? '<w:rFonts w:ascii="' + escapeXml(def.font) + '" w:hAnsi="' + escapeXml(def.font) + '"/>'
+    ? '<w:rFonts w:ascii="' + escapeXmlAttribute(def.font) + '" w:hAnsi="' + escapeXmlAttribute(def.font) + '"/>'
     : bodyFontStr;
   const szStr = def.fontSize !== undefined ? szPairFn(Math.round(def.fontSize * 2)) : '';
   const rPrInner = orderRPr(styleStr + fontStr + szStr);
   const rPr = rPrInner ? '<w:rPr>' + rPrInner + '</w:rPr>\n' : '';
 
   return '<w:style w:type="paragraph" w:customStyle="1" w:styleId="' + styleId + '">\n' +
-    '<w:name w:val="' + escapeXml(displayName) + '"/>\n' +
+    '<w:name w:val="' + escapeXmlAttribute(displayName) + '"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
     pPr + rPr +
     '</w:style>\n';
@@ -6501,7 +6502,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
   const alertColors = alertColorsByScheme(colorScheme ?? getDefaultColorScheme());
   // Helper: build w:rFonts element for a given font name
   function rFonts(font: string): string {
-    return '<w:rFonts w:ascii="' + escapeXml(font) + '" w:hAnsi="' + escapeXml(font) + '"/>';
+    return '<w:rFonts w:ascii="' + escapeXmlAttribute(font) + '" w:hAnsi="' + escapeXmlAttribute(font) + '"/>';
   }
 
   // Helper: build w:sz + w:szCs elements for a given half-point size
@@ -7351,9 +7352,9 @@ function customPropsXml(properties: CustomPropEntry[]): string {
   xml += '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">\n';
   for (let i = 0; i < properties.length; i++) {
     const pid = i + 2; // fmtid starts at pid=2 per OOXML convention
-    xml += '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="' + pid + '" name="' + escapeXml(properties[i].name) + '">';
+    xml += '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="' + pid + '" name="' + escapeXmlAttribute(properties[i].name) + '">';
     // Use minimal escaping for text content: only <, >, & need escaping.
-    // escapeXml() also escapes " as &quot; which is valid but causes Word to
+    // escapeXmlAttribute() also escapes " as &quot; which is valid but causes Word to
     // decode it on open and mark the document as modified.
     const type = 'vt:' + (properties[i].type ?? 'lpwstr');
     xml += '<' + type + '>' + properties[i].value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</' + type + '>';
@@ -7713,7 +7714,7 @@ function documentRelsXml(opts: DocumentRelsOptions): string {
   // All rIds must be sequential with no gaps — see dirty-flag invariant #6.
   let nextFixed = 1;
   for (const relationship of templateRelationships ?? []) {
-    xml += '<Relationship Id="rId' + nextFixed + '" Type="' + escapeXml(relationship.type) + '" Target="' + escapeXml(relationship.target) + '"' + (relationship.external ? ' TargetMode="External"' : '') + '/>\n';
+    xml += '<Relationship Id="rId' + nextFixed + '" Type="' + escapeXmlAttribute(relationship.type) + '" Target="' + escapeXmlAttribute(relationship.target) + '"' + (relationship.external ? ' TargetMode="External"' : '') + '/>\n';
     nextFixed++;
   }
   xml += '<Relationship Id="rId' + nextFixed + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n';
@@ -7763,7 +7764,7 @@ function documentRelsXml(opts: DocumentRelsOptions): string {
   xml += '<Relationship Id="rId' + nextFixed + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>\n';
 
   for (const [url, relId] of relationships) {
-    xml += '<Relationship Id="' + relId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + escapeXml(url) + '" TargetMode="External"/>\n';
+    xml += '<Relationship Id="' + relId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + escapeXmlAttribute(url) + '" TargetMode="External"/>\n';
   }
 
   if (imageRelationships) {
@@ -7783,7 +7784,7 @@ function noteRelsXml(
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n';
   for (const [url, relId] of relationships) {
-    xml += '<Relationship Id="' + relId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + escapeXml(url) + '" TargetMode="External"/>\n';
+    xml += '<Relationship Id="' + relId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + escapeXmlAttribute(url) + '" TargetMode="External"/>\n';
   }
   for (const [, entry] of imageRelationships) {
     xml += '<Relationship Id="' + entry.rId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="' + entry.mediaPath + '"/>\n';
@@ -8267,7 +8268,7 @@ const HYPERLINK_RE = /<w:hyperlink r:id="([^"]*)">([\s\S]*?)<\/w:hyperlink>/g;
  *  finds them, each go in a hyperlink around a change of their own, as Word
  *  writes a link in a change, since a w:ins or w:del holds only runs. */
 function trackedChangeXml(tag: 'w:ins' | 'w:del', contentXml: string, links: RegExp, author: string, dateAttr: string, state: DocxGenState): string {
-  const change = (content: string) => '<' + tag + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + content + '</' + tag + '>';
+  const change = (content: string) => '<' + tag + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXmlAttribute(author) + '"' + dateAttr + '>' + content + '</' + tag + '>';
   let xml = '';
   let last = 0;
   for (const link of contentXml.matchAll(links)) {
@@ -8336,7 +8337,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     } else if (run.type === 'critic_add') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
+      const dateAttr = date ? ' w:date="' + escapeXmlAttribute(date) + '"' : '';
       const contentXml = insertedContent(state, () => generateInlineCriticContent(run.innerRuns, run.text, run, state, options, bibEntries, citeprocEngine));
       xml += insertionXml(contentXml, author, dateAttr, state);
     } else if (run.type === 'critic_del' && hasCommentRuns(run.innerRuns)) {
@@ -8344,7 +8345,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     } else if (run.type === 'critic_del') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
+      const dateAttr = date ? ' w:date="' + escapeXmlAttribute(date) + '"' : '';
       const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.warnings, state, options);
       xml += deletionXml(deletedXml, author, dateAttr, state);
     } else if (run.type === 'critic_sub' && hasCommentRuns(run.oldRuns)) {
@@ -8354,7 +8355,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
+      const dateAttr = date ? ' w:date="' + escapeXmlAttribute(date) + '"' : '';
       const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.warnings, state, options);
       const insertedXml = insertedContent(state, () => generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine));
       xml += deletionXml(deletedXml, author, dateAttr, state);
@@ -8700,15 +8701,12 @@ function imageRunXml(run: MdRun, state: DocxGenState, options: MdToDocxOptions |
   return '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
     + '<wp:extent cx="' + cx + '" cy="' + cy + '"/>'
     + '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
-    // A tab or line break in the alt text as a reference, which a reader
-    // otherwise takes for a space in an attribute
-    + '<wp:docPr id="' + docPrId + '" name="' + escapeXml(src) + '" descr="'
-    + escapeXml(alt).replace(/[\t\n\r]/g, c => '&#x' + c.charCodeAt(0).toString(16).toUpperCase() + ';') + '"'
+    + '<wp:docPr id="' + docPrId + '" name="' + escapeXmlAttribute(src) + '" descr="' + escapeXmlAttribute(alt) + '"'
     + (linkRId ? '><a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="' + linkRId + '"/></wp:docPr>' : '/>')
     + '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
     + '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
     + '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
-    + '<pic:nvPicPr><pic:cNvPr id="' + docPrId + '" name="' + escapeXml(src) + '"/><pic:cNvPicPr/></pic:nvPicPr>'
+    + '<pic:nvPicPr><pic:cNvPr id="' + docPrId + '" name="' + escapeXmlAttribute(src) + '"/><pic:cNvPicPr/></pic:nvPicPr>'
     + '<pic:blipFill><a:blip r:embed="' + imgEntry.rId + '"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
     + '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cx + '" cy="' + cy + '"/></a:xfrm>'
     + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
@@ -8720,8 +8718,8 @@ function imageRunXml(run: MdRun, state: DocxGenState, options: MdToDocxOptions |
 function revisionWrapper(run: MdRun, state: DocxGenState, options?: MdToDocxOptions): (element: 'w:ins' | 'w:del', content: string) => string {
   const author = run.author || options?.authorName || 'Unknown';
   const date = normalizeToUtcIso(run.date || '', state.timezone);
-  const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-  return (element, content) => '<' + element + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + content + '</' + element + '>';
+  const dateAttr = date ? ' w:date="' + escapeXmlAttribute(date) + '"' : '';
+  return (element, content) => '<' + element + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXmlAttribute(author) + '"' + dateAttr + '>' + content + '</' + element + '>';
 }
 
 /** The w:ins or w:del that tracks a block's paragraph mark (see criticParaMark), or ''. */
@@ -8730,9 +8728,9 @@ function paragraphMarkRevision(token: MdToken, state: DocxGenState, options?: Md
   const run = token.criticParaMarkRun ?? token.runs[0];
   const author = run?.author || options?.authorName || 'Unknown';
   const date = normalizeToUtcIso(run?.date || '', state.timezone);
-  const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
+  const dateAttr = date ? ' w:date="' + escapeXmlAttribute(date) + '"' : '';
   const el = token.criticParaMark === 'addition' ? 'w:ins' : 'w:del';
-  return '<' + el + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '/>';
+  return '<' + el + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXmlAttribute(author) + '"' + dateAttr + '/>';
 }
 
 /** Add a paragraph-mark revision to a pPr. Revision elements come first in a
@@ -9289,7 +9287,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
 
   if (token.type === 'code_block') {
     const lines = (token.runs[0]?.text || '').replace(/\n$/, '').split('\n');
-    const rpr = '<w:rPr><w:rFonts w:ascii="' + escapeXml(state.codeFont) + '" w:hAnsi="' + escapeXml(state.codeFont) + '"/></w:rPr>';
+    const rpr = '<w:rPr><w:rFonts w:ascii="' + escapeXmlAttribute(state.codeFont) + '" w:hAnsi="' + escapeXmlAttribute(state.codeFont) + '"/></w:rPr>';
     if (state.codeShadingMode) {
       return lines.map((line) => '<w:p>' + pPr + generateRun(line, rpr) + '</w:p>').join('');
     }
@@ -9793,10 +9791,10 @@ function commentsXml(comments: CommentEntry[]): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
   xml += '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14 w15 w16cid">';
   for (const c of comments) {
-    const dateAttr = c.date ? ' w:date="' + escapeXml(c.date) + '"' : '';
+    const dateAttr = c.date ? ' w:date="' + escapeXmlAttribute(c.date) + '"' : '';
     const initials = authorInitials(c.author);
-    const initialsAttr = initials ? ' w:initials="' + escapeXml(initials) + '"' : '';
-    xml += '<w:comment w:id="' + c.id + '" w:author="' + escapeXml(c.author) + '"' + initialsAttr + dateAttr + '>';
+    const initialsAttr = initials ? ' w:initials="' + escapeXmlAttribute(initials) + '"' : '';
+    xml += '<w:comment w:id="' + c.id + '" w:author="' + escapeXmlAttribute(c.author) + '"' + initialsAttr + dateAttr + '>';
     // Split on \n\n for paragraph breaks within the comment.
     // Per OOXML spec, commentsExtended.xml links via the paraId of the
     // LAST paragraph in each comment, so place w14:paraId there.
@@ -9879,7 +9877,7 @@ function commentsExtensibleXml(comments: CommentEntry[]): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
   xml += '<w16cex:commentsExtensible xmlns:w16cex="http://schemas.microsoft.com/office/word/2018/wordml/cex">';
   for (const c of comments) {
-    const dateUtcAttr = c.date ? ' w16cex:dateUtc="' + escapeXml(c.date) + '"' : '';
+    const dateUtcAttr = c.date ? ' w16cex:dateUtc="' + escapeXmlAttribute(c.date) + '"' : '';
     xml += '<w16cex:commentExtensible w16cex:durableId="' + durableIdFromParaId(c.paraId) + '"' + dateUtcAttr + '/>';
   }
   xml += '</w16cex:commentsExtensible>';
@@ -9891,7 +9889,7 @@ function peopleXml(comments: CommentEntry[]): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
   xml += '<w15:people xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">';
   for (const author of authors) {
-    xml += '<w15:person w15:author="' + escapeXml(author) + '"/>';
+    xml += '<w15:person w15:author="' + escapeXmlAttribute(author) + '"/>';
   }
   xml += '</w15:people>';
   return xml;
@@ -10021,7 +10019,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
           }
         }
         const font = resolveAtIndex(fo.titleFonts, i);
-        if (font) inner += '<w:rFonts w:ascii="' + escapeXml(font) + '" w:hAnsi="' + escapeXml(font) + '"/>';
+        if (font) inner += '<w:rFonts w:ascii="' + escapeXmlAttribute(font) + '" w:hAnsi="' + escapeXmlAttribute(font) + '"/>';
         const sizeHp = resolveAtIndex(fo.titleSizesHp, i);
         if (sizeHp) inner += '<w:sz w:val="' + sizeHp + '"/><w:szCs w:val="' + sizeHp + '"/>';
         if (inner) rPr = '<w:rPr>' + inner + '</w:rPr>';

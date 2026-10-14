@@ -18454,6 +18454,53 @@ describe('Portrait section round-trip', () => {
   });
 });
 
+describe('round-trip regression: a comment\'s author', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const PARTS = ['word/comments.xml', 'word/people.xml'];
+  // A comment and its reply, for people.xml, by an author `author` names
+  // as XML writes it
+  const withAuthor = async (author: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A {==b==}{>>@X (2024-01-15 10:30) | one<<}{>>@X (2024-01-15 10:31) | two<<} c.')).docx);
+    for (const part of PARTS) {
+      const xml = await zip.file(part)!.async('string');
+      const edited = xml.replace(/(w15:author|w:author)="X"/g, (_all, name: string) => name + '="' + author + '"');
+      expect(edited).not.toBe(xml);
+      zip.file(part, edited);
+    }
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  // Each attribute's value in the parts that hold an author
+  const attributes = async (docx: Uint8Array) => {
+    const zip = await JSZip.loadAsync(docx);
+    const parts = await Promise.all(PARTS.map(part => zip.file(part)!.async('string')));
+    return parts.flatMap(xml => [...xml.matchAll(/\s([\w:]+)="([^"]*)"/g)].map(m => m[1] + '=' + m[2]));
+  };
+
+  test('reads an author with a tab written as a reference, and writes it back as one', async () => {
+    // Import read the reference as a tab, which export wrote as itself, and
+    // XML reads a tab written as itself in an attribute as a space, so the
+    // next import read another author
+    const once = (await convertDocx(await withAuthor('A&#9;B'))).markdown;
+    expect(strip(once)).toBe('A {==b==}{>>@A\tB (2024-01-15 10:30) | one<<}{>>@A\tB (2024-01-15 10:31) | two<<} c.\n');
+    const word = (await convertMdToDocx(once)).docx;
+    const written = await attributes(word);
+    expect(written.filter(a => /author=/.test(a))).toEqual(['w:author=A&#9;B', 'w:author=A&#9;B', 'w15:author=A&#9;B']);
+    expect((await convertDocx(word)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['a carriage return', 'A&#xD;B'],
+    ['a line feed', 'A&#xA;B'],
+  ])('reads an author with %s written as a reference, and writes back what it reads with no white space but a space as itself', async (_name, author) => {
+    const once = (await convertDocx(await withAuthor(author))).markdown;
+    const word = (await convertMdToDocx(once)).docx;
+    const written = await attributes(word);
+    expect(written.filter(a => /author=/.test(a)).length).toBeGreaterThanOrEqual(3);
+    expect(written.filter(a => /[\t\n\r]/.test(a))).toEqual([]);
+    expect((await convertDocx(word)).markdown).toBe(once);
+  });
+});
+
 describe('round-trip regression: an image\'s alt text', () => {
   // Minimal 1x1 white PNG (67 bytes)
   const TINY_PNG = Buffer.from(
@@ -18489,6 +18536,26 @@ describe('round-trip regression: an image\'s alt text', () => {
     const again = await toWord(once);
     expect(await descr(again)).toBe(attr(alt));
     expect((await convertDocx(again)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['a tab written as a reference, which stays a tab', 'a&#9;b', 'a\tb', 'a&#9;b'],
+    ['a line feed written as a reference, which stays a line feed', 'a&#xA;b', 'a&#10;b', 'a&#xA;b'],
+    ['a carriage return written as a reference, which stays a carriage return', 'a&#xD;b', 'a&#13;b', 'a&#xD;b'],
+    ['a tab written as itself, which XML reads as a space', 'a\tb', 'a b', 'a b'],
+    ['a line feed written as itself, which XML reads as a space', 'a\nb', 'a b', 'a b'],
+    ['a reference written as text', 'a&#38;#9;b', 'a\\&#9;b', 'a&amp;#9;b'],
+  ])('reads alt text with %s, as XML reads an attribute\'s value', async (_name, alt, written, again) => {
+    // Import read each reference to a character before the parser did,
+    // which read the white space it gave as a space, as XML reads an
+    // attribute's white space written as itself, which import kept
+    const zip = await JSZip.loadAsync(await toWord('A ![x](image.png){width=100 height=100} b'));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/descr="[^"]*"/, () => 'descr="' + alt + '"'));
+    const once = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(strip(once)).toBe('A ![' + written + '](image.png){width=100 height=100} b\n');
+    const word = await toWord(once);
+    expect(await descr(word)).toBe(again);
+    expect((await convertDocx(word)).markdown).toBe(once);
   });
 
   test.each([
@@ -20394,23 +20461,26 @@ describe('XML entity limits', () => {
     expect(result.markdown.split('"q"').length - 1).toBe(3000);
   });
 
+  // As a part with a DOCTYPE, which no part of a package has (ECMA-376
+  // Part 2 §8.1.4, which has a reader take one for an error), whose
+  // entities xmlParser doesn't read as XML does
   test('a DOCTYPE entity longer than one character is refused', async () => {
     const xml = wrapDocumentXml('<w:p><w:r><w:t>' + '&big;'.repeat(200) + '</w:t></w:r></w:p>')
       .replace('<?xml version="1.0"?>', '<?xml version="1.0"?><!DOCTYPE w:document [<!ENTITY big "' + 'A'.repeat(9000) + '">]>');
-    await expect(convertDocx(await buildSyntheticDocx(xml))).rejects.toThrow(/exceeds maximum allowed size/);
+    await expect(convertDocx(await buildSyntheticDocx(xml))).rejects.toThrow(/DOCTYPE/);
   });
 
-  test('a DOCTYPE after the root element is held to the same entity size', async () => {
+  test('a DOCTYPE after the root element is refused too', async () => {
     // fast-xml-parser reads a DOCTYPE wherever it appears
     const xml = wrapDocumentXml('<!DOCTYPE x [<!ENTITY big "AA">]><w:p><w:r><w:t>&big;</w:t></w:r></w:p>');
-    await expect(convertDocx(await buildSyntheticDocx(xml))).rejects.toThrow(/exceeds maximum allowed size/);
+    await expect(convertDocx(await buildSyntheticDocx(xml))).rejects.toThrow(/DOCTYPE/);
   });
 
-  test('one-character and empty DOCTYPE entities expand any number of times', async () => {
+  test('a DOCTYPE of one-character and empty entities is refused too', async () => {
+    // They were read, any number of times
     const xml = wrapDocumentXml('<w:p><w:r><w:t>' + '&x;&z;'.repeat(5000) + '</w:t></w:r></w:p>')
       .replace('<?xml version="1.0"?>', '<?xml version="1.0"?><!DOCTYPE w:document [<!ENTITY x ""><!ENTITY z "Z">]>');
-    const result = await convertDocx(await buildSyntheticDocx(xml));
-    expect(result.markdown).toContain('Z'.repeat(5000));
+    await expect(convertDocx(await buildSyntheticDocx(xml))).rejects.toThrow(/DOCTYPE/);
   });
 
   test('DOCTYPE inside CDATA, a comment, or a processing instruction is just content', async () => {

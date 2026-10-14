@@ -6,7 +6,7 @@ import { convertDocx } from './converter';
 import { latexToOmml } from './latex-to-omml';
 import { ommlToLatex } from './omml';
 import { roundTrip, parserOptions } from './test-omml-helpers';
-import { XMLParser } from 'fast-xml-parser';
+import { xmlParser } from './xml-parser';
 
 const repoRoot = join(__dirname, '..');
 
@@ -118,13 +118,13 @@ describe('ommlToLatex: labeled braces and \\text{} preservation', () => {
     // space there would re-export as a space.
     const omml =
       '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>αx</m:t></m:r>';
-    const parsed = new XMLParser(parserOptions).parse('<m:oMath>' + omml + '</m:oMath>');
+    const parsed = xmlParser(parserOptions).parse('<m:oMath>' + omml + '</m:oMath>');
     expect(ommlToLatex(parsed[0]['m:oMath'])).toBe('\\mathrm{\\alpha{}x}');
   });
 
   it('does not rewrite limLow/limUpp as braces when chr or pos mismatches', () => {
     const parse = (xml: string) => {
-      const parsed = new XMLParser(parserOptions).parse('<m:oMath>' + xml + '</m:oMath>');
+      const parsed = xmlParser(parserOptions).parse('<m:oMath>' + xml + '</m:oMath>');
       return ommlToLatex(parsed[0]['m:oMath']);
     };
     // Underbrace chr but top position: not a labeled underbrace

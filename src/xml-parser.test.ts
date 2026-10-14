@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'bun:test';
+import JSZip from 'jszip';
+import { convertDocx, extractZoteroPrefs } from './converter';
+import { convertMdToDocx } from './md-to-docx';
 import { escapeXmlAttribute, xmlBuilder, xmlParser } from './xml-parser';
 import { fastestRun } from './test-timing';
+
+// More than fast-xml-parser's default limit of a thousand references to
+// entities, of which every &lt;, &gt;, &quot; and &apos; counts
+const MANY = 1001;
 
 const OPTIONS = { ignoreAttributes: false, attributeNamePrefix: '@_', preserveOrder: true, parseTagValue: false, parseAttributeValue: false, trimValues: false };
 
@@ -35,6 +42,11 @@ describe('a parser xmlParser builds', () => {
     expect(a.a[0]['#text']).toBe('1\t2\n3\n4');
   });
 
+  it('reads more than a thousand references to entities, which fast-xml-parser\'s default limit refuses', () => {
+    const xml = '<a b="' + '&quot;'.repeat(MANY) + '">' + '&lt;'.repeat(MANY) + '</a>';
+    expect(xmlParser({ ignoreAttributes: false, attributeNamePrefix: '@_' }).parse(xml)).toEqual({ a: { '#text': '<'.repeat(MANY), '@_b': '"'.repeat(MANY) } });
+  });
+
   it('reads a character data section as it is', () => {
     const [a] = xmlParser(OPTIONS).parse('<a>&amp;<![CDATA[&amp;&#65;]]>&#65;</a>');
     expect(a.a.map((text: { '#text': string }) => text['#text']).join('')).toBe('&&amp;&#65;A');
@@ -48,12 +60,14 @@ describe('a parser xmlParser builds', () => {
 
 describe('a builder xmlBuilder builds', () => {
   it('writes what the parser read as it was, an attribute\'s white space too, which it writes as references', () => {
-    const xml = '<a b="1 2&#9;3&#xA;4&#xD;5&amp;6&lt;7&gt;8&quot;9&apos;">x\ty\nz&#xD;&amp;&lt;&gt;</a>';
+    const xml = '<a b="1 2&#9;3&#xA;4&#xD;5&amp;6&lt;7&gt;8&quot;9\'">x\ty\nz&#xD;&amp;&lt;&gt;</a>';
     expect(xmlBuilder(OPTIONS).build(xmlParser(OPTIONS).parse(xml))).toBe(xml);
   });
 
-  it('escapes an attribute\'s tab, line feed and carriage return, which a reader would read as spaces, and the characters markup reads', () => {
-    expect(escapeXmlAttribute('a\tb\nc\rd&<>"\'e')).toBe('a&#9;b&#xA;c&#xD;d&amp;&lt;&gt;&quot;&apos;e');
+  it('escapes an attribute\'s tab, line feed and carriage return, which a reader would read as spaces, and the characters markup reads between double quotes, but an apostrophe', () => {
+    // Export wrote an apostrophe as itself, as Word does, and reads a
+    // template's fonts as their text, so &apos; would come back as its text
+    expect(escapeXmlAttribute('a\tb\nc\rd&<>"\'e')).toBe('a&#9;b&#xA;c&#xD;d&amp;&lt;&gt;&quot;\'e');
   });
 
   it('reads and writes a long run of references in linear time', () => {
@@ -61,4 +75,31 @@ describe('a builder xmlBuilder builds', () => {
     const xml = '<a b="' + '&#9;&amp;'.repeat(100000) + '">' + '&#x2019;&lt;'.repeat(100000) + '</a>';
     expect(fastestRun(() => builder.build(parser.parse(xml)))).toBeLessThan(1000);
   }, 30000);
+});
+
+describe('import of a part with more than a thousand references to entities', () => {
+  it('reads a document\'s text', async () => {
+    // A guard: import's parser of a document had settings of its own, with
+    // no cap, which xmlParser's are
+    const md = Array.from({ length: 600 }, (_, i) => 'A < B > C ' + i).join('\n\n');
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/&(?:lt|gt|quot|apos);/g)!.length).toBeGreaterThan(1000);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(md1).toContain('C 599');
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
+  it('reads the citation style of Zotero\'s preferences of data version 3', async () => {
+    // Its parser had fast-xml-parser's default limit, and read no style
+    const prefs = '<data data-version="3" zotero-version="5.0"><session id="abc"/>'
+      + '<style id="http://www.zotero.org/styles/apa" locale="en-US" hasBibliography="1"/>'
+      + '<prefs><pref name="note" value="' + '&apos;'.repeat(MANY) + '"/><pref name="noteType" value="0"/></prefs></data>';
+    const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const zip = new JSZip();
+    zip.file('docProps/custom.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+      + '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+      + '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="ZOTERO_PREF_1"><vt:lpwstr>' + escape(prefs) + '</vt:lpwstr></property></Properties>');
+    expect((await extractZoteroPrefs(zip))?.styleId).toBe('http://www.zotero.org/styles/apa');
+  });
 });

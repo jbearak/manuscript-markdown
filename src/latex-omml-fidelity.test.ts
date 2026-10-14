@@ -4,7 +4,7 @@
 // directions.
 
 import { describe, test, expect } from 'bun:test';
-import { XMLParser } from 'fast-xml-parser';
+import { xmlParser } from './xml-parser';
 import JSZip from 'jszip';
 import { latexToOmml, trackedLatexToOmml, CRITIC_INSERTION_COMMAND, CRITIC_DELETION_COMMAND } from './latex-to-omml';
 import { ommlToLatex } from './omml';
@@ -18,7 +18,7 @@ const func = (fName: string, arg: string) => '<m:func><m:fName>' + fName + '</m:
 
 /** Translate Word-authored OMML (the children of an m:oMath) to LaTeX. */
 function importOmml(omml: string): string {
-  const parsed = new XMLParser(parserOptions).parse('<m:oMath>' + omml + '</m:oMath>');
+  const parsed = xmlParser(parserOptions).parse('<m:oMath>' + omml + '</m:oMath>');
   return ommlToLatex(parsed[0]['m:oMath']);
 }
 

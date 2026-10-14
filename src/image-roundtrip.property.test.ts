@@ -811,7 +811,7 @@ describe('image-roundtrip properties', () => {
     it.each([
       ['a soft break as a space, as in a paragraph', '![A chart of sales by\nregion](test.png)', 'A chart of sales by region'],
       ['a hard break as a line break', '![a\\\nb](test.png)', 'a&#xA;b'],
-      ['a line break and tab the Markdown writes as references, as references', '![a&#10;b&#9;c](test.png)', 'a&#xA;b&#x9;c'],
+      ['a line break and tab the Markdown writes as references, as references', '![a&#10;b&#9;c](test.png)', 'a&#xA;b&#9;c'],
       ['a line break in an <img> tag\'s alt text as a reference', '<img src="test.png" alt="a&#10;b">', 'a&#xA;b'],
     ])('gives Word %s', async (_name, markdown, descr) => {
       expect(await exportedDescr(markdown)).toBe(descr);

@@ -8,6 +8,8 @@
 // - Delimiter inner parsing: script operators inside \left...\right must use
 //   script-binding logic, not literal text runs
 
+import { escapeXmlAttribute } from './xml-parser';
+
 // ---------------------------------------------------------------------------
 // Reverse mapping tables from omml.ts
 // ---------------------------------------------------------------------------
@@ -521,7 +523,7 @@ class Parser {
     const accent = LATEX_ACCENT_MAP.get(cmd);
     if (accent) {
       const base = this.parseGroup();
-      return '<m:acc><m:accPr><m:chr m:val="' + escapeXmlChars(accent) + '"/></m:accPr><m:e>' + base + '</m:e></m:acc>';
+      return '<m:acc><m:accPr><m:chr m:val="' + escapeXmlAttribute(accent) + '"/></m:accPr><m:e>' + base + '</m:e></m:acc>';
     }
 
     // Functions
@@ -765,7 +767,7 @@ class Parser {
     // m:sub and m:sup are required; without the hide flags Word shows an
     // absent limit as an empty placeholder box.
     const hide = (sub ? '' : '<m:subHide m:val="1"/>') + (sup ? '' : '<m:supHide m:val="1"/>');
-    return '<m:nary><m:naryPr><m:chr m:val="' + escapeXmlChars(naryChar) + '"/>' + limits + hide + '</m:naryPr>' +
+    return '<m:nary><m:naryPr><m:chr m:val="' + escapeXmlAttribute(naryChar) + '"/>' + limits + hide + '</m:naryPr>' +
       '<m:sub>' + sub + '</m:sub><m:sup>' + sup + '</m:sup><m:e>' + body + '</m:e></m:nary>';
   }
 
@@ -870,7 +872,7 @@ class Parser {
       return makeRun(begChr) + content;
     }
 
-    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlChars(begChr) + '"/><m:endChr m:val="' + escapeXmlChars(endChr) + '"/></m:dPr><m:e>' + content + '</m:e></m:d>';
+    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlAttribute(begChr) + '"/><m:endChr m:val="' + escapeXmlAttribute(endChr) + '"/></m:dPr><m:e>' + content + '</m:e></m:d>';
   }
 
   /** Consume the delimiter after \right and return its character, undefined if there is none. */
@@ -1075,7 +1077,7 @@ class Parser {
   private parseDelimitedMatrix(envName: string, begChr: string, endChr: string): string {
     const content = this.parseMatrixContent();
     this.consumeEnd(envName);
-    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlChars(begChr) + '"/><m:endChr m:val="' + escapeXmlChars(endChr) + '"/></m:dPr><m:e><m:m>' + content + '</m:m></m:e></m:d>';
+    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlAttribute(begChr) + '"/><m:endChr m:val="' + escapeXmlAttribute(endChr) + '"/></m:dPr><m:e><m:m>' + content + '</m:m></m:e></m:d>';
   }
 
   private parseMatrixContent(): string {
