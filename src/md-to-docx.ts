@@ -15,7 +15,7 @@ import { paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText,
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlacesOf, runContentShows, styleListMeta, wordIgnoresStyle, xmlHalfPoints, ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
-import { scanOrientationDirectives } from './orientation-scan';
+import { closingFenceAtEnd, scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
 import { preprocessGridTables, preprocessGridTablesWithSourceMap, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
@@ -2661,10 +2661,12 @@ function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number
  * line of `text` it comes from, as markdown-it ends lines (see
  * line-map.ts), from which quote spacing reads the blank lines around each
  * quote (see annotateBlockquoteSpacing). Without it, `markdown` is its own.
+ * Its `written` text, where export closed a section left open at its end
+ * (see closingFenceAtEnd), is the one the warnings of directives read.
  * `linkDefinitions` are the document's, which a note body parsed on its own
  * resolves its reference links and images with, after its own definitions.
  */
-export function parseMd(markdown: string, warnings?: string[], breaks = false, source?: { text: string; lines: LineMap }, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false, bodyStartLine = 0): MdToken[] {
+export function parseMd(markdown: string, warnings?: string[], breaks = false, source?: { text: string; lines: LineMap; written?: string }, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false, bodyStartLine = 0): MdToken[] {
   // Each line end as markdown-it reads it, a \r alone too, so the steps
   // before it, and the lines quotes' and comments' spacing reads, split
   // lines where its token maps do (see newlines.ts): the source's, where
@@ -2884,7 +2886,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
   // directives the document's scan reads as the note's, which pair with none, and whose
   // lines it counted from the note's start.
   if (warnings && !inNote) {
-    const scanText = source?.text ?? markdown;
+    const scanText = source?.written ?? source?.text ?? markdown;
     const findings = scanOrientationDirectives(scanText);
     if (findings.length > 0) {
       let lineEnds: number[] | undefined;
@@ -2997,6 +2999,16 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
         }
         // If no active orientation, leave the comment as-is (user error, but harmless)
       }
+    }
+    // A section still open at the document's end ends there, so it has its
+    // own page, not the template's, and import fences it. Export closes
+    // one in the source where it can (see closingFenceAtEnd), so this is
+    // one it couldn't, where the document ends in code or an HTML comment
+    // with no end, which would hold that fence, or has a comment's start
+    // with no end, which the fence would end: the section ends after its
+    // last block. Not in a note, which has no sections
+    if (activeOrientation && !inNote) {
+      result.push({ type: 'paragraph', runs: [], [activeOrientation === 'landscape' ? 'landscapeClose' : 'portraitClose']: true, blankLinesBefore: 1 });
     }
   }
 
@@ -11031,7 +11043,14 @@ export async function convertMdToDocx(
 ): Promise<MdToDocxResult> {
   // Each line end as markdown-it reads it, \r\n or a \r alone as well as \n,
   // as \n, so each step before it splits lines where it does
-  const markdown = normalizeNewlines(source);
+  const written = normalizeNewlines(source);
+  // A section left open at the document's end ends there: export reads the
+  // document as if a closing fence ended it, after a blank line, so that
+  // each step reads what the section ends with as it reads it before that
+  // fence. The warning of the open section reads the document as written
+  // (see parseMd)
+  const closing = closingFenceAtEnd(maskFrontmatter(written));
+  const markdown = closing ? written.slice(0, closing.end) + closing.fence : written;
   // Parse frontmatter for CSL style and other metadata
   const { metadata: frontmatter, body, fieldOrder } = parseFrontmatter(markdown);
   // Count blank lines between frontmatter closing --- and body content.
@@ -11186,7 +11205,7 @@ export async function convertMdToDocx(
   const bodyStartLine = hadFrontmatter
     ? (markdown.slice(0, markdown.length - body.length) + (body.match(/^\n*/) ?? [''])[0]).split('\n').length - 1
     : 0;
-  const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, { text: maskFrontmatter(markdown), lines: bodyLines },
+  const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, { text: maskFrontmatter(markdown), lines: bodyLines, written: maskFrontmatter(written) },
     undefined, numbersFormatted ? unformattedBody : undefined, false, bodyStartLine);
 
   // Number quote groups and collect the source spacing parseMd recorded on them

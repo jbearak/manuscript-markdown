@@ -1090,7 +1090,9 @@ describe('Custom Styles — Quotes beside fences', () => {
 
   it.each([
     ['a line without a > after a quote in a list item', '- i0\n\n  > q1\n  l2\n\np\n', '- i0\n\n  > q1\n\n  l2\n\np\n', [':i0', 'GitHubBlockquote:q1', 'ManuscriptListContinuation:l2', ':p']],
-    ['a landscape directive without its end between two quotes', '> q0\n\n<!-- landscape -->\n> q\n\np\n', '> q0\n\n> q\n\np\n', ['GitHubBlockquote:q0', 'GitHubBlockquote:q', ':p']],
+    // Import writes the end where the document ends, as export closes the
+    // section there
+    ['a landscape directive without its end between two quotes', '> q0\n\n<!-- landscape -->\n> q\n\np\n', '> q0\n\n<!-- landscape -->\n> q\n\np\n\n<!-- /landscape -->\n', ['GitHubBlockquote:q0', 'GitHubBlockquote:q', ':p']],
   ])('keeps the blank lines around a quote beside %s', async (_name, md, expected, styles) => {
     // The line map since #533 finds these quotes' lines in the source
     await twoTrips(md, expected, styles);
