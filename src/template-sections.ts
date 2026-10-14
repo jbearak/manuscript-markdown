@@ -424,6 +424,21 @@ function withDocPrIds(xml: string, next: () => number): string {
 // template's trailing sectPr goes without
 const TAKEN_PROPERTIES: ReadonlySet<string> = new Set(['headerReference', 'footerReference', 'titlePg', 'pgNumType']);
 
+/** The children of a WordprocessingML element in a sectPr, in `scope`,
+ *  without text but whitespace: CT_SectPr, and each of WordprocessingML's
+ *  elements it holds, holds elements alone, with whitespace between them
+ *  (XML 1.0 §3.2.1), so other text, as a CDATA section's, which the parser
+ *  reads as text, is no property and goes. Each of WordprocessingML's
+ *  elements among them likewise; another namespace's, as an extension's,
+ *  whose content the schema doesn't give, stays as it is */
+function elementsOnly(nodes: XmlNode[], scope: Scope): XmlNode[] {
+  return nodes.filter(node => isElement(node) || !('#text' in node) || /^[ \t\r\n]*$/.test(String(node['#text']))).map(node => {
+    if (!isElement(node)) return node;
+    const inner = scopeIn(node, scope), name = nameOf(node);
+    return WORDPROCESSINGML.has(expandName(name, inner).namespace ?? '') ? { ...node, [name]: elementsOnly(childrenOf(node), inner) } : node;
+  });
+}
+
 /** A template's headers and footers, the parts they name, and its trailing
  *  sectPr, and the parts its numbering names */
 /** The custom property, in chunks from 1, in which export records the
@@ -704,10 +719,11 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
     };
     // The trailing sectPr as Word reads it, as Word writes it on save,
     // with the layout export recorded as the template's, where it changed
-    // it, and without what export gives sections of their own
+    // it, and without what export gives sections of their own, or text,
+    // which it can't hold (see elementsOnly)
     const trailing = withTemplateLayout(effectiveSectPr(last.node, last.around), recordedLayout(elementsOf(await read('docProps/custom.xml'), 'Properties', 'property')));
     const inside = contextIn(trailing, EXPORT_CONTEXT);
-    const own = childrenOf(trailing).filter(node => !TAKEN_PROPERTIES.has(sectPrPropertyOf(node, inside.scope)));
+    const own = elementsOnly(childrenOf(trailing), inside.scope).filter(node => !TAKEN_PROPERTIES.has(sectPrPropertyOf(node, inside.scope)));
     result.sectPr = buildOrdered([{ ...trailing, [nameOf(trailing)]: await withIds(own) }]);
   }
 
