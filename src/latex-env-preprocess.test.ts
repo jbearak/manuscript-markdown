@@ -167,6 +167,8 @@ describe('wrapBareLatexEnvironments in time linear in the text', () => {
 		['environments between code spans', 'a `c` b\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
 		['environments without their ends', '\\begin{equation}\nx\n\n', 0],
 		['CriticMarkup openers without their closers', 'p {++ a\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
+		// Each searched for its matching <<} to the text's end
+		['CriticMarkup comments without their closers', 'p {>> a {#a>> b {>> c {#b>> d {>> e {#c>> f\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
 		['comments without their ends', 'p <!-- a\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		expect(wrapBareLatexEnvironments(unit.repeat(2)).split('$' + '$').length - 1).toBe(wrapped * 2);

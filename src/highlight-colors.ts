@@ -1,4 +1,4 @@
-import { findMatchingClose } from './critic-markup';
+import { criticCloserSearch, findMatchingClose } from './critic-markup';
 import { overlapsCodeRegion, type CodeRegion } from './code-regions';
 
 // --- Implementation notes ---
@@ -417,6 +417,9 @@ export interface AllDecorationRanges {
 
 export function extractAllDecorationRanges(text: string, defaultColor: string): AllDecorationRanges {
   const resolvedDefault = VALID_COLOR_IDS.includes(defaultColor) ? defaultColor : 'yellow';
+  // Each opener's closer, from one search of the text for each closer, as
+  // each unclosed opener searched the rest of it
+  const closers = criticCloserSearch(text);
   const highlights = new Map<string, Array<{ start: number; end: number }>>();
   const comments: Array<{ start: number; end: number }> = [];
   const additions: Array<{ start: number; end: number }> = [];
@@ -516,7 +519,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
       const c3 = text.charCodeAt(i + 2);
 
       if (c2 === 0x2B && c3 === 0x2B) { // {++
-        const ci = text.indexOf('++}', i + 3);
+        const ci = closers.next('++}', i + 3);
         if (ci !== -1) {
           additionDelimiters.push({ start: i, end: i + 3 });
           if (ci > i + 3) additions.push({ start: i + 3, end: ci });
@@ -526,7 +529,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           i = ci + 3; continue;
         }
       } else if (c2 === 0x2D && c3 === 0x2D) { // {--
-        const ci = text.indexOf('--}', i + 3);
+        const ci = closers.next('--}', i + 3);
         if (ci !== -1) {
           deletionDelimiters.push({ start: i, end: i + 3 });
           if (ci > i + 3) deletions.push({ start: i + 3, end: ci });
@@ -536,7 +539,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           i = ci + 3; continue;
         }
       } else if (c2 === 0x7E && c3 === 0x7E) { // {~~
-        const ci = text.indexOf('~~}', i + 3);
+        const ci = closers.next('~~}', i + 3);
         if (ci !== -1) {
           substitutionDelimiters.push({ start: i, end: i + 3 });
           const content = text.slice(i + 3, ci);
@@ -554,7 +557,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           i = ci + 3; continue;
         }
       } else if (c2 === 0x3E && c3 === 0x3E) { // {>>
-        const ci = findMatchingClose(text, i + 3);
+        const ci = closers.matching(i + 3);
         if (ci !== -1) {
           commentDelimiters.push({ start: i, end: i + 3 });
           comments.push({ start: i + 3, end: ci });
@@ -566,7 +569,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
       } else if (c2 === 0x23) { // {# — possible {#id>>
         const contentStart = detectCommentIdOpener(text, i, len);
         if (contentStart !== -1) {
-          const ci = findMatchingClose(text, contentStart);
+          const ci = closers.matching(contentStart);
           if (ci !== -1) {
             commentDelimiters.push({ start: i, end: contentStart });
             comments.push({ start: contentStart, end: ci });
@@ -576,7 +579,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           }
         }
       } else if (c2 === 0x3D && c3 === 0x3D) { // {==
-        const ci = text.indexOf('==}', i + 3);
+        const ci = closers.next('==}', i + 3);
         if (ci !== -1) {
           highlightDelimiters.push({ start: i, end: i + 3 });
           // Record critic highlight content range (skip delimiters for TextMate scopes)
@@ -628,7 +631,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
             const d2 = text.charCodeAt(k + 1);
             const d3 = text.charCodeAt(k + 2);
             if (d2 === 0x3D && d3 === 0x3D) { // {==
-              const ci = text.indexOf('==}', k + 3);
+              const ci = closers.next('==}', k + 3);
               if (ci !== -1) {
                 highlightDelimiters.push({ start: k, end: k + 3 });
                 pushHighlight('critic', k + 3, ci);
@@ -637,7 +640,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 hasContent = true; k = ci + 3; continue;
               }
             } else if (d2 === 0x3E && d3 === 0x3E) { // {>>
-              const ci = findMatchingClose(text, k + 3);
+              const ci = closers.matching(k + 3);
               if (ci !== -1) {
                 commentDelimiters.push({ start: k, end: k + 3 });
                 comments.push({ start: k + 3, end: ci });
@@ -648,7 +651,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
             } else if (d2 === 0x23) { // {# — possible {#id>>
               const innerContentStart = detectCommentIdOpener(text, k, len);
               if (innerContentStart !== -1) {
-                const ci = findMatchingClose(text, innerContentStart);
+                const ci = closers.matching(innerContentStart);
                 if (ci !== -1) {
                   commentDelimiters.push({ start: k, end: innerContentStart });
                   comments.push({ start: innerContentStart, end: ci });
@@ -658,7 +661,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 }
               }
             } else if (d2 === 0x2B && d3 === 0x2B) { // {++
-              const ci = text.indexOf('++}', k + 3);
+              const ci = closers.next('++}', k + 3);
               if (ci !== -1) {
                 additionDelimiters.push({ start: k, end: k + 3 });
                 if (ci > k + 3) additions.push({ start: k + 3, end: ci });
@@ -667,7 +670,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 hasContent = true; k = ci + 3; continue;
               }
             } else if (d2 === 0x2D && d3 === 0x2D) { // {--
-              const ci = text.indexOf('--}', k + 3);
+              const ci = closers.next('--}', k + 3);
               if (ci !== -1) {
                 deletionDelimiters.push({ start: k, end: k + 3 });
                 if (ci > k + 3) deletions.push({ start: k + 3, end: ci });
@@ -676,7 +679,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 hasContent = true; k = ci + 3; continue;
               }
             } else if (d2 === 0x7E && d3 === 0x7E) { // {~~
-              const ci = text.indexOf('~~}', k + 3);
+              const ci = closers.next('~~}', k + 3);
               if (ci !== -1) {
                 substitutionDelimiters.push({ start: k, end: k + 3 });
                 const subContent = text.slice(k + 3, ci);

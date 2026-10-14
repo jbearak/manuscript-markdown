@@ -35,6 +35,7 @@ import { getDisplayWidth } from './grid-table-preprocess';
 import { parseFrontmatter, serializeFrontmatter, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { alertColorsByScheme, setDefaultColorScheme, getDefaultColorScheme, GITHUB_ALERT_COLORS, GUTTMACHER_ALERT_COLORS } from './alert-colors';
 import { fastestRun } from './test-timing';
+import { splitCriticMarkupInMath } from './critic-math';
 
 function makeState(): DocxGenState {
   return {
@@ -4124,6 +4125,31 @@ describe('Quote lines in code and HTML blocks', () => {
     const small = time(4000);
     expect(time(16000) / small).toBeLessThan(8);
   }, 30000);
+});
+
+describe('CriticMarkup without its closers in export in time linear in the text', () => {
+  // Each opener searched the rest of the text for its closer, a comment's
+  // for its matching <<}, and a substitution's for its ~>, again where none
+  // was, so a text of many took time in the square of their number
+  it.each([
+    ['spans in a paragraph', (n: number) => 'x {++ a {>> b {~~ c '.repeat(n) + '~~}\n',
+      (text: string) => expect(parseMd(text).map(token => token.type)).toEqual(['paragraph'])],
+    ['comments with IDs in a paragraph', (n: number) => 'x {#a>> b '.repeat(n) + '\n',
+      (text: string) => expect(parseMd(text).map(token => token.type)).toEqual(['paragraph'])],
+    // Which the alert's line is read without, for whether it holds text
+    ['comments with IDs on an alert\'s line', (n: number) => '> [!NOTE] ' + '{#a>> b '.repeat(n) + '\n',
+      (text: string) => expect(parseMd(text).map(token => token.type)).toEqual(['blockquote'])],
+    ['spans in an equation', (n: number) => '{++ a {>> b {~~ c '.repeat(n) + '~~}',
+      (text: string) => expect(splitCriticMarkupInMath(text)).toBeUndefined()],
+  ])('reads %s', (_name, input, read) => {
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => read(text));
+    };
+    time(20000);
+    const small = time(20000);
+    expect(time(80000) / small).toBeLessThan(8);
+  }, 60000);
 });
 
 describe('Blocks after a code fence in an HTML block or a list item', () => {

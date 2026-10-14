@@ -11,7 +11,7 @@ import {
   LINE_PLACEHOLDER,
   criticBreaksEndLinks,
   criticBreaksInRawHtml,
-  findMatchingClose,
+  criticCloserSearchOf,
   hasCriticBreak,
   iterateCriticBreaks,
   matchCriticBreakAt,
@@ -1203,14 +1203,17 @@ function manuscriptMarkdownBlock(state: StateBlock, startLine: number, endLine: 
   else if (ch2 === 0x3D /* = */ && ch3 === 0x3D /* = */) closeMarker = '==}';
   else return false;
   
-  // Search for the closing marker starting from current position
+  // Search for the closing marker starting from current position, among
+  // the closers of the text, found once for all the rule's calls, as each
+  // line's unclosed opener searched the rest of it
   const searchStart = pos + 3;
+  const closers = criticCloserSearchOf(state);
   let closePos: number;
   if (isNested) {
     // Use depth-aware matching so nested {>>...<<} replies don't close early
-    closePos = findMatchingClose(src, searchStart);
+    closePos = closers.matching(searchStart);
   } else {
-    closePos = src.indexOf(closeMarker, searchStart);
+    closePos = closers.next(closeMarker, searchStart);
   }
   if (closePos === -1) {
     return false;
@@ -1407,11 +1410,14 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start) !== 0x7B /* { */) {
     return false;
   }
+  // Each closer among those of the inline text, found once for all the
+  // rule's calls, as each unclosed opener searched the rest of it
+  const closers = criticCloserSearchOf(state);
 
   // Check for addition {++text++}
   if (src.charCodeAt(start + 1) === 0x2B /* + */ && src.charCodeAt(start + 2) === 0x2B /* + */) {
     const endMarker = '++}';
-    const endPos = src.indexOf(endMarker, start + 3);
+    const endPos = closers.next(endMarker, start + 3);
     if (endPos !== -1 && endPos + 3 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
@@ -1431,7 +1437,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   // Check for deletion {--text--}
   if (src.charCodeAt(start + 1) === 0x2D /* - */ && src.charCodeAt(start + 2) === 0x2D /* - */) {
     const endMarker = '--}';
-    const endPos = src.indexOf(endMarker, start + 3);
+    const endPos = closers.next(endMarker, start + 3);
     if (endPos !== -1 && endPos + 3 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
@@ -1451,11 +1457,14 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   // Check for substitution {~~old~>new~~}
   if (src.charCodeAt(start + 1) === 0x7E /* ~ */ && src.charCodeAt(start + 2) === 0x7E /* ~ */) {
     const endMarker = '~~}';
-    const endPos = src.indexOf(endMarker, start + 3);
+    const endPos = closers.next(endMarker, start + 3);
     if (endPos !== -1 && endPos + 3 <= max) {
-      const fullContent = src.slice(start + 3, endPos);
-      const separatorPos = fullContent.indexOf('~>');
+      // The first ~> in the span, which none is in where the first after
+      // its opener is past its closer
+      const separatorAt = closers.next('~>', start + 3);
+      const separatorPos = separatorAt !== -1 && separatorAt < endPos ? separatorAt - (start + 3) : -1;
       if (separatorPos !== -1) {
+        const fullContent = src.slice(start + 3, endPos);
         if (!silent) {
           const oldText = fullContent.slice(0, separatorPos);
           const newText = fullContent.slice(separatorPos + 2);
@@ -1501,7 +1510,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
     if (idEnd > start + 2) {
       // Check for {#id>>...<<} comment body with ID (depth-aware for nested replies)
       if (idEnd + 1 < max && src.charCodeAt(idEnd) === 0x3E /* > */ && src.charCodeAt(idEnd + 1) === 0x3E /* > */) {
-        const endPos = findMatchingClose(src, idEnd + 2);
+        const endPos = closers.matching(idEnd + 2);
         if (endPos !== -1 && endPos + 3 <= max) {
           if (!silent) {
             const id = src.slice(start + 2, idEnd);
@@ -1551,7 +1560,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
 
   // Check for comment {>>text<<} (depth-aware for nested replies)
   if (src.charCodeAt(start + 1) === 0x3E /* > */ && src.charCodeAt(start + 2) === 0x3E /* > */) {
-    const endPos = findMatchingClose(src, start + 3);
+    const endPos = closers.matching(start + 3);
     if (endPos !== -1 && endPos + 3 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
@@ -1572,7 +1581,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   // Check for highlight {==text==}
   if (src.charCodeAt(start + 1) === 0x3D /* = */ && src.charCodeAt(start + 2) === 0x3D /* = */) {
     const endMarker = '==}';
-    const endPos = src.indexOf(endMarker, start + 3);
+    const endPos = closers.next(endMarker, start + 3);
     if (endPos !== -1 && endPos + 3 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);

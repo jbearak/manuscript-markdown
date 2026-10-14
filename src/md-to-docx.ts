@@ -343,7 +343,7 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
   caution: '⛒',
 };
 
-import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml } from './critic-markup';
+import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, criticCloserSearch, criticCloserSearchOf, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { findDollarMathAt } from './math-delimiters';
 import { citationEnd, citationPrefixText, readCitationItems } from './citation-syntax';
@@ -464,7 +464,7 @@ function commentRangeRule(state: StateInline, silent: boolean): boolean {
     // Check for {#id>>...<<} comment body
     if (idEnd + 1 < max && src.charAt(idEnd) === '>' && src.charAt(idEnd + 1) === '>') {
       // Find matching <<} accounting for nested {>>...<<} replies
-      const endPos = findMatchingClose(src, idEnd + 2);
+      const endPos = criticCloserSearchOf(state).matching(idEnd + 2);
       if (endPos === -1) return false;
 
       if (!silent) {
@@ -540,19 +540,22 @@ function criticMarkupRule(state: StateInline, silent: boolean): boolean {
     default: return false;
   }
 
+  // Each search is one of the closers of the inline text, found once for
+  // all the rule's calls, as each unclosed opener's searched the rest of it
+  const closers = criticCloserSearchOf(state);
   let endPos: number;
   if (type === 'critic_comment') {
     // Use depth-aware matching for {>>...<<} which may contain nested replies
-    endPos = findMatchingClose(state.src, start + 3);
+    endPos = closers.matching(start + 3);
   } else {
-    endPos = state.src.indexOf(endMarker, start + 3);
+    endPos = closers.next(endMarker, start + 3);
   }
   if (endPos === -1) return false;
 
   // A substitution is only CriticMarkup when its old and new sides are
   // separated by ~>. Leave malformed substitution-shaped text literal.
   if (type === 'critic_sub') {
-    const separatorPos = state.src.indexOf('~>', start + 3);
+    const separatorPos = closers.next('~>', start + 3);
     if (separatorPos === -1 || separatorPos >= endPos) return false;
   }
 
@@ -1704,11 +1707,12 @@ function paragraphsBefore(tokens: MdToken[]): Array<MdToken | undefined> {
 
 /** Markdown source without its complete ID comment bodies ({#id>>...<<}). */
 function withoutCommentBodies(src: string): string {
+  const closers = criticCloserSearch(src);
   let kept = '';
   let from = 0;
   for (let open = src.indexOf('{#'); open !== -1; open = src.indexOf('{#', open + 2)) {
     const id = /^[a-zA-Z0-9_-]+>>/.exec(src.slice(open + 2));
-    const close = id ? findMatchingClose(src, open + 2 + id[0].length) : -1;
+    const close = id ? closers.matching(open + 2 + id[0].length) : -1;
     if (close === -1) continue;
     kept += src.slice(from, open);
     from = close + 3;

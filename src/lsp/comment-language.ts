@@ -1,15 +1,18 @@
-import { findMatchingClose } from '../critic-markup';
+import { criticCloserSearch } from '../critic-markup';
 
 /**
  * If `offset` falls inside a `{#id>>...<<}` comment body, return the id.
  * Uses depth-aware matching to handle nested reply `{>>...<<}` blocks.
  */
 export function findCommentIdAtOffset(text: string, offset: number): string | undefined {
+	// Each comment's matching <<}, found for all at once, as each unclosed
+	// one searched the rest of the text
+	const closers = criticCloserSearch(text);
 	const openRe = /\{#([a-zA-Z0-9_-]+)>>/g;
 	let m: RegExpExecArray | null;
 	while ((m = openRe.exec(text)) !== null) {
 		const contentStart = m.index + m[0].length;
-		const closeIdx = findMatchingClose(text, contentStart);
+		const closeIdx = closers.matching(contentStart);
 		if (closeIdx === -1) continue;
 		const endIdx = closeIdx + 3; // past <<}
 		if (offset >= m.index && offset < endIdx) {
@@ -44,12 +47,20 @@ export function findRangeTextForId(text: string, id: string): string | undefined
  */
 function stripCommentBlocks(text: string): string {
 	let result = text;
+	// The matching <<} of each comment, found for all at once in the text, as
+	// each unclosed one searched the rest of it. The search goes on where a
+	// comment was taken out, past which the result is the text after its <<},
+	// so each search is the text's, past the characters taken out before it
+	const closers = criticCloserSearch(text);
+	let removed = 0;
 	const openRe = /\{(?:>>|#[a-zA-Z0-9_-]+>>)/g;
 	let match: RegExpExecArray | null;
 	while ((match = openRe.exec(result)) !== null) {
-		const closeIdx = findMatchingClose(result, match.index + match[0].length);
-		if (closeIdx === -1) continue;
+		const textClose = closers.matching(removed + match.index + match[0].length);
+		if (textClose === -1) continue;
+		const closeIdx = textClose - removed;
 		result = result.slice(0, match.index) + result.slice(closeIdx + 3);
+		removed += closeIdx + 3 - match.index;
 		openRe.lastIndex = match.index;
 	}
 	return result;

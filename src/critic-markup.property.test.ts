@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
 import MarkdownIt from 'markdown-it';
-import { preprocessCriticMarkup, PARA_PLACEHOLDER, LINE_PLACEHOLDER, findMatchingClose } from './critic-markup';
+import { preprocessCriticMarkup, PARA_PLACEHOLDER, LINE_PLACEHOLDER, findMatchingClose, criticCloserSearch, criticPayloadRanges } from './critic-markup';
 import { computeCodeRegions, isInsideCodeRegion } from './code-regions';
 import { fastestRun } from './test-timing';
 
@@ -271,4 +271,41 @@ describe('Property 6: Streaming Preprocessor Equivalence', () => {
       expect(fastestRun(() => expect(preprocessCriticMarkup(input)).toBe(input))).toBeLessThan(1_000);
     }
   }, 30000);
+});
+
+describe('CriticMarkup closers', () => {
+  // Each opener's search for its closer read the rest of the text again
+  // where none was, so a text of many openers without one took time in the
+  // square of their number. The closers are found once each
+  const pieces = ['{>>', '<<}', '{#a>>', '{#', '>>', '<<', '{', '}', '{++', '++}', '{~~', '~~}', '~>', '{==', '==}', '--}', 'a', ' ', '-', '\n'];
+
+  test('gives each search the result of indexOf, and of findMatchingClose for a comment', () => {
+    fc.assert(fc.property(fc.array(fc.constantFrom(...pieces), { maxLength: 40 }), parts => {
+      const src = parts.join('');
+      const closers = criticCloserSearch(src);
+      for (let from = src.length + 1; from >= 0; from--) {
+        for (const closer of ['++}', '--}', '~~}', '==}', '<<}', '~>']) {
+          expect(closers.next(closer, from)).toBe(src.indexOf(closer, from));
+        }
+        expect(closers.matching(from)).toBe(findMatchingClose(src, from));
+      }
+    }), { numRuns: 500 });
+  });
+
+  test.each([
+    // Codex's: as each top-level span's payload is read
+    ['the spans of openers without their closers', (n: number) => 'p {++ a\n\n'.repeat(n) + '{>> b\n\n'.repeat(n),
+      (text: string) => expect(criticPayloadRanges(text)).toEqual([])],
+    // As an opener at a line's end, which is moved where it has a closer
+    ['openers without their closers at a line\'s end', (n: number) => 'p {++\nq\n\n'.repeat(n) + 'p {>>\nq\n\n'.repeat(n),
+      (text: string) => expect(preprocessCriticMarkup(text)).toBe(text)],
+  ])('reads %s in time linear in their number', (_name, input, read) => {
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => read(text));
+    };
+    time(20000);
+    const small = time(20000);
+    expect(time(80000) / small).toBeLessThan(8);
+  }, 60000);
 });

@@ -1,4 +1,4 @@
-import { findMatchingClose, restoreCriticLineBreaks } from './critic-markup';
+import { criticCloserSearch, restoreCriticLineBreaks } from './critic-markup';
 import { isEscapedAt } from './math-delimiters';
 
 export type CriticMathPart =
@@ -25,6 +25,9 @@ const CRITIC_MATH_OPENER_RE = /\{(?:\+\+|--|==|~~|>>)/;
 export function splitCriticMarkupInMath(src: string): CriticMathPart[] | undefined {
   if (!CRITIC_MATH_OPENER_RE.test(src)) return undefined;
   src = restoreCriticLineBreaks(src);
+  // Each opener's closer, and a substitution's ~>, from one search of the
+  // equation for each, as each unclosed opener searched the rest of it
+  const closers = criticCloserSearch(src);
   const parts: CriticMathPart[] = [];
   let textStart = 0;
   let pos = 0;
@@ -43,7 +46,7 @@ export function splitCriticMarkupInMath(src: string): CriticMathPart[] | undefin
     const simple = SIMPLE_MARKERS.find(marker => src.startsWith(marker.open, pos));
     if (simple) {
       const contentStart = pos + simple.open.length;
-      const closePos = src.indexOf(simple.close, contentStart);
+      const closePos = closers.next(simple.close, contentStart);
       if (closePos !== -1) {
         pushMathBefore(pos);
         parts.push({ type: simple.type, content: src.slice(contentStart, closePos) });
@@ -56,28 +59,29 @@ export function splitCriticMarkupInMath(src: string): CriticMathPart[] | undefin
 
     if (src.startsWith('{~~', pos)) {
       const contentStart = pos + 3;
-      const closePos = src.indexOf('~~}', contentStart);
-      if (closePos !== -1) {
+      const closePos = closers.next('~~}', contentStart);
+      // The first ~> in the span, which none is in where the first after
+      // its opener is past its closer
+      const separatorAt = closePos === -1 ? -1 : closers.next('~>', contentStart);
+      if (separatorAt !== -1 && separatorAt < closePos) {
         const content = src.slice(contentStart, closePos);
-        const separatorPos = content.indexOf('~>');
-        if (separatorPos !== -1) {
-          pushMathBefore(pos);
-          parts.push({
-            type: 'substitution',
-            oldContent: content.slice(0, separatorPos),
-            newContent: content.slice(separatorPos + 2),
-          });
-          pos = closePos + 3;
-          textStart = pos;
-          found = true;
-          continue;
-        }
+        const separatorPos = separatorAt - contentStart;
+        pushMathBefore(pos);
+        parts.push({
+          type: 'substitution',
+          oldContent: content.slice(0, separatorPos),
+          newContent: content.slice(separatorPos + 2),
+        });
+        pos = closePos + 3;
+        textStart = pos;
+        found = true;
+        continue;
       }
     }
 
     if (src.startsWith('{>>', pos)) {
       const contentStart = pos + 3;
-      const closePos = findMatchingClose(src, contentStart);
+      const closePos = closers.matching(contentStart);
       if (closePos !== -1) {
         pushMathBefore(pos);
         parts.push({ type: 'comment', content: src.slice(contentStart, closePos) });

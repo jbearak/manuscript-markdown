@@ -4,6 +4,9 @@ import {
 	findRangeTextForId,
 	stripCriticMarkup,
 } from './comment-language';
+import { fastestRun } from '../test-timing';
+import fc from 'fast-check';
+import { findMatchingClose } from '../critic-markup';
 
 describe('findCommentIdAtOffset', () => {
 	test('returns id when cursor is inside a comment body', () => {
@@ -161,4 +164,47 @@ describe('stripCriticMarkup', () => {
 	test('trims whitespace', () => {
 		expect(stripCriticMarkup('  hello  ')).toBe('hello');
 	});
+});
+
+describe('comments without their closers', () => {
+	// stripCriticMarkup as it was, which searched the text as it was after
+	// each comment it took out for the next comment's <<}
+	const stripCriticMarkupReference = (text: string): string => {
+		let result = text;
+		const openRe = /\{(?:>>|#[a-zA-Z0-9_-]+>>)/g;
+		let match: RegExpExecArray | null;
+		while ((match = openRe.exec(result)) !== null) {
+			const closeIdx = findMatchingClose(result, match.index + match[0].length);
+			if (closeIdx === -1) continue;
+			result = result.slice(0, match.index) + result.slice(closeIdx + 3);
+			openRe.lastIndex = match.index;
+		}
+		return result.replace(/\{#[a-zA-Z0-9_-]+\}/g, '').replace(/\{\/[a-zA-Z0-9_-]+\}/g, '')
+			.replace(/\{==([\s\S]*?)==\}/g, '$1').replace(/\{\+\+([\s\S]*?)\+\+\}/g, '$1')
+			.replace(/\{--([\s\S]*?)--\}/g, '$1').replace(/\{~~([\s\S]*?)~~\}/g, '$1').trim();
+	};
+
+	test('strips what it did', () => {
+		const pieces = ['{>>', '<<}', '{#a>>', '{#', '>>', '<<', '{', '}', '{++', '++}', 'a', ' '];
+		fc.assert(fc.property(fc.array(fc.constantFrom(...pieces), { maxLength: 30 }), parts => {
+			const text = parts.join('');
+			expect(stripCriticMarkup(text)).toBe(stripCriticMarkupReference(text));
+		}), { numRuns: 1000 });
+	});
+
+	// Each comment's opener searched the rest of the text for its matching
+	// <<} again where none was, so a text of many took time in the square of
+	// their number
+	test.each([
+		['finds the comment at an offset', (text: string) => expect(findCommentIdAtOffset(text, 0)).toBeUndefined()],
+		['strips CriticMarkup', (text: string) => expect(stripCriticMarkup(text)).toBe(text.trim())],
+	])('%s in time linear in their number', (_name, read) => {
+		const time = (n: number) => {
+			const text = 'x {>> a {#a>> b '.repeat(n);
+			return fastestRun(() => read(text));
+		};
+		time(20000);
+		const small = time(20000);
+		expect(time(80000) / small).toBeLessThan(8);
+	}, 60000);
 });

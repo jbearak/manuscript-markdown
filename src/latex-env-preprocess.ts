@@ -12,7 +12,7 @@
 
 import { computeMarkdownRegions } from './code-regions';
 import { exportsLiterally } from './html-blocks';
-import { findMatchingClose } from './critic-markup';
+import { criticCloserSearch } from './critic-markup';
 import { isEscapedAt } from './math-delimiters';
 
 // All environments recognized by the latexToOmml parser as display math.
@@ -66,7 +66,9 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 		open = text.indexOf('<!--', close + 3);
 	}
 
-	// 3. CriticMarkup spans
+	// 3. CriticMarkup spans, each comment's to its matching <<}, found for
+	// all of them at once, as each unclosed one searched the rest of the text
+	const closers = criticCloserSearch(text);
 	const cmMarkers: Array<{ open: string; close: string; nested?: boolean }> = [
 		{ open: '{++', close: '++}' },
 		{ open: '{--', close: '--}' },
@@ -82,7 +84,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 			const contentStart = openIdx + open.length;
 			let closeIdx: number;
 			if (nested) {
-				closeIdx = findMatchingClose(text, contentStart);
+				closeIdx = closers.matching(contentStart);
 			} else {
 				closeIdx = text.indexOf(close, contentStart);
 			}
@@ -103,7 +105,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 		let m: RegExpExecArray | null;
 		while ((m = idCommentRe.exec(text)) !== null) {
 			const contentStart = m.index + m[0].length;
-			const closeIdx = findMatchingClose(text, contentStart);
+			const closeIdx = closers.matching(contentStart);
 			if (closeIdx === -1) continue;
 			zones.push({ start: m.index, end: closeIdx + 3 });
 		}
