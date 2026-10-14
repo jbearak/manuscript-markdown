@@ -80,7 +80,9 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 //    when the value matches the base style (e.g. Heading4 sz=22 from Normal).
 //    Do not emit w:before="0" (it's the default and Word strips it), nor an
 //    empty <w:rPr> or <w:pPr>, as a heading style with nothing to change
-//    has, which Word strips too.
+//    has, which Word strips too. On a paragraph, the zero stays only where
+//    its style may give it space before, as a template's may (see
+//    generateBibliographyXml).
 // 6. Sequential rId numbering: all relationship IDs must be sequential with no
 //    gaps. Gaps trigger Word to renumber all rIds on open.
 // 7. vt:lpwstr encoding: only escape &, <, > in custom property text values.
@@ -5349,6 +5351,7 @@ export interface DocxGenState {
   templatePageSection?: number; // the last section's ordinal, the number of breaks before it, where it takes the template's landscape page, which no fence set
   templateLayout?: LayoutEntry[]; // the last section's layout, its break type, page and columns, as export wrote it and as the template had it, where export changed it, which a later export that takes this one as its template puts back
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
+  templateStyles?: boolean;     // whether styles.xml is the template's, not the one export writes (see stylesXml), whose default paragraph style, Normal, and docDefaults give no space before
   templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
   pipeTableAligned: Map<number, boolean>; // table index -> whether pipe table was column-aligned
   gridSourceColWidths: Map<number, number[]>; // table index -> original grid table column char-widths
@@ -6823,8 +6826,9 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     ? '<w:rPr>' + bodyFontStr + '</w:rPr>\n'
     : '';
 
-  // IntenseQuote: body font + existing italic/color
-  const intenseQuoteRpr = '<w:rPr><w:i/><w:color w:val="4472C4"/>' + bodyFontStr + '</w:rPr>\n';
+  // IntenseQuote: body font + existing italic/color, in schema order, the
+  // font first (dirty-flag invariant #4)
+  const intenseQuoteRpr = '<w:rPr>' + orderRPr('<w:i/><w:color w:val="4472C4"/>' + bodyFontStr) + '</w:rPr>\n';
   function githubAlertStyle(styleId: string, displayName: string, borderColor: string): string {
     return '<w:style w:type="paragraph" w:customStyle="1" w:styleId="' + styleId + '">\n' +
       '<w:name w:val="' + displayName + '"/>\n' +
@@ -10353,7 +10357,9 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         if (font) inner += '<w:rFonts w:ascii="' + escapeXmlAttribute(font) + '" w:hAnsi="' + escapeXmlAttribute(font) + '"/>';
         const sizeHp = resolveAtIndex(fo.titleSizesHp, i);
         if (sizeHp) inner += '<w:sz w:val="' + sizeHp + '"/><w:szCs w:val="' + sizeHp + '"/>';
-        if (inner) rPr = '<w:rPr>' + inner + '</w:rPr>';
+        // In schema order, the font first, caps before smallCaps and
+        // underline after the size (dirty-flag invariant #4)
+        if (inner) rPr = '<w:rPr>' + orderRPr(inner) + '</w:rPr>';
       }
       const style = resolveAtIndex(fo?.titleStyles, i);
       const wantsCenter = style && style.includes('center');
@@ -11177,7 +11183,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // there it gets none.
   if (citeprocEngine && (state.citedKeys.size > 0 || options?.zoteroBiblData)
     || hasBiblMarker && !body.endsWith(BIBL_PLACEHOLDER)) {
-    biblXml += generateBibliographyXml(citeprocEngine, options?.zoteroBiblData, frontmatter?.bibliographyHangingIndent);
+    biblXml += generateBibliographyXml(citeprocEngine, options?.zoteroBiblData, frontmatter?.bibliographyHangingIndent, state.templateStyles);
   }
   // An empty field is one hidden paragraph, which Word shows nothing of
   const biblShows = biblXml !== '' && !biblXml.startsWith('<w:p>' + HIDDEN_PARAGRAPH_PPR) || state.missingKeys.size > 0;
@@ -11707,6 +11713,7 @@ export async function convertMdToDocx(
     portraitBreakOrdinals: new Set(),
     templateSectPr: templateSections?.sectPr,
     templateSections,
+    templateStyles: templateStyles !== undefined,
     sentinelGaps: {},
     styleBlockEdges: {},
     customStyles: frontmatter.styles,
