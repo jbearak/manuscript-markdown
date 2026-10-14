@@ -363,7 +363,7 @@ function translateMatrixAsEnv(matrixChildren: XmlNode[], envName: string): strin
   const rowStrings: string[] = [];
   for (const rowChildren of rows) {
     const cells = findAllChildren(rowChildren, 'm:e');
-    const cellStrings = cells.map(cell => ommlToLatex(cell));
+    const cellStrings = cells.map(cell => unbracedToLatex(cell));
     rowStrings.push(cellStrings.join(' & '));
   }
   return `\\begin{${envName}} ${rowStrings.join(' \\\\ ')} \\end{${envName}}`;
@@ -380,7 +380,7 @@ function translateMatrixAsEnv(matrixChildren: XmlNode[], envName: string): strin
 function fallbackPlaceholder(tag: string, children: XmlNode[]): string {
   const name = tag.replace('m:', '');
   const textContent = extractAllText(children);
-  const escaped = escapeLatex(textContent);
+  const escaped = apartFromMarkup(escapeLatex(textContent), true);
   return `\\text{[UNSUPPORTED: ${name}]${escaped ? ' ' + escaped : ''}}`;
 }
 
@@ -461,11 +461,11 @@ function runTextLatex(text: string, style: string, script: string, context: RunC
   // Word drops a space at an edge without xml:space="preserve", and keeps one
   // with it, which goes in \text{}, as \text{} keeps it, beside the math
   const [, lead, core, trail] = /^([ \t\r\n]*)([\s\S]*?)([ \t\r\n]*)$/.exec(text)!;
-  if (/[~^\\]/.test(text)) return group + '{\\text{' + escapeLatex(preserved ? text : core) + '}}';
+  if (/[~^\\]/.test(text)) return group + '{\\text{' + apartFromMarkup(escapeLatex(preserved ? text : core), true) + '}}';
   const math = (source: string) => source ? mathLatex(source.replace(/[#$%&_{}]/g, ch => '\\' + ch), '{}') : '';
-  if (!preserved || !(lead || trail)) return group + '{' + math(text) + '}';
+  if (!preserved || !(lead || trail)) return group + '{' + apartFromMarkup(math(text)) + '}';
   const kept = (space: string) => space ? '\\text{' + space + '}' : '';
-  return group + '{' + kept(lead) + math(core) + kept(trail) + '}';
+  return group + '{' + apartFromMarkup(kept(lead) + math(core) + kept(trail)) + '}';
 }
 
 /** A hidden comment run (text after a \u200B marker) as its LaTeX comment. */
@@ -497,7 +497,7 @@ function textModeLatex(text: string): string {
   let prose = '';
   let symbols = '';
   const flush = () => {
-    if (prose) latex += '\\text{' + escapeLatex(prose) + '}';
+    if (prose) latex += '\\text{' + apartFromMarkup(escapeLatex(prose), true) + '}';
     if (symbols) latex += '\\mathrm{' + unicodeToLatex(symbols) + '}';
     prose = '';
     symbols = '';
@@ -649,7 +649,7 @@ function translateRadical(children: XmlNode[]): string {
     return `\\sqrt{${radicand}}`;
   }
 
-  const degree = ommlToLatex(findChild(children, 'm:deg'));
+  const degree = unbracedToLatex(findChild(children, 'm:deg'));
   if (!degree) {
     return `\\sqrt{${radicand}}`;
   }
@@ -688,8 +688,10 @@ function translateNary(children: XmlNode[]): string {
   const sub = (subHide || !subLatex) ? '' : '_' + scriptArg(subLatex);
   const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
   const bodyNodes = findChild(children, 'm:e');
-  const body = ommlToLatex(bodyNodes);
-  return appendLatex(op + limits + sub + sup, !body || isOperand(bodyNodes, body) ? body : '{' + body + '}');
+  // In braces where it's more than one operand, and kept apart from
+  // CriticMarkup there (see apartFromMarkup)
+  const body = unbracedToLatex(bodyNodes);
+  return appendLatex(op + limits + sub + sup, !body || isOperand(bodyNodes, body) ? body : '{' + apartFromMarkup(body) + '}');
 }
 
 /**
@@ -824,7 +826,7 @@ function translateDelimiter(children: XmlNode[]): string {
       const eqArrChildren = findChild(eChildren, 'm:eqArr');
       if (eqArrChildren.length > 0 && isSoleContent(eChildren, 'm:eqArr')) {
         const rows = findAllChildren(eqArrChildren, 'm:e');
-        const rowStrings = rows.map(rowChildren => ommlToLatex(rowChildren));
+        const rowStrings = rows.map(rowChildren => unbracedToLatex(rowChildren));
         return `\\begin{cases} ${rowStrings.join(' \\\\ ')} \\end{cases}`;
       }
     }
@@ -848,10 +850,10 @@ function translateDelimiter(children: XmlNode[]): string {
       }
 
       // Pmod: parens wrapping \mathrm{mod} + space + argument
-      const innerLatex = ommlToLatex(eChildren);
+      const innerLatex = unbracedToLatex(eChildren);
       const pmodMatch = /^\\mathrm\{mod\}\s*(.+)$/.exec(innerLatex);
       if (pmodMatch) {
-        return `\\pmod{${pmodMatch[1].trim()}}`;
+        return `\\pmod{${apartFromMarkup(pmodMatch[1].trim())}}`;
       }
 
       // Reuse already-computed innerLatex for default path
@@ -866,7 +868,7 @@ function translateDelimiter(children: XmlNode[]): string {
   // any other, as a comma, or U+2223, which LaTeX has as the relation \mid,
   // or with neither bracket, where \middle can't go, the separator goes
   // between the parts as it is
-  const parts = elements.map(e => ommlToLatex(e));
+  const parts = elements.map(e => unbracedToLatex(e));
   const left = sizedDelimiter(begChr);
   const middle = sizedDelimiter(sepChr);
   const right = sizedDelimiter(endChr);
@@ -939,7 +941,7 @@ function translateMatrix(children: XmlNode[]): string {
   for (const rowChildren of rows) {
     // Each row contains m:e cells
     const cells = findAllChildren(rowChildren, 'm:e');
-    const cellStrings = cells.map(cell => ommlToLatex(cell));
+    const cellStrings = cells.map(cell => unbracedToLatex(cell));
     rowStrings.push(cellStrings.join(' & '));
   }
   return `\\begin{matrix} ${rowStrings.join(' \\\\ ')} \\end{matrix}`;
@@ -971,7 +973,7 @@ function translateFunction(children: XmlNode[]): string {
       : '';
     funcCmd = `\\${name}${placement}`;
   } else {
-    funcCmd = `\\operatorname${limitsUnder ? '*' : ''}{${name}}`;
+    funcCmd = `\\operatorname${limitsUnder ? '*' : ''}{${apartFromMarkup(name)}}`;
   }
 
   // Translate the argument. Export takes a bracket group right after the name
@@ -1042,7 +1044,7 @@ function translateEqArray(children: XmlNode[]): string {
   let hasAlignment = false;
 
   for (const rowChildren of rows) {
-    const rowLatex = ommlToLatex(rowChildren);
+    const rowLatex = unbracedToLatex(rowChildren);
     rowStrings.push(rowLatex);
     if (/(?<!\\)&/.test(rowLatex)) hasAlignment = true;
   }
@@ -1214,15 +1216,68 @@ function translateNode(node: XmlNode): string {
 // Main entry point
 // ---------------------------------------------------------------------------
 
+/** Nesting depth of ommlToLatex calls: 1 for an equation, more for a part
+ *  of a structure in it, such as a script or a fraction's numerator. */
+let partDepth = 0;
+
 /**
  * Convert an OMML element's children to a LaTeX string.
  * This is the main entry point called from converter.ts.
+ *
+ * A part of a structure is kept apart from CriticMarkup (see
+ * apartFromMarkup), as most go in braces; an equation goes in $ and needs
+ * nothing, and nor does a part beside no brace (see unbracedToLatex).
  *
  * @param children - The child nodes of an m:oMath or m:oMathPara element
  * @returns LaTeX string (without delimiters)
  */
 export function ommlToLatex(children: XmlNode[]): string {
-  return ommlChildrenToLatex(children).trim();
+  partDepth++;
+  try {
+    const latex = ommlChildrenToLatex(children).trim();
+    return partDepth > 1 ? apartFromMarkup(latex) : latex;
+  } finally {
+    partDepth--;
+  }
+}
+
+/**
+ * ommlToLatex for a part that no brace is beside: a matrix's cell or a row
+ * of cases or an equation array, between spaces and & or \\, a delimiter's
+ * content, a root's degree, in [ ], or an n-ary operator's body of one
+ * operand. It needs no break, and keeps Word's text as it is, as a row that
+ * starts with ~~~, three nonbreaking spaces, does.
+ */
+function unbracedToLatex(children: XmlNode[]): string {
+  partDepth++;
+  try {
+    return ommlChildrenToLatex(children).trim();
+  } finally {
+    partDepth--;
+  }
+}
+
+/**
+ * `latex` with a break between the two characters of a CriticMarkup
+ * delimiter at its start, as ++ of {++, or its end, as ++ of ++}, so that
+ * braces around it don't make one: Word's x with a superscript of ++ is
+ * x^{+\relax+}, not x^{++}, whose {++ export reads as the start of an
+ * insertion, which a ++} later in the document, even in another paragraph,
+ * would end, and whose ++} would end one it's in.
+ *
+ * The break must change neither how TeX sets the characters nor Word's
+ * parts. In math it's \relax, which makes no atom and which export skips
+ * (see withoutRelax in latex-to-omml.ts). {} would be an empty ordinary atom,
+ * which at full size puts space around a relation or binary operator beside
+ * it, as in a+{}+b or \mathrm{>{}>}, and which export reads as an operand,
+ * even in a script: in x^{\sum^={}=} the sum's body. In `text` mode, which
+ * has neither, the break is {}.
+ */
+function apartFromMarkup(latex: string, text = false): string {
+  const between = text ? '{}' : '\\relax';
+  return latex
+    .replace(/^([+=~>-])(?=\1)/, ch => ch + between)
+    .replace(/([+=~<-])(?=\1$)/, ch => ch + between);
 }
 
 /** ommlToLatex without the trim, for the content of a tracked change, which
@@ -1251,7 +1306,9 @@ function ommlChildrenToLatex(children: XmlNode[]): string {
       contents = change.type === 'w:ins' ? ['', trackedChangeLatex(change.children)] : [trackedChangeLatex(change.children), ''];
     }
     const [oldLatex, newLatex] = contents;
-    const markup = oldLatex && newLatex ? '{~~' + oldLatex + '~>' + newLatex + '~~}'
+    // Export ends a substitution's old text at its first ~>, so one in it is
+    // ~\relax>, which TeX sets as ~> (see apartFromMarkup)
+    const markup = oldLatex && newLatex ? '{~~' + oldLatex.replace(/~>/g, '~\\relax>') + '~>' + newLatex + '~~}'
       : oldLatex ? '{--' + oldLatex + '--}'
         : newLatex ? '{++' + newLatex + '++}' : '';
     if (!markup) continue;
