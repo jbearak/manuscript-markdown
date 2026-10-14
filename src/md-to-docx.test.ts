@@ -7329,8 +7329,12 @@ describe('Blank lines before list items', () => {
     // in the square of their number. Four times the items take about four
     // times as long, not sixteen. A list of tens of thousands took under a
     // millisecond, where the timer's and the JIT's noise decided the ratio,
-    // so each run records a list of hundreds many times, some milliseconds
-    // of work, at sizes where copying them fails in seconds, not minutes.
+    // so each run records a short list many times. 10,000 lists of 100 took
+    // about 2 ms, where CI's noise or a garbage collection still decided it
+    // (a ratio of 10 on CI, about 4 locally), so 200,000 lists of 50, over
+    // 20 ms, against 200,000 of 200. Copying the places on each record
+    // still fails in seconds by the ratio (about 13), where longer lists
+    // would take it past the timeout.
     const { recordListBlankLine } = await import('./md-to-docx');
     const record = (n: number) => {
       const blankLines = new Map<number, number[]>();
@@ -7338,12 +7342,12 @@ describe('Blank lines before list items', () => {
       return blankLines;
     };
     const time = (n: number) => fastestRun(() => {
-      for (let k = 0; k < 10000; k++) record(n);
+      for (let k = 0; k < 200000; k++) record(n);
     });
     expect(record(3).get(0)).toEqual([1, 2, 3]);
-    time(100);
-    const small = time(100);
-    expect(time(400) / small).toBeLessThan(8);
+    time(50);
+    const small = time(50);
+    expect(time(200) / small).toBeLessThan(8);
   }, 60000);
 });
 
