@@ -161,15 +161,22 @@ describe('Line ends as markdown-it reads them', () => {
     expect((await convertDocx((await convertMdToDocx(back)).docx)).markdown).toBe(back);
   });
 
-  it.each([['&#13;&#10;'], ['&#13;']])('writes a line end that %s in the attributes of an image export can\'t embed decodes to as \\n', async reference => {
-    // As in its title: the attributes went into the hidden text with a \r,
-    // which Word read as a second line end, so they came back apart from
-    // the image. They come back as with &#10;, which is \n alone
-    const { docx } = await convertMdToDocx('![a](missing.png){width=100' + reference + 'height=100}\n');
+  it.each([
+    ['&#10; in them', '![a](missing.png){width=100&#10;height=100}\n', '![a](missing.png){width=100&#10;height=100}\n'],
+    ['&#13;&#10; in them', '![a](missing.png){width=100&#13;&#10;height=100}\n', '![a](missing.png){width=100&#13;&#10;height=100}\n'],
+    ['&#13; in them', '![a](missing.png){width=100&#13;height=100}\n', '![a](missing.png){width=100&#13;height=100}\n'],
+    ['&#10; in them, after a reference', '![a][r]{width=100&#10;height=100}\n\n[r]: missing.png\n', '![a](missing.png){width=100&#10;height=100}\n'],
+  ])('keeps the attributes of an image export can\'t embed as written, with %s', async (_name, md, written) => {
+    // markdown-it decodes the reference, and the attributes went into the
+    // hidden text decoded, with a line end in them, so they came back as
+    // {width=100\nheight=100}, which the next export didn't read as the
+    // image's. A \r there Word read as a second line end. As written, as the
+    // image's own Markdown is, they come back the same
+    const { docx } = await convertMdToDocx(md);
     expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).not.toContain('\r');
-    const lf = (await convertDocx((await convertMdToDocx('![a](missing.png){width=100&#10;height=100}\n')).docx)).markdown;
-    expect(lf).toBe('![a](missing.png){width=100\nheight=100}\n');
-    expect((await convertDocx(docx)).markdown).toBe(lf);
+    const back = (await convertDocx(docx)).markdown;
+    expect(back).toBe(written);
+    expect((await convertDocx((await convertMdToDocx(back)).docx)).markdown).toBe(written);
   });
 
   it.each([

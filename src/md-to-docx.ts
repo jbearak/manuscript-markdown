@@ -242,7 +242,8 @@ export interface MdRun {
 
 /** An image's Markdown: as written, or for a reference, inline, with its
  *  destination as markdown-it encoded it, and its alt text as import
- *  writes Word's, which reads back as it */
+ *  writes Word's, which reads back as it; and its attributes, `attrs`, as
+ *  written (see writtenImageAttributes) */
 function imageMarkdownSource(token: ManuscriptToken, alt: string, attrs: string | undefined): string {
   const src = token.attrGet?.('src') || '';
   const title = token.attrGet?.('title');
@@ -252,6 +253,32 @@ function imageMarkdownSource(token: ManuscriptToken, alt: string, attrs: string 
     + (/[\s()<>]/.test(src) ? '<' + src + '>' : src)
     + (title ? ' "' + title.replace(/["\\]/g, c => '\\' + c) + '"' : '') + ')';
   return source + (attrs !== undefined ? '{' + attrs + '}' : '');
+}
+
+/**
+ * The attributes after an image, `matched`, as {width=100 height=100}
+ * reads, inside its braces, as the source writes them, from the pieces of
+ * the text after the image (see image_text_source): a reference as
+ * written, as &#10;, which markdown-it reads as a line end, so that they
+ * read back as the image's. Undefined where the pieces don't read as
+ * `matched`, or where a reference or an escape spans a brace's edge.
+ */
+function writtenImageAttributes(pieces: Array<[string, string]> | undefined, matched: string): string | undefined {
+  if (!pieces || !pieces.map(([read]) => read).join('').startsWith(matched)) return undefined;
+  const from = 1, to = matched.length - 1;
+  let written = '';
+  let at = 0;
+  for (const [read, source] of pieces) {
+    const start = at;
+    at += read.length;
+    if (at <= from) continue;
+    if (start >= to) break;
+    // Text as it reads, or a reference or an escape wholly inside the braces
+    if (read === source) written += source.slice(Math.max(from - start, 0), Math.min(to, at) - start);
+    else if (start >= from && at <= to) written += source;
+    else return undefined;
+  }
+  return written;
 }
 
 function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
@@ -1171,6 +1198,25 @@ function createMarkdownIt(): MarkdownIt {
         while (isText(children[last + 1])) last++;
         children[last].meta = { ...children[last].meta, [escaped]: true };
         i = last;
+      }
+    }
+  });
+  // The text right after an image, before text_join joins it, piece by
+  // piece, each as markdown-it reads it and as the source writes it, a
+  // reference or an escape as written, up to the first } it reads, which
+  // ends the image's attributes, so that export hides them as written (see
+  // writtenImageAttributes)
+  md.core.ruler.before('text_join', 'image_text_source', state => {
+    for (const block of state.tokens) {
+      const children = block.type === 'inline' ? block.children ?? [] : [];
+      for (let i = 0; i < children.length; i++) {
+        if (children[i].type !== 'image') continue;
+        const pieces: Array<[string, string]> = [];
+        for (let j = i + 1; children[j]?.type === 'text' || children[j]?.type === 'text_special'; j++) {
+          pieces.push([children[j].content, children[j].type === 'text_special' ? children[j].markup : children[j].content]);
+          if (children[j].content.includes('}')) break;
+        }
+        if (pieces.length > 0) children[i].meta = { ...children[i].meta, textAfter: pieces };
       }
     }
   });
@@ -4202,6 +4248,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         let width: number | undefined;
         let height: number | undefined;
         let attrs: string | undefined;
+        let writtenAttrs: string | undefined;
         // Look ahead for {width=N height=N} attribute syntax, but not an
         // escaped {, or one written as a reference, which is text
         const nextToken = tokens[ti + 1];
@@ -4209,6 +4256,8 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           const attrMatch = nextToken.content.match(/^\{([^}]+)\}/);
           if (attrMatch) {
             attrs = attrMatch[1];
+            // As written, for the image's Markdown, as its own text is
+            writtenAttrs = writtenImageAttributes(token.meta?.textAfter, attrMatch[0]) ?? attrs;
             width = parseMarkdownImageDimension(attrs, 'width');
             height = parseMarkdownImageDimension(attrs, 'height');
             // Consume the attribute text (or remainder after it)
@@ -4228,7 +4277,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           imageWidth: width,
           imageHeight: height,
           imageSyntax: 'md',
-          imageSource: imageMarkdownSource(token, alt, attrs),
+          imageSource: imageMarkdownSource(token, alt, writtenAttrs),
           href: currentHref,
         });
         break;
