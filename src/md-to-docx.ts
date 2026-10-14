@@ -6001,8 +6001,9 @@ function withoutInheritedSizes(stylesXml: string, styleIds: string[], ids: Map<s
       if (size !== undefined && sizeIn(content, tag) === inherited(chain, tag)) content = content.slice(0, size.start) + content.slice(size.end);
     }
     if (content === rPr.content) continue;
-    // An rPr left empty goes too, and one with what's left keeps its tags
-    const written = /^\s*$/.test(content) ? '' : rPr.tag + content + block.slice(rPr.start + rPr.tag.length + rPr.content.length, rPr.end);
+    // An rPr left with no element goes too, with a comment or what else is
+    // in it (see holdsXmlElement), and one with what's left keeps its tags
+    const written = !holdsXmlElement(content) ? '' : rPr.tag + content + block.slice(rPr.start + rPr.tag.length + rPr.content.length, rPr.end);
     xml = xml.slice(0, style.at) + records.restore(block.slice(0, rPr.start) + written + block.slice(rPr.end)) + xml.slice(style.at + style.element.length);
     find = styleFinder(xml);
   }
@@ -7208,7 +7209,9 @@ function templateListLevels(xml: string | undefined, numId: number, styleNumIds 
   values(instance, 'w:lvlOverride', 'w:startOverride', levels.startOverrides);
   for (const node of instance.filter(n => 'w:lvlOverride' in n)) {
     const ilvl = intAttr(node, 'w:ilvl');
-    if (Number.isInteger(ilvl) && childNodes(node, 'w:lvlOverride').every(n => '#text' in n)) levels.startOverrides.set(ilvl, 0);
+    // One with no element, whatever else it holds, as a processing
+    // instruction, which Word reads as one with nothing in it
+    if (Number.isInteger(ilvl) && !childNodes(node, 'w:lvlOverride').some(isElement)) levels.startOverrides.set(ilvl, 0);
   }
   return levels;
 }
@@ -7221,10 +7224,14 @@ function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[]
   // w:num entries go before numIdMacAtCleanup, which ends the part
   const at = numberingEnds(xml).instancesAt;
   if (!numbering || abstractNumId === undefined || !Number.isInteger(abstractNumId) || at === undefined) return undefined;
+  // Each level override's elements, without a processing instruction or
+  // text, as a CDATA section's, which Word's schema has no place for there
+  // and which would keep an override that holds nothing else once its start
+  // goes (see numberingOverrideXml)
   const levelOverrides = new Map<number, string>();
   for (const n of instance) {
     const ilvl = intAttr(n, 'w:ilvl');
-    if ('w:lvlOverride' in n && Number.isInteger(ilvl)) levelOverrides.set(ilvl, buildOrdered(childNodes(n, 'w:lvlOverride')));
+    if ('w:lvlOverride' in n && Number.isInteger(ilvl)) levelOverrides.set(ilvl, buildOrdered(childNodes(n, 'w:lvlOverride').filter(isElement)));
   }
   // Durable IDs only where the template declares their namespace
   const durableId = numbering.root[':@']?.['@_xmlns:w16cid'] !== undefined;

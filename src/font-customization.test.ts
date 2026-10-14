@@ -2397,6 +2397,22 @@ describe('empty run and paragraph properties', () => {
         '<w:style w:type="paragraph" w:styleId="Bibliography"><w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/></w:style>',
       ]);
     });
+
+  // Which kept an rPr with what's not an element in it once the sizes that
+  // Normal gives anyway went (see withoutInheritedSizes)
+  it.each([['a comment', '<!-- <w:b/> -->'], ['a CDATA section', '<![CDATA[<w:b/>]]>'], ['a processing instruction', '<?pi <w:b/>?>']])(
+    'none for a heading style\'s rPr that held, beside the size it then inherits, only %s', async (_name, other) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(markdown(''))).docx);
+      const styles = (await zip.file('word/styles.xml')!.async('string')).replace(/(<w:style\b[^>]*w:styleId="Heading4"[^>]*>)[\s\S]*?(<\/w:style>)/,
+        (_match, open: string, close: string) => open + '<w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="3"/></w:pPr>'
+          + '<w:rPr><w:sz w:val="30"/><w:szCs w:val="30"/>' + other + '</w:rPr>' + close);
+      expect(styles).toContain(other);
+      expect(styles).toContain('<w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>');
+      zip.file('word/styles.xml', styles);
+      // Heading 4 at 11 points, Normal's size
+      const out = await (await JSZip.loadAsync((await convertMdToDocx(markdown('header-font-size: [12, 11]'), { templateDocx: await zip.generateAsync({ type: 'uint8array' }) })).docx)).file('word/styles.xml')!.async('string');
+      expect(extractStyleBlock(out, 'Heading4')).toBe('<w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="3"/></w:pPr></w:style>');
+    });
 });
 
 describe('heading and title styles based on another style', () => {
