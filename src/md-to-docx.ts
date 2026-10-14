@@ -1,6 +1,7 @@
 import MarkdownIt from 'markdown-it';
 import { imagePathsWithSpaces } from './image-paths';
 import { codeSpansOfSpaces } from './code-spans';
+import { linearInlineComments } from './inline-html-comments';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import { escapeXmlText, textElements, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, HIDDEN_PARAGRAPH_PPR, type CiteprocEngine } from './md-to-docx-citations';
@@ -1170,6 +1171,7 @@ function createMarkdownIt(): MarkdownIt {
   md.linkify.match = text => linkifyInPieces(md.linkify, text, LINKIFY_PIECE);
   md.use(imagePathsWithSpaces);
   md.use(codeSpansOfSpaces);
+  md.use(linearInlineComments);
   md.use(criticBreaksEndLinks);
   md.use(criticBreaksInRawHtml);
 
