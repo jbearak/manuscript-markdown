@@ -15406,6 +15406,58 @@ describe('Code block round-trip', () => {
     const result = await convertDocx(docxResult.docx);
     expect(result.markdown.trim()).toBe('```javascript\nconst x = 1;\nconst y = 2;\nconsole.log(x + y);\n```');
   });
+
+  test.each([
+    ['an empty item that holds a quote', '-\n  > p1\n', '- \n  > p1\n'],
+    ['an item that holds a rule, then a quote', '- ***\n  > p1\n', '- \n  > p1\n'],
+    ['a numbered item that holds a rule, then a quote', '1. ***\n  > p1\n', '1. \n> p1\n'],
+    ['an empty item, then a quote', '-\n\n> q\n', '- \n\n> q\n'],
+    ['an empty item, then a code block', '-\n\n```\nb\n```\n', '- \n\n```\nb\n```\n'],
+    ['an empty heading, then a quote', '#\n\n> q\n', '# \n\n> q\n'],
+    ['an empty heading, then a code block', '#\n\n```\nb\n```\n', '# \n\n```\nb\n```\n'],
+  ])('keeps %s after a code block', async (_name, md, back) => {
+    // Export writes an empty paragraph between a code block and a quote or
+    // another code block, which import drops. It took an empty item or
+    // heading there for that paragraph, and dropped it too
+    const roundTrip = async (text: string) => strip((await convertDocx((await convertMdToDocx(text)).docx)).markdown);
+    const code = '```\nu0\n```\n\n';
+    // As it comes back with a paragraph before it in place of the code block
+    expect(await roundTrip('a\n\n' + md)).toBe('a\n\n' + back);
+    const once = await roundTrip(code + md);
+    expect(once).toBe(code + back);
+    expect(await roundTrip(once)).toBe(once);
+  });
+
+  test.each([
+    ['Quote', 'a quote', '> q\n'],
+    ['Quote', 'a code block', '```\nb\n```\n'],
+    ['GitHubBlockquote', 'a quote', '> q\n'],
+    ['IntenseQuote', 'a code block', '```\nb\n```\n'],
+  ])('keeps an empty %s paragraph right after a code block, before %s', async (style, _next, md) => {
+    // Word can have one there in place of the empty paragraph export writes
+    // after a code block, which import took it for, and dropped
+    const emptyQuote = '<w:p><w:pPr><w:pStyle w:val="' + style + '"/></w:pPr></w:p>';
+    const importEdited = async (text: string, edit: (xml: string) => string) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(text)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const edited = edit(xml);
+      expect(edited).not.toBe(xml);
+      zip.file('word/document.xml', edited);
+      return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    };
+    const roundTrip = async (text: string) => (await convertDocx((await convertMdToDocx(text)).docx)).markdown;
+    const body = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    // As it comes back right after a paragraph
+    expect(body(await importEdited('a\n\n' + md, xml => xml.replace('<w:t>a</w:t></w:r></w:p>', end => end + emptyQuote)))).toBe('a\n\n> \n\n' + md);
+    const code = '```\nx\n```\n\n';
+    const once = await importEdited(code + md, xml => xml.replace(
+      /(<w:t>x<\/w:t><\/w:r><\/w:p>)<w:p [^>]*(?:\/>|><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p>)/, (_para, end: string) => end + emptyQuote));
+    expect(body(once)).toBe(code + '> \n\n' + md);
+    // Export writes nothing for an empty quote, as after a paragraph
+    const twice = await roundTrip(once);
+    expect(body(twice)).toBe(code + md);
+    expect(await roundTrip(twice)).toBe(twice);
+  });
 });
 
 describe('Inline code import (CodeChar detection)', () => {

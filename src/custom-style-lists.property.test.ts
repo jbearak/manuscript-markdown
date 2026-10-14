@@ -91,18 +91,7 @@ const documentArb: fc.Arbitrary<Child[]> = fc.array(fc.oneof(
   quoteArb(2),
   unitArb,
   fenceArb,
-), { minLength: 1, maxLength: 8 })
-  // Not a code block, past fences, before a list whose first item holds
-  // nothing before a quote, as after a block it drops on its marker line,
-  // which import loses, writing the quote right after the code, on main too
-  .filter(blocks => !blocks.some((child, k) => {
-    if (child.kind !== 'unit' || child.unit !== 'code') return false;
-    let next = k + 1;
-    while (blocks[next]?.kind === 'open' || blocks[next]?.kind === 'close') next++;
-    const after = blocks[next];
-    const first = after?.kind === 'list' ? after.list.items[0] : undefined;
-    return !!first?.marker && first.marker.kind !== 'directive' && first.children[0]?.kind === 'quote';
-  }));
+), { minLength: 1, maxLength: 8 });
 
 /** The Markdown of `blocks`, with each paragraph's and item's text unique,
  *  the custom style each paragraph at the top level takes in Word, or ''
@@ -448,6 +437,13 @@ describe('Style blocks around lists and in their items', () => {
         [[{ kind: 'open', style: 'box', tight: false }, { kind: 'list', list: { ordered: false, items: [{ children: [
           { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }, { kind: 'dropped', html: 'directive', tight: undefined }] }] } },
         { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }, { kind: 'inline', style: 'box' }]],
+        // A code block before a list whose first item holds nothing before
+        // a quote, as a block on its marker line drops, which import took
+        // for the paragraph export writes between a code block and a quote,
+        // and dropped
+        [[{ kind: 'unit', unit: 'code' }, { kind: 'list', list: { ordered: false, items: [{ children: [{ kind: 'quote', repeated: false }], marker: { kind: 'rule' } }] } }]],
+        [[{ kind: 'unit', unit: 'code' }, { kind: 'list', list: { ordered: true, items: [
+          { children: [{ kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }], marker: { kind: 'fence' } }] } }]],
       ],
     });
   }, 60000);

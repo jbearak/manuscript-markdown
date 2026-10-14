@@ -14940,10 +14940,11 @@ function buildMarkdownOnce(
         // consecutive code-block groups or before a blockquote group.  Only
         // skip when the next item after the separator is either a code-block
         // para or a blockquote para (proving it's a separator, not real
-        // content).
+        // content).  Export never writes it as a list item, a heading or a
+        // quote, so an empty one there is the document's, which it keeps.
         const sep = i < mergedContent.length ? mergedContent[i] : undefined;
         const afterSep = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
-        if (sep && sep.type === 'para' && !sep.isCodeBlock && !sep.horizontalRule && afterSep && afterSep.type === 'para' && (afterSep.isCodeBlock || afterSep.blockquoteLevel)) {
+        if (sep && sep.type === 'para' && !sep.isCodeBlock && !sep.horizontalRule && !sep.listMeta && !sep.headingLevel && !sep.blockquoteLevel && afterSep && afterSep.type === 'para' && (afterSep.isCodeBlock || afterSep.blockquoteLevel)) {
           i++;
         }
         continue;
