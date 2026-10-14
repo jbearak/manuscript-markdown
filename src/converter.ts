@@ -10704,29 +10704,36 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   // The tags open around the text, outermost first, which the next piece
   // keeps as far as its own match, so <b>a <i>b</i></b> stays nested
   let open: string[] = [];
+  // The Word hyperlink of the <a> among them, if any: text of another, to
+  // the same place, starts an <a> of its own, which export reads as another
+  // hyperlink, as linkGroup keeps them apart in Markdown
+  let openLink: number | undefined;
   const closeTo = (depth: number) => {
     while (open.length > depth) html += '</' + /^<(\w+)/.exec(open.pop()!)![1] + '>';
   };
   const linkTag = (href: string) => '<a href="' + escapeHtmlAttr(href) + '">';
-  // How many of the tags open a piece of `tags` keeps
-  const kept = (tags: string[]) => {
+  // How many of the tags open a piece of `tags`, in the hyperlink `link`
+  // where they start with an <a>, keeps
+  const kept = (tags: string[], link: number | undefined) => {
     let depth = 0;
-    while (depth < open.length && depth < tags.length && open[depth] === tags[depth]) depth++;
+    while (depth < open.length && depth < tags.length && open[depth] === tags[depth]
+      && (depth > 0 || !tags[0].startsWith('<a ') || link === openLink)) depth++;
     return depth;
   };
   // The line breaks before a piece, which go after the tags it doesn't keep
   // close and before its own open, but in the link they're in, as Word's
   // hyperlink holds them, and out of any other
   let breaks: TextItem[] = [];
-  const writeBreaks = (tags: string[]) => {
+  const writeBreaks = (tags: string[], link: number | undefined) => {
     for (const item of breaks) {
-      const link = item.href !== undefined ? linkTag(item.href) : undefined;
-      if (link !== undefined && open[0] === link) closeTo(Math.max(1, kept(tags)));
+      const tag = item.href !== undefined ? linkTag(item.href) : undefined;
+      if (tag !== undefined && open[0] === tag && item.link === openLink) closeTo(Math.max(1, kept(tags, link)));
       else {
-        closeTo(link === undefined && !open[0]?.startsWith('<a ') ? kept(tags) : 0);
-        if (link !== undefined) {
-          html += link;
-          open = [link];
+        closeTo(tag === undefined && !open[0]?.startsWith('<a ') ? kept(tags, link) : 0);
+        if (tag !== undefined) {
+          html += tag;
+          open = [tag];
+          openLink = item.link;
         }
       }
       html += '<br>';
@@ -10738,9 +10745,11 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
       breaks.push(piece.lineBreak);
       return;
     }
-    // A comment goes in the formatting around it
+    // A comment goes in the formatting around it, but not in a link, which
+    // export ends before it, as Markdown writes it between the link's parts
     if (piece.raw) {
-      writeBreaks(open);
+      writeBreaks(open, openLink);
+      if (open[0]?.startsWith('<a ')) closeTo(0);
       html += piece.html;
       return;
     }
@@ -10754,13 +10763,14 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
       ...(fmt.superscript ? ['<sup>'] : fmt.subscript ? ['<sub>'] : []),
       ...(fmt.code ? ['<code>'] : []),
     ];
-    writeBreaks(tags);
-    const depth = kept(tags);
+    writeBreaks(tags, piece.item.link);
+    const depth = kept(tags, piece.item.link);
     closeTo(depth);
     html += tags.slice(depth).join('') + piece.html;
     open = tags;
+    openLink = piece.item.link;
   });
-  writeBreaks([]);
+  writeBreaks([], undefined);
   closeTo(0);
   return html;
 }
