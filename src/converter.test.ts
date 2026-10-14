@@ -10902,6 +10902,64 @@ describe('HTML table cells', () => {
     expect(await roundTrip(await roundTrip(md))).toBe(md);
   });
 
+  /** Word's document of a table whose second row is one cell over both
+   *  columns, which import writes as HTML, with `paragraph` in it: its
+   *  hyperlinks rId1 and rId2 go to https://e.com, rId3 to https://f.com */
+  const linkedCellDocx = (paragraph: string) => buildSyntheticDocx('<?xml version="1.0"?>'
+    + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    + '<w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>h</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>z</w:t></w:r></w:p></w:tc></w:tr>'
+    + '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p>' + paragraph + '</w:p></w:tc></w:tr></w:tbl></w:body></w:document>', {
+    'word/_rels/document.xml.rels': '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + [['rId1', 'https://e.com'], ['rId2', 'https://e.com'], ['rId3', 'https://f.com']].map(([id, target]) => '<Relationship Id="' + id
+        + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + target + '" TargetMode="External"/>').join('')
+      + '</Relationships>',
+  });
+  /** The text of a document's cell over two columns, with each hyperlink's
+   *  in « and », after its target's host and a :, and ↵ for a line break */
+  const mergedCellLinks = async (docx: Uint8Array) => {
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    const target = (id: string) => /Target="https:\/\/([^"]*)"/.exec(rels.match(new RegExp('<Relationship [^>]*Id="' + id + '"[^>]*>'))![0])![1];
+    const cell = [...xml.matchAll(/<w:tc>[\s\S]*?<\/w:tc>/g)].map(match => match[0]).find(cell => cell.includes('<w:gridSpan w:val="2"/>'))!;
+    return cell.replace(/<w:br\/>/g, '↵').replace(/<w:hyperlink r:id="([^"]+)"[^>]*>/g, (_m, id: string) => '«' + target(id) + ':').replace(/<\/w:hyperlink>/g, '»')
+      .replace(/<[^>]*>/g, '').replace(/​/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  };
+  const run = (text: string, rPr = '') => '<w:r>' + (rPr && '<w:rPr>' + rPr + '</w:rPr>') + '<w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  const hyperlink = (id: string, ...runs: string[]) => '<w:hyperlink r:id="' + id + '" w:history="1">' + runs.join('') + '</w:hyperlink>';
+  const comment = run('&lt;!-- c --&gt;', '<w:vanish/>');
+  const lineBreak = '<w:r><w:br/></w:r>';
+  const e = (html: string) => '<a href="https://e.com">' + html + '</a>';
+
+  test.each([
+    ['two links to one place side by side', hyperlink('rId1', run('a')) + hyperlink('rId1', run('b', '<w:b/>')), e('a') + e('<b>b</b>'), '«e.com:a»«e.com:b»'],
+    ['two links to one place side by side, by two relationships', hyperlink('rId1', run('a')) + hyperlink('rId2', run('b')), e('a') + e('b'), '«e.com:a»«e.com:b»'],
+    ['two links to one place with a comment between', hyperlink('rId1', run('a')) + comment + hyperlink('rId1', run('b')), e('a') + '<!-- c -->' + e('b'), '«e.com:a»<!-- c -->«e.com:b»'],
+    ['two links to one place, the first ending in a line break', hyperlink('rId1', run('a'), lineBreak) + hyperlink('rId1', run('b')), e('a<br>') + e('b'), '«e.com:a↵»«e.com:b»'],
+    ['two links to one place, the second starting with a line break', hyperlink('rId1', run('a')) + hyperlink('rId1', lineBreak, run('b')), e('a') + e('<br>b'), '«e.com:a»«e.com:↵b»'],
+    ['two links to two places side by side', hyperlink('rId1', run('a')) + hyperlink('rId3', run('b')), e('a') + '<a href="https://f.com">b</a>', '«e.com:a»«f.com:b»'],
+    ['one link of two runs', hyperlink('rId1', run('a'), run('b', '<w:b/>')), e('a<b>b</b>'), '«e.com:ab»'],
+  ] as const)('keeps %s in an HTML table\'s cell as Word has them', async (_name, paragraph, html, links) => {
+    // Import wrote two of Word's hyperlinks to one place as one <a>, over
+    // what was between them, which export read as one hyperlink
+    const word = await linkedCellDocx(paragraph);
+    expect(await mergedCellLinks(word)).toBe(links);
+    const markdown = (await convertDocx(word)).markdown;
+    expect(markdown).toContain('<td colspan="2">\n      <p>' + html + '</p>\n    </td>');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await mergedCellLinks(again)).toBe(links);
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  test('splits a link of Word\'s at a comment in it in an HTML table\'s cell, as in Markdown, where export ends the link', async () => {
+    const word = await linkedCellDocx(hyperlink('rId1', run('a'), comment, run('b')));
+    const markdown = (await convertDocx(word)).markdown;
+    expect(markdown).toContain('<td colspan="2">\n      <p>' + e('a') + '<!-- c -->' + e('b') + '</p>\n    </td>');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await mergedCellLinks(again)).toBe('«e.com:a»<!-- c -->«e.com:b»');
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
   test.each([
     ['<!-->', '<!-- c -->'],
     ['<!--->', '<!-- c -->'],
