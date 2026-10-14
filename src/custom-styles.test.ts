@@ -1305,6 +1305,8 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     ['a section\'s fence in a block', twoStyles,
       '<!-- style: box -->\n\np1\n\n<!-- landscape -->\n\np2\n\n<!-- /landscape -->\n\np3\n\n<!-- /style -->\n\n<!-- style: note -->\n\np4\n\n## h1\n\n<!-- /style -->\n\n## h2\n\n'
       + '<!-- style: box -->\n\np5\n\n<!-- /style -->\n\np6\n\n<!-- style: note -->\n\np7\n\n## h3\n\n## h4\n\n<!-- /style -->\n\np8\n', ['h1', 'h2', 'h3', 'h4']],
+    ['a block with such a block between its paragraphs, which one that opens in a list item closes, where another of its style starts after only such blocks', twoStyles,
+      '<!-- style: note -->\n\np1\n\n## h1\n\n- i1\n\n  <!-- style: box -->\n\n## h2\n\n<!-- style: note -->\n\np2\n\n<!-- /style -->\n', ['h1', 'h2']],
     ['a table in a section of its own in a block', twoStyles,
       '<!-- style: box -->\n\np1\n\n<!-- table-orientation: landscape -->\n\n| a |\n|---|\n| 1 |\n\np2\n\n<!-- /style -->\n\n## h1\n\n<!-- style: note -->\n\np3\n\n## h2\n\n<!-- /style -->\n', ['h1', 'h2']],
   ])('places such blocks outside any block, as before any record, after %s', async (_name, frontmatter, md, outside) => {
@@ -1312,7 +1314,8 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     // nothing more, so import reads such blocks as ending any block, as
     // before. It read one block's records for another, and wrote a heading
     // or code outside any block in one, or closed a block at a heading
-    // between its paragraphs and took the one after it in. Export writes a
+    // between its paragraphs and took the one after it in, as past a block
+    // that one opening in a list item closed. Export writes a
     // section break around a table in a section of its own, as at a
     // section's fence, where import closes the block and opens another
     const back = (await convertDocx((await convertMdToDocx(frontmatter + md)).docx)).markdown;

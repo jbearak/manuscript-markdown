@@ -124,9 +124,9 @@ function markdownOf(blocks: Child[], mark = ''): { md: string; styles: Array<[st
   // between its paragraphs and only them since, where another of its style
   // starts (see recording in generateDocumentXml)
   let recorded = true;
-  const closeCounted = (implicit = false): void => {
+  const closeCounted = (): void => {
     if (counted?.unstyled && !counted.styled) recorded = false;
-    closed = counted?.styled && !implicit ? { ...counted, after: false } : implicit ? undefined : closed;
+    closed = counted?.styled ? { ...counted, after: false } : closed;
     counted = undefined;
   };
   const styledBlock = (): void => {
@@ -258,8 +258,9 @@ function markdownOf(blocks: Child[], mark = ''): { md: string; styles: Array<[st
           if (child.kind === 'open' && open !== child.style) counted = { style: child.style, styled: false, unstyled: false, trail: false, inner: false };
           open = child.kind === 'open' ? child.style : undefined;
         } else if (child.kind === 'open' && !quoted) {
-          // Which closes the block open at the top level with no fence
-          if (counted) closeCounted(true);
+          // Which closes the block open at the top level with no fence, as
+          // its closing fence would
+          if (counted) closeCounted();
           open = undefined;
         }
         return { lines: [indent + (child.kind === 'open' ? '<!-- style: ' + child.style + ' -->' : '<!-- /style -->')], fence: child };
