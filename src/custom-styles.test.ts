@@ -1191,6 +1191,18 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
   });
 
   it.each([
+    ['closes after it', '<!-- style: box -->\n\n- i0\n\n  > p1\n\n> p2\n\n<!-- /style -->\n', '<!-- style: box -->\n\n- i0\n\n  > p1\n\n> p2\n\n<!-- /style -->\n'],
+    ['has no closing fence', '<!-- style: box -->\n\n- x\n  > i0\n\n> i1\n', '<!-- style: box -->\n\n- x\n  > i0\n\n> i1\n\n<!-- /style -->\n'],
+  ])('keeps a quote after a list whose item ends with a quote in a block that %s', async (_name, md, expected) => {
+    // The quote after the list keeps its own style in Word, and import
+    // closed the block before it, right after the item's quote, with two
+    // blank lines after the fence. Export records it at the block's end
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
+  it.each([
     ['code after a block', '<!-- style: box -->\n\nx{++\n\n++}\n\n<!-- /style -->\n\n```\ncode\n```\n'],
     ['a heading after a block', '<!-- style: box -->\n\nx{++\n\n++}\n\n<!-- /style -->\n\n# H\n'],
     ['code a block starts with', 'x{++\n\n++}\n\n<!-- style: box -->\n\n```\ncode\n```\n\ny\n\n<!-- /style -->\n'],
