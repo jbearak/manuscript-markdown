@@ -1,5 +1,4 @@
 import JSZip from 'jszip';
-import { XMLBuilder } from 'fast-xml-parser';
 import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
 import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
@@ -8,7 +7,7 @@ import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './ima
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { styleFinder } from './style-element';
 import { replaceXmlElements, universalMeasure, xmlAttribute, xmlElement, xmlInteger, xmlNumber, xmlOn, xmlStartTag, xmlTwips } from './xml-elements';
-import { xmlParser } from './xml-parser';
+import { xmlBuilder, xmlParser } from './xml-parser';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -2139,8 +2138,9 @@ const parserOptions = {
   parseTagValue: false,
 };
 
-/** XML of what the parser read, as a title paragraph's (see ContentItem's titleXml) */
-const xmlBuilder = new XMLBuilder({ ignoreAttributes: false, attributeNamePrefix: '@_', preserveOrder: true, suppressEmptyNode: true });
+/** XML of what the parser read, as a title paragraph's (see ContentItem's
+ *  titleXml), each value written as the parser read it (see xmlBuilder) */
+const titleBuilder = xmlBuilder({ ignoreAttributes: false, attributeNamePrefix: '@_', preserveOrder: true, suppressEmptyNode: true });
 
 function escapeHtmlAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -7725,7 +7725,7 @@ export async function extractDocumentContent(
             if (listMeta) paraItem.listMeta = listMeta;
             if (isTitle) {
               paraItem.isTitle = true;
-              paraItem.titleXml = xmlBuilder.build([node]) as string;
+              paraItem.titleXml = titleBuilder.build([node]) as string;
             }
             if (blockquoteLevel) paraItem.blockquoteLevel = blockquoteLevel;
             if (blockquoteIndentUnitTwips) paraItem.blockquoteIndentUnitTwips = blockquoteIndentUnitTwips;

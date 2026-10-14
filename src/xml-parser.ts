@@ -41,9 +41,9 @@
 // Every parser in src is built with xmlParser: md-to-docx.ts reads a
 // template's numbering with parseOrdered (see scoped-xml.ts), and its
 // styles with xml-elements.ts's readers, whose values are read as
-// xmlAttributeValue reads them. Of the builders, buildOrdered's, which
-// writes a template's numbering again, and a template's sections' are
-// built with xmlBuilder; converter.ts's of a title paragraph isn't yet.
+// xmlAttributeValue reads them. Every builder in src is built with
+// xmlBuilder: buildOrdered's, which writes a template's numbering again, a
+// template's sections', and converter.ts's of a title paragraph.
 
 import { XMLBuilder, XMLParser, type X2jOptions, type XmlBuilderOptions } from 'fast-xml-parser';
 
