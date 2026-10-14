@@ -1889,8 +1889,11 @@ describe('entry types', () => {
         }
       }, 5);
     };
-    time(4000);
-    expect(time(16000) / time(4000)).toBeLessThan(8);
+    // At sizes where a run takes long enough that the timer's noise
+    // doesn't decide the ratio, and a quadratic read still takes seconds
+    time(16000);
+    const small = time(16000);
+    expect(time(64000) / small).toBeLessThan(8);
   }, 30000);
 });
 
