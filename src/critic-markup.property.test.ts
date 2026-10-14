@@ -309,3 +309,35 @@ describe('CriticMarkup closers', () => {
     expect(time(80000) / small).toBeLessThan(8);
   }, 60000);
 });
+
+describe('Openers at a line\'s end in a quote', () => {
+  // Whether each opener's span is only whitespace once its lines' quote
+  // markers are taken off, which leaves the opener where it is
+  test('are moved as the reference moves them', () => {
+    const lines = ['> p {++', '> p {--', '> {==', '> > p {++', 'p {++', '>', '> >', '> ', '>\t', '  >  >', '', ' \t', '\u00a0', '> q', 'q', '++}', '> ++}', '> > --}', '==}'];
+    fc.assert(fc.property(fc.array(fc.constantFrom(...lines), { minLength: 1, maxLength: 12 }), parts => {
+      const text = parts.join('\n');
+      fc.pre(!hasReferenceHtmlBlock(text));
+      expect(preprocessCriticMarkup(text)).toBe(preprocessCriticMarkupReference(text));
+    }), { numRuns: 1000 });
+    // Whitespace that isn't a space or a tab, and a line with fewer
+    // markers than the quote, which keeps the ones it has
+    for (const text of ['p {++\n\u00a0\n++}', 'p {++\n\r\n++}', '> > p {++\n> >\n>\n> > ++}', '> > p {++\n> > \u3000\n> > ++}']) {
+      expect(preprocessCriticMarkup(text)).toBe(preprocessCriticMarkupReference(text));
+    }
+  });
+
+  test('that share one closer are read in time linear in their number', () => {
+    // The check took the markers off all of the span, to the closer, for
+    // each opener
+    const input = (n: number) => '> p {++\n> q\n>\n'.repeat(n) + '++}';
+    expect(preprocessCriticMarkup(input(3))).toBe(preprocessCriticMarkupReference(input(3)));
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => preprocessCriticMarkup(text));
+    };
+    time(2000);
+    const small = time(2000);
+    expect(time(8000) / small).toBeLessThan(8);
+  }, 60000);
+});

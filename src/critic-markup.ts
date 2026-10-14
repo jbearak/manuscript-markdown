@@ -192,7 +192,7 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
       // a{--\n\n--}b, with the markers of the quote it's in, as
       // > a{--\n>\n> --}b: moved out, it would leave the break untracked
       // and the span empty
-      if (/^\s*$/.test(stripQuoteContinuationPrefixes(markdown.slice(contentStart, closePos), quoteDepthAt(markdown, offset)))) return full;
+      if (blankWithoutQuotePrefixes(markdown, contentStart, closePos, quoteDepthAt(markdown, offset))) return full;
       const lineStart = markdown.lastIndexOf('\n', offset - 1) + 1;
       const linePrefix = markdown.slice(lineStart, offset);
       if (linePrefix.trim().length === 0) return full;
@@ -248,6 +248,37 @@ function stripQuoteContinuationPrefixes(content: string, depth: number): string 
     }
     return '\n' + remainder;
   });
+}
+
+const WHITESPACE_RE = /\s/;
+
+/** Whether `text` from `start` to `end`, with `depth` quote markers taken
+ *  off each line but its first, as stripQuoteContinuationPrefixes takes
+ *  them, is whitespace, as /^\s*$/ reads it. It reads up to the first
+ *  character that isn't, without building the text, so the openers at a
+ *  line's end in a quote that share one closer, each of which the check
+ *  stripped to the closer, read the text once: each stops at the next
+ *  opener at the latest. */
+function blankWithoutQuotePrefixes(text: string, start: number, end: number, depth: number): boolean {
+  const isSpaceOrTab = (at: number) => at < end && (text.charCodeAt(at) === 0x20 || text.charCodeAt(at) === 0x09);
+  let i = start;
+  while (true) {
+    // The rest of the line
+    for (; i < end && text.charCodeAt(i) !== 0x0A; i++) {
+      if (!WHITESPACE_RE.test(text[i])) return false;
+    }
+    if (i >= end) return true;
+    // The next line, after its markers, or all of it where it has fewer
+    i++;
+    let after = i;
+    for (let level = 0; level < depth; level++) {
+      let at = after;
+      while (isSpaceOrTab(at)) at++;
+      if (at >= end || text.charCodeAt(at) !== 0x3E) { after = i; break; }
+      after = isSpaceOrTab(at + 1) ? at + 2 : at + 1;
+    }
+    i = after;
+  }
 }
 
 /**

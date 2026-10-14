@@ -207,4 +207,26 @@ describe('comments without their closers', () => {
 		const small = time(20000);
 		expect(time(80000) / small).toBeLessThan(8);
 	}, 60000);
+
+	test('unwraps the spans it did', () => {
+		const pieces = ['{>>', '<<}', '{#a>>', '{==', '==}', '{++', '++}', '{--', '--}', '{~~', '~~}', '~>', '{', '}', '=', '+', '-', '~', 'a', ' ', '\n'];
+		fc.assert(fc.property(fc.array(fc.constantFrom(...pieces), { maxLength: 30 }), parts => {
+			const text = parts.join('');
+			expect(stripCriticMarkup(text)).toBe(stripCriticMarkupReference(text));
+		}), { numRuns: 1000 });
+	});
+
+	test('strips spans without their closers in time linear in their number', () => {
+		// Each lazy regex that unwrapped a kind of span read the rest of the
+		// text again from each of its openers without a closer. Among spans
+		// it unwraps, so the time is long enough that the timer's noise
+		// doesn't decide the ratio
+		const time = (n: number) => {
+			const text = ('{++a++} '.repeat(500) + '{-- b ').repeat(n);
+			return fastestRun(() => expect(stripCriticMarkup(text)).toBe(text.replaceAll('{++a++}', 'a').trim()));
+		};
+		time(750);
+		const small = time(750);
+		expect(time(3000) / small).toBeLessThan(8);
+	}, 60000);
 });
