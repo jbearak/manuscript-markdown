@@ -1,6 +1,10 @@
 import { describe, test, expect } from 'bun:test';
 import { wrapBareLatexEnvironments, wrapBareLatexEnvironmentsWithLines, DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { fastestRun } from './test-timing';
+import JSZip from 'jszip';
+import { convertMdToDocx } from './md-to-docx';
+import { convertDocx } from './converter';
+import { renderWithPlugin } from './test-helpers';
 
 describe('wrapBareLatexEnvironments', () => {
 	test('wraps a bare equation environment', () => {
@@ -170,6 +174,8 @@ describe('wrapBareLatexEnvironments in time linear in the text', () => {
 		// Each searched for its matching <<} to the text's end
 		['CriticMarkup comments without their closers', 'p {>> a {#a>> b {>> c {#b>> d {>> e {#c>> f\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
 		['comments without their ends', 'p <!-- a\n\n\\begin{equation}\nx\n\\end{equation}\n\n', 2],
+		// Each skipped as in code, with closers after the environment
+		['openers in code blocks', '```\n<!--\n{++\n{>>\n{#a>>\n```\n\n\\begin{equation}\nx\n\\end{equation}\n\n<!-- c --> ++} <<}\n\n', 2],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		expect(wrapBareLatexEnvironments(unit.repeat(2)).split('$' + '$').length - 1).toBe(wrapped * 2);
 		const time = (n: number) => {
@@ -180,4 +186,69 @@ describe('wrapBareLatexEnvironments in time linear in the text', () => {
 		const small = time(4000);
 		expect(time(16000) / small).toBeLessThan(8);
 	}, 60000);
+});
+
+describe('a bare environment after an opener in a code block', () => {
+	const env = '\\begin{equation}\nx\n\\end{equation}';
+	const display = '$' + '$';
+	// An opener in a code block, and a closer after the environment, a
+	// directive's own --> too
+	const cases: Array<[string, string]> = [
+		['an HTML comment\'s opener in a fenced code block', '```\n<!--\n```\n\n' + env + '\n\n<!-- landscape -->\n\nText\n\n<!-- /landscape -->\n'],
+		['an HTML comment\'s opener after a > in a fenced code block', '```\nx > y\n<!--\n```\n\n' + env + '\n\n<!-- c -->\n'],
+		['an HTML comment\'s opener in an indented code block', '    <!--\n\n' + env + '\n\n<!-- c -->\n'],
+		['an insertion\'s opener in a fenced code block', '```\n{++\n```\n\n' + env + '\n\nz ++}\n'],
+		['a deletion\'s opener in an indented code block', '    {--\n\n' + env + '\n\nz --}\n'],
+		['a CriticMarkup comment\'s opener in a fenced code block', '```\n{>>\n```\n\n' + env + '\n\nz <<}\n'],
+		['a CriticMarkup comment\'s opener by ID in a fenced code block', '```\n{#a>>\n```\n\n' + env + '\n\nz <<}\n'],
+	];
+
+	test.each(cases)('wraps it after %s, which is the code\'s text', (_name, md) => {
+		// The scan read the opener as one, so its zone, to the closer after
+		// the environment, held the environment, which export wrote as text
+		expect(wrapBareLatexEnvironments(md)).toContain(display + env + display);
+	});
+
+	test.each(cases)('exports it after %s as an equation, which the preview shows', async (_name, md) => {
+		const { docx } = await convertMdToDocx(md);
+		const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+		expect(xml).toContain('<m:oMath');
+		expect(xml).not.toContain('begin{equation}');
+		const once = (await convertDocx(docx)).markdown;
+		expect(once).toContain(display + '\nx\n' + display);
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+		expect(renderWithPlugin(md)).toContain(display + env + display);
+	});
+
+	// The code regions read no HTML, math, links or blocks' ends, so they
+	// pair a backtick in a construct export reads first, or in a block
+	// before, with a later one, in a comment's or a span's text, whose
+	// opener export reads. An opener in a code span is left as on main
+	test.each([
+		['in another comment', 'p <!-- ` --> <!-- `\n' + env + '\n-->\n'],
+		['in a tag\'s attribute, before a comment', '<b title="`"> <!-- c `\n' + env + '\n-->\n'],
+		['in a tag\'s attribute, before an insertion', '<b title="`"> {++c `\n' + env + '\n++}\n'],
+		['in an equation', '$a`b$ <!-- c `\n' + env + '\n-->\n'],
+		['in a link\'s destination', '[a](x`y) {++ c `\n' + env + '\n++}\n'],
+		['in a highlight', '==a`b== <!-- c `\n' + env + '\n-->\n'],
+		['in an insertion', '{++a`b++} <!-- c `\n' + env + '\n-->\n'],
+		['in a citation', '[@a`b] <!-- c `\n' + env + '\n-->\n'],
+		['in a heading before', '# h `\n\np <!-- c `\n' + env + '\n-->\n'],
+		['in a link linkify reads', 'http://x.org/` <!-- c `\n' + env + '\n-->\n'],
+	])('leaves it in a comment or a span after a backtick %s, as before', async (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+		expect(once).toContain('begin{equation}');
+		expect(once).not.toContain(display);
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+		expect(renderWithPlugin(md)).not.toContain(display);
+	});
+
+	test.each([
+		['an HTML comment', '```\n<!--\n```\n\n<!--\n' + env + '\n-->\n'],
+		['an insertion', '```\n{++\n```\n\n{++\n' + env + '\n++}\n'],
+		['a CriticMarkup comment by ID', '```\n{#a>>\n```\n\n{#a>>\n' + env + '\n<<}\n'],
+	])('leaves it in %s after the same opener in a code block, as before', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
 });

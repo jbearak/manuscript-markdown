@@ -10,7 +10,7 @@
  * "inert zones" and skipped.
  */
 
-import { computeMarkdownRegions } from './code-regions';
+import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { exportsLiterally } from './html-blocks';
 import { criticCloserSearch } from './critic-markup';
 import { isEscapedAt } from './math-delimiters';
@@ -52,14 +52,27 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	// export writes as text, as a <pre> or a <div>, but not one it reads
 	// tables from, in which it reads an environment as display math (see
 	// markWrappedLatexBlocks in md-to-docx.ts)
-	const { codeRegions, literalHtmlRegions } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally });
+	const { codeRegions, blockCodeRegions, literalHtmlRegions } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally });
 	for (const r of codeRegions) {
 		zones.push({ start: r.start, end: r.end });
 	}
+	// An opener in a code block, which markdown-it reads before any HTML or
+	// CriticMarkup, is the block's text. One in a code span is left as on
+	// main: the code regions read no HTML, math, links or blocks' ends, so
+	// they can pair a backtick in a construct export reads first, as in
+	// <b title="`">, with a later one, as in a comment's text, where the
+	// <!-- is real
+	const inCode = (offset: number) => isInsideCodeRegion(offset, blockCodeRegions);
 
-	// 2. HTML comments <!-- ... -->, each to the first --> after it. Where
-	// none is, none is after a later <!-- either
+	// 2. HTML comments <!-- ... -->, each to the first --> after it, but
+	// not from a <!-- in a code block, which is the code's text: its zone
+	// hid an environment up to any later -->, a directive's too (see
+	// inCode). Where none is, none is after a later <!-- either
 	for (let open = text.indexOf('<!--'); open !== -1;) {
+		if (inCode(open)) {
+			open = text.indexOf('<!--', open + 4);
+			continue;
+		}
 		const close = text.indexOf('-->', open + 4);
 		if (close === -1) break;
 		zones.push({ start: open, end: close + 3 });
@@ -67,7 +80,9 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	}
 
 	// 3. CriticMarkup spans, each comment's to its matching <<}, found for
-	// all of them at once, as each unclosed one searched the rest of the text
+	// all of them at once, as each unclosed one searched the rest of the text.
+	// Not from an opener in a code block, which is the code's text: its zone
+	// hid an environment up to a later closer (see inCode)
 	const closers = criticCloserSearch(text);
 	const cmMarkers: Array<{ open: string; close: string; nested?: boolean }> = [
 		{ open: '{++', close: '++}' },
@@ -82,6 +97,10 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 			const openIdx = text.indexOf(open, searchFrom);
 			if (openIdx === -1) break;
 			const contentStart = openIdx + open.length;
+			if (inCode(openIdx)) {
+				searchFrom = contentStart;
+				continue;
+			}
 			let closeIdx: number;
 			if (nested) {
 				closeIdx = closers.matching(contentStart);
@@ -105,6 +124,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 		let m: RegExpExecArray | null;
 		while ((m = idCommentRe.exec(text)) !== null) {
 			const contentStart = m.index + m[0].length;
+			if (inCode(m.index)) continue;
 			const closeIdx = closers.matching(contentStart);
 			if (closeIdx === -1) continue;
 			zones.push({ start: m.index, end: closeIdx + 3 });
