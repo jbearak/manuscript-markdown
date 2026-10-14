@@ -246,6 +246,14 @@ export function xmlSearch(xml: string, pattern: RegExp): number | undefined {
   return xmlMatches(xml, pattern).next().value?.index;
 }
 
+/** Whether `xml` holds an element, a start tag in its markup (see
+ *  xmlMatches), and not only whitespace, text, comments, CDATA sections and
+ *  processing instructions, which leave a container of properties, as a
+ *  w:rPr, empty as an XML parser reads it, and as Word strips it */
+export function holdsXmlElement(xml: string): boolean {
+  return xmlSearch(xml, /<[^!?/]/) !== undefined;
+}
+
 /** Where the last match of `pattern` in `xml`'s markup starts (see
  *  xmlMatches), and its text, or undefined for none */
 export function xmlLastMatch(xml: string, pattern: RegExp): { index: number; text: string } | undefined {

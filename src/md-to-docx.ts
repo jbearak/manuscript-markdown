@@ -21,7 +21,7 @@ import { preprocessGridTables, preprocessGridTablesWithSourceMap, gridColumnAlig
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { findStyleElement, styleFinder } from './style-element';
-import { otherXmlAttributes, replaceXmlElements, withXmlAttribute, xmlAttribute, xmlElement, xmlElementParts, xmlInteger, xmlLastMatch, xmlOn, xmlSearch, xmlStartTag, xmlStartTags, xmlTwips } from './xml-elements';
+import { holdsXmlElement, otherXmlAttributes, replaceXmlElements, withXmlAttribute, xmlAttribute, xmlElement, xmlElementParts, xmlInteger, xmlLastMatch, xmlOn, xmlSearch, xmlStartTag, xmlStartTags, xmlTwips } from './xml-elements';
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
@@ -6192,10 +6192,11 @@ function templateWithFontOverrides(
           pPrContent = pPrContent.slice(0, at) + jc + pPrContent.slice(at);
         }
         // A pPr that held only the w:jc goes with it (dirty-flag invariant #5),
-        // but not one that holds a tracked change's record, which needs it,
-        // last, after a w:jc added at the end
+        // a comment or what else holds no element beside it too (see
+        // holdsXmlElement), but not one that holds a tracked change's record,
+        // which needs it, last, after a w:jc added at the end
         const [ownPPr, pPrRecord] = splitRecord(pPrContent, 'pPrChange');
-        const newPPr = ownPPr.trim() || pPrRecord ? pPr.open + ownPPr + pPrRecord + pPr.close : '';
+        const newPPr = holdsXmlElement(ownPPr) || pPrRecord ? pPr.open + ownPPr + pPrRecord + pPr.close : '';
         innerContent = innerContent.slice(0, pPr.start) + newPPr + innerContent.slice(pPr.end);
       } else if (jc) {
         // No pPr block — insert one
@@ -6256,9 +6257,10 @@ function templateWithFontOverrides(
       rPrContent = orderRPr(rPrContent);
 
       // An rPr that held only what the style override removed goes with it
-      // (dirty-flag invariant #5), but not one that holds a tracked change's
-      // record, which needs it
-      const newRPr = rPrContent.trim() || rPrRecord ? rPr.open + rPrContent + rPrRecord + rPr.close : '';
+      // (dirty-flag invariant #5), a comment or what else holds no element
+      // beside it too (see holdsXmlElement), but not one that holds a tracked
+      // change's record, which needs it
+      const newRPr = holdsXmlElement(rPrContent) || rPrRecord ? rPr.open + rPrContent + rPrRecord + rPr.close : '';
       innerContent = innerContent.slice(0, rPr.start) + newRPr + innerContent.slice(rPr.end);
     } else {
       // No <w:rPr> section — insert one
@@ -6399,8 +6401,9 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
           }
         }
         // A pPr that held only the indent goes, as Word strips an empty one
-        // (dirty-flag invariant #5)
-        const newPPr = pPrContent.trim() ? pPr.open + pPrContent + pPr.close : '';
+        // (dirty-flag invariant #5), with a comment or what else holds no
+        // element beside it (see holdsXmlElement)
+        const newPPr = holdsXmlElement(pPrContent) ? pPr.open + pPrContent + pPr.close : '';
         inner = inner.slice(0, pPr.start) + newPPr + inner.slice(pPr.end);
       } else if (wantHanging) {
         // No pPr exists yet — add one
