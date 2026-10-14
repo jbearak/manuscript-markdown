@@ -14931,6 +14931,12 @@ function buildMarkdownOnce(
         lastBlockquoteAlertType = undefined;
         lastBlockquoteLevel = undefined;
 
+        // The blank lines the source had after a quote before the code are
+        // the code's, which the blank line before its fence writes, and not
+        // those of the paragraph after it, as a code block's, which ends the
+        // quote's, would reset them on a paragraph's path
+        pendingPostContentGroupIndex = undefined;
+
         const lang = codeBlockLangs?.get(String(codeBlockGroupIndex)) || '';
         const code = codeBlockFence(mergedContent, i, lang);
         i = code.end;
