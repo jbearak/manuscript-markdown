@@ -4,6 +4,7 @@
 // directions.
 
 import { describe, test, expect } from 'bun:test';
+import * as fc from 'fast-check';
 import { xmlParser } from './xml-parser';
 import JSZip from 'jszip';
 import { latexToOmml, trackedLatexToOmml, CRITIC_INSERTION_COMMAND, CRITIC_DELETION_COMMAND } from './latex-to-omml';
@@ -402,6 +403,137 @@ describe('review follow-ups, round 5', () => {
 
   test('parentheses and brackets still import bare', () => {
     expect(importOmml('<m:d><m:e>' + run('x') + '</m:e></m:d>')).toBe('(x)');
+  });
+});
+
+describe('Word delimiters with separators', () => {
+  /** A delimiter of `elements`, each in an m:e of its own, with `sep` between them, or Word's default | without it */
+  const separated = (beg: string, end: string, sep: string | undefined, ...elements: string[]) =>
+    '<m:d><m:dPr><m:begChr m:val="' + beg + '"/>' + (sep === undefined ? '' : '<m:sepChr m:val="' + sep + '"/>') + '<m:endChr m:val="' + end + '"/></m:dPr>'
+    + elements.map(element => '<m:e>' + element + '</m:e>').join('') + '</m:d>';
+
+  // Word's separator grows with the delimiter, as \middle does, which
+  // showed as text in Word, and needs \left and \right, which parentheses
+  // and brackets otherwise come back without
+  test.each([
+    ['\\left(a\\middle|b\\right)', separated('(', ')', '|', run('a'), run('b'))],
+    ['\\left\\{x\\middle|x>0\\right\\}', separated('{', '}', '|', run('x'), run('x') + run('&gt;') + run('0'))],
+    ['\\left\\langle{}a\\middle|b\\middle|c\\right\\rangle', separated('⟨', '⟩', '|', run('a'), run('b'), run('c'))],
+    ['\\left(a\\middle\\|b\\right)', separated('(', ')', '‖', run('a'), run('b'))],
+    ['\\left[a\\middle/b\\right]', separated('[', ']', '/', run('a'), run('b'))],
+    ['\\left(a\\middle.b\\right)', separated('(', ')', '', run('a'), run('b'))],
+    ['\\left(a\\middle\\langle{}b\\right)', separated('(', ')', '⟨', run('a'), run('b'))],
+    ['\\left(a\\middle|b\\right.', separated('(', '', '|', run('a'), run('b'))],
+    ['\\left(\\frac{a}{b}\\middle|c\\right)', separated('(', ')', '|', latexToOmml('\\frac{a}{b}'), run('c'))],
+  ])('comes back as \\middle, and as the separator, in %s', (latex, omml) => {
+    expect(importOmml(omml)).toBe(latex);
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  test('of Word\'s default comes back as \\middle|', () => {
+    expect(importOmml(separated('(', ')', undefined, run('a'), run('b')))).toBe('\\left(a\\middle|b\\right)');
+  });
+
+  // Which \middle can't take, as a comma, or U+2223, which LaTeX has as the
+  // relation \mid, or a '.' typed as itself, since \middle. is none, or in
+  // a bracket \left or \right can't take, or with neither bracket, where
+  // \middle can't go, or with one part, comes back as before, between the parts
+  test.each([
+    [separated('(', ')', ',', run('a'), run('b')), '(a,b)'],
+    [separated('(', ')', '∣', run('a'), run('b')), '(a∣b)'],
+    [separated('(', ')', '.', run('a'), run('b')), '(a.b)'],
+    [separated(',', ',', '|', run('a'), run('b')), ',a|b,'],
+    [separated('(', ',', '|', run('a'), run('b')), '(a|b,'],
+    [separated('.', ')', '|', run('a'), run('b')), '.a|b)'],
+    [separated('⟨', '⟩', ',', run('a'), run('b')), '\\left\\langle{}a,b\\right\\rangle'],
+    [separated('', '', '|', run('a'), run('b')), 'a|b'],
+    [separated('(', ')', '|', run('a')), '(a)'],
+  ])('that \\middle can\'t take comes back as before, in %s', (omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+  });
+
+  test('of different characters exports as them in one part, as Word\'s delimiter has one separator', () => {
+    expect(latexToOmml('\\left(a\\middle|b\\middle/c\\right)')).toBe(
+      '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>' + run('a') + run('|') + run('b') + run('/') + run('c') + '</m:e></m:d>');
+  });
+
+  // As a \right without a \left, rather than as the text of a command
+  test.each([
+    ['a\\middle|b', run('a') + run('|') + run('b')],
+    ['\\left(a\\middle|b', run('(') + run('a') + run('|') + run('b')],
+  ])('without \\left and \\right around it exports as its character, in %s', (latex, omml) => {
+    const unknown: string[] = [];
+    expect(latexToOmml(latex, command => unknown.push(command))).toBe(omml);
+    expect(unknown).toEqual([]);
+  });
+
+  // \left, \middle and \right read their delimiters one way: after any
+  // spaces, which TeX skips after a command word, and as a character or a
+  // command, opening or closing
+  test.each([
+    ['\\left(a\\middle |b\\right)', separated('(', ')', '|', run('a'), run('b'))],
+    ['\\left(a\\middle\\vert{}b\\right)', separated('(', ')', '|', run('a'), run('b'))],
+    ['\\left(a\\middle \\vert{}b\\right)', separated('(', ')', '|', run('a'), run('b'))],
+    ['\\left (a\\middle|b\\right )', separated('(', ')', '|', run('a'), run('b'))],
+    ['\\left(a\\middle\\{b\\right)', separated('(', ')', '{', run('a'), run('b'))],
+    ['\\left(a\\middle\\lbrace{}b\\right)', separated('(', ')', '{', run('a'), run('b'))],
+    ['\\left(a\\middle\\rbrace{}b\\right)', separated('(', ')', '}', run('a'), run('b'))],
+    ['\\left(a\\middle\\langle{}b\\right)', separated('(', ')', '⟨', run('a'), run('b'))],
+    ['\\left(a\\middle(b\\right)', separated('(', ')', '(', run('a'), run('b'))],
+    ['\\left(a\\middle[b\\right)', separated('(', ')', '[', run('a'), run('b'))],
+    ['\\left (a\\right )', separated('(', ')', undefined, run('a'))],
+    ['\\left\\rbrace{}a\\right\\lbrace', separated('}', '{', undefined, run('a'))],
+    ['\\left\\}a\\right\\{', separated('}', '{', undefined, run('a'))],
+  ])('\\left, \\middle and \\right read a delimiter one way, in %s', (latex, omml) => {
+    const unknown: string[] = [];
+    expect(latexToOmml(latex, command => unknown.push(command))).toBe(omml);
+    expect(unknown).toEqual([]);
+  });
+
+  // A function's argument or an n-ary body in brackets ends at the \middle
+  // of the \left around it, as at its \right, so the \middle still splits
+  // the delimiter, and the bracket comes back as text, as an argument whose
+  // bracket closes after \right does. A | in the brackets stays a character.
+  test.each([
+    ['\\left(\\Pr(A\\middle|B)\\right)', separated('(', ')', '|', latexToOmml('\\Pr(A'), latexToOmml('B)')), '\\left(\\Pr{(}A\\middle|B)\\right)'],
+    ['\\left(\\sum(a\\middle|b)\\right)', separated('(', ')', '|', latexToOmml('\\sum(a'), latexToOmml('b)')), '\\left(\\sum{(}a\\middle|b)\\right)'],
+    ['\\left(\\sum_i a_i \\middle| b\\right)', separated('(', ')', '|', latexToOmml('\\sum_i a_i '), latexToOmml(' b')), '\\left(\\sum_ia_i\\middle|b\\right)'],
+    ['\\left(\\Pr(A|B)\\middle|C\\right)', separated('(', ')', '|', latexToOmml('\\Pr(A|B)'), run('C')), '\\left(\\Pr(A|B)\\middle|C\\right)'],
+  ])('splits a delimiter around a function or n-ary operator, in %s', (latex, omml, back) => {
+    expect(latexToOmml(latex)).toBe(omml);
+    expect(importOmml(omml)).toBe(back);
+    expect(importOmml(latexToOmml(back))).toBe(back);
+  });
+
+  test('a \\right delimiter after spaces doesn\'t close the bracket around it', () => {
+    expect(latexToOmml('\\sqrt[\\left[a\\right ]]{x}')).toBe(latexToOmml('\\sqrt[\\left[a\\right]]{x}'));
+  });
+
+  test.each([
+    '$\\left\\{x\\middle|x>0\\right\\}$', '$\\left(a\\middle|b\\middle|c\\right)$', '$\\sin\\left(a\\middle|b\\right)x$',
+    '$\\left(\\Pr{(}A\\middle|B)\\right)$',
+    // A change in a part is tracked in place, as the separator is in neither
+    '$\\left(a\\middle|{++b++}\\right)$', '${++\\left(a\\middle|b\\right)++}$',
+  ])('goes through Word and back, in %s', async (math) => {
+    const md = math + '\n';
+    const docx = (await convertMdToDocx(md)).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<m:sepChr m:val="|"/>');
+    expect(xml).not.toContain('middle');
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  // Any separator \middle takes, with two or three parts, in any brackets
+  const bracket = fc.constantFrom('(', ')', '[', ']', '|', '‖', '{', '}', '⟨', '⟩', '');
+  const part = fc.constantFrom(run('x'), run('0') + run(',') + run('1'), latexToOmml('\\frac{a}{b}'), latexToOmml('x^2') + run('+') + run('y'));
+  test('any separated delimiter from Word comes back as it was', () => {
+    fc.assert(fc.property(bracket, bracket, fc.constantFrom('|', '‖', '/', '', '⟨', '↑', '{', '}', '(', ']'), fc.array(part, { minLength: 2, maxLength: 3 }), (beg, end, sep, parts) => {
+      fc.pre(beg !== '' || end !== '');
+      const omml = separated(beg, end, sep, ...parts);
+      const latex = importOmml(omml);
+      expect(latexToOmml(latex)).toBe(omml);
+      expect(importOmml(latexToOmml(latex))).toBe(latex);
+    }), { numRuns: 500 });
   });
 });
 

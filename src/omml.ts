@@ -821,9 +821,40 @@ function translateDelimiter(children: XmlNode[]): string {
     }
   }
 
-  // Default behavior
-  const inner = elements.map(e => ommlToLatex(e)).join(sepChr);
-  return delimitedLatex(begChr, inner, endChr);
+  // Word's separator between the parts grows with the delimiter, as \middle
+  // does, so it comes back as \middle, in \left and \right, which \middle
+  // needs, though the brackets would come back bare without it. That takes
+  // all three characters as delimiters LaTeX has (see sizedDelimiter). With
+  // any other, as a comma, or U+2223, which LaTeX has as the relation \mid,
+  // or with neither bracket, where \middle can't go, the separator goes
+  // between the parts as it is
+  const parts = elements.map(e => ommlToLatex(e));
+  const left = sizedDelimiter(begChr);
+  const middle = sizedDelimiter(sepChr);
+  const right = sizedDelimiter(endChr);
+  if (parts.length > 1 && (begChr || endChr) && left && middle && right) {
+    const inner = parts.reduce((latex, part) => appendLatex(appendLatex(latex, '\\middle' + middle), part));
+    return appendLatex('\\left' + left, inner) + '\\right' + right;
+  }
+  return delimitedLatex(begChr, parts.join(sepChr), endChr);
+}
+
+/** The delimiters \left, \middle and \right take, as delimiterCommand
+ *  writes them, which export reads back as the same characters */
+const SIZED_DELIMITERS = new Set([
+  '(', ')', '[', ']', '|', '/', '\\{', '\\}', '\\|', '\\langle', '\\rangle', '\\lfloor', '\\rfloor', '\\lceil', '\\rceil',
+  '\\uparrow', '\\downarrow',
+]);
+
+/**
+ * A delimiter character as \left, \middle or \right takes it: '.' for none,
+ * or undefined for one LaTeX has no delimiter for, as a comma. A '.' typed as
+ * the character is one of those, since \left. is none.
+ */
+function sizedDelimiter(chr: string): string | undefined {
+  if (!chr) return '.';
+  const latex = delimiterCommand(chr) ?? chr;
+  return SIZED_DELIMITERS.has(latex) ? latex : undefined;
 }
 
 /** The command for a delimiter character that needs one, such as ⟨ or {. */
@@ -1093,10 +1124,10 @@ function translateGroupChr(children: XmlNode[]): string {
  */
 function appendLatex(acc: string, chunk: string): string {
   if (chunk && /\\[A-Za-z]+$/.test(acc) && /^[A-Za-z]/.test(chunk)) {
-    // A \left or \right delimiter such as \rangle ends with {} instead, since
-    // the space would export as a space. Other commands keep the space, as
-    // Markdown already written with them does.
-    return acc + (/\\(?:left|right)\\[A-Za-z]+$/.test(acc) ? '{}' : ' ') + chunk;
+    // A \left, \middle or \right delimiter such as \rangle ends with {}
+    // instead, since the space would export as a space. Other commands keep
+    // the space, as Markdown already written with them does.
+    return acc + (/\\(?:left|middle|right)\\[A-Za-z]+$/.test(acc) ? '{}' : ' ') + chunk;
   }
   return acc + chunk;
 }
