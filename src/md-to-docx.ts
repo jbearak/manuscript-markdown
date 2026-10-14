@@ -10441,12 +10441,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
           if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
           sentinelCscIdx++;
         }
-        if (!isImplicitStyleClose(token)) closeStyleBlock();
-        else {
-          closedBlock = undefined;
-          // Of such blocks alone, as closeStyleBlock reads one
-          if (styleBlock?.index !== undefined && !styleBlock.styled) recording = false;
-        }
+        // A block that one opening in a list item closes ends there as at
+        // a fence, since Word gets nothing for either, so import reads what
+        // comes next as it would after a fence (see closeStyleBlock)
+        closeStyleBlock();
         styleBlock = undefined;
         state.activeCustomStyle = undefined;
         biblAtSectionStart = biblFirst;
