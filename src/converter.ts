@@ -13777,6 +13777,60 @@ function breakCommentLines(content: ContentItem[], splits: (key: number) => bool
   return { content: out ?? content, changed };
 }
 
+/** `content` with a Word line break that comes right after the hidden
+ *  comments a paragraph starts with, in the paragraphs `splits` takes, by
+ *  their keys (see plainParagraphs), before those comments, with the keys
+ *  of the paragraphs it moves one in added to `changed`, which buildMarkdown
+ *  reads back. A comment that starts its paragraph begins an HTML block,
+ *  which runs to the end of its line, so export read the break's \ after
+ *  it, and the comment, as the block's text, which Word showed, and the
+ *  line after it as a paragraph of its own. After a <br> at the paragraph's
+ *  start, which the renderers write a break there as, the comment begins
+ *  no block: it stays hidden, in its paragraph, and Word shows what it
+ *  showed. Only where the paragraph goes on after the break, past line
+ *  breaks and whitespace: at its end, those go as <br> after the comments,
+ *  in their block, which export reads as Word has it. Each item is read
+ *  once */
+function breakBeforeLeadingComments(content: ContentItem[], splits: (key: number) => boolean, changed: Set<number>): ContentItem[] {
+  let out: ContentItem[] | undefined;
+  // The paragraph from `start` to the next block edge, whose key is the
+  // number of edges before it
+  for (let start = 0, key = 0; start < content.length; key++) {
+    let end = start;
+    while (end < content.length && !isMarkdownBlockEdge(content[end])) end++;
+    // The first item past the comments the paragraph starts with, the
+    // first of which begins a block: not one whose run starts with spaces
+    // or tabs, which go as references, after which no block starts
+    let k = start;
+    let comments: boolean | undefined;
+    for (; k < end; k++) {
+      const item = content[k];
+      if (item.type === 'html_comment') comments ??= item.text.startsWith('<!--');
+      else if (item.type !== 'text' || item.text !== '') break;
+    }
+    const item = k < end ? content[k] : undefined;
+    // A run's text after its break, which goes on after the comments
+    const rest = item?.type === 'text' && item.text.startsWith('\\\n') ? item.text.slice(2) : undefined;
+    // Whether anything but line breaks and whitespace goes after the
+    // break, which would put it on the next line
+    const shows = (after: ContentItem) => after.type !== 'text' || /\S/.test(after.text.replace(/\\\n/g, ''));
+    const goesOn = () => /\S/.test(rest!.replace(/\\\n/g, '')) || content.slice(k + 1, end).some(shows);
+    if (comments && item?.type === 'text' && rest !== undefined && goesOn() && splits(key)) {
+      out ??= content.slice(0, start);
+      out.push({ ...item, text: '\\\n' });
+      for (let j = start; j < k; j++) out.push(content[j]);
+      if (rest !== '') out.push({ ...item, text: rest });
+      for (let j = k + 1; j < end; j++) out.push(content[j]);
+      changed.add(key);
+    } else if (out) {
+      for (let j = start; j < end; j++) out.push(content[j]);
+    }
+    if (end < content.length) out?.push(content[end]);
+    start = end + 1;
+  }
+  return out ?? content;
+}
+
 /** A hidden comment's run as its comments, each as it is, and a line break
  *  for each line end outside them, where it holds one: the spaces and tabs
  *  before its first comment on that one's line go with it, as
@@ -13884,7 +13938,8 @@ function buildMarkdownOnce(
   // paragraph from this form, but not from the others (see `plain`)
   const splittable = plainParagraphs(joinedParagraphs);
   const lines = breakCommentLines(joinedParagraphs, key => splittable.has(key) && !fallback.has(key));
-  const joinedContent = lines.content;
+  // And a line break after the comments one starts with goes before them
+  const joinedContent = breakBeforeLeadingComments(lines.content, key => splittable.has(key) && !fallback.has(key), lines.changed);
   // Notes in the order they're written, after the body
   // Those only notes refer to after the others, as they reach them
   const allNotes = [...(options?.notes?.map.values() ?? [])];

@@ -22084,6 +22084,47 @@ describe('HTML comments between Word runs', () => {
       .toBe((await shown(docx)).join('').replace(/ /g, ''));
   });
 
+  test.each([
+    ['before text', comment('<!-- a -->') + lineBreak + run('after'), '<br><!-- a -->after', 1],
+    ['two, before text', comment('<!-- a -->') + comment('<!-- b -->') + lineBreak + run('after'), '<br><!-- a --><!-- b -->after', 1],
+    ['before another and text', comment('<!-- a -->') + lineBreak + comment('<!-- b -->') + run('after'), '<br><!-- a --><!-- b -->after', 1],
+    ['before another line break and text', comment('<!-- a -->') + lineBreak + lineBreak + run('after'), '<br><!-- a -->\\\nafter', 2],
+    ['before text in the break\'s run', comment('<!-- a -->') + '<w:r><w:br/><w:t>after</w:t></w:r>', '<br><!-- a -->after', 1],
+    ['before another, at the paragraph\'s end', comment('<!-- a -->') + lineBreak + comment('<!-- b -->'), '<br><!-- a --><!-- b -->', 1],
+  ])('writes a Word line break after the hidden comments its paragraph starts with before them, %s', async (_name, runs, md, count) => {
+    // The comment started an HTML block, which ran to the end of its line,
+    // so export showed the \ after it, and the comment, as text, and the
+    // text on the next line went in a paragraph of its own. Before the
+    // break, the comment starts no block, and Word hides it as before
+    for (const alwaysUseCommentIds of [false, true]) {
+      const docx = await withRuns(runs);
+      const markdown = strip((await convertDocx(docx, undefined, { alwaysUseCommentIds })).markdown);
+      expect(markdown).toBe(md + '\n');
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect(await shown(again)).toEqual(await shown(docx));
+      expect(await shownBreaks(again)).toBe(count);
+      const xml = await (await JSZip.loadAsync(again)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:p[ >]/g)).toHaveLength(1);
+      expect(strip((await convertDocx(again, undefined, { alwaysUseCommentIds })).markdown)).toBe(markdown);
+    }
+  });
+
+  test.each([
+    // Which holds only inline Markdown, so starts no block
+    ['in a heading', '# XX', comment('<!-- a -->') + lineBreak + run('after'), '# <!-- a --><br>after'],
+    // Where a line break at the paragraph's end, after them, goes as <br>,
+    // which export reads in the comment's block
+    ['at its paragraph\'s end', 'XX', comment('<!-- a -->') + lineBreak, '<!-- a --><br>'],
+    // Whose space goes as a reference, after which no block starts
+    ['after a space', 'XX', comment(' <!-- a -->') + lineBreak + run('after'), '&#32;<!-- a -->\\\nafter'],
+    // Which export, reading the paragraph alone, doesn't read as Word has it:
+    // inline Markdown reads a comment that ends in ---> on to the next -->
+    ['after a comment that ends in --->', 'XX', comment('<!-- a --->') + lineBreak + run('after'), '<!-- a --->\\\nafter'],
+  ])('writes a Word line break after the hidden comments its paragraph starts with as main does, %s', async (_name, md, runs, expected) => {
+    const docx = await withRuns(runs, md);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(expected + '\n');
+  });
+
   test('writes a line break after a citation without keys, before a comment with a blank line in it at its paragraph\'s end, as <br>', async () => {
     // The citation goes as text once its runs merge, after which the
     // paragraph is plain, though not before, where its hidden runs' line
