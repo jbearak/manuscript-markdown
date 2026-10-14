@@ -68,7 +68,7 @@ The converter aims for **semantic fidelity** rather than syntactic identity. A r
 - **Fraction variants**: `\dfrac`, `\tfrac`, and `\cfrac` all produce the same OMML fraction element. On re-import, they all become `\frac`.
 - **Binomial variants**: `\dbinom` and `\tbinom` produce the same OMML as `\binom`. On re-import, they become `\binom`.
 - **Environment selection**: On OMML-to-LaTeX import, equation arrays with `&` markers become `aligned` environments; those without become `gathered`. The original environment name (`align*`, `multline`, etc.) is not preserved since OMML does not store it.
-- **Unsupported elements**: OMML constructs with no LaTeX equivalent produce a visible `\text{[UNSUPPORTED: element] content}` placeholder.
+- **Unsupported elements**: OMML constructs with no LaTeX equivalent produce a visible `\text{[UNSUPPORTED: element] content}` placeholder, as does a script that lacks a part, or a fraction that lacks both. An empty part, as Word keeps for `x^{}`, comes back as `{}`.
 - **Bare environments**: `\begin{env}...\end{env}` (without `$$` wrappers) round-trips as `$$\begin{env}...\end{env}$$`.
 
 ### Comment Handling

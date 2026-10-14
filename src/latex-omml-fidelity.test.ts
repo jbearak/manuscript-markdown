@@ -751,3 +751,73 @@ describe('spaces Word keeps in an equation', () => {
     expect(importOmml('<m:r><m:rPr>' + rPr + '</m:rPr><m:t' + (kept ? ' xml:space="preserve"' : '') + '>' + text + '</m:t></m:r>')).toBe(latex);
   });
 });
+
+describe('an empty script, base, or fraction part', () => {
+  const throughWord = async (markdown: string) => (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+  const ctrlPr = '<m:ctrlPr><w:rPr><w:rFonts w:ascii="Cambria Math"/></w:rPr></m:ctrlPr>';
+
+  // Which import took for a missing one, and wrote as unsupported, with the
+  // rest of the equation as text. The other elements already read an empty
+  // part as {}, or, for a hidden limit or degree, as none.
+  test.each([
+    ['$x^{}$', '$x^{}$'],
+    ['$x_{}$', '$x_{}$'],
+    ['${}^{14}C$', '${}^{14}C$'],
+    ['${}_a^b X$', '${}_a^b X$'],
+    ['${}_{}$', '${}_{}$'],
+    ['${}^{}$', '${}^{}$'],
+    ['$x_{}^{}$', '$x_{}^{}$'],
+    ['$x^{}_{}$', '$x_{}^{}$'],
+    ['${}^{14}_{6}C$', '${}_6^{14}C$'],
+    ['$\\frac{}{}$', '$\\frac{}{}$'],
+    // A script of a space, which Word drops
+    ['$x^{ }$', '$x^{}$'],
+    // As on main
+    ['$\\frac{x}{}$', '$\\frac{x}{}$'],
+    ['$\\frac{}{y}$', '$\\frac{}{y}$'],
+    ['$\\sqrt{}$', '$\\sqrt{}$'],
+    ['$\\sqrt[n]{}$', '$\\sqrt[n]{}$'],
+    ['$\\sqrt[]{x}$', '$\\sqrt{x}$'],
+    ['$\\sum_{}^{}x$', '$\\sum x$'],
+    ['$\\sum_i^n{}$', '$\\sum_i^n$'],
+    ['$\\underset{}{x}$', '$\\underset{}{x}$'],
+    ['$\\underset{a}{}$', '$\\underset{a}{}$'],
+    ['$\\overset{}{x}$', '$\\overset{}{x}$'],
+    ['$\\overset{a}{}$', '$\\overset{a}{}$'],
+    ['$\\hat{}$', '$\\hat{}$'],
+    ['$\\overline{}$', '$\\overline{}$'],
+    ['$\\underline{}$', '$\\underline{}$'],
+  ])('comes back from Word, and again, in %s', async (math, back) => {
+    const markdown = await throughWord('A ' + math + ' B.\n');
+    expect(markdown).toBe('A ' + back + ' B.\n');
+    expect(await throughWord(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['<m:sSup><m:e>' + run('x') + '</m:e><m:sup/></m:sSup>', 'x^{}'],
+    ['<m:sSup><m:e>' + run('x') + '</m:e><m:sup>' + ctrlPr + '</m:sup></m:sSup>', 'x^{}'],
+    ['<m:sSub><m:e/><m:sub>' + run('a') + '</m:sub></m:sSub>', '{}_a'],
+    ['<m:sSubSup><m:e/><m:sub>' + run('a') + '</m:sub><m:sup/></m:sSubSup>', '{}_a^{}'],
+    ['<m:f><m:num/><m:den/></m:f>', '\\frac{}{}'],
+    // As on main
+    ['<m:f><m:num>' + run('x') + '</m:num></m:f>', '\\frac{x}{}'],
+    ['<m:f><m:den>' + run('y') + '</m:den></m:f>', '\\frac{}{y}'],
+    ['<m:rad><m:deg/><m:e/></m:rad>', '\\sqrt{}'],
+    ['<m:nary><m:naryPr><m:chr m:val="∑"/></m:naryPr><m:sub/><m:sup/><m:e/></m:nary>', '\\sum'],
+    ['<m:limLow><m:e/><m:lim/></m:limLow>', '\\underset{}{}'],
+    ['<m:limUpp><m:e/><m:lim/></m:limUpp>', '\\overset{}{}'],
+    ['<m:acc><m:accPr><m:chr m:val="̂"/></m:accPr><m:e/></m:acc>', '\\hat{}'],
+    ['<m:bar><m:barPr><m:pos m:val="top"/></m:barPr><m:e/></m:bar>', '\\overline{}'],
+  ])('from Word is a group, in %s', (omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+  });
+
+  test.each([
+    ['<m:sSup><m:e>' + run('x') + '</m:e></m:sSup>', 'sSup'],
+    ['<m:sSub><m:sub>' + run('a') + '</m:sub></m:sSub>', 'sSub'],
+    ['<m:sSubSup><m:e>' + run('x') + '</m:e><m:sub>' + run('a') + '</m:sub></m:sSubSup>', 'sSubSup'],
+    ['<m:f></m:f>', 'f'],
+  ])('that\'s missing is still unsupported, in %s', (omml, element) => {
+    expect(importOmml(omml)).toContain('[UNSUPPORTED: ' + element + ']');
+  });
+});

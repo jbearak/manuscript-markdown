@@ -49,6 +49,8 @@ x_{i+1}      % multi-character subscript (use braces)
 a^{n+1}      % multi-character superscript (use braces)
 ```
 
+An empty script or base, as in `x^{}` or `{}^{14}C`, is an empty part in Word, which Word shows as a dotted box, and comes back as `{}`. So is an empty numerator or denominator, as in `\frac{}{}`.
+
 ## Fractions and Roots
 
 ```latex

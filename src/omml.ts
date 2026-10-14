@@ -520,12 +520,13 @@ function textModeLatex(text: string): string {
 /**
  * Translate an m:f (fraction) element to LaTeX.
  * Extracts m:num and m:den children, emits \frac{numerator}{denominator}.
- * Falls back to placeholder if required children are missing.
+ * Falls back to placeholder if both are missing. An empty one, as Word keeps
+ * for \frac{}{}, is {}.
  */
 function translateFraction(children: XmlNode[]): string {
   const num = findChild(children, 'm:num');
   const den = findChild(children, 'm:den');
-  if (num.length === 0 && den.length === 0) {
+  if (!findChildNode(children, 'm:num') && !findChildNode(children, 'm:den')) {
     return fallbackPlaceholder('m:f', children);
   }
   const numerator = ommlToLatex(num);
@@ -562,12 +563,13 @@ function scriptArg(latex: string): string {
 /**
  * Translate an m:sSup (superscript) element to LaTeX.
  * Extracts m:e (base) and m:sup, emits {base}^{sup}.
- * Falls back to placeholder if required children are missing.
+ * Falls back to placeholder if required children are missing. An empty one,
+ * as Word keeps for x^{} or {}^{14}C, is {}.
  */
 function translateSuperscript(children: XmlNode[]): string {
   const base = findChild(children, 'm:e');
   const sup = findChild(children, 'm:sup');
-  if (base.length === 0 || sup.length === 0) {
+  if (!findChildNode(children, 'm:e') || !findChildNode(children, 'm:sup')) {
     return fallbackPlaceholder('m:sSup', children);
   }
   const baseLatex = ommlToLatex(base);
@@ -594,12 +596,13 @@ function scriptToLatex(script: XmlNode[]): string {
 /**
  * Translate an m:sSub (subscript) element to LaTeX.
  * Extracts m:e (base) and m:sub, emits {base}_{sub}.
- * Falls back to placeholder if required children are missing.
+ * Falls back to placeholder if required children are missing. An empty one,
+ * as Word keeps for x_{}, is {}.
  */
 function translateSubscript(children: XmlNode[]): string {
   const base = findChild(children, 'm:e');
   const sub = findChild(children, 'm:sub');
-  if (base.length === 0 || sub.length === 0) {
+  if (!findChildNode(children, 'm:e') || !findChildNode(children, 'm:sub')) {
     return fallbackPlaceholder('m:sSub', children);
   }
   const baseLatex = ommlToLatex(base);
@@ -610,13 +613,14 @@ function translateSubscript(children: XmlNode[]): string {
 /**
  * Translate an m:sSubSup (sub-superscript) element to LaTeX.
  * Extracts m:e (base), m:sub, and m:sup, emits {base}_{sub}^{sup}.
- * Falls back to placeholder if required children are missing.
+ * Falls back to placeholder if required children are missing. An empty one,
+ * as Word keeps for {}_a^b, is {}.
  */
 function translateSubSup(children: XmlNode[]): string {
   const base = findChild(children, 'm:e');
   const sub = findChild(children, 'm:sub');
   const sup = findChild(children, 'm:sup');
-  if (base.length === 0 || sub.length === 0 || sup.length === 0) {
+  if (!findChildNode(children, 'm:e') || !findChildNode(children, 'm:sub') || !findChildNode(children, 'm:sup')) {
     return fallbackPlaceholder('m:sSubSup', children);
   }
   const baseLatex = ommlToLatex(base);
