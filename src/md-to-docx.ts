@@ -2955,14 +2955,15 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
           const closeKey = activeOrientation === 'landscape' ? 'landscapeClose' : 'portraitClose';
           const openKey = orientation === 'landscape' ? 'landscapeOpen' : 'portraitOpen';
           const closeSentinel: MdToken = { type: 'paragraph', runs: [], [closeKey]: true };
-          // blankLines attach to the close sentinel; the open sentinel inherits no spacing
-          // because it is synthesized in-place — the source comment only had one position.
+          // Import writes a closing fence here, with the comment's blank
+          // lines before it, then this opener, with the comment's blank lines
+          // after each. The opener has none of its own before it, so import
+          // writes the closing fence's there
+          const openSentinel: MdToken = { type: 'paragraph', runs: [], [openKey]: true };
           closeSentinel.blankLinesBefore = src.blankLinesBefore;
           closeSentinel.blankLinesAfter = src.blankLinesAfter;
-          result.splice(i, 1,
-            closeSentinel,
-            { type: 'paragraph', runs: [], [openKey]: true },
-          );
+          openSentinel.blankLinesAfter = src.blankLinesAfter;
+          result.splice(i, 1, closeSentinel, openSentinel);
           i++; // skip past both sentinels
           activeOrientation = orientation;
         } else {

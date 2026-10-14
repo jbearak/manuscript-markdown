@@ -5215,6 +5215,40 @@ describe('Sentinel gap round-trip', () => {
     expect(result.markdown).toContain('<!-- landscape -->\n## Wide Table');
     expect(result.markdown).toContain('Content.\n<!-- /landscape -->');
   });
+
+  test.each([
+    ['a portrait section in a landscape one', ['landscape', 'portrait'], false],
+    ['a landscape section in a portrait one', ['portrait', 'landscape'], false],
+    ['a landscape section in a landscape one', ['landscape', 'landscape'], false],
+    ['a portrait section in a landscape one, and a landscape one in that', ['landscape', 'portrait', 'landscape'], false],
+    ['a landscape section in a portrait one, and a portrait one in that', ['portrait', 'landscape', 'portrait'], false],
+    ['a portrait section in a landscape one, in a style block', ['landscape', 'portrait'], true],
+    ['a portrait section in a landscape one, and a landscape one in that, in a style block', ['landscape', 'portrait', 'landscape'], true],
+  ])('keeps the blank lines after the opening fence of %s, which import writes after a closing fence', async (_name, fences, boxed) => {
+    // The opener export made after the closing fence had no blank lines of
+    // its own, so import wrote the next line right after it. Import closes
+    // a style block at each section's fence and opens it again after
+    const open = boxed ? '<!-- style: box -->\n\n' : '';
+    const shut = boxed ? '\n\n<!-- /style -->' : '';
+    const start = (boxed ? '---\nstyles:\n  box:\n    font-style: italic\n---\n' : '') + 'A.\n\n<!-- ' + fences[0] + ' -->\n\n' + open + 'B.';
+    const close = '\n\n<!-- /' + fences[fences.length - 1] + ' -->\n';
+    for (const gap of ['\n\n', '\n\n\n']) {
+      for (const closed of [true, false]) {
+        let md = start;
+        let expected = start + shut;
+        fences.slice(1).forEach((fence, k) => {
+          const text = String.fromCharCode(67 + k) + '.';
+          md += gap + '<!-- ' + fence + ' -->' + gap + text;
+          expected += gap + '<!-- /' + fences[k] + ' -->' + gap + '<!-- ' + fence + ' -->' + gap + open + text + shut;
+        });
+        md += shut + (closed ? close : '\n');
+        expected += close;
+        const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+        expect(markdown).toBe(expected);
+        expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(expected);
+      }
+    }
+  });
 });
 
 describe('extractZoteroCitations', () => {
