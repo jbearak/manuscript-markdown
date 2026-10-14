@@ -3020,7 +3020,12 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
       if (run.type !== 'html_comment') continue;
       if (!REFERENCES_RE.test(run.text.trim())) continue;
       if (markerCount === 0) {
-        result.splice(i, 1, { type: 'paragraph', runs: [], bibliographyMarker: true });
+        // With the blank lines around its comment, which the sentinel gaps
+        // record, as a fence's
+        const marker: MdToken = { type: 'paragraph', runs: [], bibliographyMarker: true };
+        marker.blankLinesBefore = result[i].blankLinesBefore;
+        marker.blankLinesAfter = result[i].blankLinesAfter;
+        result.splice(i, 1, marker);
       } else {
         if (warnings) warnings.push('Multiple <!-- references --> markers found; only the first is used.');
         result.splice(i, 1);
@@ -10549,6 +10554,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // status preserved across it, and a custom property puts the marker
     // back before the section's opening fence on import.
     if (token.bibliographyMarker) {
+      // The blank lines around it, as around a fence, of which there is
+      // one, the first (see parseMd), which import writes them by
+      if (token.blankLinesBefore !== undefined) sentinelGaps['ref0'] = token.blankLinesBefore;
+      if (token.blankLinesAfter !== undefined) sentinelGaps['refa0'] = token.blankLinesAfter;
       body += BIBL_PLACEHOLDER;
       preserveCloseForNextToken = !!prevWasClose;
       biblAtSectionStart = prevWasClose && !state.inLandscapeSection && !state.inPortraitSection;
