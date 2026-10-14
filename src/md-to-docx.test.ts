@@ -4168,6 +4168,23 @@ describe('CriticMarkup without its closers in export in time linear in the text'
     const small = time(20000);
     expect(time(80000) / small).toBeLessThan(8);
   }, 60000);
+
+  it('reads {== repeated, critic highlights\' openers without their ==}, in a paragraph', () => {
+    // The == of each is a format highlight's opener, whose search for its
+    // closing == read each {== after it as a critic highlight in it, which
+    // none closed, to the text's end. The emphasis makes the time of the
+    // rest of the parse some 20 ms, which the searches took 12 times as
+    // long at 4 times the size
+    const input = (n: number) => ('{== ' + '*a* '.repeat(16)).repeat(n);
+    expect(parseMd(input(2)).map(token => [token.type, token.runs.some(run => run.highlight)])).toEqual([['paragraph', false]]);
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => parseMd(text));
+    };
+    time(1200);
+    const small = time(1200);
+    expect(time(4800) / small).toBeLessThan(8);
+  }, 60000);
 });
 
 describe('Blocks after a code fence in an HTML block or a list item', () => {

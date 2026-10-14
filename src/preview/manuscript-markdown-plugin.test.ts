@@ -2711,4 +2711,20 @@ describe('CriticMarkup without its closers in the preview', () => {
     const small = time(10000);
     expect(time(40000) / small).toBeLessThan(8);
   }, 60000);
+
+  it('renders ==} repeated, highlights\' closers without their {==, in time linear in their number', () => {
+    // Each == is a format highlight's opener, whose search for its closing
+    // == read on past each ==} after it to the text's end. The emphasis
+    // makes the time of the text's other rules some 20 ms, which the
+    // searches took 13 times as long at 4 times the size
+    const input = (n: number) => ('==} ' + '*a* '.repeat(18)).repeat(n);
+    expect(render(input(2))).not.toContain('<mark');
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => render(text));
+    };
+    time(1500);
+    const small = time(1500);
+    expect(time(6000) / small).toBeLessThan(8);
+  }, 60000);
 });
