@@ -15,7 +15,8 @@ import { overlapsCodeRegion, type CodeRegion } from './code-regions';
 // - Typed delimiter arrays (additionDelimiters, deletionDelimiters, substitutionDelimiters)
 //   enable per-type coloring: green for additions, red for deletions, modified for substitutions
 // - extractAllDecorationRanges(): preserve extractHighlightRanges() behavior for ==...==
-//   inside any CriticMarkup span
+//   inside any CriticMarkup span, and for {==...==} inside an addition, a deletion or
+//   one side of a substitution, where export and the preview show it
 // - Comment token scope: use meta.comment* not comment.block* — comment.block suppresses
 //   editor features (bracket matching, auto-complete, snippets)
 
@@ -128,104 +129,65 @@ function detectCommentIdOpener(text: string, i: number, len: number): number {
   return -1;
 }
 
+/** A CriticMarkup span: its opener at `start`, its text
+ *  [contentStart, contentEnd), and its 3-character closer at contentEnd.
+ *  `marker` is the opener's second character's code. */
+interface CriticSpan { start: number; contentStart: number; contentEnd: number; marker: number }
+
 /**
- * Replace all paired CriticMarkup delimiters with spaces, preserving string length.
- * This allows the format-highlight regex (`==...==`) to match across CriticMarkup
- * blocks without being blocked by `=` or `}` characters in the delimiters.
- *
- * Handles all five CriticMarkup delimiter pairs:
- *   {== ==}  (highlight)   — indexOf pairing
- *   {>> <<}  (comment)     — findMatchingClose (depth-aware, supports nesting)
- *   {++ ++}  (addition)    — indexOf pairing
- *   {-- --}  (deletion)    — indexOf pairing
- *   {~~ ~~}  (substitution) — indexOf pairing
- *
- * Only the 3-char open/close markers are replaced; content is left intact.
- * This preserves string length so character offsets map 1:1 back to the original.
- *
- * Example — format highlight inside critic:
- *   input:  "{==sentence with ==highlighted== word==}{>>comment<<}"
- *   masked: "   sentence with ==highlighted== word      comment   "
- *   → the regex finds ==highlighted== at the correct offset
- *
- * Example — critic inside format highlight:
- *   input:  "==text with {==commented==}{>>comment<<} more=="
- *   masked: "==text with    commented      comment    more=="
- *   → the regex finds the outer ==...== spanning the whole string
+ * The CriticMarkup spans of `text` in no other span, in order. Each opener
+ * is paired as extractAllDecorationRanges pairs it, and the next is looked
+ * for after its closer; an opener without a closer is text:
+ *   {== ==}, {++ ++}, {-- --}, {~~ ~~}  with the first closer after it
+ *   {>> <<}, {#id>> <<}                  with findMatchingClose (depth-aware)
  */
-export function maskCriticDelimiters(text: string): string {
-  const chars = text.split('');
-  const mask = (start: number, len: number) => {
-    for (let j = start; j < start + len; j++) chars[j] = ' ';
-  };
+function criticSpans(text: string): CriticSpan[] {
+  const spans: CriticSpan[] = [];
   const len = text.length;
   let i = 0;
   while (i < len) {
     if (text.charCodeAt(i) === 0x7B && i + 2 < len) { // '{'
       const c2 = text.charCodeAt(i + 1);
       const c3 = text.charCodeAt(i + 2);
-
-      if (c2 === 0x3D && c3 === 0x3D) { // {==
-        const ci = text.indexOf('==}', i + 3);
-        if (ci !== -1) {
-          mask(i, 3);
-          mask(ci, 3);
-          i = ci + 3; continue;
-        }
-      } else if (c2 === 0x3E && c3 === 0x3E) { // {>>
-        const ci = findMatchingClose(text, i + 3);
-        if (ci !== -1) {
-          mask(i, 3);
-          mask(ci, 3);
-          i = ci + 3; continue;
-        }
+      let contentStart = -1;
+      let ci = -1;
+      if (c2 === 0x3E && c3 === 0x3E) { // {>>
+        contentStart = i + 3;
+        ci = findMatchingClose(text, contentStart);
       } else if (c2 === 0x23) { // {# — possible {#id>>
-        const contentStart = detectCommentIdOpener(text, i, len);
-        if (contentStart !== -1) {
-          const ci = findMatchingClose(text, contentStart);
-          if (ci !== -1) {
-            mask(i, contentStart - i);
-            mask(ci, 3);
-            i = ci + 3; continue;
-          }
-        }
-      } else if (c2 === 0x2B && c3 === 0x2B) { // {++
-        const ci = text.indexOf('++}', i + 3);
-        if (ci !== -1) {
-          mask(i, 3);
-          mask(ci, 3);
-          i = ci + 3; continue;
-        }
-      } else if (c2 === 0x2D && c3 === 0x2D) { // {--
-        const ci = text.indexOf('--}', i + 3);
-        if (ci !== -1) {
-          mask(i, 3);
-          mask(ci, 3);
-          i = ci + 3; continue;
-        }
-      } else if (c2 === 0x7E && c3 === 0x7E) { // {~~
-        const ci = text.indexOf('~~}', i + 3);
-        if (ci !== -1) {
-          mask(i, 3);
-          mask(ci, 3);
-          i = ci + 3; continue;
-        }
+        contentStart = detectCommentIdOpener(text, i, len);
+        if (contentStart !== -1) ci = findMatchingClose(text, contentStart);
+      } else if (c2 === c3 && (c2 === 0x3D || c2 === 0x2B || c2 === 0x2D || c2 === 0x7E)) { // {== {++ {-- {~~
+        contentStart = i + 3;
+        ci = text.indexOf(String.fromCharCode(c2, c2) + '}', contentStart);
+      }
+      if (ci !== -1) {
+        spans.push({ start: i, contentStart, contentEnd: ci, marker: c2 });
+        i = ci + 3; continue;
       }
     }
     i++;
   }
-  return chars.join('');
+  return spans;
 }
 
 /**
  * Extract highlight ranges from document text, grouped by color key.
  * Returns a Map where keys are color identifiers (or 'critic') and values are offset ranges.
  *
- * Two-phase extraction:
- *   Phase 1 — CriticMarkup highlights `{==...==}`: matched on the original text.
- *   Phase 2 — Format highlights `==...==` with optional `{color}` suffix: matched
- *     on the masked text (see {@link maskCriticDelimiters}) so `=` and `}` in
- *     CriticMarkup delimiters don't block the `[^}=]+` character class.
+ * The reference for extractAllDecorationRanges's highlights, found another
+ * way: with regexes over the text of each CriticMarkup span (see
+ * {@link criticSpans}) and over the text outside them, in which each span
+ * reads as one run of text, as the editor reads past one whole.
+ *   Phase 1 — CriticMarkup highlights `{==...==}`: each span of them, and
+ *     those in an addition's or deletion's text or in one side of a
+ *     substitution, where export and the preview show them. One in a
+ *     comment, or one that runs out of its span or past a substitution's
+ *     `~>`, is text to them.
+ *   Phase 2 — Format highlights `==...==` with optional `{color}` suffix,
+ *     outside the spans and in each span's text by itself. One that would
+ *     close in a span it starts outside of, or outside the span it starts
+ *     in, is none.
  *
  * This supports nesting in both directions:
  *   • `{==sentence with ==highlighted== word==}` — format highlight inside critic
@@ -238,29 +200,57 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
     if (!result.has(key)) { result.set(key, []); }
     result.get(key)!.push({ start, end });
   };
+  const spans = criticSpans(text);
 
   // CriticMarkup highlights {==text==} — content only (skip delimiters)
-  const criticRe = /\{==([\s\S]*?)==\}/g;
-  let m;
-  while ((m = criticRe.exec(text)) !== null) {
-    push('critic', m.index + 3, m.index + m[0].length - 3);
+  const criticIn = (from: number, to: number) => {
+    const criticRe = /\{==([\s\S]*?)==\}/g;
+    const part = text.slice(from, to);
+    // None in text that holds another opener (see extractAllDecorationRanges)
+    if (/\{(?:\+\+|--|~~|>>|#[0-9A-Za-z_-]+>>)/.test(part)) return;
+    let c;
+    while ((c = criticRe.exec(part)) !== null) {
+      push('critic', from + c.index + 3, from + c.index + c[0].length - 3);
+    }
+  };
+  for (const span of spans) {
+    if (span.marker === 0x3D) { // {==
+      push('critic', span.contentStart, span.contentEnd);
+    } else if (span.marker === 0x2B || span.marker === 0x2D) { // {++ {--
+      criticIn(span.contentStart, span.contentEnd);
+    } else if (span.marker === 0x7E) { // {~~
+      const arrow = text.slice(span.contentStart, span.contentEnd).indexOf('~>');
+      if (arrow === -1) {
+        criticIn(span.contentStart, span.contentEnd);
+      } else {
+        criticIn(span.contentStart, span.contentStart + arrow);
+        criticIn(span.contentStart + arrow + 2, span.contentEnd);
+      }
+    }
   }
 
   // Colored highlights ==text=={color} and default highlights ==text==
-  // Run on masked text so `=` and `}` in CriticMarkup delimiters don't block matches
-  const masked = maskCriticDelimiters(text);
   const hlRe = /(?<![{=])==([^}=]+)==(?![}=])(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
-  while ((m = hlRe.exec(masked)) !== null) {
-    const mStart = m.index;
-    const mEnd = mStart + m[0].length;
-
-    const colorId = m[2];
-    if (colorId && VALID_COLOR_IDS.includes(colorId)) {
-      push(colorId, mStart, mEnd);
-    } else {
-      push(resolvedDefaultColor, mStart, mEnd);
+  const formatIn = (part: string, offset: number) => {
+    hlRe.lastIndex = 0;
+    let m;
+    while ((m = hlRe.exec(part)) !== null) {
+      const colorId = m[2];
+      const key = colorId && VALID_COLOR_IDS.includes(colorId) ? colorId : resolvedDefaultColor;
+      push(key, offset + m.index, offset + m.index + m[0].length);
     }
+  };
+  // Outside the spans, each a space for each of its characters, which keeps
+  // the offsets and passes [^}=]+, as a span does in the editor's scan, but
+  // is no color's, as a span's { is none
+  let outside = '';
+  let pos = 0;
+  for (const span of spans) {
+    outside += text.slice(pos, span.start) + ' '.repeat(span.contentEnd + 3 - span.start);
+    pos = span.contentEnd + 3;
   }
+  formatIn(outside + text.slice(pos), 0);
+  for (const span of spans) formatIn(text.slice(span.contentStart, span.contentEnd), span.contentStart);
 
   return result;
 }
@@ -457,8 +447,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
       // Look for == that is NOT preceded by { at j-1 in the original text
       if (text.charCodeAt(j) === 0x3D && j + 1 < regionEnd && text.charCodeAt(j + 1) === 0x3D) {
         // Check negative lookbehind: not preceded by { or =, but for the
-        // = of a comment's {== before the region, which masking makes a
-        // space (see maskCriticDelimiters), as in {====a====}
+        // = of the span's opener before the region, as in {====a====},
+        // which the preview reads as a highlight in the span
         if (j > regionStart && isBlockedPredecessor(j, regionEnd)) {
           j++;
           continue;
@@ -511,6 +501,34 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     }
   };
 
+  /**
+   * Record the critic highlights {==...==} in an addition's or deletion's
+   * text, or in one side of a substitution, [regionStart, regionEnd), which
+   * export and the preview show highlighted there. One that runs past the
+   * region, as past a substitution's ~>, is its span's text to them, as one
+   * in a comment is. A region that holds another CriticMarkup opener, as
+   * {>> or {~~, records none, as before: a {== in a comment there, or one
+   * across a substitution's ~>, is text to them.
+   */
+  const scanCriticHighlights = (regionStart: number, regionEnd: number) => {
+    for (let p = regionStart; p + 3 <= regionEnd; p++) {
+      if (text.charCodeAt(p) !== 0x7B) continue;
+      const c2 = text.charCodeAt(p + 1);
+      if ((c2 === 0x2B || c2 === 0x2D || c2 === 0x7E || c2 === 0x3E) && text.charCodeAt(p + 2) === c2) return;
+      if (c2 === 0x23 && detectCommentIdOpener(text, p, regionEnd) !== -1) return;
+    }
+    for (let p = regionStart; p + 3 <= regionEnd; p++) {
+      if (text.charCodeAt(p) !== 0x7B || text.charCodeAt(p + 1) !== 0x3D || text.charCodeAt(p + 2) !== 0x3D) continue;
+      // The first ==} after it, as for one outside a span
+      const ci = closers.next('==}', p + 3);
+      if (ci === -1 || ci + 3 > regionEnd) return;
+      highlightDelimiters.push({ start: p, end: p + 3 });
+      pushHighlight('critic', p + 3, ci);
+      highlightDelimiters.push({ start: ci, end: ci + 3 });
+      p = ci + 2;
+    }
+  };
+
   const len = text.length;
   let i = 0;
   while (i < len) {
@@ -524,8 +542,9 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           additionDelimiters.push({ start: i, end: i + 3 });
           if (ci > i + 3) additions.push({ start: i + 3, end: ci });
           additionDelimiters.push({ start: ci, end: ci + 3 });
-          // Scan content for nested format highlights
+          // Scan content for nested format and critic highlights
           scanFormatHighlights(i + 3, ci);
+          scanCriticHighlights(i + 3, ci);
           i = ci + 3; continue;
         }
       } else if (c2 === 0x2D && c3 === 0x2D) { // {--
@@ -534,8 +553,9 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           deletionDelimiters.push({ start: i, end: i + 3 });
           if (ci > i + 3) deletions.push({ start: i + 3, end: ci });
           deletionDelimiters.push({ start: ci, end: ci + 3 });
-          // Scan content for nested format highlights
+          // Scan content for nested format and critic highlights
           scanFormatHighlights(i + 3, ci);
+          scanCriticHighlights(i + 3, ci);
           i = ci + 3; continue;
         }
       } else if (c2 === 0x7E && c3 === 0x7E) { // {~~
@@ -552,8 +572,10 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
             if (ci > newStart) substitutionNew.push({ start: newStart, end: ci });
           }
           substitutionDelimiters.push({ start: ci, end: ci + 3 });
-          // Scan content for nested format highlights
+          // Scan content for nested format and critic highlights
           scanFormatHighlights(i + 3, ci);
+          if (cai === -1) scanCriticHighlights(i + 3, ci);
+          else { scanCriticHighlights(i + 3, i + 3 + cai); scanCriticHighlights(i + 3 + cai + 2, ci); }
           i = ci + 3; continue;
         }
       } else if (c2 === 0x3E && c3 === 0x3E) { // {>>
@@ -593,15 +615,13 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     }
 
     // Detect format highlights ==...== and ==...=={color} outside CriticMarkup.
-    // Must replicate the masking approach: CriticMarkup delimiters ({== ==} {>> <<} etc.)
-    // are treated as transparent (as if replaced with spaces), so format highlights can
-    // span across CriticMarkup spans.
+    // A CriticMarkup span reads as one run of text, so a format highlight can
+    // hold whole spans but can't close in one.
     if (text.charCodeAt(i) === 0x3D && i + 1 < len && text.charCodeAt(i + 1) === 0x3D) {
       // Check negative lookbehind: not preceded by { or =
       if (!isBlockedPredecessor(i, len)) {
-        // Scan forward for content, skipping CriticMarkup delimiters.
-        // In the masked approach, delimiters become spaces (which pass [^}=]+).
-        // Here we skip over them and check that non-delimiter chars match [^}=]+.
+        // Scan forward for content, skipping CriticMarkup spans.
+        // A span passes [^}=]+ whole, whatever its text; other chars must match it.
         // When we skip CriticMarkup spans, we also fully process them (record their
         // ranges, delimiters, and nested format highlights) since the main loop will
         // jump past the entire format highlight match.
@@ -667,6 +687,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 if (ci > k + 3) additions.push({ start: k + 3, end: ci });
                 additionDelimiters.push({ start: ci, end: ci + 3 });
                 scanFormatHighlights(k + 3, ci);
+                scanCriticHighlights(k + 3, ci);
                 hasContent = true; k = ci + 3; continue;
               }
             } else if (d2 === 0x2D && d3 === 0x2D) { // {--
@@ -676,6 +697,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 if (ci > k + 3) deletions.push({ start: k + 3, end: ci });
                 deletionDelimiters.push({ start: ci, end: ci + 3 });
                 scanFormatHighlights(k + 3, ci);
+                scanCriticHighlights(k + 3, ci);
                 hasContent = true; k = ci + 3; continue;
               }
             } else if (d2 === 0x7E && d3 === 0x7E) { // {~~
@@ -693,6 +715,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 }
                 substitutionDelimiters.push({ start: ci, end: ci + 3 });
                 scanFormatHighlights(k + 3, ci);
+                if (cai === -1) scanCriticHighlights(k + 3, ci);
+                else { scanCriticHighlights(k + 3, k + 3 + cai); scanCriticHighlights(k + 3 + cai + 2, ci); }
                 hasContent = true; k = ci + 3; continue;
               }
             }
