@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import JSZip from 'jszip';
 import { convertDocx, extractZoteroPrefs } from './converter';
 import { convertMdToDocx } from './md-to-docx';
-import { escapeXmlAttribute, xmlBuilder, xmlParser } from './xml-parser';
+import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters, xmlBuilder, xmlParser } from './xml-parser';
 import { fastestRun } from './test-timing';
 import { xmlAttribute } from './xml-elements';
 
@@ -115,5 +115,38 @@ describe('import of a part with more than a thousand references to entities', ()
       + '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
       + '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="ZOTERO_PREF_1"><vt:lpwstr>' + escape(prefs) + '</vt:lpwstr></property></Properties>');
     expect((await extractZoteroPrefs(zip))?.styleId).toBe('http://www.zotero.org/styles/apa');
+  });
+});
+
+describe('XML\'s characters', () => {
+  // UTF-16 units at the edges of XML's characters and of the surrogates,
+  // and those Bun 1.3.9's regular expressions with the u flag read two of
+  // as one character past U+FFFF: one from U+F800 to U+FBFF, or a lead
+  // surrogate, and one from U+FC00 to U+FFFF, or a trail surrogate, after it
+  const UNITS = [0x0, 0x8, 0x9, 0xA, 0xD, 0x1F, 0x20, 0x41, 0xD7FF, 0xD800, 0xDBFF, 0xDC00, 0xDFFF, 0xE000,
+    0xF7FF, 0xF800, 0xF8FF, 0xF900, 0xFB01, 0xFBFF, 0xFC00, 0xFE0F, 0xFF0C, 0xFFFD, 0xFFFE, 0xFFFF];
+  const isXml = (code: number) => code === 0x9 || code === 0xA || code === 0xD || code >= 0x20 && code <= 0xD7FF
+    || code >= 0xE000 && code <= 0xFFFD || code >= 0x10000 && code <= 0x10FFFF;
+  /** Text's characters, as UTF-16 writes them, a lone surrogate as itself */
+  const characters = (text: string) => {
+    const out: string[] = [];
+    for (let i = 0; i < text.length; i++) {
+      const pair = /^[\uD800-\uDBFF][\uDC00-\uDFFF]/.test(text.slice(i, i + 2));
+      out.push(text.slice(i, pair ? i + 2 : i + 1));
+      if (pair) i++;
+    }
+    return out;
+  };
+
+  it('are found and removed by code point, in every text of one to three of the units at their edges', () => {
+    // Bun 1.3.9 read U+F8FF U+FFFE as one character, which XML allows, with
+    // a regular expression's u flag, so export kept U+FFFE
+    const texts = UNITS.flatMap(a => [[a], ...UNITS.flatMap(b => [[a, b], ...UNITS.map(c => [a, b, c])])]).map(units => String.fromCharCode(...units));
+    const wrong = texts.filter(text => {
+      const kept = characters(text).filter(character => isXml(character.codePointAt(0)!));
+      const removed = withoutNonXmlCharacters(text);
+      return hasNonXmlCharacter(text) !== (kept.join('') !== text) || removed.text !== kept.join('') || removed.removed !== characters(text).length - kept.length;
+    });
+    expect(wrong.map(text => [...text].map(c => c.charCodeAt(0).toString(16)).join(' '))).toEqual([]);
   });
 });

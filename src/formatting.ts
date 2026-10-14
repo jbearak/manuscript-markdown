@@ -5,6 +5,7 @@ import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { separatorAlign, type TableAlign } from './grid-table-preprocess';
 import { maxOf } from './arrays';
 import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, preprocessCriticMarkup } from './critic-markup';
+import { hasNonXmlCharacter } from './xml-parser';
 
 export interface TextTransformation {
   newText: string;
@@ -692,13 +693,6 @@ function formatGridContentRow(cells: string[], columnWidths: number[], pad: bool
   return '| ' + rendered.join(' | ') + ' |';
 }
 
-/** A character XML 1.0 can't hold: a control character other than a tab
- *  or line end, or U+FFFE or U+FFFF. Word's text can't hold one, so export
- *  drops it, import's writers take some for marks of their own, as U+0007
- *  for a bare link's, and Markdown reads one written as a reference, as
- *  &#7;, as U+FFFD, so a cell with one can't be written as it is. */
-const NOT_XML_CHARACTER = /[^\t\n\r\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/u;
-
 /** An HTML table's cell as Word's, as export reads it: its runs, with
  *  each <a> a link of its own, numbered from `links`, and each <br> a line
  *  break, in the link of the <a> it's in, or undefined where a run is one a
@@ -710,7 +704,13 @@ function htmlCellAsWord(cell: HtmlTableCell, links: { count: number }): TableCel
   let link = 0;
   for (const run of cell.runs) {
     const para = paragraphs[paragraphs.length - 1];
-    if (NOT_XML_CHARACTER.test(run.text) || run.href && NOT_XML_CHARACTER.test(run.href)) return undefined;
+    // A character XML 1.0 can't hold, a control character other than a tab
+    // or line end, or U+FFFE or U+FFFF. Word's text can't hold one, so
+    // export drops it, import's writers take some for marks of their own,
+    // as U+0007 for a bare link's, and Markdown reads one written as a
+    // reference, as &#7;, as U+FFFD, so a cell with one can't be written as
+    // it is
+    if (hasNonXmlCharacter(run.text) || run.href && hasNonXmlCharacter(run.href)) return undefined;
     if (run.linkStart) link = ++links.count;
     const linked = run.href ? { href: run.href, link } : {};
     // A line break's the formatting around it, as text's, which Word shows

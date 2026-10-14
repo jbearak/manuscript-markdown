@@ -1653,6 +1653,18 @@ describe('HTML table support for Expand/Compact Table', () => {
   });
 
   it.each([
+    ['text', 'a\uF8FF\uFFFEb'],
+    ['a link\'s URL', '<a href="u\uFB01\uFFFF">x</a>'],
+  ])('leaves a table as HTML with U+FFFE or U+FFFF after a character Bun 1.3.9\'s regular expressions read with it as one, in %s in a cell', (_name, cell) => {
+    // Under Bun 1.3.9, which the CLI's builds run, the check read U+F8FF
+    // U+FFFE, or U+FB01 U+FFFF, as one character past U+FFFF, which XML
+    // holds, and wrote the table as Markdown with a character Word can't hold
+    const html = '<table><tr><th>h</th></tr><tr><td>' + cell + '</td></tr></table>';
+    expect(compactTable(html).newText).toBe(html);
+    expect(reflowTable(html).newText).toBe(html);
+  });
+
+  it.each([
     ['a private-use character', '&#xE000;', '\uE000'],
     ['an object replacement character', '&#xFFFC;', '\uFFFC'],
   ])('Compact Table and Expand Table keep %s in an HTML cell, which Word\'s text holds', (_name, reference, ch) => {

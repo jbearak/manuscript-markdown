@@ -6855,6 +6855,20 @@ describe('Characters XML can\'t hold', () => {
     expect(warnings).toContain('Removed 4 characters a Word document can\'t hold, such as control characters');
   });
 
+  it.each([
+    ['U+F8FF', '\uF8FF'],
+    ['U+FB01, a ligature', '\uFB01'],
+  ])('removes U+FFFE after %s, which Bun 1.3.9\'s regular expressions read with it as one character XML holds', async (_name, before) => {
+    // Under Bun 1.3.9, which CI and the CLI's builds run, the pass read the
+    // two as one character past U+FFFF, so U+FFFE stayed, and Word couldn't
+    // read the part
+    const { docx, warnings } = await convertMdToDocx('a' + before + '\uFFFEb \uFFFE c');
+    const xml = await (await import('jszip')).default.loadAsync(docx).then(zip => zip.file('word/document.xml')!.async('string'));
+    expect(xml.includes('\uFFFE')).toBe(false);
+    expect(xml).toContain('a' + before + 'b  c');
+    expect(warnings).toContain('Removed 2 characters a Word document can\'t hold, such as control characters');
+  });
+
   it('keeps a space it leaves at the edge of a run\'s text', async () => {
     // Written without xml:space="preserve", which a space at the edge needs
     // and the character had kept from it, Word dropped the space
