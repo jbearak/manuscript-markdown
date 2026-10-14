@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
-import { generateCitation } from './md-to-docx-citations';
-import { BibtexEntry } from './bibtex-parser';
+import { buildItemData, generateCitation } from './md-to-docx-citations';
+import { BibtexEntry, parseBibtex } from './bibtex-parser';
 
 describe('Property Tests: citation field code reconstruction', () => {
   it('Property 10: Citations with Zotero metadata produce valid field codes', () => {
@@ -117,6 +117,32 @@ describe('Property Tests: citation field code reconstruction', () => {
         }
       ),
       { numRuns: 20 }
+    );
+  });
+});
+
+describe('Property Tests: BibTeX names with groups', () => {
+  /**
+   * A name of words, groups of words, spaces and commas splits as BibTeX
+   * splits it, only outside its groups: none of its parts in citeproc's
+   * data holds a group's brace, and together they hold each of its
+   * characters but its spaces, braces and commas, once, in any order.
+   */
+  it('splits a name only outside its groups, losing no text', () => {
+    const atom = fc.constantFrom('John', 'Ann', 'van', '{van Beethoven}', '{Mary Ann}', '{Smith, Jones}', '{x}', '{a {b} c}', ' ', ', ');
+    fc.assert(
+      fc.property(fc.array(atom, { minLength: 1, maxLength: 8 }).map(atoms => atoms.join('')), author => {
+        const entry = parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b');
+        fc.pre(entry !== undefined && /[^ ,{}]/.test(author));
+        const cited = (buildItemData(entry!).author ?? []) as Array<{ family?: string; given?: string; literal?: string }>;
+        const failure = JSON.stringify(author) + ' read as ' + JSON.stringify(cited);
+        const text = (value: string) => [...value.replace(/[\s{},]/g, '')].sort().join('');
+        const parts = cited.map(name => name.literal ?? (name.given ?? '') + (name.family ?? '')).join('');
+        if (cited.some(name => name.literal === undefined && /[{}]/.test((name.given ?? '') + (name.family ?? '')))) throw new Error(failure);
+        if (text(parts) !== text(author)) throw new Error(failure);
+        return true;
+      }),
+      { numRuns: 1000 }
     );
   });
 });
