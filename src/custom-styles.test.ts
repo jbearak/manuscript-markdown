@@ -1519,12 +1519,23 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     ['opening right before a section\'s closing fence',
       'p0\n\n<!-- landscape -->\n\np1\n\n<!-- style: box -->\n\n<!-- /landscape -->\n\n\np2\n\n<!-- /style -->\n',
       'p0\n\n<!-- landscape -->\n\np1\n\n<!-- /landscape -->\n\n<!-- style: box -->\n\n\np2\n\n<!-- /style -->\n'],
+    ['opening a section at the document\'s start with the bibliography\'s place first in it',
+      '<!-- style: box -->\n\n<!-- landscape -->\n\n<!-- references -->\n\np1\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      '<!-- landscape -->\n\n<!-- references -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n'],
+    ['opening a section at the document\'s start with the bibliography\'s place first in it, with other blank lines around each fence',
+      '<!-- style: box -->\n\n\n<!-- landscape -->\n\n<!-- references -->\n\n\n\np1\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      '<!-- landscape -->\n\n\n<!-- references -->\n\n<!-- style: box -->\n\n\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n'],
+    ['opening a section after a paragraph with the bibliography\'s place first in it, with other blank lines around each fence',
+      'p0\n\n\n<!-- style: box -->\n\n<!-- portrait -->\n\n\n<!-- references -->\n\np1\n\n<!-- /portrait -->\n\n<!-- /style -->\n',
+      'p0\n\n\n<!-- portrait -->\n\n<!-- references -->\n\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /portrait -->\n'],
   ])('keeps the blank lines around a style block\'s fence and a section\'s right beside it, with the block %s', async (_name, md, expected) => {
     // Import writes the two fences the other way around, as Word's section
     // break comes before the block's first paragraph, or after its last.
     // Each fence took its own blank lines with it, so the lines between
     // them went before the first, and those before the first between them:
-    // at the document's start, none
+    // at the document's start, none. With the bibliography's place between
+    // them, import writes the block's fence after that too, so each fence
+    // takes the place of the one before it
     const back = await trip(md);
     expect(back).toBe(expected);
     expect(await trip(back)).toBe(back);
@@ -1540,6 +1551,37 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     const back = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
     expect(back).toBe(frontmatter + '<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n<!-- /landscape -->\n');
     expect((await convertDocx((await convertMdToDocx(back)).docx)).markdown).toBe(back);
+  });
+
+  it.each([
+    ['at the document\'s start',
+      '<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n# h\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      '<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n# h\n\n<!-- /landscape -->\n'],
+    ['after a paragraph, at the document\'s end',
+      'p0\n\n<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n# h\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      'p0\n\n<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n# h\n\n<!-- /landscape -->\n'],
+    ['with no closing fence',
+      'p0\n\n<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n# h\n\n<!-- /landscape -->\n',
+      'p0\n\n<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n# h\n\n<!-- /landscape -->\n'],
+    ['with two headings',
+      '<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n# h\n\n## i\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      '<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n# h\n\n## i\n\n<!-- /landscape -->\n'],
+    ['with a quote',
+      'p0\n\n<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n> q\n\n<!-- /landscape -->\n\n<!-- /style -->\n',
+      'p0\n\n<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n> q\n\n<!-- /landscape -->\n'],
+    ['with two blank lines after it',
+      'p0\n\n<!-- style: box -->\n\n<!-- landscape -->\n\np1\n\n# h\n\n<!-- /landscape -->\n\n<!-- /style -->\n\n\np2\n',
+      'p0\n\n<!-- landscape -->\n\n<!-- style: box -->\n\np1\n\n<!-- /style -->\n\n# h\n\n<!-- /landscape -->\n\n\np2\n'],
+  ])('keeps a blank line after the closing fence import writes before the heading a style block in a section ends with, %s', async (_name, md, expected) => {
+    // Word has no record of such blocks after the block's last paragraph
+    // past a section's fence in it, so import closes the block right after
+    // that paragraph, and writes the section's fence after them. The fence
+    // it closes the block with took the blank lines after the block's own
+    // closing fence, before what comes after those blocks, and the section's
+    // its own
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
   });
 
   it.each([
