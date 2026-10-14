@@ -7710,6 +7710,29 @@ describe('Zotero citation roundtrip', () => {
     expect([...parseBibtex(bib).values()][0]?.fields.get('title')).toBe(title);
   });
 
+  // Which read back as an en dash and curly quotes once TeX's ligatures
+  // were read
+  test('generateBibTeX writes hyphens and quotes TeX would join apart, but not in names', () => {
+    const title = "A--B ---C ``D'' E";
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(Test)',
+      items: [{
+        authors: [{ family: 'Smith--Jones', given: 'Ann' }, { family: "O''Brien", given: 'B``C' }],
+        title, year: '2020', journal: 'J', volume: '1',
+        pages: '1--2', doi: '', type: 'article-journal', fullItemData: {},
+      }],
+    }];
+    const bib = generateBibTeX(citations, buildCitationKeyMap(citations));
+
+    expect(bib).toContain("title = {{A-{}-B -{}-{}-C `{}`D'{}' E}}");
+    expect(bib).toContain('pages = {1-{}-2}');
+    // As main writes them
+    expect(bib).toContain("author = {{Smith--Jones}, Ann and O''Brien, B``C}");
+    const fields = [...parseBibtex(bib).values()][0]!.fields;
+    expect(fields.get('title')).toBe(title);
+    expect(fields.get('pages')).toBe('1--2');
+  });
+
   test('generateBibTeX omits zotero fields when absent', () => {
     const citations: ZoteroCitation[] = [{
       plainCitation: '(Test)',

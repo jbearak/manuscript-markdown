@@ -6,6 +6,9 @@ describe('BibTeX Parser Property Tests', () => {
   // A field's whitespace as BibTeX reads it: a run of it one space, and
   // none at either end
   const asBibtexReadsIt = (s: string) => s.replace(/[ \t\r\n\f]+/g, ' ').replace(/^ | $/g, '');
+  // A ligature TeX makes of a pair, as -- or ``, which reads as a dash or a
+  // quotation mark
+  const TEX_LIGATURE = /--|``|''/;
 
   /**
    * Property 1 (Fault Condition): For any string s containing no braces,
@@ -14,10 +17,11 @@ describe('BibTeX Parser Property Tests', () => {
    */
   it('Property 1: double-braced field value is stripped to plain content', () => {
     // Exclude braces (would break the double-brace structure), quotes and backslashes
-    // (would confuse the fieldRegex quote-delimiter and escape branches), and
-    // ties, which read as no-break spaces.
+    // (would confuse the fieldRegex quote-delimiter and escape branches), ties,
+    // which read as no-break spaces, and the pairs of hyphens, backticks and
+    // apostrophes TeX joins, which read as dashes and quotation marks.
     const noBraceString = fc.string({ minLength: 0, maxLength: 40 })
-      .filter(s => !s.includes('{') && !s.includes('}') && !s.includes('"') && !s.includes('\\') && !s.includes('~'));
+      .filter(s => !s.includes('{') && !s.includes('}') && !s.includes('"') && !s.includes('\\') && !s.includes('~') && !TEX_LIGATURE.test(s));
 
     fc.assert(
       fc.property(noBraceString, (s) => {
@@ -35,14 +39,15 @@ describe('BibTeX Parser Property Tests', () => {
   });
 
   /**
-   * Property 3 (Preservation): For any string s that contains no braces, quotes, backslashes or ties,
+   * Property 3 (Preservation): For any string s that contains no braces, quotes, backslashes, ties
+   * or pairs of hyphens, backticks or apostrophes, which TeX joins,
    * parsing @article{k, title = {s}} yields s unchanged (single-brace path unaffected).
    * Validates: Requirements 3.1, 3.4
    */
   it('Property 3 (Preservation): single-braced field value is unchanged', () => {
     const safeSingleBraceString = fc.string({ minLength: 1, maxLength: 40 })
       .filter(s =>
-        !s.includes('}') && !s.includes('"') && !s.includes('{') && !s.includes('\\') && !s.includes('~')
+        !s.includes('}') && !s.includes('"') && !s.includes('{') && !s.includes('\\') && !s.includes('~') && !TEX_LIGATURE.test(s)
       );
 
     fc.assert(

@@ -292,6 +292,13 @@ function hasUnescapedSpecial(output: string): boolean {
       continue;
     }
 
+    // The empty group written between hyphens or quotes TeX would join,
+    // as -{}-
+    if (output.startsWith('{}', index) && /[-`']/.test(output[index - 1] ?? '') && output[index + 2] === output[index - 1]) {
+      index += 2;
+      continue;
+    }
+
     if (output[index] === '\\') {
       if (index + 1 >= output.length) return true;
       index += 2;
@@ -306,6 +313,11 @@ function hasUnescapedSpecial(output: string): boolean {
 
 // Generator: strings that mix special and non-special characters
 const bibtexInputArb = fc.oneof(
+  // Hyphens and quotes TeX would join, among braces
+  fc.array(
+    fc.constantFrom('-', '`', "'", '{', '}', 'a'),
+    { minLength: 1, maxLength: 30 },
+  ).map(chars => chars.join('')),
   // Mixed strings: normal chars interspersed with specials
   fc.string({ minLength: 0, maxLength: 50 }),
   // Strings composed purely of special characters

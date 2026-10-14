@@ -1,6 +1,7 @@
 // --- Implementation notes ---
 // - Verbatim fields bypass whitespace collapsing, brace stripping, TeX decoding, NFC normalization, and serialization escaping.
-// - TeX decoding reads standard text accents, the letters and symbols of text commands (\ss, \textregistered), ties, empty groups and \url's argument, outside math, but only the accents in names (author, editor); unknown commands remain literal.
+// - TeX decoding reads standard text accents, the letters and symbols of text commands (\ss, \textregistered), ties, empty groups, dashes and quotes, and \url's argument, outside math, but only the accents in names (author, editor); unknown commands remain literal.
+// - Escaping writes an empty group between the hyphens and quotes TeX would join, as -{}-, but not in names, so a value reads back as it was.
 // - Non-command braces remain intact; braces owned by recognized accent expressions and text symbols are consumed.
 // - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly.
 // - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string).
@@ -364,6 +365,14 @@ function bracesPair(text: string, from: number, to: number): boolean {
   return depth === 0;
 }
 
+// TeX's ligatures, as LaTeX prints them, the longest first
+const BIBTEX_LIGATURES: ReadonlyArray<readonly [string, string]> = [
+  ['---', '\u2014'],
+  ['--', '\u2013'],
+  ['``', '\u201C'],
+  ["''", '\u201D'],
+];
+
 // The \url command and the { of its argument, after the spaces TeX skips
 const URL_AT = /\\url(?![A-Za-z])[ \t]*\{/y;
 
@@ -387,15 +396,16 @@ function unknownCommandEnd(input: string, slash: number): number {
 
 /** Decode standard BibTeX/TeX text accents and text symbols while retaining
  *  every brace that is not proven to belong solely to a recognized accent
- *  expression or text symbol. A tie, ~, is a no-break space, and an empty
- *  group, {}, nothing, but not in math or a \url's argument, which prints
- *  as written (see readUrlsAndMath), nor where a command could take it as
- *  an argument (see couldBeArgumentAt), as in \foo{} or \textcolor{red}{}.
- *  In a list of `names`, only the accents are read, as on main: BibTeX
- *  splits the names, splits a name's words at its ties, and reads each
- *  word's case, before TeX reads a command, so a name would need the rest
- *  read once it's split, and serializeBibtex to write back what was read,
- *  a later step's. */
+ *  expression or text symbol. A tie, ~, is a no-break space, an empty
+ *  group, {}, nothing, and a ligature, as -- or ``, the dash or quotation
+ *  mark LaTeX prints, but not in math or a \url's argument, which prints
+ *  as written (see readUrlsAndMath), nor, for an empty group, where a
+ *  command could take it as an argument (see couldBeArgumentAt), as in
+ *  \foo{} or \textcolor{red}{}. In a list of `names`, only the accents are
+ *  read, as on main: BibTeX splits the names, splits a name's words at its
+ *  ties, and reads each word's case, before TeX reads a command, so a name
+ *  would need the rest read once it's split, and serializeBibtex to write
+ *  back what was read, a later step's. */
 function decodeBibtexText(input: string, names = false): string {
   let output = '';
   let index = 0;
@@ -471,6 +481,15 @@ function decodeBibtexText(input: string, names = false): string {
         const end = unknownCommandEnd(input, index);
         output += input.slice(index, end);
         index = end;
+        continue;
+      }
+    }
+
+    if (!names && !asWritten && (input[index] === '-' || input[index] === '`' || input[index] === "'")) {
+      const ligature = BIBTEX_LIGATURES.find(([source]) => input.startsWith(source, index));
+      if (ligature) {
+        output += ligature[1];
+        index += ligature[0].length;
         continue;
       }
     }
@@ -565,18 +584,22 @@ export function unescapeBibtexPunctuation(s: string): string {
 }
 
 /** Escape semantic text for BibTeX while keeping literal tilde and circumflex
- *  distinct from their accent-command spellings. */
-export function escapeBibtexText(s: string): string {
-  return s.replace(/([&%$#_{}~^\\])/g, char => {
+ *  distinct from their accent-command spellings, and, but not in `names`,
+ *  which the parser reads as main did, with an empty group after each
+ *  hyphen or quote TeX would join to the next, as -{}-, which reads as --,
+ *  where -- reads as an en dash. */
+export function escapeBibtexText(s: string, names = false): string {
+  return s.replace(names ? /[&%$#_{}~^\\]/g : /[&%$#_{}~^\\]|([-`'])(?=\1)/g, (char, joined: string | undefined) => {
+    if (typeof joined === 'string') return joined + '{}';
     if (char === '~') return '\\textasciitilde{}';
     if (char === '^') return '\\textasciicircum{}';
     return '\\' + char;
   });
 }
 
-function escapeBibtex(s: string): string {
+function escapeBibtex(s: string, names = false): string {
   // Unescape punctuation first to avoid double-escaping on semantic round-trips.
-  return escapeBibtexText(unescapeBibtexPunctuation(s));
+  return escapeBibtexText(unescapeBibtexPunctuation(s), names);
 }
 
 /** Whether a backslash escapes the character at `index`: an odd run of
@@ -1438,7 +1461,7 @@ export function serializeBibtex(entries: Map<string, BibtexEntry>): string {
       let escapedValue = value;
 
       if (!VERBATIM_BIBTEX_FIELDS.has(fieldName)) {
-        escapedValue = escapeBibtex(value);
+        escapedValue = escapeBibtex(value, AUTHOR_FIELDS.has(fieldName));
       }
 
       lines.push(`  ${fieldName} = {${escapedValue}},`);
@@ -2018,7 +2041,7 @@ export function mergeBibtex(existing: string, produced: string): string {
         const value = existingEntry.fields.get(fName) ?? '';
         const escapedValue = VERBATIM_BIBTEX_FIELDS.has(fName)
           ? value
-          : escapeBibtex(value);
+          : escapeBibtex(value, AUTHOR_FIELDS.has(fName.toLowerCase()));
         fieldTexts.push(formatBibtexFieldLine(fName, escapedValue, indent));
       }
 
