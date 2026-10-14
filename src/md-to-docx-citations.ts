@@ -144,6 +144,16 @@ const RPR_ORDER = [
   'em', 'lang', 'eastAsianLayout', 'specVanish', 'oMath', 'rPrChange',
 ];
 
+/** CT_PPrBase's children in schema order, then those CT_PPr adds after
+ *  them, the record of a tracked change to them last */
+const PPR_ORDER = [
+  'pStyle', 'keepNext', 'keepLines', 'pageBreakBefore', 'framePr', 'widowControl', 'numPr', 'suppressLineNumbers',
+  'pBdr', 'shd', 'tabs', 'suppressAutoHyphens', 'kinsoku', 'wordWrap', 'overflowPunct', 'topLinePunct',
+  'autoSpaceDE', 'autoSpaceDN', 'bidi', 'adjustRightInd', 'snapToGrid', 'spacing', 'ind', 'contextualSpacing',
+  'mirrorIndents', 'suppressOverlap', 'jc', 'textDirection', 'textAlignment', 'textboxTightWrap', 'outlineLvl',
+  'divId', 'cnfStyle', 'rPr', 'sectPr', 'pPrChange',
+];
+
 // A comment, a CDATA section or a processing instruction, whose text may
 // look like tags, or else a start, end or empty tag, its attributes in
 // either quotes
@@ -177,25 +187,38 @@ function topLevelElements(xml: string): Array<{ end: number; element: string }> 
 }
 
 /**
- * Run properties in schema order, so ones composed from several sources (a
- * citation's style, a highlight, a table's font, what a template's style
- * has) don't make Word reorder them on open and mark the document modified.
- * An element may hold others, as a tracked change's record does, and goes
- * with the whitespace before it, so each keeps its line where Word wrote
- * them on lines of their own. One the order doesn't know, as one of another
- * namespace, stays in its place, and the others go in order around it, as
- * does a comment, a CDATA section or a processing instruction among them,
- * which Word doesn't write there. Text among them leaves them as they were.
+ * Properties' elements, `children`, in the schema order `order` gives them,
+ * so ones composed from several sources don't make Word reorder them on open
+ * and mark the document modified. An element may hold others, as a tracked
+ * change's record does, and goes with the whitespace before it, so each
+ * keeps its line where Word wrote them on lines of their own. One the order
+ * doesn't know, as one of another namespace, stays in its place, and the
+ * others go in order around it, as does a comment, a CDATA section or a
+ * processing instruction among them, which Word doesn't write there. Text
+ * among them leaves them as they were, and so do elements in order already.
  */
-export function orderRPr(children: string): string {
+function inSchemaOrder(children: string, order: readonly string[]): string {
   const elements = topLevelElements(children);
   if (elements === undefined) return children;
-  const rank = (element: string) => RPR_ORDER.indexOf(/^<w:([A-Za-z]+)[\s/>]/.exec(element)?.[1] ?? '');
+  const rank = (element: string) => order.indexOf(/^<w:([A-Za-z]+)[\s/>]/.exec(element)?.[1] ?? '');
   // Each element with the whitespace before it
   const units = elements.map(({ end, element }, index) => ({ xml: children.slice(index === 0 ? 0 : elements[index - 1].end, end), rank: rank(element) }));
   const ordered = units.filter(unit => unit.rank >= 0).sort((a, b) => a.rank - b.rank);
   let next = 0;
   return units.map(unit => unit.rank >= 0 ? ordered[next++].xml : unit.xml).join('') + children.slice(elements.length > 0 ? elements[elements.length - 1].end : 0);
+}
+
+/** Run properties in schema order (see inSchemaOrder), as ones composed of a
+ *  citation's style, a highlight, a table's font or what a template's style
+ *  has */
+export function orderRPr(children: string): string {
+  return inSchemaOrder(children, RPR_ORDER);
+}
+
+/** Paragraph properties in schema order (see inSchemaOrder), as a template
+ *  style's with what export adds to them */
+export function orderPPr(children: string): string {
+  return inSchemaOrder(children, PPR_ORDER);
 }
 
 /** The formatting citeproc's HTML sets, as htmlToOoxmlRuns writes it */
