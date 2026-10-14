@@ -1754,6 +1754,18 @@ describe('Ordered list numbering', () => {
     expect(await roundTripWith(md, templateDocx)).toBe(md);
   });
 
+  // Which read a level override that held a processing instruction as one
+  // with something in it, so the list took the instance, whose level Word
+  // starts at 0, where it reads no element
+  test.each([['a processing instruction', '<?pi x?>'], ['a comment', '<!-- x -->'], ['a CDATA section', '<![CDATA[x]]>']])(
+    'starts a list in its own instance where a template has a level override holding only %s in the instance it would share', async (_name, other) => {
+      const templateDocx = await templateWithNumbering(numbering => withLevelStart(0, 3)(numbering)
+        .replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/, (instance: string) => instance + '<w:lvlOverride w:ilvl="0">' + other + '</w:lvlOverride>'));
+      const md = '3. a\n4. b';
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      expect(await levelOverridesOf(docx, 0)).toBe('<w:lvlOverride w:ilvl="0"><w:startOverride w:val="3"/></w:lvlOverride>');
+    });
+
   // A level override that holds a w:lvl with a start of its own, or none
   const overrideLvl = (start: string) => '<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0">' + start
     + '<w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl></w:lvlOverride>';
@@ -1834,6 +1846,23 @@ describe('Ordered list numbering', () => {
       + '<w:lvlOverride w:ilvl="2"><w:startOverride w:val="1"/></w:lvlOverride>');
     expect(strip((await convertDocx(docx)).markdown)).toBe(md);
   });
+
+  // Which a template's level override held beside its start: a processing
+  // instruction, kept as one, and a CDATA section's text, kept as text, in
+  // an override that held nothing else once its start went, or in one beside
+  // a start, where Word's schema has no text. The parser drops a comment.
+  test.each([['a processing instruction', '<?pi x?>'], ['a CDATA section', '<![CDATA[x]]>'], ['a comment', '<!-- x -->']])(
+    'keeps none of %s a template\'s level override holds in a sublist\'s numbering', async (_name, other) => {
+      const lvl = '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1)"/><w:lvlJc w:val="left"/></w:lvl>';
+      const templateDocx = await templateWithNumbering(numbering => numbering.replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/,
+        (instance: string) => instance + '<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/>' + lvl + other + '</w:lvlOverride>'
+          + '<w:lvlOverride w:ilvl="1"><w:startOverride w:val="1"/>' + other + '</w:lvlOverride>'));
+      const md = '1. a\n   - b\n     1. c\n2. d';
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      expect(await levelOverridesOf(docx, 2)).toBe('<w:lvlOverride w:ilvl="0">' + lvl + '</w:lvlOverride>'
+        + '<w:lvlOverride w:ilvl="2"><w:startOverride w:val="1"/></w:lvlOverride>');
+      expect(strip((await convertDocx(docx)).markdown)).toBe(md);
+    });
 
   test('puts no break before a numbered list after a bullet list at its level', async () => {
     // The sublist before it is numbered, not the list at the item's level
