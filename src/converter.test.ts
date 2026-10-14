@@ -14702,6 +14702,26 @@ describe('Blockquote round-trip', () => {
     expect(strip(once)).toBe(expected);
     expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
   });
+  test.each([
+    ['the bibliography\'s place, after two blank lines', 'A\n\n> q\n| a |\n| --- |\n| 1 |\n\n\n<!-- references -->\n\nB\n', 'A\n\n> q\n\n| a |\n| --- |\n| 1 |\n\n<!-- references -->\n\nB\n'],
+    ['the bibliography\'s place', 'A\n\n> q\n| a |\n| --- |\n| 1 |\n\n<!-- references -->\n\nB\n', 'A\n\n> q\n\n| a |\n| --- |\n| 1 |\n\n<!-- references -->\n\nB\n'],
+    ['a paragraph', 'A\n\n> q\n| a |\n| --- |\n| 1 |\n\nP\n', 'A\n\n> q\n\n| a |\n| --- |\n| 1 |\n\nP\n'],
+    ['a paragraph, after an alert', '> [!NOTE]\n> a\n| t |\n| --- |\n| 1 |\n\nP\n', '> [!NOTE]\n> a\n\n| t |\n| --- |\n| 1 |\n\nP\n'],
+    ['a paragraph, after a quote in a quote', '> a\n> > b\n| t |\n| --- |\n| 1 |\n\nP\n', '> a\n> > b\n\n| t |\n| --- |\n| 1 |\n\nP\n'],
+    ['a paragraph, after another table', '> q\n| a |\n| --- |\n| 1 |\n\n| b |\n| --- |\n| 2 |\n\nP\n', '> q\n\n| a |\n| --- |\n| 1 |\n\n| b |\n| --- |\n| 2 |\n\nP\n'],
+    ['display math', '> q\n| a |\n| --- |\n| 1 |\n\n$' + '$\nx\n$' + '$\n\nP\n', '> q\n\n| a |\n| --- |\n| 1 |\n\n$' + '$\nx\n$' + '$\n\nP\n'],
+    ['a paragraph, after an HTML table', '> q\n<table><tr><td>x</td></tr></table>\n\nP\n', '> q\n\n<table>\n  <tr>\n    <td>\n      <p>x</p>\n    </td>\n  </tr>\n</table>\n\nP\n'],
+  ])('keeps a blank line between a table right after a quote and %s', async (_name, md, expected) => {
+    // The quote ends at the table, with no blank line between them, which
+    // export records as the quote's blank lines after it. Import wrote
+    // those after the table instead, before what comes next, none, so the
+    // next export read a paragraph there as a row of the table, and the
+    // next import put the blank line back before the bibliography's place
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(strip(once)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
 });
 
 describe('A quote after a deeper one', () => {
