@@ -1,7 +1,7 @@
 import type MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import { type CodeRegion, computeMarkdownRegions, isInsideCodeRegion, mergeRegions } from './code-regions';
-import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
+import { computeDollarMathRegions, DOCX_DOLLAR_MATH_OPTIONS, isEscapedAt } from './math-delimiters';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines } from './line-map';
 
 // Placeholder used to preserve paragraph breaks inside CriticMarkup spans.
@@ -132,6 +132,94 @@ export function restoreCriticLineBreaks(content: string): string {
 interface CriticBlockAnalysis {
   source: string;
   inertRegions: CodeRegion[];
+  // A span over a line end can't start in a pipe table, whose cells
+  // markdown-it reads on their row's line alone, so its opener is text
+  // there (see isInTableCell). Joining the lines took the rows out of the
+  // table, as | a {++ | b |, its delimiter row and | {++c++} | d |, all
+  // one paragraph. A span from before the table, or from the start of its
+  // first line, to a closer in it still takes the lines, which the table
+  // is then text in, as a comment's sample of a table is. One region for
+  // each table, as two can touch, as a table and one in a quote after it,
+  // but for one in math (see tablesOutsideMath)
+  tableRegions: CodeRegion[];
+}
+
+/** `tableRegions` but for those a dollar math span with a line end
+ *  reaches, as in $$, then x {++a | b, --- | --- and c | d++}, then $$:
+ *  the block parse, which reads no math, reads a table there, where export
+ *  and the preview read the math, its lines joined with the span's. The
+ *  spans are those moveLeadingBreakOutsideCritic leaves alone, and those
+ *  read with the dollars in code and HTML too, as a closing $$ indented
+ *  four spaces after the table, which the block parse reads as code, is
+ *  the math's for export. Each is read with the display delimiters of two
+ *  dollars alone, and with those export reads too (see
+ *  DOCX_DOLLAR_MATH_OPTIONS), as $$, a table's lines and $$$. Any of them
+ *  takes the table out, so the rule reads no more tables than with one
+ *  alone. A bare LaTeX environment is in one, as preprocessing wraps it in
+ *  $$ first */
+function tablesOutsideMath(source: string, tableRegions: CodeRegion[], inertRegions: CodeRegion[]): CodeRegion[] {
+  if (tableRegions.length === 0) return tableRegions;
+  const overLines: CodeRegion[] = [];
+  for (const excluded of [inertRegions, undefined]) {
+    for (const options of [{}, DOCX_DOLLAR_MATH_OPTIONS]) {
+      for (const span of spansOverLines(source, computeDollarMathRegions(source, excluded, options))) overLines.push(span);
+    }
+  }
+  overLines.sort((a, b) => a.start - b.start);
+  if (overLines.length === 0) return tableRegions;
+  // The last end of the spans before the next, which may reach past it
+  let next = 0;
+  let reach = -1;
+  return tableRegions.filter(table => {
+    while (next < overLines.length && overLines[next].start < table.end) reach = Math.max(reach, overLines[next++].end);
+    return reach <= table.start;
+  });
+}
+
+/** The spans of `spans`, in order, with a line end, read from the end of
+ *  the line of the last, which a later one on that line reads again */
+function spansOverLines(source: string, spans: CodeRegion[]): CodeRegion[] {
+  const overLines: CodeRegion[] = [];
+  let lineEnd = -1;
+  for (const span of spans) {
+    if (lineEnd < span.start) {
+      lineEnd = span.start;
+      while (lineEnd < source.length && source.charCodeAt(lineEnd) !== 0x0A && source.charCodeAt(lineEnd) !== 0x0D) lineEnd++;
+    }
+    if (lineEnd < span.end) overLines.push(span);
+  }
+  return overLines;
+}
+
+/** The region of `regions`, sorted and apart, that holds `offset` */
+function regionAt(offset: number, regions: readonly CodeRegion[]): CodeRegion | undefined {
+  let lo = 0;
+  let hi = regions.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (offset < regions[mid].start) hi = mid - 1;
+    else if (offset >= regions[mid].end) lo = mid + 1;
+    else return regions[mid];
+  }
+  return undefined;
+}
+
+/** Whether an opener at `offset` is in a pipe table's cell (see
+ *  tableRegions): in a table, but for at the start of its first line's
+ *  text, past the indent and quote markers, where a span opens before the
+ *  cells, over the table's lines, as import writes a Word comment in ID
+ *  syntax whose text looks like a table, {#1>>a | b, --- | --- and c | d<<},
+ *  and as moveLeadingBreakOutsideCritic moves an opener from the end of
+ *  the line before, as in Before.{>>. Nor is it in one where a span before
+ *  it whose lines preprocessing joins ends at or past the table's start,
+ *  `joinedEnd`: a line of the table is then in a paragraph's line, which
+ *  leaves its rows a paragraph's lines */
+function isInTableCell(source: string, offset: number, tableRegions: readonly CodeRegion[], joinedEnd = -1): boolean {
+  const region = regionAt(offset, tableRegions);
+  if (!region || joinedEnd >= region.start) return false;
+  let textStart = region.start;
+  while (textStart < offset && (source[textStart] === ' ' || source[textStart] === '\t' || source[textStart] === '>')) textStart++;
+  return offset !== textStart;
 }
 
 interface CriticLeadingBreakAnalysis extends CriticBlockAnalysis {
@@ -144,13 +232,16 @@ function computeCriticBlockAnalysis(
   content: string,
   includeLists = false,
 ): CriticBlockAnalysis | CriticLeadingBreakAnalysis {
-  const { codeRegions, htmlRegions, listRegions } = computeMarkdownRegions(content, {
+  const { codeRegions, htmlRegions, listRegions, tableRegions } = computeMarkdownRegions(content, {
     html: 'all',
     includeLists,
+    includeTables: true,
   });
+  const inertRegions = mergeRegions([...codeRegions, ...htmlRegions]);
   const analysis: CriticBlockAnalysis = {
     source: content,
-    inertRegions: mergeRegions([...codeRegions, ...htmlRegions]),
+    inertRegions,
+    tableRegions: tablesOutsideMath(content, tableRegions, inertRegions),
   };
   return includeLists ? { ...analysis, listRegions } : analysis;
 }
@@ -164,13 +255,26 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
   // a new paragraph. Authors commonly put the opener at the end of the prior
   // paragraph's last line; a single source newline otherwise remains a soft
   // break and incorrectly pulls that paragraph into the revision.
-  const { source: markdown, inertRegions, listRegions } = analysis;
+  const { source: markdown, inertRegions, listRegions, tableRegions } = analysis;
   const mathRegions = computeDollarMathRegions(markdown, inertRegions);
   const closers = criticCloserSearch(markdown);
   const edits: LineEdit[] = [];
   const moved = (offset: number, full: string, text: string) => {
     edits.push({ start: offset, end: offset + full.length, text });
     return text;
+  };
+  // An opener in a table's cell stays, as it starts no span (see
+  // isInTableCell), read with the spans before it whose lines preprocessing
+  // joins, found once, where an opener is in a table, and the end of the
+  // last before the opener read
+  let joined: ReturnType<typeof joinedSpans> | undefined;
+  let next = 0;
+  let joinedEnd = -1;
+  const inTableCell = (offset: number): boolean => {
+    if (!isInTableCell(markdown, offset, tableRegions)) return false;
+    joined ??= joinedSpans(analysis);
+    while (next < joined.length && joined[next].start < offset) joinedEnd = joined[next++].closeIdx;
+    return isInTableCell(markdown, offset, tableRegions, joinedEnd);
   };
   const transformed = markdown.replace(
     /(\{\+\+|\{--|\{~~|\{==|\{>>)(\n(?:[ \t]*(?:>[ \t]*)?\n)?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
@@ -181,7 +285,7 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
       const closePos = open === '{>>'
         ? closers.matching(contentStart)
         : closers.next(open === '{++' ? '++}' : open === '{--' ? '--}' : open === '{==' ? '==}' : '~~}', contentStart);
-      if (closePos === -1) return full;
+      if (closePos === -1 || inTableCell(offset)) return full;
       if (open === '{~~') {
         const separatorPos = closers.next('~>', contentStart);
         if (separatorPos === -1 || separatorPos >= closePos) return full;
@@ -468,12 +572,21 @@ function findNextCriticOpener(src: string, pos: number): CriticOpener | undefine
  * result's or in its placeholders, one in a line's and two in a blank
  * line's, which count the source's lines.
  */
-/** The CriticMarkup spans of `source` in one pass from the left: from an
- *  opener not escaped nor in code or an HTML block, to its closer, the first
- *  after it but for a comment's, which is past its replies. */
-function* criticSpans(source: string, inertRegions: CodeRegion[]): IterableIterator<{ start: number; contentStart: number; closeIdx: number }> {
+/** The CriticMarkup spans of `analysis`'s source in one pass from the left:
+ *  from an opener not escaped nor in code or an HTML block, to its closer,
+ *  the first after it but for a comment's, which is past its replies. An
+ *  opener in a table's cell pairs only with a closer on its line (see
+ *  isInTableCell). A span with a line end, whose lines preprocessing joins,
+ *  takes the tables it reaches out of their rows, so the openers after it
+ *  are read with the end of the last. */
+function* criticSpans(analysis: CriticBlockAnalysis): IterableIterator<{ start: number; contentStart: number; closeIdx: number }> {
+  const { source, inertRegions, tableRegions } = analysis;
   const closers = criticCloserSearch(source);
   let searchFrom = 0;
+  // The end of the line of the last opener read, and of the last span
+  // with a line end
+  let lineEnd = -1;
+  let joinedEnd = -1;
   while (true) {
     const candidate = findNextCriticOpener(source, searchFrom);
     if (!candidate) return;
@@ -489,9 +602,22 @@ function* criticSpans(source: string, inertRegions: CodeRegion[]): IterableItera
       const separatorPos = closers.next('~>', contentStart);
       if (separatorPos === -1 || separatorPos >= closeIdx) continue;
     }
+    if (lineEnd < contentStart) {
+      lineEnd = contentStart;
+      while (lineEnd < source.length && source.charCodeAt(lineEnd) !== 0x0A && source.charCodeAt(lineEnd) !== 0x0D) lineEnd++;
+    }
+    const overLines = closeIdx > lineEnd;
+    if (overLines && isInTableCell(source, candidate.index, tableRegions, joinedEnd)) continue;
     yield { start: candidate.index, contentStart, closeIdx };
+    if (overLines) joinedEnd = closeIdx;
     searchFrom = closeIdx + candidate.close.length;
   }
+}
+
+/** The spans of criticSpans whose lines preprocessing joins, those with a
+ *  line end, in order */
+function joinedSpans(analysis: CriticBlockAnalysis): Array<{ start: number; contentStart: number; closeIdx: number }> {
+  return [...criticSpans(analysis)].filter(({ contentStart, closeIdx }) => /[\r\n]/.test(analysis.source.slice(contentStart, closeIdx)));
 }
 
 /** The payloads of the CriticMarkup spans in `markdown`, as [start, end),
@@ -500,7 +626,7 @@ function* criticSpans(source: string, inertRegions: CodeRegion[]): IterableItera
  *  paragraph's would lose */
 export function criticPayloadRanges(markdown: string): Array<[number, number]> {
   if (!/\{(?:\+\+|--|~~|==|>>|#)/.test(markdown)) return [];
-  return [...criticSpans(markdown, computeCriticBlockAnalysis(markdown).inertRegions)].map(({ contentStart, closeIdx }) => [contentStart, closeIdx]);
+  return [...criticSpans(computeCriticBlockAnalysis(markdown))].map(({ contentStart, closeIdx }) => [contentStart, closeIdx]);
 }
 
 /** `markdown` with each CriticMarkup span's line ends in placeholders, so
@@ -535,12 +661,12 @@ function criticPreprocessed(markdown: string, moveLeadingBreaks: boolean): { out
     ? moveLeadingBreakOutsideCritic(computeCriticBlockAnalysis(markdown, true))
     : undefined;
   const analysis = movedAnalysis ?? computeCriticBlockAnalysis(markdown);
-  const { source: result, inertRegions } = analysis;
+  const { source: result } = analysis;
   const moved = movedAnalysis && movedAnalysis.edits.length > 0 ? { source: result, edits: movedAnalysis.edits } : undefined;
   const segments: string[] = [];
   const edits: LineEdit[] = [];
   let lastPos = 0;
-  for (const { start, contentStart, closeIdx } of criticSpans(result, inertRegions)) {
+  for (const { start, contentStart, closeIdx } of criticSpans(analysis)) {
     const content = result.slice(contentStart, closeIdx);
     // Single-line spans need no transformation. Besides avoiding needless
     // allocations, this prevents quoteDepthAt from searching backward through

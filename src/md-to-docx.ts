@@ -373,7 +373,7 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
 
 import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, criticCloserSearch, criticCloserSearchOf, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
-import { findDollarMathAt } from './math-delimiters';
+import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt } from './math-delimiters';
 import { citationEnd, citationPrefixText, readCitationItems } from './citation-syntax';
 import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments } from './latex-env-preprocess';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines, withEnd } from './line-map';
@@ -1052,7 +1052,6 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
-const DOCX_DOLLAR_MATH_OPTIONS = { displayRun: 'at-least' as const };
 
 function pushMathToken(state: StateInline, content: string, display = false): void {
   const token = pushManuscriptToken(state, 'math', '', 0);

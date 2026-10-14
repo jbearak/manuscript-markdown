@@ -4,6 +4,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
 	computeCodeRegions,
+	computeMarkdownRegions,
 	isInsideCodeRegion,
 	overlapsCodeRegion,
 } from './code-regions';
@@ -249,6 +250,24 @@ function filterDecorations(text: string, defaultColor: string) {
 	all.commentDelimiters.splice(0, all.commentDelimiters.length, ...all.commentDelimiters.filter(keep));
 	return all;
 }
+
+describe('computeMarkdownRegions with tables', () => {
+	test('holds a pipe table\'s lines, in a quote too, and not a table\'s look-alike', () => {
+		const text = 'a\n\n| b | c |\n|---|---|\n| d | e |\n\n> | f |\n> |---|\n\n| g |\n| h |\n';
+		const { tableRegions } = computeMarkdownRegions(text, { includeTables: true });
+		expect(tableRegions.map(region => text.slice(region.start, region.end)))
+			.toEqual(['| b | c |\n|---|---|\n| d | e |\n', '> | f |\n> |---|\n']);
+		expect(computeMarkdownRegions(text).tableRegions).toEqual([]);
+	});
+
+	test('keeps a table and one in a quote it touches apart', () => {
+		// Merged, they were one region, from the first's start
+		const text = 'a | b\n--- | ---\nc | d\n> x | y\n> --- | ---\n> z | w';
+		const { tableRegions } = computeMarkdownRegions(text, { includeTables: true });
+		expect(tableRegions.map(region => text.slice(region.start, region.end)))
+			.toEqual(['a | b\n--- | ---\nc | d\n', '> x | y\n> --- | ---\n> z | w']);
+	});
+});
 
 describe('call-site code-region filtering skips code regions', () => {
 	test('inline code with addition: `{++added++}` — no addition ranges', () => {

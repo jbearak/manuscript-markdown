@@ -19,6 +19,10 @@ export type DollarMathMatch =
   }
   | { kind: 'currency' };
 
+/** The display delimiters DOCX export reads (see mathRule in md-to-docx.ts):
+ *  a run of more than two dollars too (see DollarMathOptions) */
+export const DOCX_DOLLAR_MATH_OPTIONS = { displayRun: 'at-least' } as const;
+
 export function isEscapedAt(content: string, offset: number): boolean {
   let backslashes = 0;
   for (let i = offset - 1; i >= 0 && content.charCodeAt(i) === 0x5C; i--) backslashes++;
@@ -89,14 +93,20 @@ export function findDollarMathAt(
   };
 }
 
-/** Find all recognized dollar-math spans outside excluded Markdown regions. */
-export function computeDollarMathRegions(content: string, excludedRegions?: readonly CodeRegion[]): CodeRegion[] {
+/** Find all recognized dollar-math spans outside excluded Markdown regions,
+ *  with display delimiters read as `displayRun` says, as DOCX export reads
+ *  them with DOCX_DOLLAR_MATH_OPTIONS. */
+export function computeDollarMathRegions(
+  content: string,
+  excludedRegions?: readonly CodeRegion[],
+  { displayRun }: Pick<DollarMathOptions, 'displayRun'> = {},
+): CodeRegion[] {
   const regions: CodeRegion[] = [];
-  const options = excludedRegions?.length ? { excludedRegions } : undefined;
+  const options = excludedRegions?.length || displayRun ? { excludedRegions, displayRun } : undefined;
   for (let i = 0; i < content.length; i++) {
     if (content.charCodeAt(i) !== 0x24) continue;
     const runLength = dollarRunLength(content, i);
-    if (runLength > 2) {
+    if (runLength > 2 && displayRun !== 'at-least') {
       i += runLength - 1;
       continue;
     }

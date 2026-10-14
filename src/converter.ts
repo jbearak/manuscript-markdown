@@ -13357,6 +13357,58 @@ function headingInMarkRevision(content: ContentItem[], index: number): boolean {
   return true;
 }
 
+/** Whether `line` reads as a pipe table's delimiter row, as markdown-it
+ *  reads one past its indent: cells of dashes, with a colon at either end,
+ *  between pipes, as --- | --- or |:---|. A scan from the left, in time
+ *  linear in the line, as a regex with spaces and tabs on both sides of an
+ *  optional pipe took time in the square of a long indent's length */
+function isTableDelimiterRow(line: string): boolean {
+  let i = 0;
+  const skipSpace = () => { while (line[i] === ' ' || line[i] === '\t') i++; };
+  skipSpace();
+  if (line[i] === '|') { i++; skipSpace(); }
+  let cells = 0;
+  while (i < line.length) {
+    if (line[i] === ':') i++;
+    const dashes = i;
+    while (line[i] === '-') i++;
+    if (i === dashes) return false;
+    if (line[i] === ':') i++;
+    skipSpace();
+    cells++;
+    if (i === line.length) break;
+    if (line[i] !== '|') return false;
+    i++;
+    skipSpace();
+  }
+  return cells > 0;
+}
+
+/** Whether a line of `text` after its first reads as a pipe table's
+ *  delimiter row (see isTableDelimiterRow). Its first line follows the
+ *  body's {>> on its line, which no delimiter row starts with, so a
+ *  comment of one line, as ---, makes no table */
+function hasTableDelimiterRow(text: string): boolean {
+  return text.split(/\r\n|\n|\r/).slice(1).some(isTableDelimiterRow);
+}
+
+/**
+ * Whether a Word comment's text or a reply's has a line that reads as a
+ * pipe table's delimiter row (see isTableDelimiterRow). Written after
+ * its anchor, as `x {==a==}{>>a | b`, then `--- | ---` and `c | d<<}`, its
+ * lines and the one it opens on read as a table, in whose cell export reads
+ * the body's opener as text, as markdown-it does (see isInTableCell in
+ * critic-markup.ts), which drops the comment. Its body takes ID syntax,
+ * which starts it on a line of its own, where an opener at the table's
+ * start opens before the table, and the comment keeps the table's lines.
+ * The rule asks only of the comment's lines, not whether the paragraph
+ * would read as a table, so it takes ID syntax for some, as one of a line
+ * of dashes alone, that would have read back written after the anchor.
+ */
+function holdsTableDelimiterRow(c: Comment): boolean {
+  return hasTableDelimiterRow(c.text) || !!c.replies?.some(reply => hasTableDelimiterRow(reply.text));
+}
+
 /** A comment's reference with no text of its own around it, as {>>c<<} */
 function isCommentPoint(item: ContentItem | undefined): boolean {
   return item?.type === 'text' && item.text === '' && item.commentIds.size > 0 && !item.revision;
@@ -14246,9 +14298,28 @@ function buildMarkdownOnce(
   // a paragraph of its own: the body takes ID syntax, which starts a line,
   // and replies go on lines of their own
   const opensWithBreak = (author: string | undefined, text: string) => !(author || '').trim() && /^[\r\n]/.test(text);
+  // A comment on nothing at the start of a paragraph, whose body then
+  // starts its line after no marker, as after an HTML block it can't go in
+  // (see idOverComments), where its opener is before the table its lines
+  // make (see holdsTableDelimiterRow), needs no ID syntax
+  const atStart = new Set<string>();
+  const elsewhere = new Set<string>();
+  mergedContent.forEach((item, k) => {
+    if (!('commentIds' in item) || !item.commentIds) return;
+    const para = mergedContent[k - 1];
+    if (isCommentPoint(item) && item.commentIds.size === 1 && (!para || para.type === 'para' && !para.listMeta && !para.headingLevel
+      && !para.isTitle && !para.isCodeBlock && para.taskLevel === undefined)) atStart.add([...item.commentIds][0]);
+    else for (const id of item.commentIds) elsewhere.add(id);
+  });
   for (const [id, c] of comments) {
-    if (opensWithBreak(c.author, c.text)) forceIdCommentIds.add(id);
-    if (c.consecutiveReplies && c.replies?.some(reply => opensWithBreak(reply.author, reply.text))) {
+    // Not one over an HTML comment, which takes ID syntax where its
+    // paragraph reads back so and goes after its block otherwise, on a line
+    // of its own, where its opener is before the table its lines make
+    if (opensWithBreak(c.author, c.text) || (holdsTableDelimiterRow(c) && !overHtmlComment.has(id) && !(atStart.has(id) && !elsewhere.has(id)))) forceIdCommentIds.add(id);
+    // So do replies whose lines make a table, as {>>note<<}{>>a | b put a
+    // consecutive reply's opener in the table's cell (see
+    // holdsTableDelimiterRow), which export read as text
+    if (c.consecutiveReplies && c.replies?.some(reply => opensWithBreak(reply.author, reply.text) || hasTableDelimiterRow(reply.text))) {
       comments.set(id, { ...c, consecutiveReplies: false });
     }
   }
