@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import JSZip from 'jszip';
 import * as fc from 'fast-check';
 import { XMLValidator } from 'fast-xml-parser';
+import fc from 'fast-check';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -216,6 +217,60 @@ async function sectionHeaders(docx: Uint8Array): Promise<string[]> {
   return sections;
 }
 
+const MARKUP_COMPATIBILITY = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+/**
+ * What a namespace-aware reader finds wrong with a part's names: a prefix
+ * no declaration in scope binds, on an element, an attribute, or in one of
+ * markup compatibility's lists of prefixes, and a name in one of the
+ * examples' namespaces, urn:example:..., which no consumer knows, where it
+ * isn't ignorable. And each such name, by its local name and namespace.
+ */
+function namespaceProblems(xml: string): { problems: string[]; names: Array<[string, string]> } {
+  const problems: string[] = [];
+  const names: Array<[string, string]> = [];
+  const open: Array<{ scope: Map<string, string>; ignorable: Set<string> }> = [{ scope: new Map([['xml', 'http://www.w3.org/XML/1998/namespace']]), ignorable: new Set() }];
+  for (const [, close, name, attributeText, empty] of xml.matchAll(/<(\/?)([^\s/>!?]+)((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/g)) {
+    if (close) { open.pop(); continue; }
+    const parent = open[open.length - 1];
+    const scope = new Map(parent.scope);
+    const attributes = [...attributeText.matchAll(/\s([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, qname, double, single]) => [qname, double ?? single] as const);
+    for (const [qname, value] of attributes) {
+      if (qname === 'xmlns') scope.set('', value);
+      else if (qname.startsWith('xmlns:')) scope.set(qname.slice('xmlns:'.length), value);
+    }
+    /** A name's namespace and local name, or none where it has no prefix and is an attribute's */
+    const resolve = (qname: string, attribute: boolean): [string, string] | undefined => {
+      const colon = qname.indexOf(':');
+      if (colon === -1) return attribute || !scope.has('') ? undefined : [scope.get('')!, qname];
+      const namespace = scope.get(qname.slice(0, colon));
+      if (namespace === undefined) problems.push(qname + ' is unbound');
+      return namespace === undefined ? undefined : [namespace, qname.slice(colon + 1)];
+    };
+    const ignorable = new Set(parent.ignorable);
+    const element = resolve(name, false);
+    for (const [qname, value] of attributes) {
+      if (qname === 'xmlns' || qname.startsWith('xmlns:')) continue;
+      const attribute = resolve(qname, true);
+      const isList = attribute?.[0] === MARKUP_COMPATIBILITY && ['Ignorable', 'MustUnderstand', 'ProcessContent', 'PreserveElements', 'PreserveAttributes'].includes(attribute[1])
+        || !qname.includes(':') && qname === 'Requires' && element?.[0] === MARKUP_COMPATIBILITY && element[1] === 'Choice';
+      if (!isList) continue;
+      for (const token of value.split(/\s+/).filter(Boolean)) {
+        const prefix = token.includes(':') ? token.slice(0, token.indexOf(':')) : token;
+        if (!scope.has(prefix)) problems.push(qname + ' names ' + prefix + ', which is unbound');
+        else if (attribute?.[1] === 'Ignorable') ignorable.add(scope.get(prefix)!);
+      }
+    }
+    for (const [namespace, local] of [element, ...attributes.filter(([qname]) => qname !== 'xmlns' && !qname.startsWith('xmlns:')).map(([qname]) => resolve(qname, true))]
+      .filter((resolved): resolved is [string, string] => resolved !== undefined)) {
+      if (!namespace.startsWith('urn:example:')) continue;
+      names.push([local, namespace]);
+      if (!ignorable.has(namespace)) problems.push(local + ' in ' + namespace + ' is not ignorable');
+    }
+    if (!empty) open.push({ scope, ignorable });
+  }
+  return { problems, names };
+}
+
 const ALL_HEADERS = 'header:even=EVEN HEADER header:default=RUNNING HEAD footer:even=EVEN FOOTER footer:default=Page { PAGE }1 header:first=FIRST HEADER footer:first=FIRST FOOTER';
 
 describe('a template\'s headers and footers', () => {
@@ -260,6 +315,81 @@ describe('a template\'s headers and footers', () => {
     expect(await packageProblems(docx)).toEqual([]);
     expect(await sectionHeaders(docx)).toEqual(['landscape titlePg header:even=EVEN HEADER header:default=LANDSCAPE HEADER footer:even=EVEN FOOTER ' +
       'footer:default=LANDSCAPE FOOTER header:first=FIRST HEADER footer:first=FIRST FOOTER']);
+  });
+
+  it.each([['paragraph', 'w:p'], ['paragraph\'s properties', 'w:pPr']])('take a section\'s references by the prefixes its %s binds, not the document element\'s', async (_, element) => {
+    // r, which the document element binds to another namespace and the
+    // section's paragraph to the relationships', got a prefix of its own
+    // there, so its references named no relationship, and its even and
+    // first-page headers and footers were dropped
+    const templateDocx = await editTemplate(await headerTemplate({ landscapeLast: true }), 'word/document.xml', xml => xml
+      .replace(/(<w:document\b[^>]*?) xmlns:r="[^"]*"/, (_, open: string) => open + ' xmlns:r="urn:example:other"')
+      .replace('<w:p><w:pPr><w:sectPr ', () => element === 'w:p' ? '<w:p xmlns:r="' + REL.slice(0, -1) + '"><w:pPr><w:sectPr ' : '<w:p><w:pPr xmlns:r="' + REL.slice(0, -1) + '"><w:sectPr ')
+      .replace('<w:sectPr w:rsidR="00A1B2C3">', () => '<w:sectPr xmlns:r="' + REL.slice(0, -1) + '" w:rsidR="00A1B2C3">'));
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(await sectionHeaders(docx)).toEqual(['landscape titlePg header:even=EVEN HEADER header:default=LANDSCAPE HEADER footer:even=EVEN FOOTER ' +
+      'footer:default=LANDSCAPE FOOTER header:first=FIRST HEADER footer:first=FIRST FOOTER']);
+  });
+
+  // Each place a template can bind a prefix, the one it uses for an
+  // extension's namespace or one of export's it binds to that namespace,
+  // and each section property export takes that can use it
+  const bindings = ['the document element', 'the body', 'the section\'s paragraph', 'the section\'s paragraph\'s properties', 'the sectPr', 'the property itself'] as const;
+  const properties = [
+    ['a reference the last section takes from an earlier one', 'first', /<w:headerReference w:type="even"/],
+    ['the last section\'s reference', 'last', /<w:headerReference w:type="default"/],
+    ['columns', 'last', /<w:cols\b/],
+    ['the document grid', 'last', /<w:docGrid\b/],
+    ['page numbering', 'last', /<w:pgNumType\b/],
+    ['an element of the extension\'s', 'last', /<PREFIX:extra\b/],
+  ] as const;
+  const cases = bindings.flatMap(binding => properties.flatMap(([property, section, element]) =>
+    // A paragraph holds only an earlier section's properties
+    (['ext', 'mc'] as const).flatMap(prefix => /paragraph/.test(binding) && section === 'last' ? [] : [[binding, property, prefix, section, element] as const])));
+  it.each(cases)('go with the namespace their template binds where it binds it on %s, for %s, with prefix %s', async (binding, _, prefix, section, element) => {
+    // A reference an earlier section's sectPr held went in the first
+    // section with a prefix for a namespace that sectPr declared, which
+    // nothing in the export did
+    const MCE = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+    // The prefix bound to the extension's namespace, ignorable, and, where
+    // it's mc, another for markup compatibility
+    const declarations = prefix === 'ext' ? 'xmlns:ext="urn:example:ext" mc:Ignorable="ext"' : 'xmlns:mc="urn:example:ext" xmlns:mce="' + MCE + '" mce:Ignorable="mc"';
+    const template = await editTemplate(await headerTemplate({ landscapeLast: true }), 'word/document.xml', xml => {
+      const at = section === 'first' ? xml.indexOf('<w:sectPr') : xml.lastIndexOf('<w:sectPr');
+      const end = xml.indexOf('</w:sectPr>', at);
+      let sectPr = xml.slice(at, end).replace(/<w:cols\b/, () => '<w:pgNumType w:fmt="lowerRoman"/><w:cols')
+        + (element.source.includes('PREFIX') ? '<' + prefix + ':extra/>' : '');
+      const target = new RegExp(element.source.replace('PREFIX', prefix));
+      sectPr = sectPr.replace(target, open => open + (binding === 'the property itself' ? ' ' + declarations : '') + ' ' + prefix + ':flag="1"');
+      if (binding === 'the sectPr') sectPr = sectPr.replace('<w:sectPr ', () => '<w:sectPr ' + declarations + ' ');
+      xml = xml.slice(0, at) + sectPr + xml.slice(end);
+      // Markup compatibility's prefix, where the template binds mc to the extension's namespace elsewhere,
+      // in place of the document element's own declaration of it
+      xml = xml.replace(' xmlns:mc="' + MCE + '"', () => '').replace('<w:document ', () => '<w:document ' + (binding !== 'the document element' ? 'xmlns:mc="' + MCE + '"' : prefix === 'ext' ? 'xmlns:mc="' + MCE + '" ' + declarations : declarations) + ' ');
+      if (binding === 'the body') xml = xml.replace('<w:body>', () => '<w:body ' + declarations + '>');
+      if (binding === 'the section\'s paragraph') xml = xml.replace('<w:p><w:pPr><w:sectPr', () => '<w:p ' + declarations + '><w:pPr><w:sectPr');
+      if (binding === 'the section\'s paragraph\'s properties') xml = xml.replace('<w:p><w:pPr><w:sectPr', () => '<w:p><w:pPr ' + declarations + '><w:sectPr');
+      return xml;
+    });
+    // The extension's names the template has, by where they are, which are its own
+    expect(namespaceProblems((await textOf(await JSZip.loadAsync(template), 'word/document.xml'))!).problems).toEqual([]);
+    for (const md of ['Hello', LANDSCAPE_MD]) {
+      const { docx } = await convertMdToDocx(md, { templateDocx: template });
+      expect(await packageProblems(docx)).toEqual([]);
+      const { problems, names } = namespaceProblems((await textOf(await JSZip.loadAsync(docx), 'word/document.xml'))!);
+      expect(problems).toEqual([]);
+      // Each of the extension's names in its namespace, and the property's
+      // flag, and the element, where export takes the section's own
+      expect(names.every(([, namespace]) => namespace === 'urn:example:ext')).toBe(true);
+      expect(names.some(([name]) => name === 'flag')).toBe(true);
+      // The inherited reference still names the even header
+      const zip = await JSZip.loadAsync(docx);
+      const firstSectPr = /<w:sectPr\b[\s\S]*?<\/w:sectPr>/.exec((await textOf(zip, 'word/document.xml'))!)![0];
+      const id = /<w:headerReference\b(?=[^>]*\sw:type="even")[^>]*\sr:id="([^"]*)"/.exec(firstSectPr)?.[1];
+      const target = new RegExp('<Relationship\\b(?=[^>]*\\sId="' + id + '")[^>]*\\sTarget="([^"]*)"').exec((await textOf(zip, 'word/_rels/document.xml.rels'))!)?.[1];
+      expect(await textOf(zip, 'word/' + target)).toContain('EVEN HEADER');
+    }
   });
 
   it('keep their images apart from the Markdown\'s, whose names they had', async () => {
@@ -577,6 +707,207 @@ async function pageNumbering(docx: Uint8Array): Promise<string[]> {
     return !pgNumType || /<w:pgMar\b[^>]*\/><w:pgNumType\b[^>]*\/><w:cols\b/.test(sectPr) ? pgNumType : 'out of place: ' + pgNumType;
   });
 }
+
+// The children of CT_SectPr in its order (ECMA-376 Part 1 §17.6.17), the
+// references, any of up to six, first
+const SECT_PR_ORDER = ['headerReference', 'footnotePr', 'endnotePr', 'type', 'pgSz', 'pgMar', 'paperSrc', 'pgBorders', 'lnNumType', 'pgNumType', 'cols',
+  'formProt', 'vAlign', 'noEndnote', 'titlePg', 'textDirection', 'bidi', 'rtlGutter', 'docGrid', 'printerSettings', 'sectPrChange'];
+// Word's narrowest column, in twips
+const NARROWEST_COLUMN = 720;
+/** An element's children, each whole, as a sectPr's */
+function childrenOf(element: string): string[] {
+  const children: string[] = [];
+  let depth = 0, start = 0;
+  const inner = element.replace(/^<[^>]*>/, '').replace(/<\/[^>]+>$/, '');
+  for (const m of inner.matchAll(/<(\/?)([\w.:-]+)\b[^>]*?(\/?)>/g)) {
+    if (m[1]) { if (--depth === 0) children.push(inner.slice(start, m.index! + m[0].length)); }
+    else if (m[3]) { if (depth === 0) children.push(m[0]); }
+    else if (depth++ === 0) start = m.index!;
+  }
+  return children;
+}
+/** A sectPr's children as a consumer reads them that takes, of markup
+ *  compatibility's alternatives, and of those in them, or in its columns,
+ *  `branch`, or, where it's Word, the choice where it needs w14, which Word
+ *  understands, and else the fallback */
+function readAs(sectPr: string, branch: 'mc:Choice' | 'mc:Fallback' | 'Word'): string[] {
+  const flatten = (children: string[]): string[] => children.flatMap(child => {
+    if (child.startsWith('<w:cols') && child.includes('<mc:AlternateContent')) return [/^<[^>]*>/.exec(child)![0] + flatten(childrenOf(child)).join('') + '</w:cols>'];
+    if (!child.startsWith('<mc:AlternateContent')) return [child];
+    const branches = childrenOf(child);
+    const taken = branch !== 'Word' ? branch : branches.some(b => b.startsWith('<mc:Choice Requires="w14"')) ? 'mc:Choice' : 'mc:Fallback';
+    const chosen = branches.find(b => b.startsWith('<' + taken));
+    return chosen ? flatten(childrenOf(chosen)) : [];
+  });
+  return flatten(childrenOf(sectPr));
+}
+const attributeOf = (element: string | undefined, name: string) => element ? new RegExp('\\sw:' + name + '="([^"]*)"').exec(element)?.[1] : undefined;
+// Twips in the units a measure can give
+const TWIPS_PER: Record<string, number> = { mm: 1440 / 25.4, cm: 1440 / 2.54, in: 1440, pt: 20, pc: 240, pi: 240 };
+/** A measure in twips, or in one of those units, in twips */
+const twips = (value: string | undefined) => {
+  const m = /^(-?\d+(?:\.\d+)?)(mm|cm|in|pt|pc|pi)?$/.exec(value ?? '');
+  return m ? Math.round(Number(m[1]) * (m[2] ? TWIPS_PER[m[2]] : 1)) : undefined;
+};
+/** The width of the text of a section whose properties are `read`, and of
+ *  its narrowest column, and what's wrong with its columns: one narrower
+ *  than Word makes them, or columns of their own widths, with the spaces
+ *  after them, wider than the text */
+function columnsOf(read: string[]): { text: number; narrowest: number; problem?: string } {
+  const pgSz = read.find(child => child.startsWith('<w:pgSz')), pgMar = read.find(child => child.startsWith('<w:pgMar')), cols = read.find(child => child.startsWith('<w:cols'));
+  const text = (twips(attributeOf(pgSz, 'w')) ?? 12240) - (twips(attributeOf(pgMar, 'left')) ?? 1440) - (twips(attributeOf(pgMar, 'right')) ?? 1440);
+  if (cols && /^(?:0|false|off)$/.test(attributeOf(cols, 'equalWidth') ?? '')) {
+    const own = [...cols.matchAll(/<w:col\b[^>]*>/g)].map(([col]) => col);
+    const widths = own.map(col => twips(attributeOf(col, 'w')) ?? 0);
+    const total = own.reduce((sum, col, i) => sum + widths[i] + (i < own.length - 1 ? twips(attributeOf(col, 'space')) ?? 0 : 0), 0);
+    const narrowest = Math.min(...widths);
+    return { text, narrowest, problem: narrowest < NARROWEST_COLUMN ? 'a column ' + narrowest + ' wide' : total > text ? 'columns ' + total + ' wide in ' + text : undefined };
+  }
+  if (!cols) return { text, narrowest: text };
+  const num = Number(attributeOf(cols, 'num') ?? 1), space = twips(attributeOf(cols, 'space')) ?? 720;
+  const narrowest = (text - (num - 1) * space) / num;
+  return { text, narrowest, problem: num > 1 && narrowest < NARROWEST_COLUMN ? num + ' columns ' + space + ' apart in ' + text : undefined };
+}
+/** What's wrong with a sectPr as each of markup compatibility's
+ *  alternatives in it reads: a child out of CT_SectPr's order or twice, or
+ *  columns that don't fit (see columnsOf) */
+function sectPrProblems(sectPr: string): string[] {
+  const problems: string[] = [];
+  for (const branch of ['mc:Choice', 'mc:Fallback'] as const) {
+    const read = readAs(sectPr, branch);
+    let last = -1;
+    for (const child of read) {
+      const name = /^<w:(\w+)/.exec(child)?.[1] ?? child;
+      const rank = SECT_PR_ORDER.indexOf(name === 'footerReference' ? 'headerReference' : name);
+      if (rank === -1) problems.push(branch + ': ' + name + ' is no section property');
+      else if (rank < last || rank === last && rank !== 0) problems.push(branch + ': ' + name + ' out of order or twice');
+      last = Math.max(last, rank);
+    }
+    const { problem } = columnsOf(read);
+    if (problem) problems.push(branch + ': ' + problem);
+  }
+  return problems;
+}
+
+describe('a template\'s section properties, in each section export writes', () => {
+  // A template's properties in CT_SectPr's order, each as markup
+  // compatibility's choice and fallback would have it, where they hold it
+  // Columns, their measures each in twips or in points, as `measure` writes them
+  type Columns = { num: number; space?: number } | Array<{ width: number; space: number }>;
+  const equalColumns = fc.record({ num: fc.integer({ min: 1, max: 3 }), space: fc.option(fc.constantFrom(0, 360, 720, 4000, 9600, 12000), { nil: undefined }) });
+  const ownColumns = fc.array(fc.record({ width: fc.integer({ min: 500, max: 13000 }), space: fc.constantFrom(0, 360, 720) }), { minLength: 1, maxLength: 3 });
+  const columns = fc.option(fc.oneof<fc.Arbitrary<Columns>[]>(equalColumns, ownColumns), { nil: undefined });
+  // Columns of their own widths can be held in alternatives in the columns
+  const colsXml = (columns: Columns, measure: (twips: number) => string, held: boolean) => {
+    if (!Array.isArray(columns)) return '<w:cols w:num="' + columns.num + '"' + (columns.space === undefined ? '' : ' w:space="' + measure(columns.space) + '"') + '/>';
+    const own = columns.map(({ width, space }, i) => '<w:col w:w="' + measure(width) + '"' + (i < columns.length - 1 ? ' w:space="' + measure(space) + '"' : '') + '/>').join('');
+    return '<w:cols w:num="' + columns.length + '" w:space="720" w:equalWidth="0">'
+      + (held ? '<mc:AlternateContent><mc:Choice Requires="w14">' + own + '</mc:Choice><mc:Fallback>' + own + '</mc:Fallback></mc:AlternateContent>' : own) + '</w:cols>';
+  };
+  const property = (xml: string) => fc.option(fc.constant(xml), { nil: undefined });
+  const template = fc.record({
+    landscape: fc.boolean(),
+    left: fc.constantFrom(720, 1440, 2160),
+    right: fc.constantFrom(720, 1440, 2160),
+    footnotePr: property('<w:footnotePr><w:numFmt w:val="lowerRoman"/></w:footnotePr>'),
+    endnotePr: property('<w:endnotePr><w:numFmt w:val="upperRoman"/></w:endnotePr>'),
+    pgMar: fc.boolean(),
+    paperSrc: property('<w:paperSrc w:first="1" w:other="1"/>'),
+    pgBorders: property('<w:pgBorders><w:top w:val="single" w:sz="4" w:space="24" w:color="auto"/></w:pgBorders>'),
+    lnNumType: property('<w:lnNumType w:countBy="1"/>'),
+    pgNumType: property('<w:pgNumType w:fmt="lowerRoman"/>'),
+    cols: columns,
+    // The fallback's own columns, where they differ
+    fallbackCols: columns,
+    formProt: property('<w:formProt w:val="0"/>'),
+    vAlign: property('<w:vAlign w:val="center"/>'),
+    noEndnote: property('<w:noEndnote/>'),
+    titlePg: property('<w:titlePg/>'),
+    textDirection: property('<w:textDirection w:val="lrTb"/>'),
+    bidi: property('<w:bidi w:val="0"/>'),
+    docGrid: property('<w:docGrid w:linePitch="360"/>'),
+    // Whether each property starts a run of them of its own, whether each
+    // run is held in alternatives, whether Word reads its choice, which
+    // needs w14, or its fallback, as its choice needs another namespace,
+    // and whether those alternatives are in a choice's of their own
+    starts: fc.array(fc.boolean(), { minLength: 20, maxLength: 20 }),
+    held: fc.array(fc.boolean(), { minLength: 20, maxLength: 20 }),
+    read: fc.array(fc.boolean(), { minLength: 20, maxLength: 20 }),
+    nested: fc.array(fc.boolean(), { minLength: 20, maxLength: 20 }),
+    // Whether margins are in inches, and columns in points
+    units: fc.boolean(),
+    // And whether columns of their own widths are in alternatives in them
+    heldColumns: fc.boolean(),
+  }).map(t => {
+    const inches = (twips: number) => t.units ? twips / 1440 + 'in' : String(twips);
+    const points = (twips: number) => t.units ? twips / 20 + 'pt' : String(twips);
+    const margins = '<w:pgMar w:top="1440" w:right="' + inches(t.right) + '" w:bottom="1440" w:left="' + inches(t.left) + '" w:header="720" w:footer="720" w:gutter="0"/>';
+    const page = t.landscape ? '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' : '<w:pgSz w:w="12240" w:h="15840"/>';
+    const properties: Array<[string, string]> = [t.footnotePr, t.endnotePr, page, t.pgMar ? margins : undefined, t.paperSrc, t.pgBorders, t.lnNumType, t.pgNumType]
+      .filter((xml): xml is string => xml !== undefined).map(xml => [xml, xml]);
+    if (t.cols) properties.push([colsXml(t.cols, points, t.heldColumns), colsXml(t.fallbackCols ?? t.cols, points, t.heldColumns)]);
+    for (const xml of [t.formProt, t.vAlign, t.noEndnote, t.titlePg, t.textDirection, t.bidi, t.docGrid]) if (xml) properties.push([xml, xml]);
+    const runs: Array<Array<[string, string]>> = [];
+    properties.forEach((p, i) => i > 0 && !t.starts[i] ? runs[runs.length - 1].push(p) : runs.push([p]));
+    return '<w:sectPr>' + runs.map((run, i) => {
+      const [choice, fallback] = [0, 1].map(side => run.map(p => p[side]).join(''));
+      if (!t.held[i]) return choice;
+      const alternatives = '<mc:AlternateContent><mc:Choice Requires="' + (t.read[i] ? 'w14"' : 'x" xmlns:x="urn:example:x"') + '>' + choice + '</mc:Choice><mc:Fallback>' + fallback + '</mc:Fallback></mc:AlternateContent>';
+      return t.nested[i] ? '<mc:AlternateContent><mc:Choice Requires="w14">' + alternatives + '</mc:Choice><mc:Fallback>' + fallback + '</mc:Fallback></mc:AlternateContent>' : alternatives;
+    }).join('') + '</w:sectPr>';
+  })
+    // As Word lets a template be: its columns fit its own page
+    .filter(sectPr => sectPrProblems(sectPr).length === 0);
+  const figure = '![f](f.png){width=1200 height=600}';
+  const table = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+  const documents = [
+    'P ' + figure + '\n\n' + table + '\n\n<!-- landscape -->\n\n' + figure + '\n\n' + table + '\n\n<!-- /landscape -->\n\n<!-- portrait -->\n\n' + figure + '\n\n' + table
+      + '\n\n<!-- /portrait -->\n\n<!-- table-orientation: landscape -->\n' + table + '\n\nEnd ' + figure + '\n',
+    'P.\n\n<!-- portrait -->\n\n' + figure + '\n\n' + table + '\n\n<!-- /portrait -->\n',
+    'P.\n\n<!-- landscape -->\n\n' + figure + '\n\n' + table + '\n\n<!-- /landscape -->\n',
+  ];
+
+  it('keep CT_SectPr\'s order, each once, and columns that fit, and size their tables and images to fit them', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'template-sections-'));
+    try {
+      writeFileSync(join(dir, 'f.png'), PNG);
+      const base = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+      const baseXml = await base.file('word/document.xml')!.async('string');
+      await fc.assert(fc.asyncProperty(template, async sectPr => {
+        base.file('word/document.xml', baseXml.replace(/<w:sectPr\b(?![\s\S]*<w:sectPr\b)[\s\S]*<\/w:sectPr>/, () => sectPr));
+        const templateDocx = await base.generateAsync({ type: 'uint8array' });
+        for (const md of documents) {
+          const { docx } = await convertMdToDocx(md, { templateDocx, sourceDir: dir });
+          const xml = (await textOf(await JSZip.loadAsync(docx), 'word/document.xml'))!;
+          expect(XMLValidator.validate(xml)).toBe(true);
+          // Each section's content, before its properties, and those
+          let from = 0;
+          for (const match of xml.matchAll(/<w:sectPr\b[^>]*>(?:(?!<w:sectPr\b)[\s\S])*?<\/w:sectPr>/g)) {
+            const [own] = match, content = xml.slice(from, match.index);
+            from = match.index! + own.length;
+            expect(sectPrProblems(own)).toEqual([]);
+            // A section export adds has what Word reads of alternatives
+            if (xml.startsWith('</w:pPr>', from)) expect(own).not.toContain('mc:AlternateContent');
+            // Its tables span the narrowest column Word shows, and its
+            // images fit it, to within rounding
+            const { narrowest } = columnsOf(readAs(own, 'Word'));
+            for (const [, grid] of content.matchAll(/<w:tblGrid>([\s\S]*?)<\/w:tblGrid>/g)) {
+              const widths = [...grid.matchAll(/<w:gridCol w:w="(-?\d+)"/g)].map(([, width]) => Number(width));
+              for (const width of widths) expect(width).toBeGreaterThan(0);
+              expect(widths.reduce((sum, width) => sum + width, 0)).toBeLessThanOrEqual(narrowest + widths.length);
+            }
+            for (const [, cx, cy] of content.matchAll(/<wp:extent cx="(-?\d+)" cy="(-?\d+)"/g)) {
+              expect(Math.min(Number(cx), Number(cy))).toBeGreaterThan(0);
+              expect(Number(cx)).toBeLessThanOrEqual((narrowest / 15 + 1) * 9525);
+            }
+          }
+        }
+      }), { numRuns: 100 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30000);
+});
 
 describe('a template\'s page numbering', () => {
   /** A template whose sections' page numbering is `pgNumType` */
@@ -1031,7 +1362,7 @@ describe('a template\'s page numbering, title page and references held in markup
       });
     };
     for (const [md, expected] of [
-      [LANDSCAPE_MD, ['nextPage 12240 15840 ', 'nextPage 15840 12240 landscape', 'continuous 12240 15840 ']],
+      [LANDSCAPE_MD, ['nextPage 12240 15840 ', 'nextPage 15840 12240 landscape', 'nextPage 12240 15840 ']],
       ['Intro\n\n<!-- landscape -->\n\nWide\n\n<!-- /landscape -->', ['nextPage 12240 15840 ', 'nextPage 15840 12240 landscape']],
     ] as Array<[string, string[]]>) {
       const word1 = (await convertMdToDocx(md, { templateDocx })).docx;

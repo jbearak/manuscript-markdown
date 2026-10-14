@@ -4,7 +4,9 @@
 // import, which reads a document's styles and runs with them, and for the
 // style lookup import and export share (see style-element.ts). And reading
 // an on/off value, as WordprocessingML's and an equation's OMML spell it,
-// and an integer, as XML Schema spells one.
+// and a number, an integer and a length in twips, as XML Schema and
+// WordprocessingML spell them, for import's readers and export's of a
+// template's sections alike.
 
 // An XML start tag's attributes after its name, as an XML parser reads
 // them: each after whitespace, with any whitespace around its =, and its
@@ -59,11 +61,66 @@ export function xmlAttribute(tag: string, name: string): string | undefined {
 }
 
 /** Whether an attribute's value is on, as an ST_OnOff's: true, 1 or on,
- *  and not false, 0 or off. Every on or off value import reads, an
+ *  and not false, 0 or off, with XML's white space around it, as
+ *  xsd:boolean's are read. Every on or off value import reads, an
  *  element's w:val (see isToggleOn in converter.ts) or m:val (see ommlOn
- *  in omml.ts), or an attribute's, goes through this. */
+ *  in omml.ts), or an attribute's, goes through this, and so do those
+ *  export reads of a template's columns (see fitColumns in md-to-docx.ts
+ *  and layoutKey in template-sections.ts). */
 export function xmlOn(value: string | undefined): boolean {
-  return value === 'true' || value === '1' || value === 'on';
+  const said = value?.replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, '');
+  return said === 'true' || said === '1' || said === 'on';
+}
+
+/** A whole number an attribute holds, as an xsd:unsignedLong's: digits,
+ *  with leading zeros, a plus sign before them and whitespace around them,
+ *  as a schema's number may have */
+export function xmlNumber(value: string | undefined): number | undefined {
+  return value !== undefined && /^[ \t\r\n]*\+?\d+[ \t\r\n]*$/.test(value) ? Number(value) : undefined;
+}
+
+// A universal measure (ST_UniversalMeasure): a decimal number and its unit,
+// as 8.5in, with digits before any point, a minus sign where it may have
+// one, and no whitespace around it, as it's a string's pattern
+const UNIVERSAL_MEASURE = /^(-?)(\d+)(?:\.(\d+))?(mm|cm|in|pt|pc|pi)$/;
+
+// Twips in each unit of a universal measure, as a fraction: a pica, pc or
+// pi, is 12 points, an inch 72, and a centimeter 1/2.54 of an inch
+const TWIPS_PER_UNIT: Record<string, readonly [bigint, bigint]> = {
+  in: [1440n, 1n], pt: [20n, 1n], pc: [240n, 1n], pi: [240n, 1n], cm: [144000n, 254n], mm: [14400n, 254n],
+};
+
+/**
+ * A universal measure's size in `perUnit`'s units, as twips, from a unit
+ * `perUnit` has, or undefined from another, or with a minus sign where it's
+ * not `signed`, as an ST_PositiveUniversalMeasure has none. Word rounds a
+ * size in centimeters or millimeters to the nearest twip, and in the other
+ * units down, as 0.99pt to 19 twips, so this does too, by its digits'
+ * value, not a float's, so 0.3in is 432 twips, not 431. A negative one is
+ * the negative of the one without its minus sign, as the schema means it.
+ */
+export function universalMeasure(value: string, signed: boolean, perUnit: Record<string, readonly [bigint, bigint]>): number | undefined {
+  const match = UNIVERSAL_MEASURE.exec(value);
+  const ratio = match ? perUnit[match[4]] : undefined;
+  if (!match || !ratio || match[1] && !signed) return undefined;
+  const fraction = match[3] ?? '';
+  const numerator = BigInt(match[2] + fraction) * ratio[0];
+  const denominator = 10n ** BigInt(fraction.length) * ratio[1];
+  const nearest = match[4] === 'cm' || match[4] === 'mm';
+  const size = Number(nearest ? (2n * numerator + denominator) / (2n * denominator) : numerator / denominator);
+  return match[1] && size ? -size : size;
+}
+
+/** A length in twips an attribute holds, as an ST_TwipsMeasure's: a whole
+ *  number of twips (see xmlNumber), as 360, or a universal measure, as 18pt
+ *  or 0.25in, the twips it is (see universalMeasure), or, `signed`, as an
+ *  ST_SignedTwipsMeasure's, either with a minus sign (see xmlInteger). Every
+ *  reader of a page's size, an indent or a paragraph's spacing goes through
+ *  this, export's of a template's page, margins and columns too, so a
+ *  length reads as one in any unit, as Word reads it. */
+export function xmlTwips(value: string | undefined, signed = false): number | undefined {
+  if (value === undefined) return undefined;
+  return (signed ? xmlInteger(value) : xmlNumber(value)) ?? universalMeasure(value, signed, TWIPS_PER_UNIT);
 }
 
 // An integer as an xsd:integer is written (see xmlInteger)
@@ -71,9 +128,10 @@ const XML_INTEGER = /^[ \t\r\n]*[+-]?\d+[ \t\r\n]*$/;
 
 /** An integer an attribute holds, as an xsd:integer's or an
  *  ST_DecimalNumber's: digits, with leading zeros, a sign before them and
- *  whitespace around them (see xmlNumber in converter.ts). Import reads
- *  an integer with this (see xmlTwips and xmlNumberId in converter.ts),
- *  and export a template's list's numId, so they agree. */
+ *  whitespace around them (see xmlNumber). Import reads an integer with
+ *  this (see xmlTwips, and xmlNumberId in converter.ts), and export a
+ *  template's list's numId and its notes' start (see noteNumberingOf in
+ *  md-to-docx.ts), so they agree. */
 export function xmlInteger(value: string | undefined): number | undefined {
   return value !== undefined && XML_INTEGER.test(value) ? Number(value) : undefined;
 }

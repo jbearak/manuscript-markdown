@@ -38,6 +38,14 @@
 //   on save. So the properties export gives it go into its own children
 //   (see withProperties), each once, in CT_SectPr's order, where every
 //   consumer reads them, and every reader finds them there by name.
+// - Where the template is an export whose last section's layout, its
+//   break type, page or columns, export changed for the document's sake,
+//   as it turns the page for a final fence and fits the columns to it, the
+//   trailing sectPr has the template's own layout back, as export recorded
+//   it (see TEMPLATE_LAYOUT_PROPERTY), so exporting again lays the sections
+//   out alike. Not where any of the section's layout has changed since, as
+//   in Word, what export changed or not, whose layout is then the
+//   template's.
 // - A reference goes if the template lacks its relationship or part, or
 //   its relationship is of another type. Kept, it would name nothing, or a
 //   part export writes for something else.
@@ -66,7 +74,8 @@
 import type JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { XML_ENTITIES, xmlBuilder } from './xml-parser';
-import { EXPORT_CONTEXT, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, NO_COMPATIBILITY, ORDERED_OPTIONS, WORD_UNDERSTOOD_NAMESPACES, WORDPROCESSINGML, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, expandName, isElement, isIgnored, isNamed, moved, nameOf, parseOrdered, readsChoice, sectPrPropertyOf, withProperties, type Context, type XmlNode } from './scoped-xml';
+import { xmlOn, xmlTwips } from './xml-elements';
+import { EXPORT_CONTEXT, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, NO_COMPATIBILITY, ORDERED_OPTIONS, WORDPROCESSINGML, WORD_UNDERSTOOD_NAMESPACES, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, expandName, expandedNameOf, isElement, isIgnored, isNamed, moved, nameOf, parseOrdered, readsChoice, scopeIn, sectPrPropertyOf, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
 
 interface Relationship {
   id: string;
@@ -409,6 +418,143 @@ const TAKEN_PROPERTIES: ReadonlySet<string> = new Set(['headerReference', 'foote
 
 /** A template's headers and footers, the parts they name, and its trailing
  *  sectPr, and the parts its numbering names */
+/** The custom property, in chunks from 1, in which export records the
+ *  layout it wrote in the last section and the template's own last
+ *  section's, where it changed that for the document's sake (see
+ *  templateLayoutRecord), which a later export that takes the document as
+ *  its template puts back */
+export const TEMPLATE_LAYOUT_PROPERTY = 'MANUSCRIPT_TEMPLATE_LAYOUT_';
+/** A layout property, its name, as export wrote it, and as the template
+ *  had it, each as XML in export's document, or '' for none */
+export type LayoutEntry = [property: string, written: string, template: string];
+// A section's layout, which export changes in the template's own last
+// section: its break type, a new page after a break; its page, which a
+// final fence turns; and its columns, which it fits to that page
+const LAYOUT_PROPERTIES = ['type', 'pgSz', 'cols'];
+
+/** Each of a sectPr's layout properties as Word reads it, in export's
+ *  document (see effectiveSectPr), as XML with what it uses there of the
+ *  sectPr (see moved), or '' where it hasn't one */
+function layoutOf(sectPr: XmlNode): Map<string, string> {
+  const inside = contextIn(sectPr, EXPORT_CONTEXT);
+  return new Map(LAYOUT_PROPERTIES.map(property => {
+    const node = childrenOf(sectPr).find(child => sectPrPropertyOf(child, inside.scope) === property);
+    return [property, node ? buildOrdered([moved(node, inside, EXPORT_CONTEXT)]) : ''];
+  }));
+}
+
+// Attributes of layout properties whose value is the default, which a
+// property says as well by leaving it out (ECMA-376 Part 1 §17.6.4,
+// §17.6.13 and §17.6.22, and [MS-OI29500] Part 1 Section 17.6.4, b, for
+// w:equalWidth, and Section 17.6.3 for a column's w:space), and on-off
+// attributes, which say on and off in more ways
+const LAYOUT_DEFAULTS: Record<string, Record<string, string>> = {
+  pgSz: { orient: 'portrait' }, cols: { num: '1', space: '720', equalWidth: '1', sep: '0' }, col: { space: '0' }, type: { val: 'nextPage' },
+};
+const ON_OFF_ATTRIBUTES = new Set(['equalWidth', 'sep']);
+// Layout properties a section says as well by leaving them out: a new
+// page for its break, and one column (ECMA-376 Part 1 §17.6.22 and
+// §17.6.4). A page it leaves out has no size of its own, which isn't one
+const LAYOUT_ELEMENT_DEFAULTS: Record<string, string> = { type: '<w:type/>', cols: '<w:cols/>' };
+
+/** What a layout property, as XML in export's document (see layoutOf), or
+ *  '' where a section hasn't one, says, alike for two that say the same
+ *  however they write it: in any order of attributes, under any prefix,
+ *  with what says the default left out, an element too, a measure in twips,
+ *  in whatever unit it's given, a number as its value, and an on-off value
+ *  as on or off (see xmlOn), and with what Word ignores of columns left
+ *  out; each element by its expanded name, and its elements, as a column,
+ *  in order */
+function layoutKey(property: string, xml: string): string {
+  const node = parseOrdered(xml || (LAYOUT_ELEMENT_DEFAULTS[property] ?? ''))?.find(isElement);
+  if (!node) return xml;
+  // An element's, and of the last of columns of their own widths, `isLast`,
+  // without the space after it, which Word ignores, as fitColumns does
+  const key = (element: XmlNode, scope: Scope, isLast = false): unknown[] => {
+    const property = sectPrPropertyOf(element, scope), defaults = LAYOUT_DEFAULTS[property] ?? {};
+    let attributes = attributesOf(element, scope).filter(attribute => attribute.namespace !== MARKUP_COMPATIBILITY).flatMap(({ namespace, local, value }) => {
+      const wml = namespace !== undefined && WORDPROCESSINGML.has(namespace);
+      let said = value.trim();
+      if (wml && ON_OFF_ATTRIBUTES.has(local)) said = xmlOn(said) ? '1' : '0';
+      else if (xmlTwips(said) !== undefined) said = String(xmlTwips(said));
+      return wml && (defaults[local] === said || isLast && local === 'space') ? [] : [(wml ? '' : namespace ?? '') + ' ' + local + '=' + said];
+    }).sort();
+    const inner = scopeIn(element, scope);
+    let children = childrenOf(element).filter(isElement);
+    // Of columns, what Word reads (see fitColumns in md-to-docx.ts): each
+    // w:col's width and space where w:equalWidth is off and there are any,
+    // but the space after the last, and not w:num and w:space, and else
+    // those, and not the w:col
+    const isColumn = (child: XmlNode) => sectPrPropertyOf(child, inner) === 'col';
+    let last = -1;
+    if (property === 'cols') {
+      if (attributes.includes(' equalWidth=0') && children.some(isColumn)) {
+        attributes = attributes.filter(attribute => !/^ (?:num|space)=/.test(attribute));
+        last = children.map(isColumn).lastIndexOf(true);
+      } else children = children.filter(child => !isColumn(child));
+    }
+    return [expandedNameOf(element, scope), attributes, children.map((child, i) => key(child, inner, i === last))];
+  };
+  return JSON.stringify(key(node, EXPORT_NAMESPACES));
+}
+/** Whether two of a section's layout property, as XML, say the same (see
+ *  layoutKey) */
+const sameLayout = (property: string, one: string, other: string) => layoutKey(property, one) === layoutKey(property, other);
+
+/** Where export changed the layout of the template's own last section,
+ *  `templateSectPr`, in what it wrote in the last section, `written`, both
+ *  sectPrs in its document, each layout property as it wrote it and as the
+ *  template had it, every one, changed or not, so that a change since to
+ *  any stops the template's being put back (see withTemplateLayout); or
+ *  none where it changed none */
+export function templateLayoutRecord(templateSectPr: string, written: string): LayoutEntry[] {
+  const [template, wrote] = [templateSectPr, written].map(xml => {
+    const sectPr = parseOrdered(xml)?.find(isElement);
+    return sectPr && layoutOf(effectiveSectPr(sectPr, EXPORT_CONTEXT));
+  });
+  if (!template || !wrote || LAYOUT_PROPERTIES.every(property => sameLayout(property, template.get(property)!, wrote.get(property)!))) return [];
+  return LAYOUT_PROPERTIES.map(property => [property, wrote.get(property)!, template.get(property)!]);
+}
+
+/** The layout a template's custom properties record (see
+ *  TEMPLATE_LAYOUT_PROPERTY), none where they record none, or what they
+ *  record isn't such, each layout property once */
+function recordedLayout(properties: Record<string, string>[]): LayoutEntry[] {
+  const chunks = new Map<number, string>();
+  for (const property of properties) {
+    const name = property['@_name'];
+    const type = Object.keys(property).find(key => !key.startsWith('@_') && key !== '#text');
+    const value = type && property[type];
+    const n = typeof name === 'string' && name.startsWith(TEMPLATE_LAYOUT_PROPERTY) ? Number(name.slice(TEMPLATE_LAYOUT_PROPERTY.length)) : NaN;
+    if (Number.isInteger(n) && n >= 1 && typeof value === 'string') chunks.set(n, value);
+  }
+  if (chunks.size === 0) return [];
+  let json = '';
+  for (let n = 1; chunks.has(n); n++) json += chunks.get(n);
+  try {
+    const record: unknown = JSON.parse(json);
+    return Array.isArray(record) && record.length === LAYOUT_PROPERTIES.length
+      && record.every(entry => Array.isArray(entry) && entry.length === 3 && entry.every(part => typeof part === 'string'))
+      && LAYOUT_PROPERTIES.every(property => record.some(entry => entry[0] === property))
+      ? record as LayoutEntry[] : [];
+  } catch {
+    return [];
+  }
+}
+
+/** A trailing sectPr, as Word reads it in export's document, with the
+ *  layout export recorded as the template's own in place of what it wrote,
+ *  where the sectPr still says what it wrote, every layout property of it,
+ *  however it writes it (see layoutKey), as after a rewrite of its XML */
+function withTemplateLayout(sectPr: XmlNode, record: LayoutEntry[]): XmlNode {
+  const layout = layoutOf(sectPr);
+  if (record.length === 0 || record.some(([property, written]) => !sameLayout(property, layout.get(property)!, written))) return sectPr;
+  const changes = record.filter(([property, written, template]) => !sameLayout(property, written, template));
+  const inside = contextIn(sectPr, EXPORT_CONTEXT), changed = new Set(changes.map(([property]) => property));
+  const kept = { ...sectPr, [nameOf(sectPr)]: childrenOf(sectPr).filter(child => !changed.has(sectPrPropertyOf(child, inside.scope))) };
+  return withProperties(kept, EXPORT_CONTEXT, changes.flatMap(([, , template]) => template ? parseOrdered(template) ?? [] : []), EXPORT_CONTEXT);
+}
+
 export async function readTemplateSections(zip: JSZip): Promise<TemplateSections> {
   const result: TemplateSections = { references: '', titlePg: false, pgNumType: { first: '', others: '' }, evenAndOddHeaders: false, relationships: [], parts: new Map(), numIds: new Set(), customProperties: [] };
   const shownProperties = new Set<string>();
@@ -542,8 +688,10 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
       return kept;
     };
     // The trailing sectPr as Word reads it, as Word writes it on save,
-    // without what export gives sections of their own
-    const trailing = effectiveSectPr(last.node, last.around), inside = contextIn(trailing, EXPORT_CONTEXT);
+    // with the layout export recorded as the template's, where it changed
+    // it, and without what export gives sections of their own
+    const trailing = withTemplateLayout(effectiveSectPr(last.node, last.around), recordedLayout(elementsOf(await read('docProps/custom.xml'), 'Properties', 'property')));
+    const inside = contextIn(trailing, EXPORT_CONTEXT);
     const own = childrenOf(trailing).filter(node => !TAKEN_PROPERTIES.has(sectPrPropertyOf(node, inside.scope)));
     result.sectPr = buildOrdered([{ ...trailing, [nameOf(trailing)]: await withIds(own) }]);
   }

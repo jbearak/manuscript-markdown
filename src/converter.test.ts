@@ -38,7 +38,7 @@ import {
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
 import { fastestRun, fastestRunAsync } from './test-timing';
-import { annotateHtmlCommentIndices, convertMdToDocx, directiveRest, exportReads, holdsDirective, parseMd, templateStyleIds } from './md-to-docx';
+import { annotateHtmlCommentIndices, convertMdToDocx, directiveRest, exportReads, holdsDirective, noteNumberText, parseMd, templateStyleIds } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { keepParagraphEdgeWhitespace } from './html-entities';
@@ -5507,6 +5507,14 @@ describe('extractDocumentContent', () => {
     const buf = await zip.generateAsync({ type: 'uint8array' });
     const result = await convertDocx(buf);
     expect(result.markdown).toBe('**Bold** Plain\n');
+  });
+
+  test('reads an on or off value with XML\'s white space around it as Word does, as xsd:boolean has it', async () => {
+    // One that said on was read as off
+    const result = await convertDocx(await buildSyntheticDocx(wrapDocumentXml(
+      '<w:p><w:r><w:rPr><w:b w:val=" true "/></w:rPr><w:t>Bold</w:t></w:r><w:r><w:rPr><w:i w:val="\t1\n"/></w:rPr><w:t> italic</w:t></w:r>'
+      + '<w:r><w:rPr><w:b w:val=" 0 "/></w:rPr><w:t> plain</w:t></w:r></w:p>')));
+    expect(result.markdown).toBe('**Bold** *italic* plain\n');
   });
 
   test('run boundary hoists trailing whitespace outside italic delimiters', async () => {
@@ -17825,6 +17833,440 @@ describe('A section at the end of the document', () => {
     const md1 = (await convertDocx(docx)).markdown;
     expect(strip(md1)).toBe(md);
     expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+});
+
+describe('A template\'s section properties on the sections export adds', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const documentXml = async (docx: Uint8Array) => (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+  // A journal's: footnotes numbered in roman, numbered lines, two columns,
+  // a grid of lines
+  const journalTemplate = async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:sectPr');
+    const sectPr = xml.slice(at, xml.indexOf('</w:sectPr>', at) + '</w:sectPr>'.length);
+    zip.file('word/document.xml', xml.slice(0, at) + sectPr
+      .replace(/(<w:sectPr\b[^>]*>)/, (open: string) => open + '<w:footnotePr><w:numFmt w:val="lowerRoman"/></w:footnotePr>')
+      .replace(/<w:cols\b[^>]*\/>/, () => '<w:lnNumType w:countBy="1" w:restart="continuous"/><w:cols w:num="2" w:space="720"/>')
+      .replace('</w:sectPr>', '<w:docGrid w:linePitch="360"/></w:sectPr>') + xml.slice(at + sectPr.length));
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  // Each sectPr's children, by name, with a page's orientation
+  const sectionsOf = (xml: string) => [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(([, inner]) =>
+    [...inner.matchAll(/<w:(\w+)\b([^>]*?)\/?>/g)].filter(([tag]) => !tag.startsWith('</')).map(([, name, attrs]) => name === 'pgSz' && attrs.includes('w:orient="landscape"') ? 'pgSz landscape' : name)
+      .filter(name => name !== 'numFmt'));
+  const journal = ['footnotePr', 'pgSz', 'pgMar', 'lnNumType', 'cols', 'docGrid'];
+  const withBreak = (page: string) => ['footnotePr', 'type', page, 'pgMar', 'lnNumType', 'cols', 'docGrid'];
+
+  test.each([
+    ['a landscape section and a landscape table in the middle', 'Intro.\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n\nMiddle.\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nEnd.\n',
+      [withBreak('pgSz'), withBreak('pgSz landscape'), withBreak('pgSz'), withBreak('pgSz landscape'), journal]],
+    ['a landscape section that ends the document', 'Intro.\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n',
+      [withBreak('pgSz'), journal.map(name => name === 'pgSz' ? 'pgSz landscape' : name)]],
+    ['a landscape table that starts the document', '<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nEnd.\n',
+      [withBreak('pgSz landscape'), journal]],
+  ])('gives each section of %s the template\'s', async (_, md, sections) => {
+    // A section break had a page, margins and one column of its own, so
+    // only the last section had the template's numbered lines and columns
+    const templateDocx = await journalTemplate();
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const xml = await documentXml(docx);
+    expect(sectionsOf(xml)).toEqual(sections);
+    expect(xml).not.toContain('<w:cols w:space="720"/>');
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    // Again with the template, and with the export as the template, as
+    // Export to Word takes it
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+    const { docx: docx2 } = await convertMdToDocx(md1, { templateDocx: docx });
+    expect(sectionsOf(await documentXml(docx2))).toEqual(sections);
+    expect((await convertDocx(docx2)).markdown).toBe(md1);
+  });
+
+  test.each([
+    ['continuous', 'a portrait section', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.\n'],
+    ['oddPage', 'a landscape section', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.\n'],
+    ['continuous', 'a table\'s own section', 'A.\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nC.\n'],
+  ])('starts the last section on a new page where the template\'s last section starts %s, after %s', async (type, _, md) => {
+    // The last section took the template's w:type, so it ran on after the
+    // section before it, on its page, or after a blank one
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:pgSz');
+    zip.file('word/document.xml', xml.slice(0, at) + '<w:type w:val="' + type + '"/>' + xml.slice(at));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const out = await documentXml(docx);
+    expect(out).not.toContain(type);
+    expect(out.slice(out.lastIndexOf('<w:sectPr'))).toMatch(/^<w:sectPr\b[^>]*><w:type w:val="nextPage"\/><w:pgSz\b/);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
+  test('starts the last section on a new page where an extension\'s wrapper whose content Word reads holds the template\'s break type, after a portrait section', async () => {
+    // Word reads the wrapper's content, which mc:ProcessContent names, as
+    // the sectPr's own, so a continuous break in it ran the last section
+    // on after the fence's, on its page
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const open = xml.lastIndexOf('<w:sectPr'), at = xml.lastIndexOf('<w:pgSz');
+    zip.file('word/document.xml', xml.slice(0, open) + '<w:sectPr xmlns:ext="urn:example:ext" mc:Ignorable="ext" mc:ProcessContent="ext:wrap"' + xml.slice(open + '<w:sectPr'.length, at)
+      + '<ext:wrap><w:type w:val="continuous"/></ext:wrap>' + xml.slice(at));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const md = 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.\n';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const out = await documentXml(docx);
+    expect(out).not.toContain('continuous');
+    expect(out.slice(out.lastIndexOf('<w:sectPr'))).toMatch(/^<w:sectPr\b[^>]*>(?:<ext:wrap>)?<w:type w:val="nextPage"\/>(?:<\/ext:wrap>)?<w:pgSz\b/);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
+  const MAIN = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  // The prefixes of the elements and attributes no declaration in scope binds
+  const unbound = (xml: string) => {
+    const scopes = [new Set(['xml'])];
+    const prefixes = new Set<string>();
+    for (const [, close, name, attributes, empty] of xml.matchAll(/<(\/?)([\w.:-]+)((?:\s+[\w.:-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/g)) {
+      if (close) { scopes.pop(); continue; }
+      const scope = new Set(scopes[scopes.length - 1]);
+      for (const [, prefix] of attributes.matchAll(/\sxmlns:([\w.-]+)\s*=/g)) scope.add(prefix);
+      for (const qname of [name, ...[...attributes.matchAll(/\s([\w.:-]+)\s*=/g)].map(m => m[1])]) {
+        const prefix = qname.includes(':') ? qname.slice(0, qname.indexOf(':')) : '';
+        if (prefix && prefix !== 'xmlns' && !scope.has(prefix)) prefixes.add(prefix);
+      }
+      if (!empty) scopes.push(scope);
+    }
+    return [...prefixes];
+  };
+  /** A template whose document element or sectPr has `declarations`, and
+   *  whose sectPr is edited */
+  const templateWith = async (where: 'document' | 'sectPr', declarations: string, edit: (sectPr: string) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    if (where === 'document') xml = xml.replace(/<w:document\b/, () => '<w:document ' + declarations).replace(/mc:Ignorable="([^"]*)"(?=[^>]*>\s*<w:body)/, (_, ignorable: string) => 'mc:Ignorable="' + ignorable + ' ext"');
+    const at = xml.lastIndexOf('<w:sectPr');
+    const sectPr = xml.slice(at, xml.indexOf('</w:sectPr>', at) + '</w:sectPr>'.length);
+    zip.file('word/document.xml', xml.slice(0, at) + edit(where === 'sectPr' ? sectPr.replace(/^<w:sectPr\b/, () => '<w:sectPr ' + declarations) : sectPr) + xml.slice(at + sectPr.length));
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  const fenced = 'Intro.\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n\nEnd.\n';
+  /** The export of `md` with the template, which comes back as it went, and
+   *  again with the export as the template, each checked */
+  const roundTrip = async (md: string, templateDocx: Uint8Array, check: (xml: string) => void) => {
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    check(await documentXml(docx));
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+    const { docx: docx2 } = await convertMdToDocx(md1, { templateDocx: docx });
+    check(await documentXml(docx2));
+    expect((await convertDocx(docx2)).markdown).toBe(md1);
+  };
+
+  test.each([['sectPr', 'sectPr'], ['document element', 'document']] as const)('declares on each section the namespaces the template\'s section properties use, ignorable as there, where the template\'s %s declares them', async (_, where) => {
+    // A section break took an extension of the template's, written with a
+    // prefix its sectPr declares, and the declaration, but not that it's
+    // ignorable. Where the document element declared it, no section had
+    // the declaration, so the prefix was unbound
+    const templateDocx = await templateWith(where, 'xmlns:ext="urn:example:ext"' + (where === 'sectPr' ? ' mc:Ignorable="ext"' : ''),
+      sectPr => sectPr.replace('</w:sectPr>', '<ext:extra ext:val="1"/></w:sectPr>'));
+    await roundTrip(fenced, templateDocx, xml => {
+      expect(xml.match(/<ext:extra ext:val="1"\/>/g)).toHaveLength(3);
+      expect(unbound(xml)).toEqual([]);
+      for (const [open] of xml.matchAll(/<w:sectPr\b[^>]*>/g)) {
+        expect(open).toContain(' xmlns:ext="urn:example:ext"');
+        expect(open).toMatch(/ mc:Ignorable="(?:[^"]* )?ext(?: [^"]*)?"/);
+      }
+    });
+  });
+
+  test.each([['sectPr', 'sectPr'], ['document element', 'document']] as const)('reads the template\'s section properties by their namespace, whatever its prefix, where the template\'s %s declares it', async (_, where) => {
+    // A section break left the template's page size, written with another
+    // prefix for WordprocessingML's namespace, and added one of its own, a
+    // page of the default size, so it had two. Where the document element
+    // declared the prefix, no section had the declaration
+    const templateDocx = await templateWith(where, 'xmlns:localw="' + MAIN + '"', sectPr => sectPr
+      .replace(/<w:pgSz\b[^>]*\/>/, () => '<localw:pgSz localw:w="11906" localw:h="16838"/>')
+      .replace(/<w:cols\b[^>]*\/>/, () => '<localw:cols localw:num="2" localw:space="720"/>'));
+    await roundTrip(fenced, templateDocx, xml => {
+      expect(unbound(xml)).toEqual([]);
+      const sections = [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(([, inner]) => inner);
+      expect(sections.map(inner => inner.match(/<(?:w|localw):pgSz\b[^>]*\/>/g))).toEqual([
+        ['<w:pgSz w:w="11906" w:h="16838"/>'], ['<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'], ['<w:pgSz w:w="11906" w:h="16838"/>'],
+      ]);
+      expect(sections.map(inner => inner.match(/<(?:w|localw):cols\b[^>]*\/>/g))).toEqual(new Array(3).fill(['<w:cols w:num="2" w:space="720"/>']));
+    });
+  });
+
+  test('reads a template saved as Strict, whose namespaces are Strict\'s, as it reads one saved as Transitional', async () => {
+    // Its section properties, in Strict's namespace for WordprocessingML,
+    // got a prefix of their own, as another namespace bound to w, so export
+    // read no page, page numbering or title page there
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    xml = xml.replace(' xmlns:w="' + MAIN + '"', ' xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"')
+      .replace(' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"', ' xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships"');
+    const at = xml.lastIndexOf('<w:sectPr');
+    zip.file('word/document.xml', xml.slice(0, at) + xml.slice(at)
+      .replace(/<w:pgSz\b[^>]*\/>/, '<w:pgSz w:w="11906" w:h="16838"/>')
+      .replace(/<w:cols\b[^>]*\/>/, '<w:pgNumType w:fmt="lowerRoman"/><w:cols w:num="2" w:space="720"/><w:titlePg/>'));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    await roundTrip(fenced, templateDocx, xml => {
+      expect(xml).not.toContain('ns1');
+      const sections = [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(([, inner]) => inner);
+      expect(sections.map(inner => inner.match(/<w:pgSz\b[^>]*\/>/g))).toEqual([
+        ['<w:pgSz w:w="11906" w:h="16838"/>'], ['<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'], ['<w:pgSz w:w="11906" w:h="16838"/>'],
+      ]);
+      for (const inner of sections) {
+        expect(inner).toContain('<w:pgNumType w:fmt="lowerRoman"/>');
+        expect(inner).toContain('<w:cols w:num="2" w:space="720"/>');
+      }
+      expect(sections.map(inner => inner.includes('<w:titlePg/>'))).toEqual([true, false, false]);
+    });
+  });
+
+  test('gives a prefix of its own to another namespace the template binds to export\'s prefix for WordprocessingML\'s', async () => {
+    // The template's columns, under another prefix, became w:cols with
+    // the template's declaration of w for another namespace, so they were
+    // in that namespace, and so was their w:num
+    const templateDocx = await templateWith('sectPr', 'xmlns:localw="' + MAIN + '"', sectPr => sectPr
+      .replace(/<w:cols\b[^>]*\/>/, () => '<localw:cols xmlns:w="urn:example:ext" localw:num="2" localw:space="720" w:extra="1"/>')
+      .replace('</w:sectPr>', '<w:tail xmlns:w="urn:example:ext"><w:inner mc:Ignorable="w" mc:ProcessContent="w:x" mc:MustUnderstand="w" mc:PreserveElements="w:y" mc:PreserveAttributes="w:*"/></w:tail>'
+        // A choice of what needs that namespace, which w named, which needs WordprocessingML's in its place
+        + '<mc:AlternateContent><mc:Choice xmlns:w="urn:example:ext" Requires="w"><w:alt/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:sectPr>'));
+    await roundTrip(fenced, templateDocx, xml => {
+      expect(unbound(xml)).toEqual([]);
+      const sections = [...xml.matchAll(/(<w:sectPr\b[^>]*>)([\s\S]*?)<\/w:sectPr>/g)];
+      expect(sections).toHaveLength(3);
+      for (const [, open, inner] of sections) {
+        // The other namespace's prefix declared where the template declared
+        // it, and w nowhere
+        expect(open + inner).not.toMatch(/xmlns:w=/);
+        expect(inner.match(/<\w+:cols\b[^>]*\/>/g)).toEqual([expect.stringMatching(/^<w:cols\b(?=[^>]* xmlns:ns1="urn:example:ext")(?=[^>]* w:num="2")(?=[^>]* w:space="720")(?=[^>]* ns1:extra="1")/)]);
+        // Markup compatibility's lists of prefixes name it as it's named, on
+        // any element, mc:MustUnderstand too, which names a namespace Word
+        // doesn't understand, but on an element Word ignores, whose own
+        // mc:Ignorable names its namespace, and which Word reads none of
+        expect(inner).toContain('<ns1:tail xmlns:ns1="urn:example:ext"><ns1:inner mc:Ignorable="ns1" mc:ProcessContent="ns1:x" mc:MustUnderstand="ns1" mc:PreserveElements="ns1:y" mc:PreserveAttributes="ns1:*"/></ns1:tail>');
+        // Each section, the last, the template's own, as Word reads it too,
+        // has the empty fallback, which Word reads, as the choice needs the
+        // other namespace, not WordprocessingML's
+        expect(inner).not.toMatch(/mc:AlternateContent|ns1:alt/);
+      }
+    });
+  });
+
+  test('takes the template\'s margins and columns, which markup compatibility\'s alternatives hold together, as Word reads them, in each section export adds', async () => {
+    // A section break took the alternatives for margins alone, so it added
+    // one column beside them, and either alternative had two
+    const margins = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
+    const alternatives = '<mc:AlternateContent><mc:Choice Requires="w14">' + margins + '<w:cols w:num="2" w:space="720"/></mc:Choice><mc:Fallback>' + margins + '<w:cols w:space="720"/></mc:Fallback></mc:AlternateContent>';
+    const templateDocx = await templateWith('sectPr', '', sectPr => sectPr.replace(/<w:pgMar\b[^>]*\/><w:cols\b[^>]*\/>/, () => alternatives));
+    await roundTrip(fenced, templateDocx, xml => {
+      expect(unbound(xml)).toEqual([]);
+      const sections = [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(match => match[1]);
+      expect(sections).toHaveLength(3);
+      // Each section has the choice's, which Word reads, once, the last,
+      // the template's own, as Word reads it too
+      for (const inner of sections) {
+        expect(inner).not.toContain('mc:AlternateContent');
+        expect(inner.match(/<w:pgMar\b[^>]*\/>|<w:cols\b[^>]*\/>/g)).toEqual([margins, '<w:cols w:num="2" w:space="720"/>']);
+      }
+    });
+  });
+
+  test('declares the default namespace of an extension that markup compatibility\'s alternatives hold on it in each section export adds', async () => {
+    // A section break took the extension out of the choice without the
+    // choice's declaration of its namespace, so it was in none, which
+    // the section's properties can't hold and none makes ignorable
+    const alternatives = '<mc:AlternateContent><mc:Choice Requires="w14" xmlns="urn:example:ext"><extra/></mc:Choice></mc:AlternateContent>';
+    const templateDocx = await templateWith('sectPr', 'xmlns:ext="urn:example:ext" mc:Ignorable="ext"', sectPr => sectPr.replace('</w:sectPr>', () => alternatives + '</w:sectPr>'));
+    await roundTrip(fenced, templateDocx, xml => {
+      const sections = [...xml.matchAll(/(<w:sectPr\b[^>]*>)([\s\S]*?)<\/w:sectPr>/g)];
+      expect(sections).toHaveLength(3);
+      // The last, the template's own, as Word reads it too
+      for (const [, open, inner] of sections) {
+        expect(open).toMatch(/ mc:Ignorable="[^"]*\bext\b/);
+        expect(inner).toContain('<extra xmlns="urn:example:ext"/>');
+        expect(inner).not.toContain('mc:AlternateContent');
+      }
+    });
+  });
+
+  test('keeps the template\'s break type in a document of one section', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:pgSz');
+    zip.file('word/document.xml', xml.slice(0, at) + '<w:type w:val="continuous"/>' + xml.slice(at));
+    const { docx } = await convertMdToDocx('A.\n\nB.\n', { templateDocx: await zip.generateAsync({ type: 'uint8array' }) });
+    expect(await documentXml(docx)).toContain('<w:type w:val="continuous"/>');
+  });
+
+  // A note in each of three sections, and two references again, to the
+  // second section's note in it, and to the first's in the third
+  const notesInSections = 'A[^a].\n\n<!-- landscape -->\n\nB[^b], again[^b].\n\n<!-- /landscape -->\n\nC[^c], and[^a] again.\n\n[^a]: Note a.\n\n[^b]: Note b.\n\n[^c]: Note c.\n';
+  test.each([
+    ['restarts them in each section', '', '<w:footnotePr><w:numRestart w:val="eachSect"/></w:footnotePr>', ['1', '1']],
+    ['restarts them on each page, of which a section has at least one', '', '<w:footnotePr><w:numRestart w:val="eachPage"/></w:footnotePr>', ['1', '1']],
+    ['numbers them in lowercase roman numerals from 3', '', '<w:footnotePr><w:numFmt w:val="lowerRoman"/><w:numStart w:val="3"/></w:footnotePr>', ['iv', 'iii']],
+    // A start with a plus sign, which Word reads, was read as none, from 1
+    ['numbers them from 3, written with a plus sign', '', '<w:footnotePr><w:numStart w:val="+3"/></w:footnotePr>', ['4', '3']],
+    ['numbers them with symbols', '', '<w:footnotePr><w:numFmt w:val="chicago"/></w:footnotePr>', ['\u2020', '*']],
+    ['numbers endnotes, by default, in lowercase roman numerals', '---\nnotes: endnotes\n---\n', '', ['ii', 'i']],
+    ['restarts endnotes in each section', '---\nnotes: endnotes\n---\n', '<w:endnotePr><w:numFmt w:val="decimal"/><w:numRestart w:val="eachSect"/></w:endnotePr>', ['1', '1']],
+    ['numbers them as Word does by default, which they did before', '', '', ['2', '1']],
+  ])('gives a note\'s reference again the number Word shows for the note, where the template %s', async (_, front, notePr, cached) => {
+    // The reference again showed the note's ID until Word updated it, which
+    // the template's numbering, which each section takes, can number
+    // otherwise: after the first section's note, the second section's
+    // first showed 1 and a reference to it 2
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:sectPr');
+    zip.file('word/document.xml', xml.slice(0, at) + xml.slice(at).replace(/^<w:sectPr\b[^>]*>/, open => open + notePr));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const md = front + notesInSections;
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const out = await documentXml(docx);
+    expect([...out.matchAll(/NOTEREF[\s\S]*?w:fldCharType="separate"\/><\/w:r><w:r>(?:<w:rPr>[\s\S]*?<\/w:rPr>)?<w:t>([^<]*)<\/w:t>/g)].map(([, text]) => text)).toEqual(cached);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(notesInSections);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
+  test('numbers a note as Word does in each of its formats', () => {
+    // Past the letters and the symbols, Word repeats them
+    expect([1, 4, 9, 14, 40, 1994].map(n => noteNumberText(n, 'upperRoman'))).toEqual(['I', 'IV', 'IX', 'XIV', 'XL', 'MCMXCIV']);
+    expect([1, 26, 27, 53].map(n => noteNumberText(n, 'lowerLetter'))).toEqual(['a', 'z', 'aa', 'aaa']);
+    expect([2, 28].map(n => noteNumberText(n, 'upperLetter'))).toEqual(['B', 'BB']);
+    expect([1, 4, 5, 10].map(n => noteNumberText(n, 'chicago'))).toEqual(['*', '\u00A7', '**', '\u2020\u2020\u2020']);
+    expect([3, 12].map(n => noteNumberText(n, 'decimalZero'))).toEqual(['03', '12']);
+    expect(noteNumberText(7, 'decimal')).toBe('7');
+  });
+
+  // A landscape template's, with columns that fit its page and that a
+  // portrait section has fitted to its own
+  const landscapeTemplate = async (cols: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:pgSz\b[^>]*\/>/, () => '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>').replace(/<w:cols\b[^>]*\/>/, () => cols));
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  // Each sectPr, but its revision ID, which each export gives its own, and
+  // each table's grid
+  const layoutOf = async (docx: Uint8Array) => {
+    const xml = await documentXml(docx);
+    return {
+      sections: [...xml.matchAll(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g)].map(([sectPr]) => sectPr.replace(/ w:rsidR="[^"]*"/g, '')),
+      grids: [...xml.matchAll(/<w:tblGrid>[\s\S]*?<\/w:tblGrid>/g)].map(([grid]) => grid),
+    };
+  };
+  const endsPortrait = 'A.\n\n<!-- landscape -->\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n<!-- /landscape -->\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n';
+  test.each([
+    ['columns of their own widths, which it scales down', '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="5760" w:space="720"/><w:col w:w="6480"/></w:cols>',
+      '<w:gridCol w:w="2880"/><w:gridCol w:w="2880"/>'],
+    ['two columns too far apart for it, which it makes one', '<w:cols w:num="2" w:space="9600"/>', '<w:gridCol w:w="840"/><w:gridCol w:w="840"/>'],
+  ])('lays out the sections export adds alike where the export it wrote, ending in a portrait section, is the template, under a landscape template of %s', async (_, cols, grid) => {
+    // The last section's columns, fitted to its upright page, were what
+    // the export, as a template, gave as its own, so the landscape section
+    // had them too, narrower, or one column
+    const templateDocx = await landscapeTemplate(cols);
+    const first = (await convertMdToDocx(endsPortrait, { templateDocx })).docx;
+    const layout = await layoutOf(first);
+    // The landscape section has the template's columns, and its table's
+    // grid the narrower one
+    expect(layout.sections[1]).toContain(cols);
+    expect(layout.grids).toEqual(['<w:tblGrid>' + grid + '</w:tblGrid>']);
+    const second = (await convertMdToDocx(endsPortrait, { templateDocx: first })).docx;
+    expect(await layoutOf(second)).toEqual(layout);
+    const third = (await convertMdToDocx(endsPortrait, { templateDocx: second })).docx;
+    expect(await layoutOf(third)).toEqual(layout);
+    const md1 = (await convertDocx(first)).markdown;
+    expect(strip(md1)).toBe(endsPortrait);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx: first })).docx)).markdown).toBe(md1);
+  });
+
+  const OWN_WIDTHS = '<w:cols w:num="2" w:space="720" w:equalWidth="0" w:sep="0"><w:col w:w="5760" w:space="720"/><w:col w:w="6480"/></w:cols>';
+  test.each([
+    ['the order of the last page\'s attributes', (sectPr: string) => sectPr.replace(/<w:pgSz w:w="(\d+)" w:h="(\d+)"\/>/, (_, w: string, h: string) => '<w:pgSz w:h="' + h + '" w:w="' + w + '"/>')],
+    ['the prefix of the last section\'s properties', (sectPr: string) => sectPr.replace(/(<\/?)w:(pgSz|cols)\b/g, (_, start: string, name: string) => start + 'q:' + name)
+      .replace(/(<q:(?:pgSz|cols)\b[^>]*)/g, tag => tag.replace(/ w:/g, ' q:')).replace(/^<w:sectPr\b/, open => open + ' xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"')],
+    // As Word reads them: down to a whole twip from points, and with a plus
+    // sign
+    ['the columns\' spacing, to points and a fraction of a twip', (sectPr: string) => sectPr.replace(/<w:cols w:space="720"\/>/, () => '<w:cols w:space="36.04pt"/>')],
+    ['the last page\'s width, to twips with a plus sign', (sectPr: string) => sectPr.replace(/<w:pgSz w:w="12240"/, () => '<w:pgSz w:w="+12240"')],
+    ['the measures of the last page and columns, to inches', (sectPr: string) => sectPr.replace(/<w:pgSz w:w="12240"/, () => '<w:pgSz w:w="8.5in"').replace(/<w:cols w:space="720"\/>/, () => '<w:cols w:space="0.5in"/>')],
+    // Where the template starts its last section on the same page, export
+    // starts it on a new one, which its break type says, or its leaving it out
+    ['the break type, to say a new page by leaving it out', (sectPr: string) => sectPr.replace('<w:type w:val="nextPage"/>', ''), '<w:type w:val="continuous"/>'],
+    // Columns of their own widths, which export scales down to the last
+    // page and writes with a separator, as the template has them
+    ['the columns\' separator, to say none by leaving it out', (sectPr: string) => sectPr.replace(' w:sep="0"', ''), '', OWN_WIDTHS],
+    // Which Word ignores where the columns are of their own widths
+    ['the number of columns of their own widths, to none', (sectPr: string) => sectPr.replace(' w:num="2"', ''), '', OWN_WIDTHS],
+    ['the last column\'s space, to say none by giving it', (sectPr: string) => sectPr.replace(/<w:col w:w="(\d+)"\/><\/w:cols>/, (_, w: string) => '<w:col w:w="' + w + '" w:space="0"/></w:cols>'), '', OWN_WIDTHS],
+    // Which Word ignores after the last column, as it has no column after it
+    ['the last column\'s space, which Word ignores, to none', (sectPr: string) => sectPr.replace(/(<w:col w:w="\d+") w:space="\d+"(\/><\/w:cols>)/, (_, col: string, end: string) => col + end), '',
+      '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="6120" w:space="720"/><w:col w:w="6120" w:space="720"/></w:cols>'],
+  ])('lays out the sections export adds alike where the export it wrote is the template, after a rewrite that changes only %s', async (_, rewrite, type = '', cols = '<w:cols w:num="2" w:space="9600"/>') => {
+    // What export wrote was compared as text, so a rewrite that keeps what
+    // the properties say, in another order of attributes, in another unit,
+    // or by leaving out what says the default, took them for changed, and
+    // the landscape section had the upright page's one column. Another
+    // prefix, which reading them under export's prefixes made alike before,
+    // stays alike
+    const template = await JSZip.loadAsync(await landscapeTemplate(cols));
+    template.file('word/document.xml', (await template.file('word/document.xml')!.async('string')).replace('<w:pgSz ', () => type + '<w:pgSz '));
+    const first = (await convertMdToDocx(endsPortrait, { templateDocx: await template.generateAsync({ type: 'uint8array' }) })).docx;
+    const zip = await JSZip.loadAsync(first);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:sectPr');
+    const end = xml.indexOf('</w:sectPr>', at) + '</w:sectPr>'.length;
+    const rewritten = rewrite(xml.slice(at, end));
+    expect(rewritten).not.toBe(xml.slice(at, end));
+    zip.file('word/document.xml', xml.slice(0, at) + rewritten + xml.slice(end));
+    const second = (await convertMdToDocx(endsPortrait, { templateDocx: await zip.generateAsync({ type: 'uint8array' }) })).docx;
+    expect((await layoutOf(second)).sections[1]).toContain(cols);
+    expect(await layoutOf(second)).toEqual(await layoutOf(first));
+  });
+
+  test('takes the last section as the export, as a template, has it, where it was changed after export', async () => {
+    // As Word saves a change to its columns: the template's own, which
+    // export recorded, no longer apply
+    const templateDocx = await landscapeTemplate('<w:cols w:num="2" w:space="9600"/>');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(endsPortrait, { templateDocx })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:sectPr');
+    zip.file('word/document.xml', xml.slice(0, at) + xml.slice(at).replace(/<w:cols\b[^>]*\/>/, () => '<w:cols w:num="3" w:space="360"/>'));
+    const second = (await convertMdToDocx(endsPortrait, { templateDocx: await zip.generateAsync({ type: 'uint8array' }) })).docx;
+    const { sections } = await layoutOf(second);
+    expect(sections.map(sectPr => /<w:cols\b[^>]*\/>/.exec(sectPr)?.[0])).toEqual(Array(3).fill('<w:cols w:num="3" w:space="360"/>'));
+  });
+
+  test.each([
+    ['its columns', (sectPr: string) => sectPr.replace(/<w:cols\b[^>]*\/>/, () => '<w:cols w:num="2" w:space="720"/>'), '<w:cols w:num="2" w:space="720"/>'],
+    ['its break type', (sectPr: string) => sectPr.replace(/<w:pgSz\b/, () => '<w:type w:val="continuous"/><w:pgSz'), '<w:type w:val="continuous"/>'],
+  ])('takes the last section as the export, as a template, has it, where %s, which export left as the template had them, changed after export', async (_, edit, edited) => {
+    // Export recorded only the page, which it turned for the final fence,
+    // and checked only that, so where something else of the section's
+    // layout changed, as in Word, a document of one section still had the
+    // template's upright page back, under the changed layout
+    const templateDocx = (await convertMdToDocx('x')).docx;
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n', { templateDocx })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:sectPr');
+    expect(xml.slice(at)).toContain('w:orient="landscape"');
+    const changed = xml.slice(0, at) + edit(xml.slice(at));
+    expect(changed).not.toBe(xml);
+    zip.file('word/document.xml', changed);
+    const second = await documentXml((await convertMdToDocx('A.\n', { templateDocx: await zip.generateAsync({ type: 'uint8array' }) })).docx);
+    const last = second.slice(second.lastIndexOf('<w:sectPr'));
+    expect(last).toContain('w:orient="landscape"');
+    expect(last).toContain(edited);
   });
 });
 
