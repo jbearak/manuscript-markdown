@@ -20362,13 +20362,13 @@ describe('Highlights across runs', () => {
 
   test.each([
     // Whose ~> or ~~} its ~~ makes, once resolving drops the mark after it
-    ['struck text starting with > at the old side\'s end', [revised('>y', 'deletion', { strikethrough: true }), revised('n', 'addition')], 1000, '{--**d**--}{--~~>y~~--}{++n++}'],
-    ['struck text starting with } at the old side\'s end', [revised('}y', 'deletion', { strikethrough: true }), revised('n', 'addition')], 1000, '{--**d**--}{--~~}y~~--}{++n++}'],
-    ['an insertion in a comment\'s range', [revised('n', 'addition', {}, new Set(['1']))], 8000, '{--**d**--}{=={++n++}==}'],
-    ['a deletion in a comment\'s range', [revised('z', 'deletion', {}, new Set(['1'])), revised('n', 'addition')], 8000, '{--**d**--}{=={--z--}==}{++n++}'],
-    ['a ~~} on the new side', [revised('n', 'addition', { strikethrough: true }), revised('}', 'addition')], 1000, '{++~~n~~++}{++}++}'],
-    ['two equations in a row on the old side', [deletedMath('x'), deletedMath('y'), revised('n', 'addition')], 1000, '{--$x$--}{--$y$--}{++n++}'],
-    ['an empty new side', [revised('', 'addition'), revised('', 'addition')], 1000, '{--**d**--}{++++}'],
+    ['struck text starting with > at the old side\'s end', [revised('>y', 'deletion', { strikethrough: true }), revised('n', 'addition')], 8000, '{--**d**--}{--~~>y~~--}{++n++}'],
+    ['struck text starting with } at the old side\'s end', [revised('}y', 'deletion', { strikethrough: true }), revised('n', 'addition')], 8000, '{--**d**--}{--~~}y~~--}{++n++}'],
+    ['an insertion in a comment\'s range', [revised('n', 'addition', {}, new Set(['1']))], 16000, '{--**d**--}{=={++n++}==}'],
+    ['a deletion in a comment\'s range', [revised('z', 'deletion', {}, new Set(['1'])), revised('n', 'addition')], 16000, '{--**d**--}{=={--z--}==}{++n++}'],
+    ['a ~~} on the new side', [revised('n', 'addition', { strikethrough: true }), revised('}', 'addition')], 8000, '{++~~n~~++}{++}++}'],
+    ['two equations in a row on the old side', [deletedMath('x'), deletedMath('y'), revised('n', 'addition')], 8000, '{--$x$--}{--$y$--}{++n++}'],
+    ['an empty new side', [revised('', 'addition'), revised('', 'addition')], 8000, '{--**d**--}{++++}'],
   ] as const)('writes many deletions before %s, from which no substitution holds, in linear time', (_name, tail, size, end) => {
     // Each start in the deletions built its sides again, or read to their
     // end again, and declined as the first had
@@ -20386,8 +20386,10 @@ describe('Highlights across runs', () => {
       return fastest;
     };
     expect(buildMarkdown(items(size), new Map())).toEndWith(end);
-    // About 2 in linear time, and 4 in time in the square of the deletions
-    expect(time(2 * size) / time(size)).toBeLessThan(3);
+    // About 4 in linear time, and 16 in time in the square of the
+    // deletions. The smaller list takes about 20 ms, so the timer's noise
+    // on a slower runner doesn't decide the ratio
+    expect(time(4 * size) / time(size)).toBeLessThan(8);
   }, 30000);
 
   test('keeps a substitution from after an equation and an empty run before struck text resolving writes as <s>', () => {

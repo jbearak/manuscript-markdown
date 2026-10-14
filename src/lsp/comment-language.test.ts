@@ -194,18 +194,24 @@ describe('comments without their closers', () => {
 
 	// Each comment's opener searched the rest of the text for its matching
 	// <<} again where none was, so a text of many took time in the square of
-	// their number
+	// their number. Each run reads its text 20 times, so the smaller one
+	// takes about 20 ms and the timer's noise on a slower runner doesn't
+	// decide the ratio. Longer texts don't do as well: the map of each
+	// comment's closer outgrows the processor's cache, which alone takes
+	// time faster than its size grows
 	test.each([
 		['finds the comment at an offset', (text: string) => expect(findCommentIdAtOffset(text, 0)).toBeUndefined()],
 		['strips CriticMarkup', (text: string) => expect(stripCriticMarkup(text)).toBe(text.trim())],
 	])('%s in time linear in their number', (_name, read) => {
 		const time = (n: number) => {
 			const text = 'x {>> a {#a>> b '.repeat(n);
-			return fastestRun(() => read(text));
+			return fastestRun(() => {
+				for (let k = 0; k < 20; k++) read(text);
+			});
 		};
-		time(20000);
-		const small = time(20000);
-		expect(time(80000) / small).toBeLessThan(8);
+		time(10000);
+		const small = time(10000);
+		expect(time(40000) / small).toBeLessThan(8);
 	}, 60000);
 
 	test('unwraps the spans it did', () => {
