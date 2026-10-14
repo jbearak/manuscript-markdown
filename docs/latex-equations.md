@@ -257,6 +257,14 @@ One-sided delimiter (invisible on the other side):
 \left. \frac{df}{dx} \right|_{x=0}
 ```
 
+A separator that grows with the delimiter, with `\middle`:
+
+```latex
+\left\{ x \middle| x > 0 \right\}
+```
+
+In Word, `\middle` splits the delimiter's content into parts, with the separator between them. A Word delimiter's separator comes back as `\middle`, with `\left` and `\right`, even around parentheses, square brackets or single bars, as `\left(a\middle|b\right)`. Word's delimiter has one separator character, so `\middle` with different ones, as `\middle|` and `\middle/` in one delimiter, exports as those characters, which don't grow. A `\middle` outside `\left` and `\right` exports as its character, as a `\right` without a `\left` does. A Word separator `\middle` can't take, as a comma, a `.` typed as itself (`\middle.` is no separator), or `∣`, which LaTeX has as the relation `\mid`, comes back as that character between the parts, as `(a,b)`. So does one in a delimiter with neither bracket, or with a bracket `\left` or `\right` can't take, as `,a|b,`.
+
 ## Matrices
 
 | Environment | Delimiters | Description |

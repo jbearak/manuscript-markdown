@@ -1023,15 +1023,15 @@ describe('Unit tests: OMML construct translation', () => {
       expect(ommlToLatex([node])).toBe('[x]');
     });
 
-    it('translates m:d with multiple m:e elements joined by separator', () => {
+    it('translates m:d with multiple m:e elements joined by \\middle and the separator', () => {
       const node = {
         'm:d': [
           { 'm:e': [makeRun('a')] },
           { 'm:e': [makeRun('b')] },
         ],
       };
-      // Default separator is '|'
-      expect(ommlToLatex([node])).toBe('(a|b)');
+      // Default separator is '|', which \middle needs \left and \right for
+      expect(ommlToLatex([node])).toBe('\\left(a\\middle|b\\right)');
     });
   });
 

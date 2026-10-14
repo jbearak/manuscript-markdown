@@ -557,9 +557,10 @@ class Parser {
         return this.parseDelimiter();
 
       // A \right with no \left, as when only the \left is tracked: just its
-      // delimiter, as a \left with no \right is
+      // delimiter, as a \left with no \right is, and so a \middle
+      case '\\middle':
       case '\\right': {
-        const endChr = this.closingDelimiter();
+        const endChr = this.delimiterChr(')');
         return endChr ? makeRun(endChr) : '';
       }
 
@@ -777,7 +778,8 @@ class Parser {
    * group instead of just its opening bracket. `opens` limits the brackets,
    * and `inner` parses only what's between them, as for \sqrt's [n]. Returns
    * undefined, leaving the token stream untouched, unless the bracket closes
-   * within the current brace group, \left…\right pair, row, and cell.
+   * within the current brace group, \left…\right pair (before its \middle),
+   * row, and cell.
    */
   private parseBracketedOperand(opens = '([', inner = false): string | undefined {
     let start = this.pos;
@@ -805,15 +807,17 @@ class Parser {
         continue;
       }
       if (nesting > 0) continue;
-      if (token.type === 'ampersand' || (token.type === 'command' && token.value === '\\\\')) {
+      // A \middle here is the enclosing \left's, which splits it, as its \right ends it
+      if (token.type === 'ampersand' || (token.type === 'command' && (token.value === '\\\\' || token.value === '\\middle'))) {
         return undefined;
       }
       if (token.type !== 'text') continue;
 
-      // The character right after \right is that command's delimiter.
+      // The character right after \right, and the spaces before it, is that
+      // command's delimiter (see delimiterChr).
       const prev = this.tokens[i - 1];
       const skipDelimiter = prev?.type === 'command' && prev.value === '\\right';
-      for (let j = i === start ? lead : skipDelimiter ? 1 : 0; j < token.value.length; j++) {
+      for (let j = i === start ? lead : skipDelimiter ? token.value.length - token.value.trimStart().length + 1 : 0; j < token.value.length; j++) {
         const ch = token.value.charAt(j);
         if (ch === open) {
           depth++;
@@ -832,31 +836,22 @@ class Parser {
   }
 
   private parseDelimiter(): string {
-    const leftToken = this.consume();
-    if (!leftToken) return '';
+    const begChr = this.delimiterChr('(');
+    if (begChr === undefined) return '';
 
-    let begChr = '(';
-    let content = '';
-
-    if (leftToken.type === 'text') {
-      // The delimiter and content might be combined in one token like "(x"
-      begChr = leftToken.value.charAt(0);
-      if (begChr === '.') begChr = ''; // \left. → invisible delimiter
-      const remaining = leftToken.value.slice(1);
-      if (remaining) {
-        this.tokens.splice(this.pos, 0, { type: 'text', value: remaining, pos: leftToken.pos });
-      }
-    } else if (leftToken.type === 'command') {
-      switch (leftToken.value) {
-        case '\\{': case '\\lbrace': begChr = '{'; break;
-        case '\\|': begChr = '\u2016'; break;
-        case '\\[': begChr = '['; break;
-        default: begChr = this.delimiterCommandChr(leftToken.value); break;
-      }
+    // Parse any additional content until \\right, in parts between the
+    // delimiters of \middle, which Word's delimiter has as its separator
+    const parts = [this.parseUntilRight()];
+    const separators: string[] = [];
+    while (this.peek()?.type === 'command' && this.peek()!.value === '\\middle') {
+      this.consume();
+      separators.push(this.delimiterChr(')') ?? '');
+      parts.push(this.parseUntilRight());
     }
-
-    // Parse any additional content until \\right
-    content += this.parseUntilRight();
+    // A delimiter in Word has one separator, so parts between different
+    // ones go in one, with their characters between them, as Word shows them
+    const separator = separators.length > 0 && separators.every(sep => sep === separators[0]) ? separators[0] : undefined;
+    const content = parts.map((part, k) => (k === 0 ? '' : makeRun(separators[k - 1])) + part).join('');
 
     const rightCmd = this.peek();
     if (!(rightCmd?.type === 'command' && rightCmd.value === '\\right')) {
@@ -866,36 +861,47 @@ class Parser {
 
     this.consume(); // consume \\right
 
-    const endChr = this.closingDelimiter();
+    const endChr = this.delimiterChr(')');
     if (endChr === undefined) {
       // Malformed input (missing \right delimiter): fall back to emitting the open delimiter + content.
       return makeRun(begChr) + content;
     }
 
-    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlAttribute(begChr) + '"/><m:endChr m:val="' + escapeXmlAttribute(endChr) + '"/></m:dPr><m:e>' + content + '</m:e></m:d>';
+    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlAttribute(begChr) + '"/>'
+      + (separator === undefined ? '' : '<m:sepChr m:val="' + escapeXmlAttribute(separator) + '"/>')
+      + '<m:endChr m:val="' + escapeXmlAttribute(endChr) + '"/></m:dPr>'
+      + (separator === undefined ? '<m:e>' + content + '</m:e>' : parts.map(part => '<m:e>' + part + '</m:e>').join('')) + '</m:d>';
   }
 
-  /** Consume the delimiter after \right and return its character, undefined if there is none. */
-  private closingDelimiter(): string | undefined {
-    const delimToken = this.consume();
-    if (!delimToken) return undefined;
-    let endChr = ')';
-    if (delimToken.type === 'text') {
-      endChr = delimToken.value.charAt(0);
-      if (endChr === '.') endChr = ''; // \right. → invisible delimiter
-      const remaining = delimToken.value.slice(1);
+  /**
+   * Consume the delimiter after \left, \middle or \right and return its
+   * character, '' for '.', which is none, or undefined if there is none. The
+   * spaces before it go, as TeX skips them after a command word, and a
+   * command can be any of the delimiters, opening or closing, as \lbrace in
+   * \middle or \right. A token that's no delimiter is taken as `fallback`.
+   */
+  private delimiterChr(fallback: string): string | undefined {
+    let token = this.consume();
+    while (token?.type === 'text' && !token.value.trim()) token = this.consume();
+    if (!token) return undefined;
+    if (token.type === 'text') {
+      // The delimiter and content might be combined in one token like "(x"
+      const value = token.value.trimStart();
+      const remaining = value.slice(1);
       if (remaining) {
-        this.tokens.splice(this.pos, 0, { type: 'text', value: remaining, pos: delimToken.pos });
+        this.tokens.splice(this.pos, 0, { type: 'text', value: remaining, pos: token.pos });
       }
-    } else if (delimToken.type === 'command') {
-      switch (delimToken.value) {
-        case '\\}': case '\\rbrace': endChr = '}'; break;
-        case '\\|': endChr = '\u2016'; break;
-        case '\\]': endChr = ']'; break;
-        default: endChr = this.delimiterCommandChr(delimToken.value); break;
-      }
+      return value.charAt(0) === '.' ? '' : value.charAt(0);
     }
-    return endChr;
+    if (token.type !== 'command') return fallback;
+    switch (token.value) {
+      case '\\{': case '\\lbrace': return '{';
+      case '\\}': case '\\rbrace': return '}';
+      case '\\|': return '\u2016';
+      case '\\[': return '[';
+      case '\\]': return ']';
+      default: return this.delimiterCommandChr(token.value);
+    }
   }
 
   /** Consume a `*` prefix from the next text token (for `\tag*` variants); report whether there was one. */
@@ -1000,7 +1006,7 @@ class Parser {
 
   private parseUntilRight(): string {
     return this.parseAtoms(
-      (t) => t.type === 'command' && t.value === '\\right',
+      (t) => t.type === 'command' && (t.value === '\\right' || t.value === '\\middle'),
     ).join('');
   }
 
