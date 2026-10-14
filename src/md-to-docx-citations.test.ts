@@ -1093,3 +1093,144 @@ describe('BibTeX names with groups', () => {
     expect(html).not.toMatch(/[{}]/);
   });
 });
+
+describe('BibTeX names with a von part or a Jr part', () => {
+  // A name with no comma split at its last space, so a von part went in the
+  // given name, and a last part of two words lost its first; a Jr part
+  // went in the given name, which citeproc read as a given name of Jr
+  const names = (author: string) => buildItemData(parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b')!).author;
+  // As pandoc reads BibTeX's von part
+  const VON = 'dropping-particle';
+
+  it.each([
+    ['a von part', 'Ludwig van Beethoven', { given: 'Ludwig', [VON]: 'van', family: 'Beethoven' }],
+    ['a von part of two words', 'Johannes Diderik van der Waals', { given: 'Johannes Diderik', [VON]: 'van der', family: 'Waals' }],
+    ['a von part before a last part of two words', 'Jean de La Fontaine', { given: 'Jean', [VON]: 'de', family: 'La Fontaine' }],
+    ['von parts around a capitalized word', String.raw`Charles Louis Xavier Joseph de la Vall{\'e}e Poussin`,
+      { given: 'Charles Louis Xavier Joseph', [VON]: 'de la', family: 'Vallée Poussin' }],
+    ['a von part with no first part', 'van Beethoven', { [VON]: 'van', family: 'Beethoven' }],
+    ['a von part before a comma', 'van der Waals, Johannes', { given: 'Johannes', [VON]: 'van der', family: 'Waals' }],
+    ['a von part that starts with a capital before a comma', 'Van der Waals, Johannes', { given: 'Johannes', [VON]: 'Van der', family: 'Waals' }],
+    ['a Jr part', 'Smith, Jr, John', { given: 'John', family: 'Smith', suffix: 'Jr' }],
+    ['a Jr part with a von part', 'van Beethoven, Jr., Ludwig', { given: 'Ludwig', [VON]: 'van', family: 'Beethoven', suffix: 'Jr.' }],
+    ['an empty Jr part', 'Smith, , John', { given: 'John', family: 'Smith' }],
+    // BibTeX warns of a third comma, and pandoc drops what's after it
+    ['a part after a third comma', 'Smith, Jr, John, Extra', { given: 'John', family: 'Smith', suffix: 'Jr' }],
+    ['a lowercase word that starts with an accent', 'José álvarez Ruiz', { given: 'José', [VON]: 'álvarez', family: 'Ruiz' }],
+    ['a lowercase word after a group', 'Ludwig {v}an Beethoven', { given: 'Ludwig', [VON]: 'van', family: 'Beethoven' }],
+    // A group that starts with a command, a special character, has its
+    // letter's case, from BibTeX's table or its first letter after the
+    // command's name; outside a group, the command's first letter's
+    ['a special character that is lowercase', String.raw`Hans {\ss}chen Meier`, { given: 'Hans', [VON]: String.raw`{\ss}chen`, family: 'Meier' }],
+    ['a lowercase letter after a special character\'s command', String.raw`Hans {\relax d}e Meier`, { given: 'Hans', [VON]: String.raw`{\relax d}e`, family: 'Meier' }],
+    ['a command whose name\'s first letter is lowercase', String.raw`Jan \l{}ukasz Kowalski`, { given: 'Jan', [VON]: String.raw`\l{}ukasz`, family: 'Kowalski' }],
+  ])('reads %s as BibTeX does', (_name, author, expected) => {
+    expect(names(author)).toEqual([expected]);
+  });
+
+  // Between two words BibTeX keeps the first of the spaces and hyphens
+  // there, so a hyphen after a space was a character of the last word, and
+  // one before a space of the word before it
+  it.each([
+    ['a space before a hyphen', 'John Smith -Jones', { given: 'John Smith', family: 'Jones' }],
+    ['spaces around a hyphen', 'John Smith - Jones', { given: 'John Smith', family: 'Jones' }],
+    ['a hyphen right after a word, before a space', 'John Smith- Jones', { given: 'John', family: 'Smith-Jones' }],
+  ])('reads a last word after %s as BibTeX does', (_name, author, expected) => {
+    expect(names(author)).toEqual([expected]);
+  });
+
+  it.each([
+    ['a lowercase word as the last word', 'Ludwig beethoven', { given: 'Ludwig', family: 'beethoven' }],
+    ['a lowercase word as the last of two', 'Ludwig van', { given: 'Ludwig', family: 'van' }],
+    ['a group, which has no case', 'Ludwig {van} Beethoven', { given: 'Ludwig van', family: 'Beethoven' }],
+    ['a last name a hyphen joins', 'John Smith-Jones', { given: 'John', family: 'Smith-Jones' }],
+    ['a first name a hyphen joins', 'Jean-Paul Sartre', { given: 'Jean-Paul', family: 'Sartre' }],
+    ['a name of one word', 'Plato', { family: 'Plato' }],
+    ['a special character that is uppercase', String.raw`Hans {\O}rsted Meier`, { given: String.raw`Hans {\O}rsted`, family: 'Meier' }],
+    ['a command whose name\'s first letter is uppercase', String.raw`\L{}ukasz Kowalski`, { given: String.raw`\L{}ukasz`, family: 'Kowalski' }],
+  ])('reads %s as before', (_name, author, expected) => {
+    expect(names(author)).toEqual([expected]);
+  });
+
+  // BibTeX reads al as a von part, and Hassan as the last part, which
+  // lost the hyphen; pandoc reads al- as a non-dropping particle
+  it.each([
+    ['a first name and a last name a hyphen joins to a lowercase word', 'Ali al-Hassan', { given: 'Ali', family: 'al-Hassan' }],
+    ['a last name a hyphen joins to a lowercase word, before a comma', 'al-Hassan, Ali', { given: 'Ali', family: 'al-Hassan' }],
+    ['a last name a hyphen joins to a lowercase word, before a Jr part', 'al-Hassan, Jr, Ali', { given: 'Ali', family: 'al-Hassan', suffix: 'Jr' }],
+    ['a von part before a last name a hyphen joins to a lowercase word', 'Ali ibn al-Hassan', { given: 'Ali', [VON]: 'ibn', family: 'al-Hassan' }],
+    ['a first name a hyphen joins, before a von part', 'Jean-Paul de la Fontaine', { given: 'Jean-Paul', [VON]: 'de la', family: 'Fontaine' }],
+    ['a first name a hyphen joins to a lowercase word', 'Jean-paul Sartre', { given: 'Jean-paul', family: 'Sartre' }],
+    ['a name of one word a hyphen joins', 'Smith-Jones', { family: 'Smith-Jones' }],
+    ['a last name a hyphen joins, before a comma', 'Smith-Jones, John', { given: 'John', family: 'Smith-Jones' }],
+  ])('keeps the words a hyphen joins in one part in %s', (_name, author, expected) => {
+    expect(names(author)).toEqual([expected]);
+  });
+
+  it.each([
+    ['Jean de La Fontaine', '(La Fontaine 2019)'],
+    ['Ali al-Hassan', '(al-Hassan 2019)'],
+    // As pandoc writes them: a dropping particle doesn't show in a citation
+    ['Ludwig van Beethoven', '(Beethoven 2019)'],
+    ['Smith, Jr, John', '(Smith 2019)'],
+  ])('writes the last part of %s in the text of a citation citeproc can\'t write', (author, expected) => {
+    const entries = parseBibtex('@book{b,\n  author = {' + author + '},\n  year = {2019}\n}\n');
+    expect(generateFallbackText(['b'], entries)).toBe(expected);
+  });
+
+  // What pandoc 3.12 shows for the same entry in the same styles
+  it.each([
+    ['apa', 'La Fontaine, J. de', 'King, M. L., Jr.'],
+    ['chicago-author-date', 'La Fontaine, Jean de', 'Martin Luther King Jr.'],
+  ])('shows a von part and a Jr part in %s as pandoc does', (style, von, jr) => {
+    const bib = '@book{b,\n  author = {Jean de La Fontaine and King, Jr., Martin Luther},\n  title = {T},\n  publisher = {P},\n  year = {2019}\n}\n';
+    const engine = createCiteprocEngine(parseBibtex(bib), style)!;
+    engine.updateItems(['b']);
+    const html = renderBibliography(engine)!.entries[0];
+    expect(html).toContain(von);
+    expect(html).toContain(jr);
+  });
+
+  const entry = (author: string) => parseBibtex('@book{b,\n  author = {' + author + '},\n  title = {T},\n  publisher = {P},\n  year = {2019}\n}\n');
+  const shown = (author: string, style: string) => {
+    const engine = createCiteprocEngine(entry(author), style)!;
+    engine.updateItems(['b']);
+    return renderBibliography(engine)!.entries[0];
+  };
+
+  // Which citeproc read again, so it took the lowercase word at the end of
+  // the given name for the dropping particle, in place of the von part, and
+  // apa showed Smith, J. paul
+  it.each([
+    ['de Smith, John paul', 'Smith, J. paul de.', 'Smith, John paul de.'],
+    ['van Beethoven, Ludwig maria', 'Beethoven, L. maria van.', 'Beethoven, Ludwig maria van.'],
+  ])('keeps the von part of %s, whose given name ends in a lowercase word, as pandoc does', (author, apa, chicago) => {
+    expect(shown(author, 'apa')).toContain(apa);
+    expect(shown(author, 'chicago-author-date')).toContain(chicago);
+  });
+
+  // Guard: a family name a group keeps whole, which citeproc still splits
+  // into its particle, as import writes Zotero's non-dropping particle
+  it('shows a family name a group keeps whole with its particle, as pandoc does', () => {
+    expect(shown('{van Gogh}, Vincent', 'apa')).toContain('van Gogh, V.');
+    expect(shown('{van Gogh}, Vincent', 'chicago-author-date')).toContain('Gogh, Vincent van.');
+  });
+
+  // Which showed as the particle al, which apa leaves out, and Hassan
+  it('shows a family name a hyphen joins to a lowercase word whole in apa', () => {
+    const engine = createCiteprocEngine(entry('Ali al-Hassan'), 'apa')!;
+    const run = { keys: ['b'], text: '@b' };
+    expect(generateCitation(run, entry('Ali al-Hassan'), engine, new Set<string>(), new Map<string, string | number>()).xml).toContain('(al-Hassan, 2019)');
+    expect(shown('Ali al-Hassan', 'apa')).toContain('al-Hassan, A. (2019)');
+  });
+
+  // Which a Word processor's citeproc, as Zotero's where it refreshes the
+  // field, would read again, as the export's did
+  it('marks a name with a von part in a citation\'s data so citeproc doesn\'t read it again', async () => {
+    const bibtex = '@book{b,\n  author = {de Smith, John paul and {van Gogh}, Vincent},\n  year = {2019}\n}\n';
+    const { docx } = await convertMdToDocx('A [@b].', { bibtex });
+    const xml = (await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).replace(/&quot;/g, '"');
+    expect(xml).toContain('{"family":"Smith","given":"John paul","dropping-particle":"de","static-particles":true}');
+    expect(xml).toContain('{"family":"van Gogh","given":"Vincent"}');
+  });
+});

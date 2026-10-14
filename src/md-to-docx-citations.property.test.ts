@@ -129,16 +129,26 @@ describe('Property Tests: BibTeX names with groups', () => {
    * characters but its spaces, braces and commas, once, in any order.
    */
   it('splits a name only outside its groups, losing no text', () => {
-    const atom = fc.constantFrom('John', 'Ann', 'van', '{van Beethoven}', '{Mary Ann}', '{Smith, Jones}', '{x}', '{a {b} c}', ' ', ', ');
+    const atom = fc.constantFrom('John', 'Ann', 'van', 'Smith-Jones', 'al-Hassan', '{van Beethoven}', '{Mary Ann}', '{Smith, Jones}', '{x}', '{a {b} c}', ' ', ', ');
     fc.assert(
       fc.property(fc.array(atom, { minLength: 1, maxLength: 8 }).map(atoms => atoms.join('')), author => {
         const entry = parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b');
-        fc.pre(entry !== undefined && /[^ ,{}]/.test(author));
-        const cited = (buildItemData(entry!).author ?? []) as Array<{ family?: string; given?: string; literal?: string }>;
+        // A name of more than three parts loses the rest, as pandoc reads it
+        // (see bibtexNameParts in md-to-docx-citations.ts)
+        let depth = 0;
+        let commas = 0;
+        for (const char of author) {
+          if (char === '{') depth++;
+          else if (char === '}') depth = Math.max(0, depth - 1);
+          else if (char === ',' && depth === 0) commas++;
+        }
+        fc.pre(entry !== undefined && /[^ ,{}]/.test(author) && commas <= 2);
+        const cited = (buildItemData(entry!).author ?? []) as Array<Record<string, string | undefined>>;
         const failure = JSON.stringify(author) + ' read as ' + JSON.stringify(cited);
         const text = (value: string) => [...value.replace(/[\s{},]/g, '')].sort().join('');
-        const parts = cited.map(name => name.literal ?? (name.given ?? '') + (name.family ?? '')).join('');
-        if (cited.some(name => name.literal === undefined && /[{}]/.test((name.given ?? '') + (name.family ?? '')))) throw new Error(failure);
+        const person = (name: Record<string, string | undefined>) => ['given', 'dropping-particle', 'family', 'suffix'].map(key => name[key] ?? '').join('');
+        const parts = cited.map(name => name.literal ?? person(name)).join('');
+        if (cited.some(name => name.literal === undefined && /[{}]/.test(person(name)))) throw new Error(failure);
         if (text(parts) !== text(author)) throw new Error(failure);
         return true;
       }),
