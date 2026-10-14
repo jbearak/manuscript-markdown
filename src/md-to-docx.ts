@@ -626,32 +626,84 @@ function criticMarkupRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
-function findClosingHighlightMarker(src: string, from: number, max: number): number {
-  let depth = 0;
-  let pos = from;
-  while (pos < max - 1) {
+/** Whether the == at `at` is a {=='s, whose { no backslash escapes, as
+ *  import writes Word's { before a highlight's closing == */
+function opensCriticHighlight(src: string, at: number): boolean {
+  if (at === 0 || src[at - 1] !== '{') return false;
+  let slashes = 0;
+  while (src[at - 2 - slashes] === '\\') slashes++;
+  return slashes % 2 === 0;
+}
+
+/**
+ * Where the critic highlight that the {== at `at` (its ==) opens in a
+ * format highlight ends: just past the ==} that closes it, once each {== in
+ * it is closed in turn, or -1 if none does before `max`. Each {=='s end is
+ * kept in `ends`, for the text and `max`, so a search from each == before
+ * a {== that never closes doesn't read the rest of the text again.
+ */
+function criticHighlightEnd(src: string, at: number, max: number, ends: Map<number, number>): number {
+  const known = ends.get(at);
+  if (known !== undefined) return known;
+  // The {=='s still open, innermost last
+  const open = [at];
+  let pos = at + 2;
+  while (open.length > 0) {
+    if (pos >= max - 1) {
+      // None closes, nor any that holds it
+      for (const opener of open) ends.set(opener, -1);
+      return -1;
+    }
     if (src[pos] === '=' && src[pos + 1] === '=') {
-      // Opening {== increases depth, unless its { is escaped, as import
-      // writes Word's { before a highlight's closing ==
-      let slashes = 0;
-      while (src[pos - 2 - slashes] === '\\') slashes++;
-      if (pos > 0 && src[pos - 1] === '{' && slashes % 2 === 0) {
-        depth++;
-        pos += 2;
+      if (opensCriticHighlight(src, pos)) {
+        const end = ends.get(pos);
+        if (end === undefined) {
+          open.push(pos);
+          pos += 2;
+        } else {
+          pos = end === -1 ? max : end;
+        }
         continue;
       }
-      // Closing ==} decreases depth (only if inside a {== block)
-      if (depth > 0 && pos + 2 < max && src[pos + 2] === '}') {
-        depth--;
+      // Its closing ==}
+      if (pos + 2 < max && src[pos + 2] === '}') {
+        ends.set(open.pop()!, pos + 3);
         pos += 3;
         continue;
       }
-      // At depth 0, this is the closing ==
-      if (depth === 0) return pos;
+    }
+    pos++;
+  }
+  return ends.get(at)!;
+}
+
+/** The closing == of a format highlight whose text starts at `from`: the
+ *  first == outside the critic highlights in it, each {== opening one that
+ *  its ==} closes (see criticHighlightEnd), or -1 if none is before `max` */
+function findClosingHighlightMarker(src: string, from: number, max: number, ends = new Map<number, number>()): number {
+  let pos = from;
+  while (pos < max - 1) {
+    if (src[pos] === '=' && src[pos + 1] === '=') {
+      if (!opensCriticHighlight(src, pos)) return pos;
+      pos = criticHighlightEnd(src, pos, max, ends);
+      if (pos === -1) return -1;
+      continue;
     }
     pos++;
   }
   return -1;
+}
+
+const criticHighlightEnds = new WeakMap<StateInline, { src: string; byMax: Map<number, Map<number, number>> }>();
+
+/** The ends of the critic highlights in a state's text found so far, for
+ *  its posMax (see criticHighlightEnd), kept for each == the rule meets */
+function criticHighlightEndsOf(state: StateInline): Map<number, number> {
+  let memo = criticHighlightEnds.get(state);
+  if (!memo || memo.src !== state.src) criticHighlightEnds.set(state, memo = { src: state.src, byMax: new Map() });
+  let ends = memo.byMax.get(state.posMax);
+  if (!ends) memo.byMax.set(state.posMax, ends = new Map());
+  return ends;
 }
 
 function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
@@ -660,7 +712,7 @@ function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
   
   if (start + 2 >= max || state.src.slice(start, start + 2) !== '==') return false;
   
-  const endPos = findClosingHighlightMarker(state.src, start + 2, max);
+  const endPos = findClosingHighlightMarker(state.src, start + 2, max, criticHighlightEndsOf(state));
   if (endPos === -1) return false;
   
   let next = endPos + 2;

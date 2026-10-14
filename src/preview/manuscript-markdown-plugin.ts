@@ -1355,6 +1355,42 @@ function criticHighlightEnd(state: StateInline, at: number): number {
   return ends.get(at)!;
 }
 
+const unbracedEquals = new WeakMap<object, { src: string; at: number[] }>();
+
+/**
+ * The first == at or after `from` that a format highlight's search for its
+ * closing == stops at: a {=='s, or one that no } follows before the
+ * state's posMax, or posMax if none is. Their offsets are found once for
+ * the state's text, as reading on past each ==} read the rest of the text
+ * again for each == before it, as in ==} repeated.
+ */
+function nextUnbracedEquals(state: StateInline, from: number): number {
+  const src = state.src;
+  const max = state.posMax;
+  let memo = unbracedEquals.get(state);
+  if (!memo || memo.src !== src) {
+    const at: number[] = [];
+    for (let k = src.indexOf('=='); k !== -1; k = src.indexOf('==', k + 1)) {
+      if (src.charCodeAt(k + 2) !== 0x7D /* } */ || opensCriticHighlight(src, k)) at.push(k);
+    }
+    unbracedEquals.set(state, memo = { src, at });
+  }
+  // The first at or after `from`
+  const at = memo.at;
+  let lo = 0;
+  let hi = at.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (at[mid] < from) lo = mid + 1;
+    else hi = mid;
+  }
+  let next = lo < at.length && at[lo] + 1 < max ? at[lo] : max;
+  // An == right before posMax, whose } is past it
+  const last = max - 2;
+  if (last >= from && last < next && src.charCodeAt(last) === 0x3D /* = */ && src.charCodeAt(last + 1) === 0x3D /* = */) next = last;
+  return next;
+}
+
 /**
  * Inline rule for ==highlight== patterns (not CriticMarkup)
  * @param state - The inline parsing state
@@ -1392,9 +1428,10 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
         if (pos === -1) return false;
         continue;
       }
-      // Check if followed by } (to avoid matching CriticMarkup {==...==})
+      // Check if followed by } (to avoid matching CriticMarkup {==...==}),
+      // and go on to the next == that isn't, or that opens one
       if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7D /* } */) {
-        pos += 2;
+        pos = nextUnbracedEquals(state, pos + 2);
         continue;
       }
       
