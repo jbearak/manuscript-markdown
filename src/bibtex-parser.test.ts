@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, BIBTEX_TEXT_SYMBOLS, stripOuterBraces, stripWrappingBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, BIBTEX_TEXT_SYMBOLS, bibtexFieldAsPlainText, stripOuterBraces, stripWrappingBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
 import { fastestRun } from './test-timing';
 import { parseAuthors } from './md-to-docx-citations';
 
@@ -431,10 +431,14 @@ describe('BibTeX text symbols', () => {
     ['a capital letter as a command\'s second argument after a space', String.raw`A \textcolor{red} {\O} B`, 'A \\textcolor{red} {\u00D8} B'],
     ['a capital letter as a command\'s second argument after a command\'s group', String.raw`A \textcolor{\mycolor}{\O} B`, 'A \\textcolor{\\mycolor}{\u00D8} B'],
     ['a letter as a command\'s second argument after a letter\'s group', String.raw`\texorpdfstring{\ss}{\o}`, '\\texorpdfstring{\u00DF}{\u00F8}'],
-    // Whose braces stay after any group, a letter's group or its empty
-    // group too, as it could be a command's argument
-    ['letters in groups after a letter\'s group', String.raw`{\l}{\L}`, '\u0142{\u0141}'],
-    ['a letter in a group after a letter\'s command and its empty group', String.raw`\OE{} {\l}`, '\u0152 {\u0142}'],
+    // Whose braces stay after any group a command could take as its
+    // argument, but not after a letter read as its letter, which takes
+    // none, as read so far
+    ['letters in groups after a letter\'s group', String.raw`{\l}{\L}`, '\u0142\u0141'],
+    ['a letter in a group after a letter\'s command and its empty group', String.raw`\OE{} {\l}`, '\u0152 \u0142'],
+    ['a letter in a group after a letter\'s command', String.raw`\ss{\O}`, '\u00DF\u00D8'],
+    // Whose empty group, after the space that ends the command, is nothing
+    ['a letter, a space and an empty group', String.raw`Stra\ss {}e`, 'Stra\u00DFe'],
     ['a letter that starts a group with more in it', String.raw`H. C. {\O rsted}`, 'H. C. {\u00D8rsted}'],
     ['letters of other languages', String.raw`{\AA}ngstr{\"o}m \ae{} \OE{} \l{}\L{} \i{} \th{}`, '\u00C5ngstr\u00F6m \u00E6 \u0152 \u0142\u0141 \u0131 \u00FE'],
     ['symbols', String.raw`\textregistered{} \copyright{} \texttrademark{} \dag{} \ddag{} \S{} \P{}`, '\u00AE \u00A9 \u2122 \u2020 \u2021 \u00A7 \u00B6'],
@@ -681,6 +685,87 @@ describe('BibTeX dashes and quotes', () => {
     const fields = parseBibtex(serialized).get('k')!.fields;
     expect(fields.get('title')).toBe(value);
     expect(fields.get('author')).toBe('Smith--Jones, Ann');
+  });
+});
+
+describe('BibTeX values as TeX', () => {
+  // A value's escaped braces, as \{, read as the braces, the same as a
+  // group's, so the language server, which takes a group's braces off a
+  // title, showed \{RNA\} as RNA
+  const read = (name: string, value: string) => parseBibtex('@article{k,\n  ' + name + ' = ' + value + ',\n  year = {2020}\n}').get('k')!;
+
+  it.each([
+    ['escaped braces', String.raw`\{RNA\} and {RNA}`, String.raw`\{RNA\} and {RNA}`, '{RNA} and {RNA}'],
+    ['an escaped backslash', String.raw`a\\b and \foo`, String.raw`a\\b and \foo`, String.raw`a\b and \foo`],
+    ['an escaped dollar sign', String.raw`\$5 and 6\$`, String.raw`\$5 and 6\$`, '$5 and 6$'],
+    ['a \\url\'s braces, backslashes and dollar signs', String.raw`\url{a{b}\\c\$d$e}`, String.raw`a\{b\}\\c\$d\$e`, String.raw`a{b}\c$d$e`],
+  ])('keeps %s escaped in the value as TeX, and reads the text as before', (_name, value, tex, text) => {
+    const entry = read('title', '{' + value + '}');
+    expect(entry.texFields!.get('title')).toBe(tex);
+    expect(entry.fields.get('title')).toBe(text);
+  });
+
+  it.each([
+    ['author', String.raw`\{Smith\}, John`],
+    ['doi', String.raw`10.1/a\{b\}`],
+  ])('keeps no TeX of %s, as before', (name, value) => {
+    const entry = read(name, '{' + value + '}');
+    expect(entry.texFields!.has(name)).toBe(false);
+  });
+
+  it.each([
+    ['a group and escaped braces', String.raw`{The {RNA} of \{x\}}`, 'The RNA of {x}'],
+    ['an escaped backslash and dollar sign', String.raw`{a\\b \$5}`, String.raw`a\b $5`],
+  ])('shows %s as plain text', (_name, value, expected) => {
+    expect(bibtexFieldAsPlainText(read('title', value), 'title')).toBe(expected);
+  });
+
+  it('shows a value with no TeX without its braces, as before', () => {
+    const entry: BibtexEntry = { type: 'article', key: 'k', fields: new Map([['title', '{The RNA} of {x}']]) };
+    expect(bibtexFieldAsPlainText(entry, 'title')).toBe('The RNA of x');
+    expect(bibtexFieldAsPlainText(read('author', String.raw`{{Smith}, John}`), 'author')).toBe('Smith, John');
+  });
+
+  // Whether a command could take a group as its argument is read from the
+  // value as read so far, kept as it's read (see ArgumentContext)
+  it.each([
+    ['letters', 'a'.repeat(20000) + '{}'.repeat(20000)],
+    ['spaces', 'a' + ' {}'.repeat(60000)],
+  ])('reads many empty groups after %s in linear time', (_name, value) => {
+    expect(fastestRun(() => read('title', '{' + value + '}'))).toBeLessThan(500);
+  }, 30000);
+
+  // Which read the value so far again at each group, which V8 copied each
+  // time, as it was built by concatenation, so four times as many groups
+  // took sixteen times as long
+  it('reads many groups in a note in linear time', () => {
+    const time = (n: number) => {
+      const value = '{' + '{b} '.repeat(n) + '}';
+      return fastestRun(() => read('note', value));
+    };
+    time(160000);
+    expect(time(640000) / time(160000)).toBeLessThan(8);
+  }, 30000);
+
+  // An accent's group a command could take as its argument read as the
+  // accented letter, without its braces, so the command's name ran into the
+  // letter, as \textitx̱
+  it.each([
+    ['a command\'s group', String.raw`A \textit{\b{x}}`, 'A \\textit{x\u0331}'],
+    ['a command\'s group after a space', String.raw`\textsc {\'e}`, '\\textsc {\u00E9}'],
+    ['a group after a group', String.raw`\textcolor{red}{\"o}`, '\\textcolor{red}{\u00F6}'],
+  ])('reads an accent in %s, keeping a group\'s braces', (_name, value, text) => {
+    expect(read('title', '{' + value + '}').fields.get('title')).toBe(text);
+  });
+
+  // However long a command's name, or a run of backslashes before one
+  it.each([
+    ['a command with a long name', '\\' + 'a'.repeat(65) + ' {}X', '\\' + 'a'.repeat(65) + ' {}X'],
+    ['a command after many escaped backslashes', '\\\\'.repeat(40) + '\\foo {}X', '\\'.repeat(40) + '\\foo {}X'],
+  ])('keeps the empty group after %s as its argument', (_name, value, text) => {
+    const once = read('title', '{' + value + '}');
+    expect(once.texFields!.get('title')).toBe(value);
+    expect(once.fields.get('title')).toBe(text);
   });
 });
 
