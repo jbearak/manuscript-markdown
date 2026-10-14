@@ -1,7 +1,9 @@
 // src/link-footnotes.test.ts — a note reference in a link's text keeps the
 // link: export reads [a[^1] b](u) as a link, as Pandoc does, and writes the
 // reference inside its w:hyperlink, and import writes the hyperlink back as
-// one link around it.
+// one link around it. And a note reference after a ! that a ( follows,
+// in a link or not, stays a note: import escapes the !, which would make
+// ![^1](x) an image.
 
 import { describe, expect, it } from 'bun:test';
 import JSZip from 'jszip';
@@ -96,6 +98,29 @@ describe('a note reference in a link', () => {
   ])('keeps the link in %s', async (_, md, back) => {
     const once = await roundTrip(md);
     expect(once).toBe(back);
+    expect(await roundTrip(once)).toBe(once);
+  });
+});
+
+describe('a note reference after a !', () => {
+  const note = '\n\n[^1]: Note.\n';
+  it.each([
+    ['before a (', 'A Wow\\![^1](extra) D' + note],
+    ['before a (, in a link', 'A [Wow\\![^1](extra)](https://example.com) D' + note],
+    ['before a (, in a link in an insertion', 'A {++[Wow\\![^1](extra)](https://example.com)++} D' + note],
+    ['before a (, in a highlight', 'A ==Wow\\![^1](extra)== D' + note],
+    ['before a (, in a comment\'s range', 'A {==Wow\\![^1](extra)==}{>>c<<} D' + note],
+    ['before a (, in overlapping comments\' ranges', 'X {#1}A {#2}Wow\\![^1](extra){/1} D{/2} E\n{#1>>c<<}\n{#2>>d<<}' + note],
+    ['before a (, on the old side of a substitution', 'A {~~Wow\\![^1](extra)~>x~~} D' + note],
+    ['before a (, after a backslash of Word\'s', 'A Wow\\\\\\![^1](extra) D' + note],
+    // An image only before a (, so the ! stays as it is before anything else
+    ['before anything else', 'A Wow![^1] D' + note],
+    ['before another note', 'A Wow![^1][^2](x) D' + note + '\n[^2]: Other.\n'],
+    ['before anything else, in a link', 'A [Wow![^1] C](https://example.com) D' + note],
+    ['before a link whose text starts with a (', 'A Wow![^1][(x)](https://example.com) D' + note],
+  ])('keeps its note %s', async (_, md) => {
+    const once = await roundTrip(md);
+    expect(once).toBe(md);
     expect(await roundTrip(once)).toBe(once);
   });
 });

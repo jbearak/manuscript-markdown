@@ -8206,25 +8206,45 @@ function bareLinkReadsBack(before: string, address: string, closer: string, foll
 /** `markdown`, the Markdown of the text at `index`, with a ! at its end
  *  escaped where a link, or a picture or a note's [^1] that starts one,
  *  comes next in its comments, which the ! would make an image of, as in
- *  ![text](url). A note's [^1] or a citation's [@key] outside a link isn't
- *  one, and stays one after a !. Spans of a tracked change keep apart
- *  at a ! before a link (canJoinSpans), so only text in none, or on a side
- *  of a substitution (`side`), which has none of its own, runs into one.
- *  From the text's Markdown, as reading the end of Markdown being built
- *  copies it, which took time in the square of a paragraph's length over
- *  its links. */
+ *  ![text](url), and where a note's [^1] does that a ( comes right after,
+ *  in the link the note is in or outside one, as in ![^1](x), as a
+ *  citation's [@key] in the text is escaped after one (see
+ *  escapeMarkdownChars). A note's [^1] before anything else stays one
+ *  after a !, and so does a citation's, which goes after a space (see
+ *  citationSeparator). Spans of a tracked change keep apart at a ! before
+ *  a link or a note (canJoinSpans), so only text in none runs into one, or
+ *  text written in one span with what comes next (`side`), as on a side of
+ *  a substitution, which has none of its own, in a link's text or in a
+ *  highlight. From the text's Markdown, as reading the end of Markdown
+ *  being built copies it, which took time in the square of a paragraph's
+ *  length over its links. */
 function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: number, end: number, side = false): string {
   const item = segment[index];
-  let k = index + 1;
-  while (k < end && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k++;
+  // Only text ending in a ! it doesn't escape looks ahead, so a run of
+  // empty items, kept apart by their comments, isn't scanned once for each
+  if (!readsMarkdown || item.type !== 'text' || !markdown.endsWith('!') || !/(?:^|[^\\])(?:\\\\)*!$/.test(markdown)) return markdown;
+  // The first item from `from` that isn't empty text
+  const nonEmpty = (from: number) => {
+    let k = from;
+    while (k < end && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k++;
+    return k;
+  };
+  const k = nonEmpty(index + 1);
   const next = segment[k];
+  if (k >= end || next.type !== 'text' && next.type !== 'image' && next.type !== 'footnote_ref') return markdown;
+  // A link that starts there, not the one the text is in
+  const startsLink = next.href !== undefined && (next.href !== item.href || next.link !== item.link);
+  const at = nonEmpty(k + 1);
+  const after = at < end ? segment[at] : undefined;
+  const noteBeforeParen = next.type === 'footnote_ref' && after?.type === 'text' && after.text.startsWith('(')
+    && after.href === next.href && after.link === next.link;
   // A tracked change's delimiters come between them, but for one of part of
   // a link of several runs, which go inside its text, after its [. In an
   // HTML table's cell, a link is its tag, which a ! makes nothing of.
-  if (!readsMarkdown || k >= end || item.type !== 'text' || next.type !== 'text' && next.type !== 'image' && next.type !== 'footnote_ref' || next.href === undefined
+  if (!startsLink && !noteBeforeParen
     || !side && (item.revision || next.revision && !partlyRevisedLinkAt(segment, k, end, next.commentIds))
     || !commentSetsEqual(item.commentIds, next.commentIds)) return markdown;
-  return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
+  return markdown.slice(0, -1) + '\\!';
 }
 
 /** `markdown`, the Markdown of the text at `index`, with a { it starts with
@@ -8788,7 +8808,8 @@ function renderHighlightGroup(
   for (let g = start; g < end; g++) {
     const item = segment[g];
     if (item.type === 'text') {
-      inner += textNextToMath(markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd)), segment, g, end, inner.length === mathEnd, true, inner);
+      inner += textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd)), segment, g, end, true),
+        segment, g, end, inner.length === mathEnd, true, inner);
     } else if (item.type === 'footnote_ref') {
       inner += footnoteRefText(item, noteLabels);
     } else if (item.type === 'math') {
@@ -9753,7 +9774,8 @@ function linkGroup(
       return color ? wrapHighlight(footnoteRefText(item, noteLabels), color) : footnoteRefText(item, noteLabels);
     }
     return item.text === '\\\n' && !showsOnBreak(item.formatting) ? lineBreakText()
-      : escapeBraceAfterImage(markedFormatting(item.text, item.formatting, false, after.linkTo(href)), segment, start + k);
+      : escapeBangBeforeLink(escapeBraceAfterImage(markedFormatting(item.text, item.formatting, false, after.linkTo(href)), segment, start + k),
+        segment, start + k, start + items.length, true);
   };
   // A revision of the whole link goes around it, but where its span would
   // end at its closer in the link's code, and a substitution with nothing
