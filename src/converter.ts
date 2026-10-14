@@ -15031,10 +15031,14 @@ function buildMarkdownOnce(
     let incomingSep: string | null = null;
     // Whether that's the separator after a section's or style block's fence
     let afterSentinel = false;
+    // Whether it writes the blank lines export recorded after that fence or
+    // comment
+    let incomingRecorded = false;
     if (lastRenderedHtmlCommentIndex !== undefined) {
       const gapCount = htmlCommentAfterGaps?.get(lastRenderedHtmlCommentIndex);
       if (gapCount !== undefined) {
         incomingSep = '\n' + '\n'.repeat(lastHtmlCommentIsParagraph ? Math.max(1, gapCount) : gapCount);
+        incomingRecorded = true;
       }
       lastRenderedHtmlCommentIndex = undefined;
     } else if (lastWasSectionSentinel) {
@@ -15042,6 +15046,7 @@ function buildMarkdownOnce(
       const afterGap = lastSentinelAfterGapKey && sentinelGaps ? sentinelGaps[lastSentinelAfterGapKey] : undefined;
       if (afterGap !== undefined) {
         incomingSep = '\n' + '\n'.repeat(afterGap);
+        incomingRecorded = true;
       } else {
         incomingSep = '\n';
       }
@@ -15127,7 +15132,11 @@ function buildMarkdownOnce(
 
       // Code block grouping: collect consecutive code-block paragraphs into a fenced block
       if (item.isCodeBlock) {
-        if (output.length > 0) {
+        // After a fence or a comment of its own, the blank lines export
+        // recorded after it, as before any other block, or else one
+        if (incomingRecorded) {
+          output.push(incomingSep!);
+        } else if (output.length > 0) {
           output.push('\n\n');
         }
         endListContext();
