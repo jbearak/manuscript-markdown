@@ -8948,11 +8948,14 @@ function paragraphMarkRevision(token: MdToken, state: DocxGenState, options?: Md
 }
 
 /** Add a paragraph-mark revision to a pPr. Revision elements come first in a
- *  paragraph mark's rPr, and rPr comes last in every pPr this file writes. */
+ *  paragraph mark's rPr, and rPr comes last in every pPr this file writes.
+ *  With replacers, as a replacement string reads a $&, $` or $' in the
+ *  revision's author, or one its escaping makes, as A$<B's A$&lt;B, as what
+ *  it matched or the text around it. */
 function withParagraphMarkRevision(pPr: string, revision: string): string {
   if (!revision) return pPr;
-  if (pPr.includes('<w:rPr>')) return pPr.replace('<w:rPr>', '<w:rPr>' + revision);
-  if (pPr) return pPr.replace('</w:pPr>', '<w:rPr>' + revision + '</w:rPr></w:pPr>');
+  if (pPr.includes('<w:rPr>')) return pPr.replace('<w:rPr>', () => '<w:rPr>' + revision);
+  if (pPr) return pPr.replace('</w:pPr>', () => '<w:rPr>' + revision + '</w:rPr></w:pPr>');
   return '<w:pPr><w:rPr>' + revision + '</w:rPr></w:pPr>';
 }
 

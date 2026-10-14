@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import JSZip from 'jszip';
+import { XMLValidator } from 'fast-xml-parser';
 import { convertMdToDocx, parseMd } from './md-to-docx';
 import { convertDocx } from './converter';
 import { preprocessCriticMarkup } from './critic-markup';
 import { createMarkdownItWithPlugin, renderWithPlugin } from './test-helpers';
 import { fastestRun } from './test-timing';
+import { xmlAttributeValue } from './xml-parser';
 
 const example = '{++This is a sentence.\n\nThis sentence is in another paragraph.\n++}';
 
@@ -274,6 +276,36 @@ describe('tracked paragraph marks', () => {
       expect(await roundTrip(md)).toBe(md);
     }
   });
+
+  // The sequences a replacement string reads as patterns, as $& for what it
+  // matched, which the author's name of a mark export added to a pPr took;
+  // $1 and $<a>, which a string pattern leaves as they are, too. Written by
+  // concatenation, as a replacement string would read these very lines.
+  const dollarAuthors = ['$' + '$', '$' + '&', '$' + '`', '$' + "'", '$' + '1', '$' + '<a>'].map(sequence => 'A' + sequence + 'B');
+  const markedParagraphs = [
+    ['a list item', '- x {++a\n\n  b++} y\n- next'],
+    ['a quote', '> x {--a\n>\n> b--} y'],
+    ['a custom style', '<!-- style: special -->\nx {++a\n\nb++} y\n<!-- /style -->'],
+    ['an HTML table\'s cell', '<table>\n  <tr>\n    <th>\n      <p>h</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n      <p>c{++</p>\n      <p>++}e</p>\n    </td>\n  </tr>\n</table>'],
+  ];
+  it.each(dollarAuthors.flatMap(authorName => markedParagraphs.map(([where, md]) => [where, authorName, md])))(
+    'tracks the mark of a paragraph in %s by an author named %s, as named', async (_where, authorName, md) => {
+      const trip = async (markdown: string) => {
+        const { docx } = await convertMdToDocx(markdown, { authorName });
+        const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+        expect(XMLValidator.validate(xml)).toBe(true);
+        // The mark's and the text's, all as named
+        expect(xml).toMatch(/<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr><w:(?:ins|del) [^>]*\/><\/w:rPr><\/w:pPr>/);
+        const authors = [...xml.matchAll(/ w:author="([^"]*)"/g)].map(match => xmlAttributeValue(match[1]));
+        expect(authors.length).toBeGreaterThan(0);
+        expect(new Set(authors)).toEqual(new Set([authorName]));
+        return (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      };
+      // One span, as the mark's revision is the text's
+      const once = await trip(md);
+      expect(once).toBe(md);
+      expect(await trip(once)).toBe(once);
+    });
 
   it('keeps a wholly deleted paragraph\'s mark in its deletion, and a break export leaves untracked as it is', async () => {
     // The deletion came back as {--Gone.--} on a line of its own, whose mark
