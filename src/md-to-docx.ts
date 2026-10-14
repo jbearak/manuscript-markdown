@@ -1829,7 +1829,14 @@ function addUnshownStyleFences(tokens: MdToken[], source: (line: number) => numb
     }
     open = undefined;
   };
-  for (const token of tokens) {
+  // A paragraph of comment bodies only that Word doesn't get is no
+  // paragraph of the block's, as generateDocumentXml leaves it out (see
+  // commentBodiesOmitted), which reads it after the last block it reads
+  const omitsCommentBodies = commentBodiesOmitted(tokens);
+  let prev: MdToken | undefined;
+  for (const [at, token] of tokens.entries()) {
+    if (omitsCommentBodies(at, prev)) continue;
+    prev = token;
     const run = token.type === 'paragraph' && !token.listContinuation && token.runs.length === 1 ? token.runs[0] : undefined;
     const fence = run?.type === 'html_comment' ? styleFence(run.text) : undefined;
     // A block that opens closes the one open, as a block on one line or
