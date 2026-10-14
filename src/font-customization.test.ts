@@ -2371,6 +2371,32 @@ describe('empty run and paragraph properties', () => {
     expect(extractStyleBlock(styles, 'Heading2')).toBe('<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>');
     expect(extractStyleBlock(styles, 'Heading4')).not.toContain('<w:rPr');
   });
+
+  // What an XML parser reads as no element: a comment, a CDATA section, whose
+  // text Word's schema has no place for there, and a processing instruction
+  it.each([['a comment', '<!-- <w:b/> -->'], ['a CDATA section', '<![CDATA[<w:b/>]]>'], ['a processing instruction', '<?pi <w:b/>?>']])(
+    'none for a style\'s properties that held, beside what export takes out, only %s', async (_name, other) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(markdown(''))).docx);
+      const style = (id: string, inner: string) => (xml: string) => xml.replace(
+        new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>)[\\s\\S]*?(</w:style>)'),
+        (_match, open: string, close: string) => open + inner + close);
+      // The title's centering, Heading 4's bold and the bibliography's
+      // hanging indent, each with `other` after it
+      const styles = [
+        style('Title', '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="center"/>' + other + '</w:pPr>'),
+        style('Heading4', '<w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="3"/></w:pPr><w:rPr><w:b/>' + other + '</w:rPr>'),
+        style('Bibliography', '<w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/><w:pPr><w:ind w:left="720" w:hanging="720"/>' + other + '</w:pPr>'),
+      ].reduce((xml, edit) => edit(xml), await zip.file('word/styles.xml')!.async('string'));
+      expect(styles.split(other).length).toBe(4);
+      zip.file('word/styles.xml', styles);
+      const md = markdown('title-font-style: normal\nheader-font-style: normal\nbibliography-hanging-indent: false');
+      const out = await (await JSZip.loadAsync((await convertMdToDocx(md, { templateDocx: await zip.generateAsync({ type: 'uint8array' }) })).docx)).file('word/styles.xml')!.async('string');
+      expect([extractStyleBlock(out, 'Title'), extractStyleBlock(out, 'Heading4'), extractStyleBlock(out, 'Bibliography')]).toEqual([
+        '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/></w:style>',
+        '<w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="3"/></w:pPr></w:style>',
+        '<w:style w:type="paragraph" w:styleId="Bibliography"><w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/></w:style>',
+      ]);
+    });
 });
 
 describe('heading and title styles based on another style', () => {
