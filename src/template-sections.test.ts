@@ -1003,6 +1003,60 @@ describe('a template\'s section properties, in each section export writes', () =
   }, 30000);
 });
 
+describe('a template\'s last section without a w:rsidR or columns', () => {
+  // Its sectPr came back as it was, where Word adds both on open, marking
+  // the document changed (dirty-flag invariant 11), as the sections export
+  // adds before it have them
+  const page = '<w:pgSz w:w="12240" w:h="15840"/>', turned = '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>';
+  const margins = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
+  const columns = '<w:cols w:space="720"/>', grid = '<w:docGrid w:linePitch="360"/>';
+  const fenced = 'A\n\n<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n';
+  /** A template whose last sectPr is `sectPr` */
+  const withLast = async (sectPr: string) => editTemplate((await convertMdToDocx('Template text')).docx, 'word/document.xml',
+    xml => xml.replace(/<w:sectPr\b(?![\s\S]*<w:sectPr\b)[\s\S]*<\/w:sectPr>/, () => sectPr));
+  /** Each sectPr export writes of `md` with `templateDocx`, its rsid as
+   *  RSID, where the Markdown comes back from Word as it was, and again */
+  const sectPrsOf = async (md: string, templateDocx: Uint8Array) => {
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(md1).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+    const zip = await JSZip.loadAsync(docx);
+    const rsid = /<w:rsidRoot w:val="([^"]+)"/.exec((await textOf(zip, 'word/settings.xml'))!)![1];
+    return [...(await textOf(zip, 'word/document.xml'))!.matchAll(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g)].map(([sectPr]) => sectPr.split(rsid).join('RSID'));
+  };
+
+  it.each([
+    ['only its page and margins', '<w:sectPr>' + page + margins + '</w:sectPr>', 'Hello\n', '<w:sectPr w:rsidR="RSID">' + page + margins + columns + '</w:sectPr>'],
+    ['a document grid, which columns go before', '<w:sectPr>' + page + margins + grid + '</w:sectPr>', 'Hello\n', '<w:sectPr w:rsidR="RSID">' + page + margins + columns + grid + '</w:sectPr>'],
+    ['columns of its own', '<w:sectPr>' + page + margins + '<w:cols w:num="2" w:space="720"/>' + grid + '</w:sectPr>', 'Hello\n',
+      '<w:sectPr w:rsidR="RSID">' + page + margins + '<w:cols w:num="2" w:space="720"/>' + grid + '</w:sectPr>'],
+    ['another rsid', '<w:sectPr w:rsidSect="00AB12CD">' + page + margins + '</w:sectPr>', 'Hello\n', '<w:sectPr w:rsidR="RSID" w:rsidSect="00AB12CD">' + page + margins + columns + '</w:sectPr>'],
+    ['a section break before it', '<w:sectPr>' + page + margins + grid + '</w:sectPr>', fenced + '\nC\n', '<w:sectPr w:rsidR="RSID">' + page + margins + columns + grid + '</w:sectPr>'],
+    ['a fence that ends it', '<w:sectPr>' + page + margins + grid + '</w:sectPr>', fenced, '<w:sectPr w:rsidR="RSID">' + turned + margins + columns + grid + '</w:sectPr>'],
+  ])('gets them, as a section break has them, where it has %s', async (_name, sectPr, md, expected) => {
+    const sectPrs = await sectPrsOf(md, await withLast(sectPr));
+    expect(sectPrs[sectPrs.length - 1]).toBe(expected);
+    for (const each of sectPrs) expect(each).toMatch(/^<w:sectPr w:rsidR="[^"]+"[^>]*>.*<w:cols [^>]*\/>/);
+  });
+
+  it('gets them among the template\'s references, title page and document grid, in CT_SectPr\'s order', async () => {
+    const templateDocx = await editTemplate(await headerTemplate(), 'word/document.xml',
+      xml => xml.replace('<w:sectPr w:rsidR="00A1B2C3" w:rsidSect="00A1B2C3">', '<w:sectPr w:rsidSect="00A1B2C3">').replace(columns, ''));
+    const sectPrs = await sectPrsOf('Hello\n', templateDocx);
+    expect(sectPrs).toHaveLength(1);
+    expect(sectPrs[0]).toMatch(/^<w:sectPr w:rsidR="RSID" w:rsidSect="00A1B2C3">(?:<w:(?:header|footer)Reference [^>]*\/>){6}<w:pgSz /);
+    expect(sectPrs[0].replace(/<w:(?:header|footer)Reference [^>]*\/>/g, '')).toBe('<w:sectPr w:rsidR="RSID" w:rsidSect="00A1B2C3">' + page + margins + columns + '<w:titlePg/>' + grid + '</w:sectPr>');
+  });
+
+  it.each([['Hello\n'], [fenced + '\nC\n']])('comes back as the template has it where it has both: %j', async md => {
+    const sectPr = '<w:sectPr w:rsidR="00AB12CD" w:rsidSect="00AB12CD">' + page + margins + '<w:cols w:num="2" w:space="720"/>' + grid + '</w:sectPr>';
+    const sectPrs = await sectPrsOf(md, await withLast(sectPr));
+    expect(sectPrs[sectPrs.length - 1]).toBe(sectPr);
+  });
+});
+
 describe('a template\'s page numbering', () => {
   /** A template whose sections' page numbering is `pgNumType` */
   const numberedTemplate = async (pgNumType: string) =>

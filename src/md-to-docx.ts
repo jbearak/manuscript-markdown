@@ -32,7 +32,7 @@ import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
 import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters } from './xml-parser';
-import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, type Context, type Scope, type XmlNode } from './scoped-xml';
+import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -93,7 +93,8 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 // 9. Font completeness: include w:sig on all fonts, and include Calibri Light
 //    (referenced by theme minorFont/majorFont).
 // 10. Heading styles: include w:outlineLvl in pPr for all heading levels.
-// 11. sectPr completeness: include w:cols w:space="720" and w:rsidR.
+// 11. sectPr completeness: include w:cols w:space="720" and w:rsidR, in a
+//     template's sectPr too where it hasn't them (see completedSectPr).
 // 12. DEFLATE compression: use DEFLATE (not STORE) when generating the zip.
 //     Word re-compresses uncompressed entries on open and marks the file dirty.
 //
@@ -5166,6 +5167,26 @@ function fittingColumns(children: InScope[], textWidth: number): XmlNode[] {
   return at === -1 ? [...nodes, ONE_COLUMN] : [...nodes.slice(0, at), ONE_COLUMN, ...nodes.slice(at)];
 }
 
+/** A template's sectPr, parsed, in export's document, with what Word adds
+ *  to one that hasn't it on open, marking the document changed (see
+ *  dirty-flag invariant 11), as a section break has it (see
+ *  sectionBreakSectPrXml): `rsid` as its w:rsidR, after its declarations,
+ *  and one column, among its properties in CT_SectPr's order (see
+ *  withProperties). What it has stays, in its order, and one with both is
+ *  the same node. */
+function completedSectPr(sectPr: XmlNode, rsid?: string): XmlNode {
+  // Its columns as Word reads them, in a wrapper whose content it reads too
+  const effective = effectiveSectPr(sectPr, EXPORT_CONTEXT), inside = contextIn(effective, EXPORT_CONTEXT);
+  const hasColumns = childrenOf(effective).some(child => sectPrPropertyOf(child, inside.scope) === 'cols');
+  const columned = hasColumns ? sectPr : withProperties(sectPr, EXPORT_CONTEXT, [ONE_COLUMN], EXPORT_CONTEXT);
+  if (!rsid || attributeNamed(sectPr, EXPORT_NAMESPACES, WORDPROCESSINGML, 'rsidR') !== undefined) return columned;
+  const attributes = Object.entries(sectPr[':@'] ?? {});
+  const others = new Set(attributesOf(sectPr, EXPORT_NAMESPACES).filter(({ namespace }) => namespace !== MARKUP_COMPATIBILITY).map(({ key }) => key));
+  const first = attributes.findIndex(([key]) => others.has(key));
+  const at = first === -1 ? attributes.length : first;
+  return { ...columned, ':@': Object.fromEntries([...attributes.slice(0, at), ['@_w:rsidR', rsid], ...attributes.slice(at)]) };
+}
+
 /**
  * Build the sectPr of a section break, which ends a section on a new page,
  * the fence's orientation. With a template, it has the template's own
@@ -5233,7 +5254,7 @@ function fencedBodySectPrXml(landscape: boolean, pgSz: PageSize, margins: string
     const withPage = page !== -1 ? children.map((child, i) => i === page ? turned : child) : [...children.slice(0, at), turned, ...children.slice(at)];
     // Its columns fitted to the turned page
     const textWidth = textWidthTwips(landscape ? pgSz.h : pgSz.w, margins);
-    return buildOrdered([{ ...sectPr, [nameOf(sectPr)]: withPage.map(child => property(child) === 'cols' ? fitColumns({ node: child, scope }, textWidth).cols.node : child) }]);
+    return buildOrdered([completedSectPr({ ...sectPr, [nameOf(sectPr)]: withPage.map(child => property(child) === 'cols' ? fitColumns({ node: child, scope }, textWidth).cols.node : child) }, rsid)]);
   }
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '>' + fencePgSz +
     '<w:pgMar ' + margins + '/>' +
@@ -5257,10 +5278,17 @@ function nextPageSectPrXml(sectPrXml: string): string {
 
 /** Build the final body-level sectPr (no <w:type>, direct child of <w:body>). */
 function bodyClosingSectPrXml(pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
-  // If we have a template sectPr, reuse it as-is to preserve any additional
-  // properties (columns, etc.). It comes without its headers, footers and
-  // page numbering, which withTemplateSectPrs gives it
-  if (templateSectPr) return templateSectPr;
+  // If we have a template sectPr, reuse it to preserve any additional
+  // properties (columns, etc.), as it is where it has a w:rsidR and
+  // columns, and else with them (see completedSectPr). It comes without
+  // its headers, footers and page numbering, which withTemplateSectPrs
+  // gives it
+  if (templateSectPr) {
+    const sectPr = parseOrdered(templateSectPr)?.find(isElement);
+    if (!sectPr || !isNamed(sectPr, EXPORT_NAMESPACES, WORDPROCESSINGML, 'sectPr')) return templateSectPr;
+    const completed = completedSectPr(sectPr, rsid);
+    return completed === sectPr ? templateSectPr : buildOrdered([completed]);
+  }
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
     '<w:pgMar ' + margins + '/>' +
     '<w:cols w:space="720"/></w:sectPr>';

@@ -5804,7 +5804,7 @@ describe('landscape sections', () => {
       const state = makeState();
       state.templateSectPr = '<w:sectPr><w:headerReference w:type="default" r:id="rId99"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/><w:cols w:space="720"/></w:sectPr>';
       const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), state);
-      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith('<w:sectPr><w:headerReference w:type="default" r:id="rId99"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1000"');
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith('<w:sectPr w:rsidR="00000001"><w:headerReference w:type="default" r:id="rId99"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1000"');
       expect(xml.match(/w:orient="landscape"/g)).toHaveLength(1);
     });
 
@@ -5818,13 +5818,13 @@ describe('landscape sections', () => {
       state.templateSectPr = '<w:sectPr><w:headerReference w:type="default" r:id="rId99"/>' + page + '<w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/><w:pgNumType w:start="5"/><w:cols w:num="2" w:space="720"/>' + change + '</w:sectPr>';
       const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), state);
       // The page's size is the template's, or else the default
-      const bodySectPr = xml.slice(xml.lastIndexOf('<w:sectPr>', xml.lastIndexOf('<w:headerReference')));
-      expect(bodySectPr.replace(/<w:pgSz w:w="\d+" w:h="\d+" w:orient="landscape"\/>/, '<pgSz/>')).toStartWith('<w:sectPr><w:headerReference w:type="default" r:id="rId99"/><pgSz/>'
+      const bodySectPr = xml.slice(xml.lastIndexOf('<w:sectPr ', xml.lastIndexOf('<w:headerReference')));
+      expect(bodySectPr.replace(/<w:pgSz w:w="\d+" w:h="\d+" w:orient="landscape"\/>/, '<pgSz/>')).toStartWith('<w:sectPr w:rsidR="00000001"><w:headerReference w:type="default" r:id="rId99"/><pgSz/>'
         + '<w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/><w:pgNumType w:start="5"/><w:cols w:num="2" w:space="720"/>' + change + '</w:sectPr>');
     });
 
     it.each([
-      ['no attributes', '<w:sectPr/>', '<w:sectPr>'],
+      ['no attributes', '<w:sectPr/>', '<w:sectPr w:rsidR="00000001">'],
       ['attributes', '<w:sectPr w:rsidR="00AB12CD"/>', '<w:sectPr w:rsidR="00AB12CD">'],
     ])('turns the page of a template whose properties are an empty element with %s for a landscape section that ends the document', (_, sectPr, open) => {
       // The page went inside the element's tag, which has no closing tag
@@ -5832,7 +5832,7 @@ describe('landscape sections', () => {
       const state = makeState();
       state.templateSectPr = sectPr;
       const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), state);
-      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith(open + '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/></w:sectPr>\n</w:body>');
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith(open + '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:cols w:space="720"/></w:sectPr>\n</w:body>');
       expect(XMLValidator.validate(xml)).toBe(true);
     });
 
@@ -5955,7 +5955,7 @@ describe('landscape sections', () => {
       const turned = '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>';
       expect(sectPrs).toEqual([letter, turned, letter].map(page => '<w:type w:val="nextPage"/>' + page + letterMargins + '<w:cols w:num="2" w:space="720"/>')
         .concat(turned + letterMargins + '<w:cols w:num="2" w:space="720"/>'));
-      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith(open);
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith(open.replace(/>$/, ' w:rsidR="00000001">'));
     });
 
     const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
@@ -5988,7 +5988,7 @@ describe('landscape sections', () => {
       state.templateSectPr = '<w:sectPr>' + alternatives('<w:type w:val="continuous"/>', '<w:type w:val="evenPage"/>', 'x') + letter + letterMargins + '<w:cols w:space="720"/></w:sectPr>';
       const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
       // The last section's properties, the template's own, keep its alternatives
-      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith('<w:sectPr>' + alternatives('<w:type w:val="nextPage"/>', '<w:type w:val="nextPage"/>', 'x') + letter + letterMargins);
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith('<w:sectPr w:rsidR="00000001">' + alternatives('<w:type w:val="nextPage"/>', '<w:type w:val="nextPage"/>', 'x') + letter + letterMargins);
     });
 
     it('starts the last section after a fence on a new page where an extension\'s wrapper whose content Word reads holds the template\'s break type', () => {
@@ -6003,7 +6003,7 @@ describe('landscape sections', () => {
         + '<ext:wrap>' + change + '</ext:wrap></w:sectPr>';
       const xml = generateDocumentXml(parseMd('A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.'), state);
       expect(xml).not.toContain('continuous');
-      expect(xml.slice(xml.lastIndexOf('<w:sectPr ')).replace(/<\/w:body>[\s\S]*/, '').trim()).toBe(open + '<ext:wrap><w:type w:val="nextPage"/></ext:wrap>' + letter + letterMargins + '<w:cols w:space="720"/>'
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr ')).replace(/<\/w:body>[\s\S]*/, '').trim()).toBe(open.replace(/>$/, ' w:rsidR="00000001">') + '<ext:wrap><w:type w:val="nextPage"/></ext:wrap>' + letter + letterMargins + '<w:cols w:space="720"/>'
         + '<ext:wrap>' + change + '</ext:wrap></w:sectPr>');
     });
 

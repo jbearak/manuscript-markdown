@@ -18441,7 +18441,7 @@ describe('A section at the end of the document', () => {
     const md = 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n';
     const { docx } = await convertMdToDocx(md, { templateDocx });
     const out = await documentXml(docx);
-    expect(out.slice(out.lastIndexOf('<w:sectPr'))).toMatch(/^<w:sectPr\b[^>/]*><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"\/><\/w:sectPr>\s*<\/w:body>/);
+    expect(out.slice(out.lastIndexOf('<w:sectPr'))).toMatch(/^<w:sectPr w:rsidR="[^"]+"><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"\/><w:cols w:space="720"\/><\/w:sectPr>\s*<\/w:body>/);
     const md1 = (await convertDocx(docx)).markdown;
     expect(strip(md1)).toBe(md);
     expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
