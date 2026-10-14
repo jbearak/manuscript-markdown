@@ -15314,6 +15314,104 @@ describe('An alert whose first paragraph holds spaces or tabs alone', () => {
   });
 });
 
+describe('Quotes Word added, took out or moved', () => {
+  type Edit = (paragraphs: string[], quote: (text: string) => [number, number]) => string[];
+  // The Markdown import reads of export's paragraphs of `md`, with `edit`
+  // made to them, as in Word: each quote between the spacer before it and
+  // the one after, which `quote` finds by its text, with an empty paragraph
+  // for each blank line after it, but before a quote, which has none
+  const edited = async (md: string, edit: Edit) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const start = xml.indexOf('<w:body>') + '<w:body>'.length;
+    const end = xml.indexOf('<w:sectPr', start);
+    const paragraphs = xml.slice(start, end).match(/<w:p[ >][\s\S]*?<\/w:p>/g)!;
+    const quote = (text: string): [number, number] => {
+      const at = paragraphs.findIndex(paragraph => paragraph.includes('>' + text + '</w:t>'));
+      expect(at).toBeGreaterThan(-1);
+      return [at - 1, at + 2];
+    };
+    zip.file('word/document.xml', xml.slice(0, start) + edit(paragraphs, quote).join('') + xml.slice(end));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }))).markdown;
+  };
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  const two = '> [!NOTE] first alert\n\n> [!TIP]\n> second alert\n';
+  const three = '> [!NOTE] a\n\n\n> [!TIP]\n> b\n\n> [!WARNING] c\n';
+  const between = 'p0\n\n> [!NOTE] n\n\n\np1\n\n> [!TIP]\n> t\n\n\n\np2\n';
+  const hidden = '---\ncallout-labels: false\n---\n\n> [!NOTE]\n>\n> first\n\n> [!TIP]\n>\n> second\n\n> [!WARNING] third\n';
+
+  test.each<[string, string, Edit, string]>([
+    ['took out the first, with the blank line after it', two, (paragraphs, quote) => {
+      const [from, to] = quote('first alert');
+      return [...paragraphs.slice(0, from), ...paragraphs.slice(to + 1)];
+    }, '> [!TIP]\n> second alert\n'],
+    ['added one before the first, with other text', two, (paragraphs, quote) => {
+      const [from, to] = quote('second alert');
+      const added = paragraphs.slice(from, to).map(paragraph => paragraph.replace('>second alert<', '>new alert<'));
+      // With the empty paragraph after the first, for the blank line
+      return [...added, paragraphs[quote('first alert')[1]], ...paragraphs];
+    }, '> [!TIP]\n> new alert\n\n> [!NOTE] first alert\n\n> [!TIP]\n> second alert\n'],
+    ['added a copy of the second before the first', two, (paragraphs, quote) => {
+      const [from, to] = quote('second alert');
+      return [...paragraphs.slice(from, to), paragraphs[quote('first alert')[1]], ...paragraphs];
+    }, '> [!TIP]\n> second alert\n\n> [!NOTE] first alert\n\n> [!TIP]\n> second alert\n'],
+    ['moved the second before the first', two, (paragraphs, quote) => {
+      const [from, to] = quote('second alert');
+      return [...paragraphs.slice(from, to), paragraphs[from - 1], ...paragraphs.slice(0, from - 1)];
+    }, '> [!TIP]\n> second alert\n\n> [!NOTE] first alert\n'],
+    ['moved the last before the first', three, (paragraphs, quote) => {
+      const [from, to] = quote('c');
+      return [...paragraphs.slice(from, to), paragraphs[from - 1], ...paragraphs.slice(0, from - 1)];
+    }, '> [!WARNING] c\n\n> [!NOTE] a\n\n\n> [!TIP]\n> b\n'],
+    ['took out the middle one, with the blank line after it', three, (paragraphs, quote) => {
+      const [from, to] = quote('b');
+      return [...paragraphs.slice(0, from), ...paragraphs.slice(to + 1)];
+    }, '> [!NOTE] a\n\n\n> [!WARNING] c\n'],
+    ['took out the first and changed the text of the second', three, (paragraphs, quote) => {
+      const [from, to] = quote('b');
+      return [...paragraphs.slice(from, to).map(paragraph => paragraph.replace('>b<', '>bee<')), ...paragraphs.slice(to)];
+    }, '> [!TIP]\n> bee\n\n> [!WARNING] c\n'],
+    ['took out the first, between paragraphs', between, (paragraphs, quote) => {
+      const [from, to] = quote('n');
+      return [...paragraphs.slice(0, from), ...paragraphs.slice(to)];
+    }, 'p0\n\np1\n\n> [!TIP]\n> t\n\n\n\np2\n'],
+    // Whose marker export writes no paragraph for, where it's one of its own
+    ['took out the middle one, with the labels hidden', hidden, (paragraphs, quote) => {
+      const [from, to] = quote('second');
+      return [...paragraphs.slice(0, from), ...paragraphs.slice(to + 1)];
+    }, '---\ncallout-labels: false\n---\n\n> [!NOTE]\n>\n> first\n\n> [!WARNING] third\n'],
+  ])('keeps each alert\'s marker and blank lines where Word %s', async (_name, md, edit, expected) => {
+    // Export records them by each quote's place among the quotes, which
+    // the quotes Word added or took out before one changed, so it took
+    // the records of another
+    const markdown = await edited(md, edit);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps each alert\'s marker where Word changed one\'s text', async () => {
+    // Which tells nothing of which quote it is, where Word added or took
+    // out none, so each takes the records of the one at its place
+    const markdown = await edited(two, paragraphs => paragraphs.map(paragraph => paragraph.replace('>first alert<', '>changed<')));
+    expect(markdown).toBe('> [!NOTE] changed\n\n> [!TIP]\n> second alert\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['with the labels hidden', '---\ncallout-labels: false\n---\n\n> [!NOTE] **※ Note** ※ Note x\n\n> [!NOTE] **※ Note** x\n'],
+    ['with the labels shown', '> [!NOTE] **※ Note** ※ Note x\n\n> [!NOTE] **※ Note** x\n'],
+    ['after a blank line, with the labels shown', 'p0\n\n\n> [!NOTE]\n>\n> **※ Note** ※ Note x\n\n> [!NOTE]\n>\n> **※ Note** x\n\n\n\np1\n'],
+  ])('keeps each alert\'s marker and blank lines where Word changed nothing, with text that starts with bold text like the label %s', async (_name, md) => {
+    // Import took that text out as the label, where export wrote none, or
+    // past one, as it does only at the start of the first paragraph, so it
+    // took the alerts for others export wrote, and read each one's records
+    // as another's
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
 describe('Blocks a note can\'t hold', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
   const note = (body: string) => 'T.[^1]\n\n[^1]: A.\n\n    ' + body.replace(/\n(?!\n)/g, '\n    ') + '\n';

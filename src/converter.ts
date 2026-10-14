@@ -4237,6 +4237,27 @@ export async function extractBlockquoteAlertMarkerAloneGroups(data: Uint8Array |
   }
 }
 
+/** What tells each quote group export wrote from the others, by group
+ *  index: its kind, the number of its paragraphs and the fingerprint of its
+ *  start, as one key (see blockquoteIdentityProps in md-to-docx.ts) */
+export async function extractBlockquoteIdentities(data: Uint8Array | JSZip): Promise<Map<number, string> | null> {
+  const mappingJson = await extractChunkedCustomProp(data, 'MANUSCRIPT_BLOCKQUOTE_IDENTITIES_');
+  if (!mappingJson) return null;
+  try {
+    const parsedJson = JSON.parse(mappingJson);
+    if (!parsedJson || typeof parsedJson !== 'object') return null;
+    const identities = new Map<number, string>();
+    for (const [key, identity] of Object.entries(parsedJson)) {
+      const groupIdx = parseInt(key, 10);
+      if (isNaN(groupIdx) || !Array.isArray(identity) || typeof identity[0] !== 'number' || typeof identity[1] !== 'string' || typeof identity[2] !== 'string') continue;
+      identities.set(groupIdx, quoteGroupKey(identity[2], identity[0], identity[1]));
+    }
+    return identities.size > 0 ? identities : null;
+  } catch {
+    return null;
+  }
+}
+
 async function extractIdMappingFromCustomXml(
   data: Uint8Array | JSZip,
   propPrefix: string,
@@ -12997,13 +13018,20 @@ function deriveBlockquoteSpacingFromStructure(content: ContentItem[]): {
  *  place among those groups (see blockquoteListLevelProps in md-to-docx.ts) */
 type BlockquotePlace = [listLevel: number, level: number, start: string, paragraphs: number, groups: number, order: number];
 
+/** The label export writes at the start of the first paragraph of an
+ *  alert of `alertType`, where it shows labels, in bold */
+function alertLabelText(alertType: GfmAlertType | undefined): string | undefined {
+  const glyph = alertType !== undefined ? alertGlyphForType(alertType) : undefined;
+  return alertType !== undefined && glyph ? glyph + ' ' + gfmAlertTitle(alertType) : undefined;
+}
+
 /** The text of the paragraph at `index` in content, as export finds it in
  *  the paragraph it writes (see wordText there), past the label export
- *  writes at the start of an alert's */
-function authoredParagraphText(content: ContentItem[], index: number, alertType: GfmAlertType | undefined): string {
-  const glyph = alertType !== undefined ? alertGlyphForType(alertType) : undefined;
+ *  writes at the start of an alert's, unless `labeled` is false, as where
+ *  export writes none */
+function authoredParagraphText(content: ContentItem[], index: number, alertType: GfmAlertType | undefined, labeled = true): string {
   // The label is the paragraph's first text, in bold
-  let label = alertType !== undefined && glyph ? glyph + ' ' + gfmAlertTitle(alertType) : undefined;
+  let label = labeled ? alertLabelText(alertType) : undefined;
   let text = '';
   for (let j = index + 1; j < content.length && !isStructuralBoundaryItem(content[j]); j++) {
     const item = content[j];
@@ -13064,6 +13092,181 @@ function quoteGroupIdentities(content: ContentItem[]): Map<number, { key: string
     i = end;
   }
   return groups;
+}
+
+/** A quote group's kind, the alert's type or '' for a quote that's no
+ *  alert, the number of its paragraphs and the fingerprint of its start, as
+ *  one key, which starts with its kind */
+function quoteGroupKey(kind: string, paragraphs: number, start: string): string {
+  return kind + ':' + paragraphs + ':' + start;
+}
+
+/** The start of a quote group whose key import can't be sure of, as no
+ *  fingerprint is, so no group export wrote has the key (see
+ *  readQuoteGroupKeys) */
+const unsureQuoteGroupStart = '?';
+
+/** Whether import can't be sure of the quote group's key (see
+ *  readQuoteGroupKeys) */
+function isUnsureQuoteGroupKey(key: string): boolean {
+  return key.endsWith(':' + unsureQuoteGroupStart);
+}
+
+/** What tells each quote group import read in `content` from the others,
+ *  by its index, as export takes it of each group it writes (see
+ *  blockquoteIdentityProps in md-to-docx.ts): its kind, the number of its
+ *  paragraphs and the fingerprint of the start of the first with text past
+ *  an alert's label, which tells nothing of which alert it is, as one key.
+ *  Export writes the label only at the start of an alert's first
+ *  paragraph, where it shows labels (`labelsShown`), and finds the rest of
+ *  the text there as the author wrote it, so import takes only that label
+ *  out. Where export hides them, an alert whose first paragraph starts with
+ *  bold text like the label, which the author wrote, has an unsure key, as
+ *  import couldn't tell it from a label before (see isUnsureQuoteGroupKey) */
+function readQuoteGroupKeys(content: ContentItem[], labelsShown: boolean): Map<number, string> {
+  const blank = paragraphStartFingerprint('');
+  const groups = new Map<number, { kind: string; paragraphs: number; start: string }>();
+  for (const [i, item] of content.entries()) {
+    if (item.type !== 'para' || item.blockquoteGroupIndex === undefined) continue;
+    let group = groups.get(item.blockquoteGroupIndex);
+    const first = !group;
+    if (!group) groups.set(item.blockquoteGroupIndex, group = { kind: item.alertType ?? '', paragraphs: 0, start: blank });
+    group.paragraphs++;
+    if (group.start !== blank) continue;
+    if (first && !labelsShown && startsWithLabelLike(content, i, item.alertType)) group.start = unsureQuoteGroupStart;
+    else group.start = paragraphStartFingerprint(authoredParagraphText(content, i, item.alertType, first && labelsShown));
+  }
+  return new Map([...groups].map(([index, { kind, paragraphs, start }]) => [index, quoteGroupKey(kind, paragraphs, start)]));
+}
+
+/** Whether the paragraph at `index` in content starts with bold text like
+ *  the label of an alert of `alertType` (see alertLabelText) */
+function startsWithLabelLike(content: ContentItem[], index: number, alertType: GfmAlertType | undefined): boolean {
+  const label = alertLabelText(alertType);
+  if (label === undefined) return false;
+  for (let j = index + 1; j < content.length && !isStructuralBoundaryItem(content[j]); j++) {
+    const item = content[j];
+    if (item.type === 'text') return item.formatting.bold && item.text.trim() === label;
+  }
+  return false;
+}
+
+/** The index of the group export wrote, of those `written` (see
+ *  extractBlockquoteIdentities), that each quote group import read, of
+ *  those `read` (see readQuoteGroupKeys), is, by the index of each, which
+ *  import finds export's records of the group by (see byReadGroup). None
+ *  where they're the same groups in the same order, as where Word added or
+ *  took out none, where import reads the records by index, as before.
+ *  Elsewhere, each group whose key as many groups have as export wrote
+ *  with it is the one of those export wrote at its place among them,
+ *  wherever Word moved it. The others in a run between two of those, or
+ *  the document's start or end, are those export wrote between those two
+ *  that no group is, in order, where there are as many of each, as where
+ *  Word changed a group's text. Elsewhere, where import can't tell which is
+ *  which, as where Word added a group or took one out with another's text,
+ *  each is the one export wrote at its own index, as before, if that one
+ *  is among them, and otherwise none, as one Word added. Each only of its
+ *  own kind, which no change to its text changes. A group whose key import
+ *  can't be sure of (see readQuoteGroupKeys) has none of those export
+ *  wrote, so it and the others in its run are each the one at its own
+ *  index, as before, and with nothing else changed, the groups are the
+ *  same */
+function readQuoteGroups(written: Map<number, string>, read: Map<number, string>): ReadQuoteGroups | undefined {
+  const writtenGroups = [...written].sort(([a], [b]) => a - b);
+  const readGroups = [...read].sort(([a], [b]) => a - b);
+  const kind = (key: string) => key.slice(0, key.indexOf(':'));
+  // A group whose key import can't be sure of is the one at its index,
+  // where it's of its kind, so a document Word didn't change reads by index
+  const same = (read: string, key: string) => read === key || isUnsureQuoteGroupKey(read) && kind(read) === kind(key);
+  if (writtenGroups.length === readGroups.length && writtenGroups.every(([index, key], k) => readGroups[k][0] === index && same(readGroups[k][1], key))) return undefined;
+  const counts = (groups: Array<[number, string]>) => {
+    const byKey = new Map<string, number>();
+    for (const [, key] of groups) byKey.set(key, (byKey.get(key) ?? 0) + 1);
+    return byKey;
+  };
+  const writtenCounts = counts(writtenGroups);
+  const readCounts = counts(readGroups);
+  const writtenWith = new Map<string, number[]>();
+  for (const [index, key] of writtenGroups) {
+    const groups = writtenWith.get(key);
+    if (groups) groups.push(index);
+    else writtenWith.set(key, [index]);
+  }
+  const found = new Map<number, number>();
+  const taken = new Set<number>();
+  const seen = new Map<string, number>();
+  for (const [index, key] of readGroups) {
+    const place = seen.get(key) ?? 0;
+    seen.set(key, place + 1);
+    if (writtenCounts.get(key) !== readCounts.get(key)) continue;
+    const group = writtenWith.get(key)![place];
+    found.set(index, group);
+    taken.add(group);
+  }
+  // The groups export wrote that no group import read is yet, in order
+  const left = writtenGroups.map(([index]) => index).filter(index => !taken.has(index));
+  for (let k = 0; k < readGroups.length;) {
+    if (found.has(readGroups[k][0])) {
+      k++;
+      continue;
+    }
+    let end = k;
+    while (end < readGroups.length && !found.has(readGroups[end][0])) end++;
+    const after = k > 0 ? found.get(readGroups[k - 1][0])! : -1;
+    const before = end < readGroups.length ? found.get(readGroups[end][0])! : Infinity;
+    const between = after < before ? left.slice(lowerBound(left, after + 1), lowerBound(left, before)).filter(index => !taken.has(index)) : [];
+    const run = readGroups.slice(k, end).map(([index]) => index);
+    const own = new Set(between);
+    // Where import can't be sure of a group's key in the run, each is the
+    // one export wrote at its own index, as before
+    const inOrder = between.length === run.length && !run.some(index => isUnsureQuoteGroupKey(read.get(index)!));
+    for (const [j, index] of run.entries()) {
+      const group = inOrder ? between[j] : own.has(index) ? index : undefined;
+      if (group === undefined || kind(written.get(group)!) !== kind(read.get(index)!)) continue;
+      found.set(index, group);
+      taken.add(group);
+    }
+    k = end;
+  }
+  return { read: readGroups.map(([index]) => index), written: writtenGroups.map(([index]) => index), found };
+}
+
+/** The quote groups import read, by index, in order, those export wrote,
+ *  and the one of those that each one import read is, where it's one (see
+ *  readQuoteGroups) */
+interface ReadQuoteGroups { read: number[]; written: number[]; found: Map<number, number> }
+
+/** `records` export keeps of the quote groups it wrote, by the index of
+ *  each, by the index of the group import read that is that one (see
+ *  readQuoteGroups), where Word added a group, took one out or moved one,
+ *  and as they are otherwise. A record of the blank lines between a group
+ *  and the next (`side` 'between') is only where the next one import read
+ *  is the next one export wrote, and elsewhere what Word's paragraphs
+ *  between them tell (`derived`, see deriveBlockquoteSpacingFromStructure),
+ *  in the empty paragraphs export writes for them. One of those before or
+ *  after a group ('before', 'after') is the record where the group has the
+ *  one export wrote before it, or after it, beside it there, as export
+ *  wrote them, and elsewhere the record if any, or else what Word's
+ *  paragraphs tell, or else `fallback` */
+function byReadGroup<T>(records: Map<number, T> | null, groups: ReadQuoteGroups | undefined, side?: 'between' | 'before' | 'after', derived?: Map<number, T>, fallback?: T): Map<number, T> | null {
+  if (!records || !groups) return records;
+  const { read, written, found } = groups;
+  const asWritten = (index: number): boolean => {
+    const group = found.get(index);
+    if (group === undefined) return false;
+    if (side === 'between') return found.get(index + 1) === group + 1;
+    if (side === 'before') return index === read[0] ? group === written[0] : found.get(index - 1) === group - 1;
+    if (side === 'after') return index === read[read.length - 1] ? group === written[written.length - 1] : found.get(index + 1) === group + 1;
+    return true;
+  };
+  const byRead = new Map<number, T>();
+  for (const index of read) {
+    const group = found.get(index);
+    const record = group === undefined ? undefined : records.get(group);
+    const value = asWritten(index) ? record : side === 'between' ? derived?.get(index) : record ?? derived?.get(index) ?? fallback;
+    if (value !== undefined) byRead.set(index, value);
+  }
+  return byRead;
 }
 
 /** The places export recorded for quote groups (`places`), by each one's
@@ -17613,6 +17816,7 @@ export async function convertDocx(
     blockquotePostContentBlankLineMapping,
     blockquoteAlertStyleMapping,
     blockquoteAlertMarkerAloneGroups,
+    blockquoteIdentities,
     imageFormatMapping,
     noteImageFormatMapping,
     tableFormatMapping,
@@ -17672,6 +17876,7 @@ export async function convertDocx(
     blockquotePostContentBlankLineMapping: extractBlockquotePostContentBlankLineMapping(zip),
     blockquoteAlertStyleMapping: extractBlockquoteAlertStyleMapping(zip),
     blockquoteAlertMarkerAloneGroups: extractBlockquoteAlertMarkerAloneGroups(zip),
+    blockquoteIdentities: extractBlockquoteIdentities(zip),
     imageFormatMapping: extractImageFormatMapping(zip),
     noteImageFormatMapping: extractNoteImageFormatMapping(zip),
     tableFormatMapping: extractTableFormatMapping(zip),
@@ -17792,6 +17997,10 @@ export async function convertDocx(
     derivedBlockquotePreContentBlankLines,
     derivedBlockquotePostContentBlankLines,
   } = structureBody(docContent, blockquotePlaces);
+  // The quote group export wrote that each one import read is, where Word
+  // added one or took one out, which moves the index of those after it,
+  // that export's records of them are by (see readQuoteGroups)
+  const quoteGroups = blockquoteIdentities ? readQuoteGroups(blockquoteIdentities, readQuoteGroupKeys(docContent, storedCalloutLabels !== false)) : undefined;
 
   // Post-process: apply per-paragraph indent overrides from custom properties.
   // Uses the same body-paragraph counting as md-to-docx generation: count
@@ -18251,11 +18460,16 @@ export async function convertDocx(
     notes: notesMap.size > 0 ? { map: notesMap, assignedLabels } : undefined,
     codeBlockLangs: codeBlockLangMapping,
     noteCodeBlockStarts,
-    blockquoteGaps: blockquoteGapMapping ?? derivedBlockquoteGaps,
-    blockquotePreContentBlankLines: blockquotePreContentBlankLineMapping ?? derivedBlockquotePreContentBlankLines,
-    blockquotePostContentBlankLines: blockquotePostContentBlankLineMapping ?? derivedBlockquotePostContentBlankLines,
-    blockquoteAlertInlineByGroup: blockquoteAlertStyleMapping,
-    blockquoteAlertMarkerAloneGroups,
+    blockquoteGaps: byReadGroup(blockquoteGapMapping, quoteGroups, 'between', derivedBlockquoteGaps) ?? derivedBlockquoteGaps,
+    // A blank line before a group Word moved after other content, where
+    // export recorded none and Word has no empty paragraph, as before one
+    // anywhere else, which export writes none for
+    blockquotePreContentBlankLines: byReadGroup(blockquotePreContentBlankLineMapping, quoteGroups, 'before', derivedBlockquotePreContentBlankLines, 1) ?? derivedBlockquotePreContentBlankLines,
+    blockquotePostContentBlankLines: byReadGroup(blockquotePostContentBlankLineMapping, quoteGroups, 'after', derivedBlockquotePostContentBlankLines) ?? derivedBlockquotePostContentBlankLines,
+    blockquoteAlertInlineByGroup: byReadGroup(blockquoteAlertStyleMapping, quoteGroups),
+    blockquoteAlertMarkerAloneGroups: blockquoteAlertMarkerAloneGroups && quoteGroups
+      ? new Set(byReadGroup(new Map([...blockquoteAlertMarkerAloneGroups].map(group => [group, true])), quoteGroups)!.keys())
+      : blockquoteAlertMarkerAloneGroups,
     calloutLabels: storedCalloutLabels,
     imageFormatMapping,
     noteImageFormatMapping,

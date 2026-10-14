@@ -2104,8 +2104,10 @@ type BlockquotePlace = [listLevel: number, level: number];
  *  added before it, which takes its index: the fingerprint of its first
  *  paragraph with text, past an alert's label, which tells nothing of
  *  which alert it is (see paragraphStartFingerprint), and the number of its
- *  paragraphs. Once its first paragraph is written */
-interface QuoteGroupIdentity { start?: string; paragraphs: number }
+ *  paragraphs. Once its first paragraph is written. With its kind, the
+ *  alert's type, or '' for a quote that's no alert, which tells it from a
+ *  group of another kind with the same text (see blockquoteIdentityProps) */
+interface QuoteGroupIdentity { start?: string; paragraphs: number; kind: string }
 
 /** The start of a paragraph with no text, which a later paragraph of its
  *  group replaces as the group's start */
@@ -2135,6 +2137,22 @@ export function blockquoteListLevelProps(places: Map<number, BlockquotePlace>, i
   }
   if (Object.keys(mapping).length === 0) return [];
   return chunkCustomProps('MANUSCRIPT_BLOCKQUOTE_LIST_LEVELS_', JSON.stringify(mapping));
+}
+
+/** What tells import each quote group export wrote, by group index, for
+ *  the records export keeps of the groups by index (see
+ *  blockquoteSpacingMaps): the number of its paragraphs, the fingerprint of
+ *  its start and its kind (see QuoteGroupIdentity). Word can add a quote
+ *  before one, or take one out, which moves the index of each after it, so
+ *  import finds each group's records by these (see readQuoteGroups in
+ *  converter.ts) */
+export function blockquoteIdentityProps(identities: Map<number, QuoteGroupIdentity>): CustomPropEntry[] {
+  const mapping: Record<string, [number, string, string]> = {};
+  for (const [index, identity] of identities) {
+    if (identity.start !== undefined && identity.paragraphs > 0) mapping[String(index)] = [identity.paragraphs, identity.start, identity.kind];
+  }
+  if (Object.keys(mapping).length === 0) return [];
+  return chunkCustomProps('MANUSCRIPT_BLOCKQUOTE_IDENTITIES_', JSON.stringify(mapping));
 }
 
 // Assign a sequential blockquoteGroupIndex to each blockquote token so the
@@ -11039,7 +11057,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       const group = token.type === 'blockquote' ? token.blockquoteGroupIndex : undefined;
       if (group !== undefined) {
         let identity = state.blockquoteIdentities.get(group);
-        if (!identity) state.blockquoteIdentities.set(group, identity = { paragraphs: 0 });
+        if (!identity) state.blockquoteIdentities.set(group, identity = { paragraphs: 0, kind: token.alertType ?? '' });
         if (identity.start === undefined || identity.start === blankParagraphStart) {
           const label = token.alertType && token.alertLead && options?.calloutLabels !== false ? ALERT_GLYPH_BY_TYPE[token.alertType] + ' ' + gfmAlertTitle(token.alertType) : '';
           const text = wordText(paragraphXml);
@@ -12167,7 +12185,12 @@ export async function convertMdToDocx(
     pushAll(customProps, blockquoteListLevelProps(state.blockquotePlaces, state.blockquoteIdentities));
     // Word shows the label's paragraph of an alert whose marker is one of its
     // own, and with the label hidden, has none
-    if (!effectiveCalloutLabels) pushAll(customProps, blockquoteAlertMarkerAloneProps(blockquoteSpacing.alertAlone));
+    const alertAlone = !effectiveCalloutLabels ? blockquoteSpacing.alertAlone : new Map<number, boolean>();
+    pushAll(customProps, blockquoteAlertMarkerAloneProps(alertAlone));
+    // Which group each of those records by index is
+    if ([state.blockquoteGaps, state.blockquotePreContentBlankLines, state.blockquotePostContentBlankLines, state.blockquoteAlertMarkerInlineByGroup, alertAlone].some(records => records.size > 0)) {
+      pushAll(customProps, blockquoteIdentityProps(state.blockquoteIdentities));
+    }
     if (explicitCalloutLabels !== undefined) {
       customProps.push({ name: 'MANUSCRIPT_CALLOUT_LABELS', value: String(explicitCalloutLabels) });
     }
