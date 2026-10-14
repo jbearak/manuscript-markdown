@@ -610,6 +610,54 @@ describe('Custom Styles — Round-Trip', () => {
     expect(metadata.styles!['pullquote'].font).toBe('Georgia');
     expect(metadata.styles!['pullquote'].paragraphIndent).toBe(0.3);
   });
+
+  it.each([
+    // Which import named by the ID export gave it, as rd and pull-quote,
+    // which the frontmatter didn't define, so the next export dropped them
+    ['names the styles part gives them', (xml: string) => xml, ['R&D', 'Pull Quote'], ['MsCustomRd', 'MsCustomPullQuote']],
+    ['a name Word gave a style', (xml: string) => xml.replace('Custom: R&amp;D', 'Custom: Findings'), ['Findings', 'Pull Quote'], ['MsCustomFindings', 'MsCustomPullQuote']],
+  ])('writes the directives of custom styles without custom properties by %s, as the frontmatter does', async (_name, styles, names, ids) => {
+    const md = '---\nstyles:\n  R&D:\n    font-style: bold\n  Pull Quote:\n    font-style: italic\n---\n\n<!-- style: R&D -->\nA\n<!-- /style -->\n\n<!-- style: Pull Quote -->\nB\n<!-- /style -->\n';
+    const JSZip = (await import('jszip')).default;
+    const withoutProperties = async (docx: Uint8Array) => {
+      const zip = await JSZip.loadAsync(docx);
+      zip.remove('docProps/custom.xml');
+      zip.file('word/styles.xml', styles(await zip.file('word/styles.xml')!.async('string')));
+      return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    };
+    // Each paragraph's style and text
+    const paragraphs = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .matchAll(/<w:p\b(?:(?!<\/w:p>)[\s\S])*?<w:t>([^<]*)<\/w:t>/g)].map(p => (/<w:pStyle w:val="([^"]*)"/.exec(p[0])?.[1] ?? 'none') + ':' + p[1]);
+    const md1 = await withoutProperties((await convertMdToDocx(md)).docx);
+    expect(Object.keys(parseFrontmatter(md1).metadata.styles ?? {})).toEqual(names);
+    expect(md1).toContain('<!-- style: ' + names[0] + ' -->\nA\n');
+    expect(md1).toContain('<!-- style: ' + names[1] + ' -->\nB\n');
+    const docx = (await convertMdToDocx(md1)).docx;
+    expect(await paragraphs(docx)).toEqual([ids[0] + ':A', ids[1] + ':B']);
+    expect(await withoutProperties(docx)).toBe(md1);
+  });
+
+  it.each([
+    // Which would end the directive's comment
+    ['R&D', 'a-->b', 'R&amp;D', 'rd', 'a-->b', undefined],
+    // Which the frontmatter reads back as caption, at its first :, as main
+    // read the ID, so the next export keeps the style
+    ['caption', 'caption: revised', 'caption', 'caption', 'caption', 'MsCustomCaption'],
+  ])('writes the directive of a custom style %s without custom properties by its ID where Word names it one a directive or the frontmatter can\'t give back, as %s', async (style, renamed, written, directive, key, id) => {
+    const md = '---\nstyles:\n  ' + style + ':\n    font-style: bold\n---\n\n<!-- style: ' + style + ' -->\nA\n<!-- /style -->\n';
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    zip.remove('docProps/custom.xml');
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: ' + written, 'Custom: ' + renamed.replace(/>/g, '&gt;')));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(Object.keys(parseFrontmatter(markdown).metadata.styles ?? {})).toEqual([key]);
+    expect(markdown).toContain('\n<!-- style: ' + directive + ' -->\nA\n');
+    expect(markdown.match(/<!-- style: [^\n]*/g)).toEqual(['<!-- style: ' + directive + ' -->']);
+    if (id !== undefined) {
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<w:pStyle w:val="' + id + '"/>');
+    }
+  });
 });
 
 describe('Custom Styles — List items', () => {

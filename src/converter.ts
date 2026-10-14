@@ -25,6 +25,7 @@ import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, table
 import { cellParagraphMarkAt, htmlPieceAt, parseHtmlCellRuns } from './html-table-parser';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
+import { styleFence } from './style-fence';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
 import { asUtf8, decodeXml, parsePart, relatedPartPath } from './template-sections';
@@ -2509,8 +2510,10 @@ export function parseHeadingLevel(pPrChildren: XmlNode[]): number | undefined {
   return undefined;
 }
 
-/** Detect a custom style (MsCustomXxx) and return the user-facing name, or undefined. */
-export function parseCustomStyleName(pPrChildren: XmlNode[], knownStyles?: Record<string, CustomStyleDef>): string | undefined {
+/** Detect a custom style (MsCustomXxx) and return the user-facing name, or
+ *  undefined: the one of `knownStyles` whose ID it is, or else the name
+ *  `names` gives its ID (see customStyleNames), or else one from the ID. */
+export function parseCustomStyleName(pPrChildren: XmlNode[], knownStyles?: Record<string, CustomStyleDef>, names?: ReadonlyMap<string, string>): string | undefined {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return undefined;
   const val = getAttr(pStyleElement, 'val');
@@ -2521,6 +2524,10 @@ export function parseCustomStyleName(pPrChildren: XmlNode[], knownStyles?: Recor
       if (customStyleId(name) === val) return name;
     }
   }
+  // The styles part's name, which the frontmatter's styles take where
+  // there are no custom properties, as R&D, which an ID drops the & of
+  const named = names?.get(val);
+  if (named !== undefined) return named;
   // Fallback: derive name from PascalCase by lowering and inserting hyphens
   const suffix = val.slice('MsCustom'.length);
   return suffix.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
@@ -7147,6 +7154,9 @@ export async function extractDocumentContent(
     /** The last section, by the number of breaks before it, where its landscape page is the template's, which no fence set */
     templatePageSections?: Set<number>;
     customStyles?: Record<string, CustomStyleDef>;
+    /** The custom styles' names by their IDs, from the styles part, where
+     *  there are no customStyles (see customStyleNames) */
+    customStyleNames?: ReadonlyMap<string, string>;
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
     footnoteCrossRefMap?: Map<string, string>;
     styleLayouts?: StyleLayouts;
@@ -7700,7 +7710,7 @@ export async function extractDocumentContent(
               alertType = parseAlertType(pPrChildren);
               isCodeBlock = parseCodeBlockStyle(pPrChildren);
               generatedListContinuation = parseListContinuationStyle(pPrChildren);
-              customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined);
+              customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined, options?.customStyleNames);
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
               spacerShaped = pPrChildren.length === 1 && pPrChildren[0]['w:spacing'] !== undefined
                 && Object.keys(pPrChildren[0][':@'] ?? {}).join() === '@_w:after' && xmlTwips(getAttr(pPrChildren[0], 'after')) === 0;
@@ -17125,6 +17135,10 @@ async function documentContentInputs(zip: JSZip, format: CitationKeyFormat = 'au
   // One set of image files for the document and its notes, whose images'
   // relationships are each part's own
   const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
+  // Without custom properties, the frontmatter takes the custom styles from
+  // the styles part, by their names there, which their paragraphs take too
+  const stylesXml = storedCustomStyles || ![...styleLayouts.paragraph.byId.keys()].some(id => id.startsWith('MsCustom'))
+    ? undefined : await readZipText(zip, 'word/styles.xml');
   const options = {
     numberingDefs: numbering.defs,
     numberingStartOverrides: numbering.startOverrides,
@@ -17138,6 +17152,7 @@ async function documentContentInputs(zip: JSZip, format: CitationKeyFormat = 'au
     imageFiles,
     ...sections,
     customStyles: storedCustomStyles ?? undefined,
+    customStyleNames: stylesXml === undefined ? undefined : customStyleNames(styleElementsOf(stylesXml)),
     footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined,
     styleLayouts,
   };
@@ -17290,6 +17305,49 @@ function fontKeepsOtherStyles(stylesXml: string, fields: Partial<Frontmatter>, o
   return [...fontsShown({ ...fields, font: undefined })].every(([id, fonts]) => after.get(id) === fonts);
 }
 
+/** Each w:style element of a styles part: its start tag and all of it, but
+ *  its start tag alone for a style whose elements Word ignores (see
+ *  styleChildren) */
+function styleElementsOf(stylesXml: string): { tag: string; block: string }[] {
+  const styleElements: { tag: string; block: string }[] = [];
+  for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
+    const ignored = STYLES_WORD_IGNORES.has((xmlAttribute(style.tag, 'w:styleId') ?? '').toLowerCase());
+    styleElements.push({ tag: style.tag, block: ignored ? style.tag : stylesXml.slice(style.start, style.end) });
+  }
+  return styleElements;
+}
+
+/** The ID and name of each custom style among `styleElements`, as export
+ *  writes one: a w:customStyle whose w:name is "Custom: " and the name */
+function customStyleEntries(styleElements: { tag: string; block: string }[]): [string, string][] {
+  const entries: [string, string][] = [];
+  for (const { tag, block } of styleElements) {
+    if (!xmlOn(xmlAttribute(tag, 'w:customStyle'))) continue;
+    const nameMatch = /^Custom:\s*(.+)$/.exec(xmlElementAttribute(block, 'w:name', 'w:val') ?? '');
+    if (nameMatch) entries.push([xmlAttribute(tag, 'w:styleId') ?? '', nameMatch[1].trim()]);
+  }
+  return entries;
+}
+
+/** The custom styles' names by their IDs, the first's where two share one,
+ *  which the frontmatter's styles take where the document has no custom
+ *  properties (see extractFontOverridesFromStyles), and so their
+ *  paragraphs' directives (see parseCustomStyleName). Only a name that
+ *  comes back as itself from both: the key the frontmatter's reader takes
+ *  from the definition its writer writes, which a : ends, and the name a
+ *  directive holds, which a --> ends. Another's paragraphs take a name from
+ *  the ID, as before. */
+function customStyleNames(styleElements: { tag: string; block: string }[]): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const [id, name] of customStyleEntries(styleElements)) {
+    if (names.has(id)) continue;
+    const fence = styleFence('<!-- style: ' + name + ' -->');
+    const read = Object.keys(parseFrontmatter(serializeFrontmatter({ styles: { [name]: {} } })).metadata.styles ?? {});
+    if (fence?.kind === 'open' && fence.style === name && read.length === 1 && read[0] === name) names.set(id, name);
+  }
+  return names;
+}
+
 /**
  * Extract heading/title font properties from word/styles.xml for round-trip.
  * Each element and attribute as an XML parser reads it (see xmlElement and
@@ -17303,13 +17361,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptio
   const documentIds = new Map<string, string>();
   for (const [id, builtInId] of opts?.builtInIds ?? []) if (!documentIds.has(builtInId)) documentIds.set(builtInId, id);
 
-  // Each w:style element: its start tag and all of it, but its start tag
-  // alone for a style whose elements Word ignores (see styleChildren)
-  const styleElements: { tag: string; block: string }[] = [];
-  for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
-    const ignored = STYLES_WORD_IGNORES.has((xmlAttribute(style.tag, 'w:styleId') ?? '').toLowerCase());
-    styleElements.push({ tag: style.tag, block: ignored ? style.tag : stylesXml.slice(style.start, style.end) });
-  }
+  const styleElements = styleElementsOf(stylesXml);
 
   /** The w:style element of the paragraph style `id`, by the document's ID
    *  for a built-in style, of any type with `anyType` (see
@@ -17754,12 +17806,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptio
 
   // Custom named styles: detect "Custom: ..." styles for fallback extraction
   const extractedCustomStyles: Record<string, CustomStyleDef> = {};
-  for (const { tag, block } of styleElements) {
-    if (!xmlOn(xmlAttribute(tag, 'w:customStyle'))) continue;
-    const nameMatch = /^Custom:\s*(.+)$/.exec(xmlElementAttribute(block, 'w:name', 'w:val') ?? '');
-    if (!nameMatch) continue;
-    const styleName = nameMatch[1].trim();
-    const csStyleId = xmlAttribute(tag, 'w:styleId') ?? '';
+  for (const [csStyleId, styleName] of customStyleEntries(styleElements)) {
     const def: CustomStyleDef = {};
     // A custom style can be a character style
     const csRpr = getStyleRPr(csStyleId, true);
