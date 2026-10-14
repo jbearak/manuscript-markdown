@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
 import JSZip from 'jszip';
 import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, buildItemData, createCiteprocEngine, renderBibliography, renderCitationText, textElements } from './md-to-docx-citations';
-import { BibtexEntry, parseBibtex } from './bibtex-parser';
+import { BibtexEntry, parseBibtex, serializeBibtex } from './bibtex-parser';
 import { parseMd, convertMdToDocx, type MdRun } from './md-to-docx';
 import { fastestRun } from './test-timing';
 
@@ -964,6 +964,62 @@ describe('a BibTeX field wrapped across lines', () => {
     expect(entry).toMatch(/that wraps/i);
     expect(entry).not.toContain('\u00A0');
     expect(renderCitationText(engine, ['b'])).not.toContain('\u00A0');
+  });
+});
+
+describe('BibTeX text symbols in citeproc\'s data', () => {
+  const names = (author: string) => buildItemData(parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b')!).author;
+
+  // Names stay as main reads them: BibTeX splits them, and reads a word's
+  // case, before TeX reads a command, and serializeBibtex would have to
+  // write them back as they were read
+  it.each([
+    ['a letter in a group', String.raw`J{\o}rgensen, Jens`, [{ family: String.raw`J{\o}rgensen`, given: 'Jens' }]],
+    ['a letter with an empty group', String.raw`\O{}stergaard, Ole`, [{ family: String.raw`\O{}stergaard`, given: 'Ole' }]],
+    ['a letter before an and', String.raw`Gau\ss and Doe, Jane`, [{ family: String.raw`Gau\ss` }, { family: 'Doe', given: 'Jane' }]],
+    ['a letter before a control space', String.raw`{Gau\ss\ Inc.}`, [{ literal: String.raw`Gau\ss\ Inc.` }]],
+    ['an escaped backslash before letters', String.raw`\\ss`, [{ family: String.raw`\ss` }]],
+    ['a special character of a letter BibTeX\'s table hasn\'t', String.raw`{\dh}orsteinn Meier, Hans`, [{ family: String.raw`{\dh}orsteinn Meier`, given: 'Hans' }]],
+    ['a special character that holds more than its command', String.raw`Hans {\O x}rsted Meier`, [{ given: String.raw`Hans {\O x}rsted`, family: 'Meier' }]],
+    ['a letter as a command\'s second argument', String.raw`John \textcolor{red}{\O}`, [{ family: String.raw`\textcolor{red}{\O}`, given: 'John' }]],
+  ])('reads %s in a name as before', (_name, author, expected) => {
+    expect(names(author)).toEqual(expected);
+  });
+
+  // Guard: a name with a text symbol's command, which a saved bibliography
+  // would change if the parser read it and serializeBibtex wrote it as text
+  it('reads a name with a text symbol\'s command the same once serializeBibtex writes it', () => {
+    const once = parseBibtex('@book{b,\n  author = {Stra{\\ss}e, Anna and J{\\o}rgensen, Jens}\n}');
+    const twice = parseBibtex(serializeBibtex(once));
+    expect(buildItemData(twice.get('b')!).author).toEqual(buildItemData(once.get('b')!).author);
+  });
+
+  // T1 and T4 of the BibTeX audit
+  it('shows text symbols in a bibliography as the characters LaTeX prints', () => {
+    const bib = String.raw`@book{b,
+  author = {Strasse, Anna},
+  title = {{\AA}ngstr{\"o}m\textregistered{} and \dag{} y},
+  publisher = {Stra{\ss}e},
+  year = {2019}
+}
+`;
+    const engine = createCiteprocEngine(parseBibtex(bib), 'apa')!;
+    engine.updateItems(['b']);
+    const html = renderBibliography(engine)!.entries[0];
+    expect(html).toContain('Ångström® and † y');
+    expect(html).toContain('Straße');
+    expect(html).not.toContain('\\');
+  });
+
+  // Guard: a bracket's command, which, read as the bracket, would complete
+  // a tag citeproc reads, so it set x in italic and dropped the tag
+  it('shows a tag a bracket\'s command would complete as it was written, not as italic', () => {
+    const bib = '@book{b,\n  title = {<i\\textgreater{}x</i\\textgreater{}},\n  publisher = {P},\n  year = {2019}\n}\n';
+    const engine = createCiteprocEngine(parseBibtex(bib), 'apa')!;
+    engine.updateItems(['b']);
+    const html = renderBibliography(engine)!.entries[0];
+    expect(html).toContain('textgreater');
+    expect(html).not.toContain('<i>x</i>');
   });
 });
 
