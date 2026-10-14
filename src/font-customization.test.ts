@@ -12,6 +12,7 @@ import {
 } from './md-to-docx';
 import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { fastestRunAsync } from './test-timing';
+import { orderPPr } from './md-to-docx-citations';
 import { extractHtmlTables } from './html-table-parser';
 
 // Helper: extract a <w:style ...styleId="X"...>...</w:style> block from styles XML
@@ -3414,6 +3415,48 @@ describe('the styles export takes from a template', () => {
     const { styles } = await exportedStyles(fields, [id, head + rPr]);
     expect(extractStyleBlock(styles, id)).toMatch(/^<w:style\b[^>]*>/);
     expect(extractStyleBlock(styles, id)!.replace(/^<w:style\b[^>]*>/, '')).toBe(head + pPr + rPr + '</w:style>');
+  });
+
+  // As Word writes them, which it reorders on open, marking the document
+  // modified (dirty-flag invariant #3)
+  const spacing = '<w:spacing w:after="0" w:line="480" w:lineRule="auto"/>';
+  const defaultSpacing = '<w:spacing w:after="160" w:line="480" w:lineRule="auto"/>';
+  const hanging = '<w:ind w:left="720" w:hanging="720"/>';
+  const border = '<w:pBdr><w:bottom w:val="single" w:sz="4" w:space="1" w:color="auto"/></w:pBdr>';
+  it.each([
+    ['Normal\'s line spacing after its widowControl', 'line-spacing: double', 'Normal', '<w:widowControl/>', '<w:widowControl/>' + spacing],
+    ['Normal\'s line spacing after its keepNext, before its jc', 'line-spacing: double', 'Normal', '<w:keepNext/><w:jc w:val="both"/>',
+      '<w:keepNext/>' + spacing + '<w:jc w:val="both"/>'],
+    ['Normal\'s line spacing after its widowControl and pBdr, before its ind', 'line-spacing: double', 'Normal', '<w:widowControl/>' + border + '<w:ind w:firstLine="360"/>',
+      '<w:widowControl/>' + border + spacing + '<w:ind w:firstLine="360"/>'],
+    ['Normal\'s line spacing before its ind', 'line-spacing: double', 'Normal', '<w:ind w:firstLine="360"/>', spacing + '<w:ind w:firstLine="360"/>'],
+    ['the document defaults\' line spacing after their widowControl', 'line-spacing: double', 'pPrDefault', '<w:widowControl/>', '<w:widowControl/>' + defaultSpacing],
+    ['the bibliography\'s hanging indent before its contextualSpacing', '', 'Bibliography', '<w:contextualSpacing/>', hanging + '<w:contextualSpacing/>'],
+    ['the bibliography\'s hanging indent after its keepNext, before its jc', '', 'Bibliography', '<w:keepNext/><w:jc w:val="left"/>',
+      '<w:keepNext/>' + hanging + '<w:jc w:val="left"/>'],
+    ['the bibliography\'s hanging indent before its textDirection', '', 'Bibliography', '<w:textDirection w:val="lrTb"/>', hanging + '<w:textDirection w:val="lrTb"/>'],
+    ['centering a title, after its keepNext and spacing, before its outlineLvl', 'title: T\ntitle-font-style: center', 'Title',
+      '<w:keepNext/><w:spacing w:after="300"/><w:outlineLvl w:val="0"/>', '<w:keepNext/><w:spacing w:after="300"/><w:jc w:val="center"/><w:outlineLvl w:val="0"/>'],
+  ])('the property export adds to a template style\'s pPr for %s goes where CT_PPrBase puts it', async (_name, fields, id, own, expected) => {
+    const head = id === 'pPrDefault' ? '' : '<w:name w:val="' + id + '"/><w:basedOn w:val="Normal"/>';
+    const { styles } = await exportedStyles(fields, [id, id === 'pPrDefault' ? own : head + '<w:pPr>' + own + '</w:pPr>']);
+    const pPr = id === 'pPrDefault' ? /<w:pPrDefault><w:pPr>([\s\S]*?)<\/w:pPr><\/w:pPrDefault>/.exec(styles)![1]
+      : /<w:pPr>([\s\S]*?)<\/w:pPr>/.exec(extractStyleBlock(styles, id)!)![1];
+    expect(pPr).toBe(expected);
+  });
+
+  it('leaves a template style\'s pPr in schema order as it was, with its whitespace, but for what export replaces', async () => {
+    const own = '\n  <w:keepNext/>\n  <w:widowControl/>\n  ' + border + '\n  <w:spacing w:after="120"/>\n  <w:ind w:firstLine="360"/>\n  <w:jc w:val="both"/>\n';
+    const { styles } = await exportedStyles('line-spacing: double', ['Normal', '<w:name w:val="Normal"/><w:pPr>' + own + '</w:pPr>']);
+    expect(extractStyleBlock(styles, 'Normal')).toContain('<w:pPr>' + own.replace('<w:spacing w:after="120"/>', spacing) + '</w:pPr>');
+  });
+
+  it('writes each pPr of a template of export\'s own styles as it was', async () => {
+    // Which are in schema order, as Word writes them, and stay so
+    const { styles } = await exportedStyles('line-spacing: double\ntitle: T\ntitle-font-style: center');
+    const pPrs = [...styles.matchAll(/<w:pPr>([\s\S]*?)<\/w:pPr>/g)].map(match => match[1]);
+    expect(pPrs.length).toBeGreaterThan(10);
+    for (const pPr of pPrs) expect(orderPPr(pPr)).toBe(pPr);
   });
 
   // Word strips an empty pPr

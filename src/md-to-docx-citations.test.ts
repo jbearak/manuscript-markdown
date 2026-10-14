@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
 import JSZip from 'jszip';
-import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, buildItemData, createCiteprocEngine, renderBibliography, renderCitationText, textElements } from './md-to-docx-citations';
+import { generateCitation, orderPPr, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, buildItemData, createCiteprocEngine, renderBibliography, renderCitationText, textElements } from './md-to-docx-citations';
 import { BibtexEntry, parseBibtex, serializeBibtex } from './bibtex-parser';
 import { parseMd, convertMdToDocx, type MdRun } from './md-to-docx';
 import { fastestRun } from './test-timing';
@@ -1135,6 +1135,47 @@ describe('orderRPr', () => {
   });
 });
 
+
+describe('orderPPr', () => {
+  // CT_PPrBase's children, in the order ECMA-376 Part 1 gives them, then
+  // those CT_PPr adds after them
+  const SCHEMA_ORDER = [
+    'pStyle', 'keepNext', 'keepLines', 'pageBreakBefore', 'framePr', 'widowControl', 'numPr', 'suppressLineNumbers',
+    'pBdr', 'shd', 'tabs', 'suppressAutoHyphens', 'kinsoku', 'wordWrap', 'overflowPunct', 'topLinePunct',
+    'autoSpaceDE', 'autoSpaceDN', 'bidi', 'adjustRightInd', 'snapToGrid', 'spacing', 'ind', 'contextualSpacing',
+    'mirrorIndents', 'suppressOverlap', 'jc', 'textDirection', 'textAlignment', 'textboxTightWrap', 'outlineLvl',
+    'divId', 'cnfStyle', 'rPr', 'sectPr', 'pPrChange',
+  ];
+
+  it('puts paragraph properties in schema order', () => {
+    expect(orderPPr('<w:spacing w:after="0"/><w:widowControl/><w:jc w:val="center"/><w:keepNext/><w:ind w:left="720"/>'))
+      .toBe('<w:keepNext/><w:widowControl/><w:spacing w:after="0"/><w:ind w:left="720"/><w:jc w:val="center"/>');
+  });
+
+  it('leaves properties in schema order as they were, with their whitespace', () => {
+    const children = '\n  <w:keepNext/>\n  <w:pBdr><w:bottom w:val="single" w:sz="4" w:space="1" w:color="auto"/></w:pBdr>\n  <w:spacing w:after="0"/>\r\n\t<w:outlineLvl w:val="0"/>\n';
+    expect(orderPPr(children)).toBe(children);
+  });
+
+  it('keeps an element it doesn\'t know in its place, and leaves properties with text among them as they were', () => {
+    expect(orderPPr('<w:jc w:val="left"/><w14:foo/><w:keepNext/>')).toBe('<w:keepNext/><w14:foo/><w:jc w:val="left"/>');
+    expect(orderPPr('<w:jc w:val="left"/>text<w:keepNext/>')).toBe('<w:jc w:val="left"/>text<w:keepNext/>');
+  });
+
+  it('puts any of the properties, in any order and with any whitespace between them, in schema order, each once', () => {
+    const element = (name: string) => fc.constantFrom('<w:' + name + '/>', '<w:' + name + ' w:val="1"></w:' + name + '>');
+    const whitespace = fc.constantFrom('', ' ', '\n', '\r\n    ');
+    const properties = fc.shuffledSubarray(SCHEMA_ORDER).chain(names => fc.tuple(
+      fc.constant(names), fc.tuple(...names.map(element)), fc.array(whitespace, { minLength: names.length + 1, maxLength: names.length + 1 })));
+    fc.assert(fc.property(properties, ([names, elements, spaces]) => {
+      const children = elements.map((xml, index) => spaces[index] + xml).join('') + spaces[elements.length];
+      const ordered = orderPPr(children);
+      const byRank = elements.map((xml, index) => ({ xml, rank: SCHEMA_ORDER.indexOf(names[index]) })).sort((a, b) => a.rank - b.rank);
+      expect(ordered.replace(/>[ \t\r\n]+</g, '><').trim()).toBe(byRank.map(({ xml }) => xml).join(''));
+      expect(ordered.length).toBe(children.length);
+    }), { numRuns: 200 });
+  });
+});
 describe('BibTeX names with groups', () => {
   // A group in a name split at its spaces, as the words of a name do, and
   // at a comma in it, so its braces didn't pair, and citeproc showed them.

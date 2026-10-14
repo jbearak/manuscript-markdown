@@ -4,7 +4,7 @@ import { codeSpansOfSpaces } from './code-spans';
 import { linearInlineComments } from './inline-html-comments';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXmlText, textElements, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, HIDDEN_PARAGRAPH_PPR, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXmlText, textElements, orderPPr, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, HIDDEN_PARAGRAPH_PPR, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -71,8 +71,10 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 // 2. Zip directory entries: do not include explicit folder entries (word/,
 //    _rels/, etc.) in the zip. Word omits them and normalizes if present.
 //    Delete dir entries from zip.files before generateAsync().
-// 3. pPr element ordering: pBdr before spacing before ind. Word normalizes
-//    out-of-order elements. Applies to styles AND inline paragraph properties.
+// 3. pPr element ordering: CT_PPrBase's schema order, as keepNext and
+//    widowControl before pBdr before spacing before ind before jc. Word
+//    normalizes out-of-order elements. Applies to styles AND inline paragraph
+//    properties. Put what export adds to a template's pPr through orderPPr.
 // 4. rPr element ordering: CT_RPr's schema order, as rFonts before b, caps
 //    before smallCaps, color before sz/szCs before u before shd. Put run
 //    properties composed from several parts through orderRPr.
@@ -6351,7 +6353,9 @@ function templateWithFontOverrides(
           !FONT_STYLE_CENTERING.wanted(fontStyleOverride) && !fontStylePropertyOn(FONT_STYLE_CENTERING, xmlStartTag(element, 'w:jc')!.tag) ? element : '');
         if (jc && !xmlStartTag(pPrContent, 'w:jc')) {
           const at = xmlSearch(pPrContent, /<w:(?:textDirection|textAlignment|textboxTightWrap|outlineLvl|divId|cnfStyle|rPr|sectPr|pPrChange)\b/) ?? pPrContent.length;
-          pPrContent = pPrContent.slice(0, at) + jc + pPrContent.slice(at);
+          // With the template's own in the order CT_PPrBase gives them, as
+          // Word writes them (dirty-flag invariant #3)
+          pPrContent = orderPPr(pPrContent.slice(0, at) + jc + pPrContent.slice(at));
         }
         // A pPr that held only the w:jc goes with it (dirty-flag invariant #5),
         // a comment or what else holds no element beside it too (see
@@ -6499,11 +6503,11 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
     const newSpacing = '<w:spacing w:after="' + afterVal + '" w:line="' + lsTwips + '" w:lineRule="auto"/>';
     const pPr = xmlElementParts(inner, 'w:pPr');
     if (pPr) {
-      // In place of its spacing, or else after pBdr if present to maintain
-      // required pBdr → spacing → ind order (dirty-flag invariant)
+      // In place of its spacing, or else where CT_PPrBase puts it among the
+      // template's, as after a widowControl or pBdr (dirty-flag invariant #3)
       const spacing = xmlElement(pPr.content, 'w:spacing');
       const at = spacing?.start ?? xmlElement(pPr.content, 'w:pBdr')?.end ?? 0;
-      const content = pPr.content.slice(0, at) + newSpacing + pPr.content.slice(spacing?.end ?? at);
+      const content = orderPPr(pPr.content.slice(0, at) + newSpacing + pPr.content.slice(spacing?.end ?? at));
       inner = inner.slice(0, pPr.start) + pPr.open + content + pPr.close + inner.slice(pPr.end);
     } else {
       inner = withStylePPr(inner, '<w:pPr>' + newSpacing + '</w:pPr>');
@@ -6516,10 +6520,12 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
   const defaultPPr = pPrDefault && xmlElementParts(pPrDefault.content, 'w:pPr');
   if (pPrDefault && defaultPPr) {
     const newSpacing = '<w:spacing w:after="160" w:line="' + lsTwips + '" w:lineRule="auto"/>';
+    // In place of its spacing, or else where CT_PPrBase puts it among the
+    // template's (dirty-flag invariant #3)
     const spacing = xmlElement(defaultPPr.content, 'w:spacing');
-    const pPrContent = spacing
+    const pPrContent = orderPPr(spacing
       ? defaultPPr.content.slice(0, spacing.start) + newSpacing + defaultPPr.content.slice(spacing.end)
-      : newSpacing + defaultPPr.content;
+      : newSpacing + defaultPPr.content);
     const at = pPrDefault.start + pPrDefault.tag.length;
     xml = xml.slice(0, at + defaultPPr.start) + defaultPPr.open + pPrContent + defaultPPr.close + xml.slice(at + defaultPPr.end);
   }
@@ -6561,6 +6567,9 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
               ? pPrContent.slice(0, insertBefore) + indEl + pPrContent.slice(insertBefore)
               : pPrContent + indEl;
           }
+          // Where CT_PPrBase puts it among the template's, as before a
+          // contextualSpacing (dirty-flag invariant #3)
+          pPrContent = orderPPr(pPrContent);
         }
         // A pPr that held only the indent goes, as Word strips an empty one
         // (dirty-flag invariant #5), with a comment or what else holds no
