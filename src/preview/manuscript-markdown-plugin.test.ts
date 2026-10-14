@@ -1499,6 +1499,37 @@ describe('Property 10: Preview ==highlight== rendering', () => {
   });
 });
 
+describe('A format highlight with a {== after its opening ==', () => {
+  // The == of a {== is no closing ==, as export reads it: it opens a critic
+  // highlight, whose ==} closes it, and one that never closes leaves the
+  // format highlight unclosed. The preview took it for the closing ==.
+  const hl = (text: string) => '<mark class="manuscript-markdown-format-highlight">' + text + '</mark>';
+  const critic = (text: string) => '<mark class="manuscript-markdown-highlight">' + text + '</mark>';
+  it.each([
+    ['==a{=={=={>>==}b', '==a' + critic('{=={&gt;&gt;') + 'b',
+      [['text', '==a', false], ['critic_highlight', '{=={>>', false], ['text', 'b', false]]],
+    ['==a {==b==} c==', hl('a ' + critic('b') + ' c'),
+      [['text', 'a ', true], ['critic_highlight', 'b', true], ['text', ' c', true]]],
+    ['==a {==b==}{>>note<<} c==', hl('a <mark class="manuscript-markdown-highlight" data-comment="note">b</mark> c'),
+      [['text', 'a ', true], ['critic_highlight', 'b', true], ['critic_comment', '', true], ['text', ' c', true]]],
+    ['=={++a {==b==} c++}==', hl('<ins class="manuscript-markdown-addition">a ' + critic('b') + ' c</ins>'),
+      [['critic_add', 'a {==b==} c', true]]],
+    // The critic highlight's {== pairs with the first ==} after it, and the
+    // format highlight's search with the ==} after the second
+    ['==a {==b {==c==} d==} e==', hl('a ' + critic('b {==c') + ' d==} e'),
+      [['text', 'a ', true], ['critic_highlight', 'b {==c', true], ['text', ' d==} e', true]]],
+    // A {== that never closes
+    ['==a {==b c', '==a {==b c', [['text', '==a {==b c', false]]],
+    // A { after an escaped backslash opens one, and an escaped { none
+    ['==a \\\\{==b==} c==', hl('a \\' + critic('b') + ' c'),
+      [['text', 'a \\', true], ['critic_highlight', 'b', true], ['text', ' c', true]]],
+    ['==a \\{==b==', hl('a {') + 'b==', [['text', 'a {', true], ['text', 'b==', false]]],
+  ])('%j shows as export reads it', (markdown, html, runs) => {
+    expect(renderWithPlugin(markdown, 'github').match(/<p>[\s\S]*<\/p>/)?.[0]).toBe('<p>' + html + '</p>');
+    expect(parseMd(markdown)[0].runs.map(run => [run.type, run.text, !!run.highlight])).toEqual(runs);
+  });
+});
+
 // Highlight color properties
 describe('Property 2: Preview renders colored highlights with correct color class', () => {
   const colorIdGen = fc.constantFrom(...VALID_COLOR_IDS as string[]);
@@ -2668,6 +2699,8 @@ describe('CriticMarkup without its closers in the preview', () => {
     // Which the block rule reads where they start a line
     ['paragraphs that start with them', (n: number) => '{++ a\n\n'.repeat(n) + '{>> b\n\n'.repeat(n), 2],
     ['spans in a paragraph', (n: number) => 'x {++ a {>> b {~~ c {#a>> d '.repeat(n) + '~~}\n', 0],
+    // Each == read the rest of the text for its closing ==, past the {== after it
+    ['format highlights before a {== that never closes', (n: number) => '==a {== '.repeat(n), 0],
   ])('renders %s in time linear in their number', (_name, input, paragraphs) => {
     expect(render(input(2)).split('<p>').length - 1).toBe(paragraphs * 2 || 1);
     const time = (n: number) => {

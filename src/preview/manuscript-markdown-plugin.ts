@@ -1294,6 +1294,67 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
+/** Whether the == at `at` is a {=='s, whose { no backslash escapes, as
+ *  export reads it in a format highlight (findClosingHighlightMarker) */
+function opensCriticHighlight(src: string, at: number): boolean {
+  if (src.charCodeAt(at - 1) !== 0x7B /* { */) return false;
+  let slashes = 0;
+  while (src.charCodeAt(at - 2 - slashes) === 0x5C /* \ */) slashes++;
+  return slashes % 2 === 0;
+}
+
+const criticHighlightEnds = new WeakMap<object, { src: string; byMax: Map<number, Map<number, number>> }>();
+
+/**
+ * Where the critic highlight that the {== at `at` (its ==) opens in a
+ * format highlight ends, as export reads it: just past the ==} that closes
+ * it, once each {== in it is closed in turn, or -1 if none does before the
+ * state's posMax. Each {=='s end is found once for the state's text and
+ * posMax, as a search from each == before a {== that never closes read the
+ * rest of the text again.
+ */
+function criticHighlightEnd(state: StateInline, at: number): number {
+  const src = state.src;
+  const max = state.posMax;
+  let memo = criticHighlightEnds.get(state);
+  if (!memo || memo.src !== src) criticHighlightEnds.set(state, memo = { src, byMax: new Map() });
+  let ends = memo.byMax.get(max);
+  if (!ends) memo.byMax.set(max, ends = new Map());
+  const known = ends.get(at);
+  if (known !== undefined) return known;
+  // The {=='s still open, innermost last
+  const open = [at];
+  let pos = at + 2;
+  while (open.length > 0) {
+    if (pos >= max) {
+      // None closes, nor any that holds it
+      for (const opener of open) ends.set(opener, -1);
+      return -1;
+    }
+    if (src.charCodeAt(pos) === 0x3D /* = */ && pos + 1 < max && src.charCodeAt(pos + 1) === 0x3D /* = */) {
+      if (opensCriticHighlight(src, pos)) {
+        const end = ends.get(pos);
+        if (end === undefined) {
+          open.push(pos);
+          pos += 2;
+        } else if (end === -1) {
+          pos = max;
+        } else {
+          pos = end;
+        }
+        continue;
+      }
+      if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7D /* } */) {
+        ends.set(open.pop()!, pos + 3);
+        pos += 3;
+        continue;
+      }
+    }
+    pos++;
+  }
+  return ends.get(at)!;
+}
+
 /**
  * Inline rule for ==highlight== patterns (not CriticMarkup)
  * @param state - The inline parsing state
@@ -1319,10 +1380,18 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
     return false;
   }
 
-  // Find closing ==
+  // Find closing ==. As export reads it (findClosingHighlightMarker in
+  // md-to-docx.ts), the == of a {== in the highlight is no closing ==: it
+  // opens a critic highlight, read past to the ==} that closes it, and one
+  // that never closes leaves the highlight unclosed.
   let pos = start + 2;
   while (pos < max) {
     if (src.charCodeAt(pos) === 0x3D /* = */ && pos + 1 < max && src.charCodeAt(pos + 1) === 0x3D /* = */) {
+      if (opensCriticHighlight(src, pos)) {
+        pos = criticHighlightEnd(state, pos);
+        if (pos === -1) return false;
+        continue;
+      }
       // Check if followed by } (to avoid matching CriticMarkup {==...==})
       if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7D /* } */) {
         pos += 2;
