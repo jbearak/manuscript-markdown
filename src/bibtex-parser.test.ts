@@ -537,6 +537,103 @@ describe('BibTeX text symbols', () => {
   });
 });
 
+describe('BibTeX ties, empty groups and \\url', () => {
+  // A tie, an empty group and a \url stayed as written, so citeproc showed
+  // a~b, a-{}-b and \url{https://e.com/a_b}
+  const field = (name: string, value: string) => parseBibtex('@article{k,\n  ' + name + ' = {' + value + '}\n}').get('k')?.fields.get(name);
+
+  it.each([
+    ['a tie, a no-break space', String.raw`a~b`, 'a\u00A0b'],
+    ['ties around spaces and together', String.raw`a ~ b, x~~y`, 'a \u00A0 b, x\u00A0\u00A0y'],
+    ['a tie in a group', String.raw`{a~b} c`, '{a\u00A0b} c'],
+    ['an empty group, which is nothing', String.raw`a{}b`, 'ab'],
+    ['a tilde\'s and a circumflex\'s accent on nothing', String.raw`\~{} and \^{}`, '~ and ^'],
+    ['a \\url\'s argument, as written', String.raw`See \url{https://e.com/a_b~c--d}.`, 'See https://e.com/a_b~c--d.'],
+    ['a \\url\'s argument after a space', String.raw`\url {e.com}`, 'e.com'],
+    ['a \\url\'s escaped characters', String.raw`\url{a\_b\%c\#d\&e\~f\{g\}h\\i}`, 'a_b%c#d&e~f{g}h\\i'],
+    ['a \\url\'s groups', String.raw`\url{a{b}c}`, 'a{b}c'],
+    ['an empty \\url', String.raw`a\url{}b`, 'ab'],
+    // A $ that ends no math is text
+    ['a tie after a $ that ends no math', String.raw`$5 and a~b`, '$5 and a\u00A0b'],
+    ['a tie between escaped $', String.raw`\$ a~b \$`, '$ a\u00A0b $'],
+    ['a \\url\'s escaped caret', String.raw`\url{https://e.com/a\^b}`, 'https://e.com/a^b'],
+    ['a \\url\'s escaped braces that pair', String.raw`\url{a\{b\}c}`, 'a{b}c'],
+    // Whose spaces are one, as BibTeX reads a field's
+    ['an empty group between spaces', String.raw`a {} b`, 'a b'],
+    ['an empty group at an edge, before a space', String.raw`{} a`, 'a'],
+  ])('reads %s as TeX prints it', (_name, value, expected) => {
+    expect(field('title', value)).toBe(expected);
+  });
+
+  it.each([
+    // Math, which this doesn't read yet, where a ~ is math's
+    ['a tie and an empty group in math', String.raw`$a~b{}$ c`, '$a~b{}$ c'],
+    // Display math, with two $ on each side, joined so that the source
+    // has no pair of $, which text replacement corrupts
+    ['a tie in display math', '$' + '$a~b$' + '$', '$' + '$a~b$' + '$'],
+    ['a tie in math after a display math\'s $ alone', '$' + '$a$b~c$' + '$', '$' + '$a$b~c$' + '$'],
+    ['a tie in math after inline math', String.raw`$a$ and $b~c$`, '$a$ and $b~c$'],
+    // A command this doesn't know, with the group that ends it
+    ['a command\'s empty group', String.raw`\foo{}bar`, String.raw`\foo{}bar`],
+    ['an accent\'s empty group', String.raw`\"{}x`, String.raw`\"{}x`],
+    // A tilde's accent, whose ~ is no tie
+    ['a tilde\'s accent before a space', String.raw`\~ x`, String.raw`\~ x`],
+    ['a \\url with no group', String.raw`\url x`, String.raw`\url x`],
+    // A \url whose argument's braces, counting the escaped ones, don't
+    // pair, as main reads it, whose argument read as it prints would have
+    // braces that don't pair, which the .bib file written back would hold
+    // escaped, which the scanner counts
+    ['a \\url whose braces don\'t pair', String.raw`\url{\}x\{}`, String.raw`\url{}x{}`],
+    ['a tie in a \\url whose braces don\'t pair', String.raw`\url{\}a~\{}`, String.raw`\url{}a~{}`],
+    // Whether or not a $ before it starts math
+    ['a \\url whose braces don\'t pair after a $ that ends no math', String.raw`$5 \url{\}a{}~\{}`, String.raw`$5 \url{}a{}~{}`],
+    ['a \\url whose braces don\'t pair after math', String.raw`$5$ \url{\}a{}~\{}`, String.raw`$5$ \url{}a{}~{}`],
+    ['a \\url whose braces don\'t pair in math', String.raw`$5 \url{\}a{}~\{}$`, String.raw`$5 \url{}a{}~{}$`],
+    // Math, where a \url, \~{} and \^{} are math's
+    ['a \\url in math', String.raw`$\url{a~b}$`, String.raw`$\url{a~b}$`],
+    ['a tilde\'s and a circumflex\'s accent on nothing in math', String.raw`$\^{}$ and $\~{}$`, String.raw`$\^{}$ and $\~{}$`],
+    // An empty group a command could take as its argument, as a symbol's
+    // group does (see 'BibTeX text symbols')
+    ['an empty group after a command and a space', String.raw`\foo {}bar`, String.raw`\foo {}bar`],
+    ['an empty group after a command\'s group', String.raw`\textcolor{red}{} x`, String.raw`\textcolor{red}{} x`],
+    ['a longer command', String.raw`\urlx{a}`, String.raw`\urlx{a}`],
+  ])('reads %s as before', (_name, value, expected) => {
+    expect(field('title', value)).toBe(expected);
+  });
+
+  it.each([
+    ['url', 'http://x/~a{}b'],
+    ['doi', '10.1/a~b{}'],
+  ])('keeps a %s as written', (name, value) => {
+    expect(field(name, value)).toBe(value);
+  });
+
+  // As on main: BibTeX splits a name's words at a tie once it has split the
+  // names, so the names would need their ties read once they're split, a
+  // later step's
+  it.each([
+    ['a \\url whose braces don\'t pair', String.raw`\url{\}x\{}`],
+    ['a tie after a \\url whose braces don\'t pair', String.raw`\url{\}a~\{} b~c`],
+    ['an empty group between spaces', String.raw`a {} b`],
+  ])('reads %s back the same once it\'s written', (_name, value) => {
+    const once = parseBibtex('@article{k,\n  title = {' + value + '},\n  year = {2020}\n}');
+    const twice = parseBibtex(serializeBibtex(once)).get('k');
+    expect(twice?.fields.get('title')).toBe(once.get('k')!.fields.get('title'));
+    expect(twice?.fields.get('year')).toBe('2020');
+  });
+
+  it('keeps ties in names as written', () => {
+    expect(field('author', 'D.~E. Knuth and Smith~and~Jones')).toBe('D.~E. Knuth and Smith~and~Jones');
+  });
+
+  it('reads \\url arguments that end nothing in linear time', () => {
+    // Each \url's { that its \} doesn't close, which a search for the end of
+    // each would read to the end of the field
+    const value = String.raw`\url{a\}`.repeat(20000);
+    expect(fastestRun(() => expect(field('note', value)).toBe(String.raw`\url{a}`.repeat(20000)))).toBeLessThan(500);
+  }, 30000);
+});
+
 describe('BibTeX field whitespace', () => {
   // A value wrapped across lines kept its line end and indentation, which
   // citeproc writes as no-break spaces, so the bibliography showed a gap

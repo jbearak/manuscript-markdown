@@ -1,6 +1,6 @@
 // --- Implementation notes ---
 // - Verbatim fields bypass whitespace collapsing, brace stripping, TeX decoding, NFC normalization, and serialization escaping.
-// - TeX decoding reads standard text accents and the letters and symbols of text commands (\ss, \textregistered), but not the latter in names (author, editor); unknown commands remain literal.
+// - TeX decoding reads standard text accents, the letters and symbols of text commands (\ss, \textregistered), ties, empty groups and \url's argument, outside math, but only the accents in names (author, editor); unknown commands remain literal.
 // - Non-command braces remain intact; braces owned by recognized accent expressions and text symbols are consumed.
 // - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly.
 // - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string).
@@ -126,6 +126,14 @@ const BIBTEX_LITERAL_COMMANDS: ReadonlyArray<readonly [string, string]> = [
   ['\\textasciicircum{}', '^'],
 ];
 
+// And, outside names, where they stay as on main, a tilde's and a
+// circumflex's accents on nothing, which LaTeX prints as the characters,
+// as pandoc reads them
+const BIBTEX_TEXT_LITERAL_COMMANDS: ReadonlyArray<readonly [string, string]> = BIBTEX_LITERAL_COMMANDS.concat([
+  ['\\~{}', '~'],
+  ['\\^{}', '^'],
+]);
+
 // The commands of letters and symbols LaTeX prints in text, as the
 // characters it prints, as citation-js reads them. \SS isn't one: pandoc
 // drops it, as a command it doesn't know, and it stays as written, as such
@@ -225,8 +233,8 @@ function readAccentTarget(input: string, index: number): AccentBase | undefined 
   return { value: base.value, nextIndex: base.nextIndex + 1 };
 }
 
-function tryDecodeLiteralCommandAt(input: string, slashIndex: number): DecodedCommand | undefined {
-  for (const [source, value] of BIBTEX_LITERAL_COMMANDS) {
+function tryDecodeLiteralCommandAt(input: string, slashIndex: number, names: boolean): DecodedCommand | undefined {
+  for (const [source, value] of names ? BIBTEX_LITERAL_COMMANDS : BIBTEX_TEXT_LITERAL_COMMANDS) {
     if (input.startsWith(source, slashIndex)) {
       return { value, nextIndex: slashIndex + source.length };
     }
@@ -278,18 +286,127 @@ function tryDecodeAccentAt(input: string, slashIndex: number): DecodedCommand | 
   };
 }
 
+/** Where each \url's argument in `text` ends, by the index of its \, and
+ *  the spans read as written but for their accents, symbols and escapes,
+ *  as main reads them: math, a pair of $, as in $x~y$, or of two, outside
+ *  the \url arguments and not escaped, and a \url whose argument's braces,
+ *  counting the escaped ones, don't pair, as in \url{\}x\{}, whose argument
+ *  as it prints, }x{, the .bib file written back would hold escaped, which
+ *  the scanner counts, so the entry would read on past its end. In inline
+ *  math, a $ ends it, the first of two too, and in display math, a $ alone
+ *  is math's. A $ that ends nothing starts no math. Read in one pass, with
+ *  each group's end found once, so it takes linear time. */
+function readUrlsAndMath(text: string): { urls: Map<number, number>; spans: Array<[number, number]> } {
+  const urls = new Map<number, number>();
+  const spans: Array<[number, number]> = [];
+  if (!/[$\\]/.test(text)) return { urls, spans };
+  // Where the group each { opens ends, counting the braces no \ escapes
+  const closes = new Map<number, number>();
+  if (text.includes('\\url')) {
+    const open: number[] = [];
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '\\') i++;
+      else if (text[i] === '{') open.push(i);
+      else if (text[i] === '}' && open.length > 0) closes.set(open.pop()!, i);
+    }
+  }
+  const maths: Array<[number, number]> = [];
+  // The \url arguments whose braces don't pair, whether or not a $ before
+  // them starts math, which only a $ after them can tell
+  const unpaired: Array<[number, number]> = [];
+  let start = -1;
+  let display = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (char === '\\') {
+      URL_AT.lastIndex = i;
+      const url = URL_AT.exec(text);
+      const close = url ? closes.get(i + url[0].length - 1) : undefined;
+      if (close !== undefined) {
+        if (bracesPair(text, i + url![0].length, close)) urls.set(i, close + 1);
+        else unpaired.push([i, close + 1]);
+        i = close;
+      } else {
+        i++;
+      }
+    } else if (char === '$') {
+      const two = text[i + 1] === '$';
+      if (start < 0) {
+        start = i;
+        display = two;
+        if (two) i++;
+      } else if (!display || two) {
+        maths.push([start, i + (display ? 2 : 1)]);
+        start = -1;
+        if (display) i++;
+      }
+    }
+  }
+  // In order, with each in math left to the math's span
+  let math = 0;
+  for (const url of unpaired) {
+    while (math < maths.length && maths[math][1] <= url[0]) spans.push(maths[math++]);
+    if (math === maths.length || maths[math][0] > url[0]) spans.push(url);
+  }
+  while (math < maths.length) spans.push(maths[math++]);
+  return { urls, spans };
+}
+
+/** Whether the braces in text from `from` to `to`, escaped ones too, pair,
+ *  as the scanner counts them */
+function bracesPair(text: string, from: number, to: number): boolean {
+  let depth = 0;
+  for (let i = from; i < to; i++) {
+    if (text[i] === '\\' && text[i + 1] !== '{' && text[i + 1] !== '}') i++;
+    else if (text[i] === '{') depth++;
+    else if (text[i] === '}' && --depth < 0) return false;
+  }
+  return depth === 0;
+}
+
+// The \url command and the { of its argument, after the spaces TeX skips
+const URL_AT = /\\url(?![A-Za-z])[ \t]*\{/y;
+
+/** A \url's argument, a URL, as it prints, with the characters BibTeX's
+ *  syntax has a \ escape, as \_ and \%, unescaped, as pandoc reads it */
+function urlAsPrinted(argument: string): string {
+  return argument.replace(/\\([&%$#_{}~^\\])/g, (_escape, char: string) => char);
+}
+
+/** The end of the command this doesn't know at `slash`, as \foo or \-,
+ *  with the empty group that ends it, as in \foo{}, whose braces are its */
+function unknownCommandEnd(input: string, slash: number): number {
+  let end = slash + 1;
+  if (isAsciiLetter(input[end] ?? '')) {
+    while (end < input.length && isAsciiLetter(input[end])) end++;
+  } else if (end < input.length) {
+    end++;
+  }
+  return input.startsWith('{}', end) ? end + 2 : end;
+}
+
 /** Decode standard BibTeX/TeX text accents and text symbols while retaining
  *  every brace that is not proven to belong solely to a recognized accent
- *  expression or text symbol. In a list of `names`, the text symbols stay
- *  as written, as on main: BibTeX splits the names, and reads each word's
- *  case, before TeX reads a command, so a name would need them read once
- *  it's split, and serializeBibtex to write back what was read, a later
- *  step's. */
+ *  expression or text symbol. A tie, ~, is a no-break space, and an empty
+ *  group, {}, nothing, but not in math or a \url's argument, which prints
+ *  as written (see readUrlsAndMath), nor where a command could take it as
+ *  an argument (see couldBeArgumentAt), as in \foo{} or \textcolor{red}{}.
+ *  In a list of `names`, only the accents are read, as on main: BibTeX
+ *  splits the names, splits a name's words at its ties, and reads each
+ *  word's case, before TeX reads a command, so a name would need the rest
+ *  read once it's split, and serializeBibtex to write back what was read,
+ *  a later step's. */
 function decodeBibtexText(input: string, names = false): string {
   let output = '';
   let index = 0;
+  const { urls, spans } = names ? { urls: new Map<number, number>(), spans: [] } : readUrlsAndMath(input);
+  // The span read as written at or after index
+  let span = 0;
 
   while (index < input.length) {
+    while (span < spans.length && spans[span][1] <= index) span++;
+    const asWritten = span < spans.length && spans[span][0] <= index;
+
     if (input[index] === '{') {
       const grouped = tryDecodeAccentAt(input, index + 1);
       if (grouped && input[grouped.nextIndex] === '}') {
@@ -304,10 +421,22 @@ function decodeBibtexText(input: string, names = false): string {
         index = symbol.nextIndex;
         continue;
       }
+
+      if (!names && !asWritten && input[index + 1] === '}' && !couldBeArgumentAt(input, index)) {
+        index += 2;
+        continue;
+      }
     }
 
     if (input[index] === '\\') {
-      const literal = tryDecodeLiteralCommandAt(input, index);
+      const url = asWritten ? undefined : urls.get(index);
+      if (url !== undefined) {
+        output += urlAsPrinted(input.slice(input.indexOf('{', index) + 1, url - 1));
+        index = url;
+        continue;
+      }
+
+      const literal = tryDecodeLiteralCommandAt(input, index, names || asWritten);
       if (literal) {
         output += literal.value;
         index = literal.nextIndex;
@@ -337,6 +466,19 @@ function decodeBibtexText(input: string, names = false): string {
         index += 2;
         continue;
       }
+
+      if (!names) {
+        const end = unknownCommandEnd(input, index);
+        output += input.slice(index, end);
+        index = end;
+        continue;
+      }
+    }
+
+    if (!names && !asWritten && input[index] === '~') {
+      output += '\u00A0';
+      index++;
+      continue;
     }
 
     output += input[index];
@@ -354,12 +496,7 @@ function decodeBibtexText(input: string, names = false): string {
  *  \textsc{\O} or \textsc {\O}, or a group, any group, as in
  *  \textcolor{red} {\O} or \texorpdfstring{\ss}{\o}, so {\l}{\L} is ł{Ł} */
 function tryDecodeGroupedTextSymbolAt(input: string, open: number): DecodedCommand | undefined {
-  let before = open;
-  while (before > 0 && (input[before - 1] === ' ' || input[before - 1] === '\t')) before--;
-  if (input[before - 1] === '}' && !isEscapedAt(input, before - 1)) return undefined;
-  let name = before;
-  while (name > 0 && isAsciiLetter(input[name - 1])) name--;
-  if (name < before && input[name - 1] === '\\' && !isEscapedAt(input, name - 1)) return undefined;
+  if (couldBeArgumentAt(input, open)) return undefined;
   const symbol = tryDecodeTextSymbolAt(input, open + 1);
   if (!symbol || input[symbol.nextIndex] !== '}' || input[symbol.nextIndex - 1] === '}') return undefined;
   return { value: symbol.value, nextIndex: symbol.nextIndex + 1 };
@@ -386,6 +523,20 @@ function collapseBibtexWhitespace(fieldName: string, value: string): string {
   return value.replace(/[ \t\r\n\f]+/g, ' ').replace(/^ | $/g, '');
 }
 
+/** Whether a command could take the group at `open` as an argument: where
+ *  the nearest character before it but spaces and tabs ends a command's
+ *  name, as in \textsc{\O} or \foo {}, or a group, any group, as in
+ *  \textcolor{red} {\O} or \textcolor{red}{}. Linear over a text, as it
+ *  reads back over spaces and letters only, which stop at a brace. */
+function couldBeArgumentAt(input: string, open: number): boolean {
+  let before = open;
+  while (before > 0 && (input[before - 1] === ' ' || input[before - 1] === '\t')) before--;
+  if (input[before - 1] === '}' && !isEscapedAt(input, before - 1)) return true;
+  let name = before;
+  while (name > 0 && isAsciiLetter(input[name - 1])) name--;
+  return name < before && input[name - 1] === '\\' && !isEscapedAt(input, name - 1);
+}
+
 function decodeBibtexFieldValue(
   fieldName: string,
   value: string,
@@ -399,7 +550,11 @@ function decodeBibtexFieldValue(
   const semanticValue = braceDelimited && !AUTHOR_FIELDS.has(fieldName)
     ? collapseBibtexWhitespace(fieldName, stripOuterBraces(collapsed))
     : collapsed;
-  return decodeBibtexText(semanticValue, AUTHOR_FIELDS.has(fieldName));
+  if (AUTHOR_FIELDS.has(fieldName)) return decodeBibtexText(semanticValue, true);
+  // And again after it's decoded, as an empty group read as nothing can
+  // leave two spaces, as in a {} b, or one at an edge, which the .bib file
+  // written back wouldn't hold
+  return collapseBibtexWhitespace(fieldName, decodeBibtexText(semanticValue));
 }
 
 /** Undo the punctuation escapes BibTeX requires — `\&`, `\%`, `\$`, `\#`,
