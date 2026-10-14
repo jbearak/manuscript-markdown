@@ -1603,7 +1603,10 @@ export type ContentItem =
   // body's m:oMathPara of its own
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean }
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting }
-  | { type: 'html_comment'; text: string; commentIds: Set<string> }
+  // otherLineEnds: its hidden runs held a line end that isn't a line break
+  // of Word's, as a line feed in their text, which Word shows as a space, or
+  // a page or column break (see breakCommentLines)
+  | { type: 'html_comment'; text: string; commentIds: Set<string>; otherLineEnds?: true }
   // href and link: as text's, of a w:hyperlink around the picture or its
   // docPr's a:hlinkClick
   | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string; href?: string; link?: number }
@@ -5000,16 +5003,21 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
   }
   // Text from w:t/w:delText, with breaks, so multiline payloads survive
   let runText = '';
+  // Whether it holds a line end that isn't a line break of Word's: one of
+  // its text's, or a page or column break
+  let otherLineEnds = false;
   for (const child of runChildren) {
-    if (child['w:t'] !== undefined) {
-      runText += nodeText(asXmlNodes(child['w:t']));
-    } else if (child['w:delText'] !== undefined) {
-      runText += nodeText(asXmlNodes(child['w:delText']));
+    const text = child['w:t'] ?? child['w:delText'];
+    if (text !== undefined) {
+      const read = nodeText(asXmlNodes(text));
+      otherLineEnds ||= /[\n\r]/.test(read);
+      runText += read;
     } else if (child['w:br'] !== undefined || child['w:cr'] !== undefined) {
+      otherLineEnds ||= child['w:br'] !== undefined && !['', 'textWrapping'].includes(getAttr(child, 'type'));
       runText += '\n';
     }
   }
-  readHiddenText(runText, target, activeComments, revision, link);
+  readHiddenText(runText, target, activeComments, revision, link, otherLineEnds);
   return [];
 }
 
@@ -5396,7 +5404,7 @@ function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[
  * Markdown, up to a closing ZWSP, which the image keeps once it has it. Word
  * can split one between runs, or join several in one.
  */
-function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, link?: { href: string; link: number }): void {
+function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, link?: { href: string; link: number }, otherLineEnds = false): void {
   // The start of one Word split off before it showed which it is
   const pending = pendingHiddenText.get(target);
   pendingHiddenText.delete(target);
@@ -5443,6 +5451,7 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
     // With a ZWSP it starts with, which is the comment's own, before which
     // Word split its run
     lastItem.text += rest;
+    if (otherLineEnds) lastItem.otherLineEnds = true;
     const end = afterComment(lastItem.text, lastItem.text.lastIndexOf('<!--') + 4);
     rest = end === -1 ? '' : lastItem.text.slice(end);
     if (end !== -1) lastItem.text = lastItem.text.slice(0, end);
@@ -5455,7 +5464,7 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
     const payload = rest.replace(/^\u200B+/, '');
     if (payload.trimStart().startsWith('<!--')) {
       const end = afterComment(payload, payload.indexOf('<!--') + 4);
-      target.push({ type: 'html_comment', text: end === -1 ? payload : payload.slice(0, end), commentIds: new Set(activeComments) });
+      target.push({ type: 'html_comment', text: end === -1 ? payload : payload.slice(0, end), commentIds: new Set(activeComments), ...otherLineEnds ? { otherLineEnds: true as const } : {} });
       rest = end === -1 ? '' : payload.slice(end);
     } else if (rest.startsWith('\u200B') && /^(?:!\[|<img\b)/i.test(rest.slice(1))) {
       const end = rest.indexOf('\u200B', 1);
@@ -13720,6 +13729,93 @@ function plainParagraphs(content: ContentItem[]): Set<number> {
   return plain;
 }
 
+/** `content` with each Word line break in a hidden comment's run outside
+ *  its comments, which readHiddenText reads into the comment's text, where
+ *  Markdown reads it as a space, as a line break of its own, which the
+ *  renderers write as a \ and a line end, or a <br> before a comment that
+ *  would start the next line (see breakBeforeComment), in the paragraphs
+ *  `splits` takes, by their keys (see plainParagraphs), with the keys of
+ *  those it changed, which buildMarkdown reads back. Only where text Word
+ *  shows goes before the comment in its paragraph and after it: at the
+ *  paragraph's start the comment starts an HTML block, which takes a \ as
+ *  text, and at its end a break would show that the hidden one didn't.
+ *  And only where each such line end in the paragraph can go so (see
+ *  commentLinePieces), as one that stays in its comment's text reads as a
+ *  space. Each item is read once */
+function breakCommentLines(content: ContentItem[], splits: (key: number) => boolean): { content: ContentItem[]; changed: Set<number> } {
+  const changed = new Set<number>();
+  const showsText = (item: ContentItem) => item.type === 'text' && /\S/.test(item.text.replace(/\\\n/g, ''));
+  let out: ContentItem[] | undefined;
+  // The paragraph from `start` to the next block edge, whose key is the
+  // number of edges before it
+  for (let start = 0, key = 0; start < content.length; key++) {
+    let end = start;
+    while (end < content.length && !isMarkdownBlockEdge(content[end])) end++;
+    // The last item that shows text, before which comments' runs split
+    let last = -1;
+    for (let k = start; k < end; k++) if (showsText(content[k])) last = k;
+    const split: Array<ContentItem[] | null | undefined> = [];
+    // Whether each run's line ends outside its comments go as breaks
+    let whole = splits(key);
+    let shown = false;
+    for (let k = start; whole && k < end; k++) {
+      const item = content[k];
+      const pieces = item.type === 'html_comment' ? commentLinePieces(item) : undefined;
+      const between = shown && k < last;
+      split.push(between ? pieces : undefined);
+      whole = between ? pieces !== null : pieces === undefined;
+      shown ||= showsText(item);
+    }
+    for (let k = start; k < end; k++) {
+      const pieces = whole ? split[k - start] : undefined;
+      if (pieces) {
+        out ??= content.slice(0, k);
+        pushAll(out, pieces);
+        changed.add(key);
+      } else out?.push(content[k]);
+    }
+    if (end < content.length) out?.push(content[end]);
+    start = end + 1;
+  }
+  return { content: out ?? content, changed };
+}
+
+/** A hidden comment's run as its comments, each as it is, and a line break
+ *  for each line end outside them, where it holds one: the spaces and tabs
+ *  before its first comment on that one's line go with it, as
+ *  withoutHiddenCommentSpace reads them, and the rest of the whitespace
+ *  goes, which Word hid, and a paragraph would show. Undefined where it
+ *  holds none, and null where it holds a line end but can't go so: where
+ *  the run holds anything else outside its comments, which a paragraph
+ *  would show, or a line end that isn't a Word line break (see
+ *  readHiddenRun), or a comment with no end, or an empty one, <!--> or
+ *  <!--->, whose end Markdown reads otherwise */
+function commentLinePieces(item: Extract<ContentItem, { type: 'html_comment' }>): ContentItem[] | null | undefined {
+  const { text } = item;
+  if (!text.includes('\n')) return undefined;
+  if (item.otherLineEnds) return null;
+  const pieces: ContentItem[] = [];
+  const breaks = (outside: string) => {
+    for (let k = outside.indexOf('\n'); k !== -1; k = outside.indexOf('\n', k + 1)) {
+      pieces.push({ type: 'text', text: '\\\n', commentIds: new Set(item.commentIds), formatting: DEFAULT_FORMATTING });
+    }
+  };
+  let at = 0;
+  for (let open = text.indexOf('<!--'); open !== -1; open = text.indexOf('<!--', at)) {
+    const close = text.indexOf('-->', open + 4);
+    const outside = text.slice(at, open);
+    if (/\S/.test(outside) || /^-?>/.test(text.slice(open + 4, open + 6)) || close === -1) return null;
+    breaks(outside);
+    const lead = pieces.length === 0 ? outside : '';
+    at = close + 3;
+    pieces.push({ type: 'html_comment', text: lead + text.slice(open, at), commentIds: new Set(item.commentIds) });
+  }
+  const rest = text.slice(at);
+  if (/\S/.test(rest)) return null;
+  breaks(rest);
+  return pieces.some(piece => piece.type === 'text') ? pieces : undefined;
+}
+
 /** The Markdown of a document's content, its body and notes, as import
  *  writes it. Each paragraph that takes a form main doesn't write (see
  *  plainParagraphs) is read back alone as export reads it, and where it
@@ -13780,9 +13876,18 @@ function buildMarkdownOnce(
   let listWordLevels: number[] = [];
   // paragraphLinePrefix is declared further down
   // A quote paragraph's own lines take its prefix in the main loop below
-  const joinedContent = joinTrackedParagraphBreaks(content, marks, (para, opening) => (
+  const joinedParagraphs = joinTrackedParagraphBreaks(content, marks, (para, opening) => (
     opening && prefixesQuoteLines(opening) ? '' : paragraphLinePrefix(para)
   ));
+  // The hidden runs' line breaks of the paragraphs plain here (see
+  // plainParagraphs), by the block edges before them, which the steps
+  // after, to mergedContent, keep, go as breaks of their own, but where
+  // they go as main writes them. Those whose breaks go so are read back.
+  // Here a citation without keys isn't yet text, which keeps its
+  // paragraph from this form, but not from the others (see `plain`)
+  const splittable = plainParagraphs(joinedParagraphs);
+  const lines = breakCommentLines(joinedParagraphs, key => splittable.has(key) && !fallback.has(key));
+  const joinedContent = lines.content;
   // Notes in the order they're written, after the body
   // Those only notes refer to after the others, as they reach them
   const allNotes = [...(options?.notes?.map.values() ?? [])];
@@ -15543,7 +15648,7 @@ function buildMarkdownOnce(
     }
 
     const formsKey = formsKeys[i];
-    const forms = plain.has(formsKey) && !fallback.has(formsKey) ? { used: false } : undefined;
+    const forms = (plain.has(formsKey) || lines.changed.has(formsKey)) && !fallback.has(formsKey) ? { used: lines.changed.has(formsKey) } : undefined;
     const rendered = renderInlineRange(mergedContent, i, comments, {
       stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading, ...(quoteLinePrefix ? {} : { listLinePrefix }), forms,
     }, renderOpts);

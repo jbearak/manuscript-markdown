@@ -21407,6 +21407,101 @@ describe('HTML comments between Word runs', () => {
   }, 60000);
 
   test.each([
+    ['after it, before text', run('a') + commentLines('<!-- x -->\n') + run('b'), 'a<!-- x -->\\\nb', 1],
+    // Before a comment that would start the next line, as <br> (see
+    // breakBeforeComment)
+    ['after it, before another', run('a') + commentLines('<!-- x -->\n') + comment('<!-- z -->') + run('b'), 'a<!-- x --><br><!-- z -->b', 1],
+    ['between it and another in its run', run('a') + commentLines('<!-- x -->\n<!-- z -->') + run('b'), 'a<!-- x --><br><!-- z -->b', 1],
+    ['before it', run('a') + commentLines('\n<!-- x -->') + run('b'), 'a<br><!-- x -->b', 1],
+    ['two after it', run('a') + commentLines('<!-- x -->\n\n') + comment('<!-- z -->') + run('b'), 'a<!-- x -->\\\n<br><!-- z -->b', 2],
+    // Which Word hid, and the paragraph would show, or drops at a line's start
+    ['after it, with a space after the break', run('a') + commentLines('<!-- x -->\n ') + comment('<!-- z -->') + run('b'), 'a<!-- x --><br><!-- z -->b', 1],
+    ['after it, with a space before the break', run('a') + commentLines('<!-- x --> \n') + run('b'), 'a<!-- x -->\\\nb', 1],
+    // Whose space goes as a reference, after which the comment starts no block
+    ['after it, before a space Word shows and another', run('a') + commentLines('<!-- x -->\n') + run(' ') + comment('<!-- z -->') + run('b'), 'a<!-- x -->\\\n&#32;<!-- z -->b', 1],
+    // Whose line that would start a block the paragraph indents
+    ['after one over lines, one a heading\'s', run('a') + commentLines('<!-- x\n# y -->\n') + run('b'), 'a<!-- x\n    # y -->\\\nb', 1],
+    ['after it, before text that would start a block', run('a') + commentLines('<!-- x -->\n') + run('# b'), 'a<!-- x -->\\\n\\# b', 1],
+  ])('writes a Word line break in a comment\'s hidden run outside the comment, %s, as one of its own', async (_name, runs, md, count) => {
+    // In the comment's text, its line end read as a space, which the next
+    // export showed, or started an HTML block before the next comment,
+    // which the paragraph then indented. The break shows, as other
+    // whitespace after the comment's end does
+    for (const alwaysUseCommentIds of [false, true]) {
+      const docx = await withRuns(runs);
+      const markdown = strip((await convertDocx(docx, undefined, { alwaysUseCommentIds })).markdown);
+      expect(markdown).toBe(md + '\n');
+      const again = (await convertMdToDocx(markdown)).docx;
+      expect((await shown(again)).join('').replace(/ /g, '')).toBe((await shown(docx)).join('').replace(/ /g, ''));
+      expect(await shownBreaks(again)).toBe(count);
+      expect(strip((await convertDocx(again, undefined, { alwaysUseCommentIds })).markdown)).toBe(markdown);
+    }
+  });
+
+  test.each([
+    // Where a break would show that the hidden one didn't
+    ['at its paragraph\'s end', 'XX', run('a') + commentLines('<!-- x -->\n'), 'a<!-- x -->'],
+    // Where the comment starts an HTML block, which would take a \ as text
+    ['at its paragraph\'s start', 'XX', commentLines('<!-- x -->\n') + comment('<!-- z -->') + run('b'), '<!-- x -->\n<!-- z -->b'],
+    // Or before one there, whose line end, outside the comments, stays in
+    // their text, so that the paragraph's comments go as main writes them
+    ['before another at its paragraph\'s end', 'XX', run('a') + commentLines('<!-- x -->\n') + run('b') + commentLines('<!-- y -->\n<!-- z -->'), 'a<!-- x -->\nb<!-- y -->\n    <!-- z -->'],
+    // A line feed in Word's text, or a page break, which no line break is
+    ['as a line feed in Word\'s text', 'XX', run('a') + comment('<!-- x -->\n') + run('b'), 'a<!-- x -->\nb'],
+    ['as a page break', 'XX', run('a') + comment('<!-- x -->').replace(/<\/w:t><\/w:r>$/, '</w:t><w:br w:type="page"/></w:r>') + run('b'), 'a<!-- x -->\nb'],
+    // Where export, reading the paragraph alone, doesn't read it as Word has
+    // it: a comment that ends in --->, which inline Markdown reads on over
+    // the text after it to the next -->
+    ['after a comment that ends in --->, before text and another', 'XX', run('Source') + commentLines('\n<!-- a --->') + run('V') + commentLines('\n<!-- b -->') + run('A'), 'Source\n<!-- a --->V\n<!-- b -->A'],
+    // In a heading, a list item or a quote, which export doesn't read alone
+    ['in a heading, before a comment over lines', '# XX', run('Source') + commentLines('\n<!-- c\nd -->'), '# Source\n<!-- c\nd -->'],
+    ['in a heading', '# XX', run('a') + commentLines('<!-- x -->\n') + run('b'), '# a<!-- x -->\nb'],
+    ['in a list item', '- XX', run('a') + commentLines('<!-- x -->\n') + run('b'), '- a<!-- x -->\n  b'],
+    ['in a quote', '> XX', run('a') + commentLines('<!-- x -->\n') + run('b'), '> a<!-- x -->\n> b'],
+  ])('writes a Word line break in a comment\'s hidden run as main does, %s', async (_name, md, runs, expected) => {
+    const docx = await withRuns(runs, md);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(expected + '\n');
+    // Which keeps what Word shows shown
+    expect((await shown((await convertMdToDocx(markdown)).docx)).join('').replace(/&lt;!--[\s\S]*?--&gt;|\\| /g, ''))
+      .toBe((await shown(docx)).join('').replace(/ /g, ''));
+  });
+
+  test('writes a line break after a citation without keys, before a comment with a blank line in it at its paragraph\'s end, as <br>', async () => {
+    // The citation goes as text once its runs merge, after which the
+    // paragraph is plain, though not before, where its hidden runs' line
+    // breaks are read. Its \ showed on the next export
+    const citation: ContentItem = { type: 'citation', text: '(Doe 2020)', pandocKeys: [], commentIds: new Set() };
+    const [para, ...rest] = paragraphItems('\\\n', '<!-- a\n\nb -->');
+    const markdown = buildMarkdown([para, citation, ...rest], new Map());
+    expect(markdown).toBe('(Doe 2020)<br>\n\n<!-- a\n\nb -->');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await shown(again)).join('')).toBe('(Doe 2020)');
+    expect(await shownBreaks(again)).toBe(1);
+  });
+
+  test.each([
+    ['after a comment', (n: number) => paragraphItems('Source', '<!-- x -->' + '\n'.repeat(n), 'A')],
+    ['each after a comment', (n: number) => paragraphItems('Source', ...Array.from({ length: n }, () => '<!-- x -->\n'), 'A')],
+  ])('writes many Word line breaks in a comment\'s hidden run %s in linear time', (_name, paragraph) => {
+    const time = (n: number) => {
+      const items = paragraph(n);
+      return fastestRun(() => buildMarkdown(items, new Map()));
+    };
+    const small = time(16000);
+    expect(time(64000) / small).toBeLessThan(8);
+  }, 60000);
+
+  test('writes many paragraphs of a Word line break in a comment\'s hidden run in linear time', () => {
+    const time = (n: number) => {
+      const items = Array.from({ length: n }, () => paragraphItems('a', '<!-- x -->\n', 'b')).flat();
+      return fastestRun(() => buildMarkdown(items, new Map()));
+    };
+    const small = time(800);
+    expect(time(3200) / small).toBeLessThan(8);
+  }, 60000);
+
+  test.each([
     ['between two comments in their run', comment('<!-- a -->secret<!-- b -->'), '<!-- a -->secret<!-- b -->'],
     ['in the next comment\'s run', comment('<!-- a -->') + comment('<!-- b -->secret<!-- c -->'), '<!-- a --><!-- b -->secret<!-- c -->'],
     ['in the run of a comment after a space Word shows', comment('<!-- a -->') + run(' ') + comment('<!-- b -->secret<!-- c -->'), '<!-- a --> <!-- b -->secret<!-- c -->'],
