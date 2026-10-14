@@ -26,6 +26,18 @@
 //   section would number that section's pages over, so the template's
 //   trailing sectPr goes without its pgNumType, which each sectPr gets in
 //   its schema place.
+// - The references, title page and page numbering are read as Word reads
+//   a sectPr, by namespace, from the choice or fallback of markup
+//   compatibility's alternatives it reads, or from a wrapper whose content
+//   it reads as the sectPr's own (see effectiveSectPr). Each goes into a
+//   section with the declarations and markup compatibility's settings it
+//   uses (see moved), so the sections export adds have them.
+// - The trailing sectPr is written as Word reads it (see effectiveSectPr),
+//   under export's prefixes, with markup compatibility's alternatives and
+//   wrappers in place of what Word reads of them, as Word itself writes it
+//   on save. So the properties export gives it go into its own children
+//   (see withProperties), each once, in CT_SectPr's order, where every
+//   consumer reads them, and every reader finds them there by name.
 // - A reference goes if the template lacks its relationship or part, or
 //   its relationship is of another type. Kept, it would name nothing, or a
 //   part export writes for something else.
@@ -53,8 +65,8 @@
 
 import type JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
-import { XML_ENTITIES, xmlBuilder, xmlParser } from './xml-parser';
-import { ORDERED_OPTIONS, childrenOf, nameOf, type XmlNode } from './scoped-xml';
+import { XML_ENTITIES, xmlBuilder } from './xml-parser';
+import { EXPORT_CONTEXT, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, NO_COMPATIBILITY, ORDERED_OPTIONS, WORD_UNDERSTOOD_NAMESPACES, WORDPROCESSINGML, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, expandName, isElement, isIgnored, isNamed, moved, nameOf, parseOrdered, readsChoice, sectPrPropertyOf, withProperties, type Context, type XmlNode } from './scoped-xml';
 
 interface Relationship {
   id: string;
@@ -288,30 +300,72 @@ const relsXml = (relationships: Relationship[]) => '<?xml version="1.0" encoding
   relationships.map(r => '<Relationship Id="' + escapeAttr(r.id) + '" Type="' + escapeAttr(r.type) + '" Target="' + escapeAttr(r.target) + '"' +
     (r.external ? ' TargetMode="External"' : '') + '/>').join('') + '</Relationships>';
 
-/** The sectPrs that are a section's own, in order: a paragraph's and the
- *  body's, but not the one a tracked change to one holds */
-function sectPrsOf(documentXml: string): string[] {
-  const sectPrs: string[] = [];
-  let depth = 0, start = 0;
-  for (const m of documentXml.matchAll(/<w:sectPr(?=[\s>/])[^>]*?(\/?)>|<\/w:sectPr\s*>/g)) {
-    if (m[0].startsWith('</')) {
-      if (depth > 0 && --depth === 0) sectPrs.push(documentXml.slice(start, m.index! + m[0].length));
-    } else if (m[1]) {
-      if (depth === 0) sectPrs.push(m[0]);
-    } else if (depth++ === 0) {
-      start = m.index!;
+/** A comment, CDATA section, processing instruction or declaration, an end
+ *  tag, or a start tag, by its name, attributes and whether it's empty. An
+ *  instruction ends at ?>, as what it holds can look like markup */
+const NODE = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<![\s\S]*?>|<\/([^\s>]+)\s*>|<([^\s!?/>][^\s/>]*)((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/g;
+
+/**
+ * The sectPrs that are a section's own, in order, as Word reads the body: a
+ * paragraph's and the body's, but not one a tracked change to one holds,
+ * nor one in a branch of markup compatibility's alternatives Word doesn't
+ * read (see chosenBranch), or in an element Word ignores with all it holds
+ * (see isIgnored), as the compatibility check reads them. Each comes with
+ * the context around it (see Context): what its ancestors, as the document
+ * element, the body and its paragraph, declare, and markup compatibility's
+ * settings they make. Known by namespace, whatever their prefix.
+ */
+function sectPrsOf(documentXml: string): Array<{ xml: string; around: Context }> {
+  const sectPrs: Array<{ xml: string; around: Context }> = [];
+  // Each open element: the context in it, whether it's a sectPr, whether
+  // Word reads it, and, of alternatives, whether Word reads one of their
+  // branches already
+  type Open = { context: Context; isSectPr: boolean; read: boolean; alternatives?: { chosen: boolean } };
+  const open: Open[] = [{ context: { scope: new Map(), compatibility: NO_COMPATIBILITY }, isSectPr: false, read: true }];
+  let depth = 0, start = 0, around = open[0].context;
+  for (const m of documentXml.matchAll(NODE)) {
+    const [whole, end, name, attributes, empty] = m;
+    if (end !== undefined) {
+      const closed = open.length > 1 ? open.pop()! : undefined;
+      if (closed?.isSectPr && depth > 0 && --depth === 0) sectPrs.push({ xml: documentXml.slice(start, m.index! + whole.length), around });
+      continue;
     }
+    if (name === undefined) continue;
+    const parent = open[open.length - 1];
+    // Nothing in what Word doesn't read is read
+    if (!parent.read) {
+      if (!empty) open.push({ ...parent, isSectPr: false, alternatives: undefined });
+      continue;
+    }
+    // Only a start tag that declares something or says how to read it
+    // changes the context, which the tag alone, parsed, gives; and only a
+    // choice's, or that of an element of a namespace Word doesn't
+    // understand, says whether Word reads it
+    const parsed = () => parseOrdered('<' + name + attributes + '/>', parent.context.scope)?.[0];
+    let tag = /xmlns|Ignorable|ProcessContent/.test(attributes) ? parsed() : undefined;
+    const context = tag ? contextIn(tag, parent.context) : parent.context;
+    const { namespace, local } = expandName(name, context.scope);
+    const isCompatibility = (element: string) => namespace === MARKUP_COMPATIBILITY && local === element;
+    let read = true;
+    if (parent.alternatives) {
+      // Of alternatives, the first choice Word reads, or else the fallback
+      read = !parent.alternatives.chosen && (isCompatibility('Choice') ? (tag ??= parsed()) !== undefined && readsChoice(tag, parent.context.scope) : isCompatibility('Fallback'));
+      if (read) parent.alternatives.chosen = true;
+    } else if (namespace !== undefined && !WORD_UNDERSTOOD_NAMESPACES.has(namespace)) {
+      tag ??= parsed();
+      read = tag === undefined || !isIgnored(tag, parent.context.scope, parent.context.compatibility);
+    }
+    const isSectPr = read && local === 'sectPr' && WORDPROCESSINGML.has(namespace ?? '');
+    if (isSectPr && depth === 0) {
+      around = parent.context;
+      if (empty) sectPrs.push({ xml: whole, around });
+      else start = m.index!;
+    }
+    if (empty) continue;
+    if (isSectPr) depth++;
+    open.push({ context, isSectPr, read, ...(read && isCompatibility('AlternateContent') ? { alternatives: { chosen: false } } : {}) });
   }
   return sectPrs;
-}
-
-/** A sectPr's element, parsed */
-function parseSectPr(xml: string): XmlNode | undefined {
-  try {
-    return (xmlParser(ORDERED_OPTIONS).parse(xml) as XmlNode[]).find(node => nameOf(node) === 'w:sectPr');
-  } catch {
-    return undefined;
-  }
 }
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
@@ -347,6 +401,11 @@ const NUM_ID = /<w:numId\b[^>]*?\sw:val\s*=\s*(["'])(\d+)\1/g;
 /** A reference to a comment or a note, which the template's other parts hold */
 const COMMENT_OR_NOTE = /<w:(commentRangeStart|commentRangeEnd|commentReference|footnoteReference|endnoteReference)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1\s*>)/g;
 const DOC_PR_ID = /(<wp:docPr\b[^>]*?\sid\s*=\s*)(["'])\d+\2/g;
+
+
+// The section properties export gives sections of its own, which the
+// template's trailing sectPr goes without
+const TAKEN_PROPERTIES: ReadonlySet<string> = new Set(['headerReference', 'footerReference', 'titlePg', 'pgNumType']);
 
 /** A template's headers and footers, the parts they name, and its trailing
  *  sectPr, and the parts its numbering names */
@@ -395,7 +454,11 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
 
   const documentXml = await read('word/document.xml') ?? '';
   const bodyClose = documentXml.lastIndexOf('</w:body>');
-  const sectPrs = sectPrsOf(bodyClose < 0 ? documentXml : documentXml.slice(0, bodyClose)).map(parseSectPr);
+  const sectPrs = sectPrsOf(bodyClose < 0 ? documentXml : documentXml.slice(0, bodyClose)).map(({ xml, around }) => {
+    // None that breaks Namespaces in XML where it is, which Word refuses
+    const node = parseOrdered(xml, around.scope)?.find(isElement);
+    return node && { node, around };
+  });
   const last = sectPrs[sectPrs.length - 1];
   if (last) {
     const documentRels = new Map(relationshipsOf('word/document.xml', await read('word/_rels/document.xml.rels')).map(r => [r.id, r]));
@@ -415,29 +478,45 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
     };
     const builder = xmlBuilder(ORDERED_OPTIONS);
 
+    // Each sectPr's properties as Word reads them, under export's prefixes
+    // (see effectiveSectPr), which the references, title page and page
+    // numbering come from, each moved out of it into export's document,
+    // with what it uses there of the template's declarations and markup
+    // compatibility's settings
+    const properties = sectPrs.map(sectPr => {
+      if (!sectPr) return [];
+      const effective = effectiveSectPr(sectPr.node, sectPr.around), inside = contextIn(effective, EXPORT_CONTEXT);
+      return childrenOf(effective).filter(isElement).map(node => ({ name: sectPrPropertyOf(node, inside.scope), node: moved(node, inside, EXPORT_CONTEXT) }));
+    });
+    const named = (sectPr: Array<{ name: string; node: XmlNode }> | undefined, name: string) => sectPr?.find(property => property.name === name)?.node;
+    const attribute = (node: XmlNode, namespaces: string | ReadonlySet<string>, local: string) =>
+      attributesOf(node, EXPORT_NAMESPACES).find(name => name.local === local && (typeof namespaces === 'string' ? name.namespace === namespaces : namespaces.has(name.namespace ?? '')));
+
     // Each type of reference as the last section shows it
-    const references = new Map<string, XmlNode>();
-    for (const sectPr of sectPrs) {
-      for (const node of sectPr ? childrenOf(sectPr) : []) {
-        const name = nameOf(node);
-        if (name === 'w:headerReference' || name === 'w:footerReference') references.set(name + ':' + (node[':@']?.['@_w:type'] ?? 'default'), node);
+    const references = new Map<string, { name: string; node: XmlNode }>();
+    for (const sectPr of properties) {
+      for (const property of sectPr) {
+        if (property.name === 'headerReference' || property.name === 'footerReference') references.set(property.name + ':' + (attribute(property.node, WORDPROCESSINGML, 'type')?.value ?? 'default'), property);
       }
     }
-    for (const node of references.values()) {
-      const name = nameOf(node);
-      const id = await idFor(node[':@']?.['@_r:id'], name === 'w:headerReference' ? 'header' : 'footer');
-      if (id) result.references += builder.build([{ [name]: [], ':@': { ...node[':@'], '@_r:id': id } }]);
+    for (const { name, node } of references.values()) {
+      const templateId = attribute(node, RELATIONSHIPS_NAMESPACES, 'id');
+      const id = await idFor(templateId?.value, name === 'headerReference' ? 'header' : 'footer');
+      if (id) result.references += buildOrdered([{ [nameOf(node)]: [], ':@': { ...node[':@'], [templateId!.key]: id } }]);
     }
-    result.titlePg = !!sectPrs[0] && childrenOf(sectPrs[0]).some(node => nameOf(node) === 'w:titlePg' && isOn(node[':@']?.['@_w:val']));
+    const titlePg = named(properties[0], 'titlePg');
+    result.titlePg = !!titlePg && isOn(attribute(titlePg, WORDPROCESSINGML, 'val')?.value);
 
     // The page number format of the last section, as its numerals, which
     // each section export writes takes, and the start, which only the first
     // takes, so that the pages count on through the sections export adds.
     // The start is the first section's, whose first page is the document's,
     // as a previous export writes it, or else the last's.
-    const pageNumbersOf = (sectPr: XmlNode | undefined) => sectPr && childrenOf(sectPr).find(node => nameOf(node) === 'w:pgNumType')?.[':@'];
-    const { '@_w:start': lastStart, ...format } = pageNumbersOf(last) ?? {};
-    const start = pageNumbersOf(sectPrs[0])?.['@_w:start'] ?? lastStart;
+    // Export's document writes WordprocessingML's attributes under w:, as
+    // the template's are, read under export's prefixes
+    const pageNumbersOf = (sectPr: Array<{ name: string; node: XmlNode }> | undefined) => named(sectPr, 'pgNumType')?.[':@'];
+    const { '@_w:start': lastStart, ...format } = pageNumbersOf(properties[properties.length - 1]) ?? {};
+    const start = pageNumbersOf(properties[0])?.['@_w:start'] ?? lastStart;
     const pgNumType = (attributes: Record<string, string>) => Object.keys(attributes).length === 0 ? '' : builder.build([{ 'w:pgNumType': [], ':@': attributes }]) as string;
     // Its attributes in the schema's order, which Word writes: fmt, start, chapStyle, chapSep
     result.pgNumType = {
@@ -462,8 +541,11 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
       }
       return kept;
     };
-    const own = childrenOf(last).filter(node => !['w:headerReference', 'w:footerReference', 'w:titlePg', 'w:pgNumType'].includes(nameOf(node)));
-    result.sectPr = builder.build([{ 'w:sectPr': await withIds(own), ':@': last[':@'] }]) as string;
+    // The trailing sectPr as Word reads it, as Word writes it on save,
+    // without what export gives sections of their own
+    const trailing = effectiveSectPr(last.node, last.around), inside = contextIn(trailing, EXPORT_CONTEXT);
+    const own = childrenOf(trailing).filter(node => !TAKEN_PROPERTIES.has(sectPrPropertyOf(node, inside.scope)));
+    result.sectPr = buildOrdered([{ ...trailing, [nameOf(trailing)]: await withIds(own) }]);
   }
 
   // What the numbering names, as a picture bullet's image, after the
@@ -486,22 +568,15 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
   return result;
 }
 
-/** sectPr's children after pgNumType, which pgNumType goes before, in CT_SectPr's order (ECMA-376) */
-const AFTER_PG_NUM_TYPE = /<w:(?:cols|formProt|vAlign|noEndnote|titlePg|textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)(?=[\s/>])/;
-/** sectPr's children after titlePg, which titlePg goes before */
-const AFTER_TITLE_PG = /<w:(?:textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)\b/;
-
-/** A sectPr with `element` among its own children, before the first that
- *  `before` finds, or after them, and before a tracked change to them */
-function withChild(sectPr: string, element: string, before: RegExp): string {
-  const open = /^<w:sectPr\b[^>]*?(\/?)>/.exec(sectPr);
-  if (!open || !element) return sectPr;
-  const xml = open[1] ? open[0].slice(0, -2) + '>' + '</w:sectPr>' : sectPr;
-  const start = open[1] ? open[0].length - 1 : open[0].length;
-  const change = xml.indexOf('<w:sectPrChange', start);
-  const own = xml.slice(start, change < 0 ? xml.lastIndexOf('</w:sectPr>') : change);
-  const at = start + (before.exec(own)?.index ?? own.length);
-  return xml.slice(0, at) + element + xml.slice(at);
+/** A sectPr export writes, in its document, with `element`, one or more
+ *  section properties, among its own children in CT_SectPr's order (see
+ *  withProperties), in place of any of their names. Elements and
+ *  attributes are known by their namespaces, whatever their prefixes. */
+function withChild(sectPr: string, element: string): string {
+  const parsed = element ? parseOrdered(sectPr)?.find(isElement) : undefined;
+  const added = parsed && parseOrdered(element);
+  if (!parsed || !added || !isNamed(parsed, EXPORT_NAMESPACES, WORDPROCESSINGML, 'sectPr')) return sectPr;
+  return buildOrdered([withProperties(parsed, EXPORT_CONTEXT, added, EXPORT_CONTEXT)]);
 }
 
 /**
@@ -511,10 +586,10 @@ function withChild(sectPr: string, element: string, before: RegExp): string {
  * after the first take its headers and footers and count its pages on.
  */
 export function withTemplateSection(sectPr: string, sections: TemplateSections, first: boolean): string {
-  sectPr = withChild(sectPr, first ? sections.pgNumType.first : sections.pgNumType.others, AFTER_PG_NUM_TYPE);
+  sectPr = withChild(sectPr, first ? sections.pgNumType.first : sections.pgNumType.others);
   if (!first) return sectPr;
-  sectPr = withChild(sectPr, sections.references, /^/);
-  return sections.titlePg ? withChild(sectPr, '<w:titlePg/>', AFTER_TITLE_PG) : sectPr;
+  sectPr = withChild(sectPr, sections.references);
+  return sections.titlePg ? withChild(sectPr, '<w:titlePg/>') : sectPr;
 }
 
 /**
