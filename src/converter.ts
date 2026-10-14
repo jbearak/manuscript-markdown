@@ -26,7 +26,8 @@ import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
-import { asUtf8, decodeXml, parsePart, relatedPartPath, XML_ENTITIES } from './template-sections';
+import { asUtf8, decodeXml, parsePart, relatedPartPath } from './template-sections';
+import { XML_ENTITIES } from './xml-parser';
 
 // --- Implementation notes ---
 // Table parsing:

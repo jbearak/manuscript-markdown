@@ -52,7 +52,9 @@
 //   The core and app properties, as Title or Company, stay export's.
 
 import type JSZip from 'jszip';
-import { XMLBuilder, XMLParser } from 'fast-xml-parser';
+import { XMLParser } from 'fast-xml-parser';
+import { XML_ENTITIES, xmlBuilder, xmlParser } from './xml-parser';
+import { ORDERED_OPTIONS, childrenOf, nameOf, type XmlNode } from './scoped-xml';
 
 interface Relationship {
   id: string;
@@ -117,37 +119,6 @@ export interface TemplateSections {
   customProperties: Array<{ name: string; type: string; value: string }>;
 }
 
-type XmlNode = Record<string, unknown> & { ':@'?: Record<string, string> };
-
-/** An element in order, its attributes as written, which the builder writes back */
-const ORDERED_OPTIONS = {
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  preserveOrder: true,
-  parseTagValue: false,
-  parseAttributeValue: false,
-  trimValues: false,
-  suppressEmptyNode: true,
-};
-
-/**
- * How the parsers read entities: the standard ones and character
- * references, with no cap on how many. fast-xml-parser counts every &quot;,
- * &lt;, &gt; and &apos; toward maxTotalExpansions, and a long manuscript
- * passes any fixed count (Zotero field codes are full of &quot;), as a
- * part's relationships can (a link's target may hold many &apos;). Leaving
- * it uncapped is safe because no expansion can grow the text: standard
- * entities replace 4+ characters with one, and maxEntitySize holds DOCTYPE
- * entities (which Word never writes) to one character in place of a
- * reference of at least three.
- */
-export const XML_ENTITIES = {
-  enabled: true,
-  maxTotalExpansions: Infinity,
-  maxEntitySize: 1,
-  maxExpandedLength: 1000000,
-};
-
 /** A package part (relationships, content types, settings, custom
  *  properties) as data, its prefixes dropped, its text as it is, with
  *  its character references, as &#x2019;, read too */
@@ -207,9 +178,6 @@ export const asUtf8 = (xml: string) => xml.replace(/^(<\?xml\b[^>]*?\sencoding\s
 
 /** Whether an on-off property that is present is on: its w:val isn't "0", "false" or "off" */
 const isOn = (val: unknown) => typeof val !== 'string' || !/^(?:0|false|off)$/.test(val);
-
-const nameOf = (node: XmlNode) => Object.keys(node).find(key => key !== ':@')!;
-const childrenOf = (node: XmlNode) => node[nameOf(node)] as XmlNode[];
 
 /** The path of a part's relationships part */
 const relsPathOf = (part: string) => {
@@ -340,7 +308,7 @@ function sectPrsOf(documentXml: string): string[] {
 /** A sectPr's element, parsed */
 function parseSectPr(xml: string): XmlNode | undefined {
   try {
-    return (new XMLParser(ORDERED_OPTIONS).parse(xml) as XmlNode[]).find(node => nameOf(node) === 'w:sectPr');
+    return (xmlParser(ORDERED_OPTIONS).parse(xml) as XmlNode[]).find(node => nameOf(node) === 'w:sectPr');
   } catch {
     return undefined;
   }
@@ -445,7 +413,7 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
       ids.set(relationship.id, id);
       return id;
     };
-    const builder = new XMLBuilder(ORDERED_OPTIONS);
+    const builder = xmlBuilder(ORDERED_OPTIONS);
 
     // Each type of reference as the last section shows it
     const references = new Map<string, XmlNode>();
