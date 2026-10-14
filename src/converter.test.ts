@@ -5255,6 +5255,36 @@ describe('Sentinel gap round-trip', () => {
     expect(markdown).toBe(md);
   });
 
+  const codeBox = '---\nstyles:\n  box:\n    font-style: italic\n---\n';
+  test.each([
+    ['a landscape section\'s opening fence', 'A.\n\n<!-- landscape -->', '\n\n<!-- /landscape -->\n'],
+    ['a portrait section\'s opening fence', 'A.\n\n<!-- portrait -->', '\n\n<!-- /portrait -->\n'],
+    ['a section\'s opening fence that starts the document', '<!-- landscape -->', '\n\n<!-- /landscape -->\n'],
+    ['a section\'s closing fence', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->', '\n'],
+    ['a style block\'s opening fence', codeBox + 'A.\n\n<!-- style: box -->', '\n\nP.\n\n<!-- /style -->\n'],
+    ['a style block\'s closing fence', codeBox + 'A.\n\n<!-- style: box -->\n\nP.\n\n<!-- /style -->', '\n'],
+    ['a comment of its own', 'A.\n\n<!-- c -->', '\n'],
+    ['a comment of its own at a section\'s start', 'A.\n\n<!-- landscape -->\n\n<!-- c -->', '\n\n<!-- /landscape -->\n'],
+  ])('keeps the blank lines between %s and a code block after it', async (_name, before, after) => {
+    // Import wrote one blank line before the code, whatever export had
+    // recorded after the fence or comment, as it does before no other block
+    for (const gap of ['\n', '\n\n', '\n\n\n']) {
+      const md = before + gap + '```\nc\n```' + after;
+      const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+      expect(markdown).toBe(md);
+      expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(md);
+    }
+  });
+
+  test('keeps the blank lines between a section\'s opening fence and indented code after it, which import fences', async () => {
+    for (const gap of ['\n', '\n\n', '\n\n\n']) {
+      const expected = 'A.\n\n<!-- landscape -->' + gap + '```\nc\n```\n\n<!-- /landscape -->\n';
+      const markdown = (await convertDocx((await convertMdToDocx('A.\n\n<!-- landscape -->' + gap + '    c\n\n<!-- /landscape -->\n')).docx)).markdown;
+      expect(markdown).toBe(expected);
+      expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(expected);
+    }
+  });
+
   test('portrait sentinel with no blank line after opening', async () => {
     const md = 'Before.\n\n<!-- portrait -->\n## Table 1\n\nSome text.\n\n<!-- /portrait -->\n\nAfter.';
     const { docx } = await convertMdToDocx(md);
