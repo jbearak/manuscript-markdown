@@ -14,9 +14,10 @@ describe('BibTeX Parser Property Tests', () => {
    */
   it('Property 1: double-braced field value is stripped to plain content', () => {
     // Exclude braces (would break the double-brace structure), quotes and backslashes
-    // (would confuse the fieldRegex quote-delimiter and escape branches).
+    // (would confuse the fieldRegex quote-delimiter and escape branches), and
+    // ties, which read as no-break spaces.
     const noBraceString = fc.string({ minLength: 0, maxLength: 40 })
-      .filter(s => !s.includes('{') && !s.includes('}') && !s.includes('"') && !s.includes('\\'));
+      .filter(s => !s.includes('{') && !s.includes('}') && !s.includes('"') && !s.includes('\\') && !s.includes('~'));
 
     fc.assert(
       fc.property(noBraceString, (s) => {
@@ -34,14 +35,14 @@ describe('BibTeX Parser Property Tests', () => {
   });
 
   /**
-   * Property 3 (Preservation): For any string s that contains no braces, quotes, or backslashes,
+   * Property 3 (Preservation): For any string s that contains no braces, quotes, backslashes or ties,
    * parsing @article{k, title = {s}} yields s unchanged (single-brace path unaffected).
    * Validates: Requirements 3.1, 3.4
    */
   it('Property 3 (Preservation): single-braced field value is unchanged', () => {
     const safeSingleBraceString = fc.string({ minLength: 1, maxLength: 40 })
       .filter(s =>
-        !s.includes('}') && !s.includes('"') && !s.includes('{') && !s.includes('\\')
+        !s.includes('}') && !s.includes('"') && !s.includes('{') && !s.includes('\\') && !s.includes('~')
       );
 
     fc.assert(

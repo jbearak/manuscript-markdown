@@ -1023,6 +1023,25 @@ describe('BibTeX text symbols in citeproc\'s data', () => {
   });
 });
 
+describe('BibTeX ties, empty groups and \\url in names', () => {
+  const names = (author: string) => buildItemData(parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b')!).author;
+
+  // Names stay as main reads them: BibTeX splits a name's words at a tie
+  // once it has split the names, and serializeBibtex would have to write
+  // them back as they were read, a later step's
+  it.each([
+    ['ties between initials', String.raw`D.~E. Knuth`, [{ family: 'Knuth', given: 'D.~E.' }]],
+    ['ties around a von part', String.raw`Jean~de~La~Fontaine`, [{ family: 'Jean~de~La~Fontaine' }]],
+    ['a tie in a group', String.raw`{Jean~Paul} Sartre`, [{ family: 'Sartre', given: 'Jean~Paul' }]],
+    ['a tilde\'s accent on nothing', String.raw`X \~{}Y`, [{ family: String.raw`\~{}Y`, given: 'X' }]],
+    ['a tilde\'s command', String.raw`X \textasciitilde{}Y`, [{ family: '~Y', given: 'X' }]],
+    ['an empty group between hyphens', String.raw`Smith-{}-Jones`, [{ family: 'Smith--Jones' }]],
+    ['a \\url', String.raw`\url{a_b}, John`, [{ family: String.raw`\url{a_b}`, given: 'John' }]],
+  ])('reads %s in a name as before', (_name, author, expected) => {
+    expect(names(author)).toEqual(expected);
+  });
+});
+
 describe('orderRPr', () => {
   it('puts run properties in schema order', () => {
     expect(orderRPr('<w:i/><w:b/><w:vertAlign w:val="superscript"/><w:smallCaps/><w:highlight w:val="red"/><w:sz w:val="18"/>'))
