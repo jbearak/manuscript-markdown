@@ -287,3 +287,44 @@ describe('environments with no OMML form', () => {
     expect(await roundTrip(back)).toBe(back);
   });
 });
+
+// Fences on lines of their own wrote their line ends into Word as runs of a
+// line feed alone at the equation's edges, which Word never writes, and an
+// equation written on one line got them after its first trip
+describe("the line ends at a display equation's fences", () => {
+  const fence = '$'.repeat(2);
+  const roundTrip = async (md: string) => stripFrontmatter((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const equations = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return xml.match(/<m:oMathPara>[\s\S]*?<\/m:oMathPara>/g) ?? [];
+  };
+  const lineFeeds = (omml: string[]) => omml.join('').match(/<m:t(?: [^>]*)?>\n<\/m:t>/g)?.length ?? 0;
+
+  // With the number of line ends between rows, which stay
+  it.each([
+    ['in a paragraph, on lines of their own', 'See\n' + fence + '\nx\n' + fence + ' b.\n', 0],
+    ['on the same line', 'See ' + fence + 'x' + fence + ' b.\n', 0],
+    ['around a multi-row environment', 'See\n' + fence + '\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n' + fence + ' b.\n', 3],
+    ['around rows without an environment', fence + '\na \\\\\nb\n' + fence + '\n', 1],
+    ['around an equation that ends in a comment', 'See\n' + fence + '\nx % note\n' + fence + ' b.\n', 0],
+    ['in a list item', '- See\n  ' + fence + '\n  x\n  ' + fence + ' b.\n', 0],
+    ['in a quote', '> See\n> ' + fence + '\n> x\n> ' + fence + ' b.\n', 0],
+    ['in a paragraph of their own', fence + '\nx\n' + fence + '\n', 0],
+    ['around a numbered equation', fence + '\nx \\tag{1}\n' + fence + '\n', 0],
+    ['around a tracked change', 'See\n' + fence + '\n{++x++}\n' + fence + ' b.\n', 0],
+    ['around an equation Word records as replaced', fence + '\n{++\\frac++}{1}{2}\n' + fence + '\n', 0],
+  ])('writes no line feed alone for fences %s', async (_name, md, between) => {
+    const omml = await equations(md);
+    expect(omml).toHaveLength(1);
+    expect(lineFeeds(omml)).toBe(between);
+    const back = await roundTrip(md);
+    expect(await equations(back)).toEqual(omml);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  it("keeps a comment's line end at the equation's end", async () => {
+    const md = 'See\n' + fence + '\nx % note\n' + fence + ' b.\n';
+    expect((await equations(md))[0]).toContain(' % note\n</m:t>');
+    expect(await roundTrip(md)).toContain('\nx % note\n' + fence);
+  });
+});

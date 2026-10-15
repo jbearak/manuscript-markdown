@@ -674,7 +674,7 @@ describe('CriticMarkup\'s openers in an equation, and the breaks no rule reads',
     ['a closer in the next paragraph', 'A $x^{++}$ B.\n\nC ++} D.', ['A x++ B.', 'C ++} D.'], 1, 'A $x^{+\\relax+}$ B.\n\nC +\\+} D.'],
     ['an opener in the next paragraph\'s equation', 'A $x^{++}$ B.\n\nC $y^{++}$ D.', ['A x++ B.', 'C y++ D.'], 2, 'A $x^{+\\relax+}$ B.\n\nC $y^{+\\relax+}$ D.'],
     // And Word showed LINE in the equation too
-    ['a display equation', display + '\nx^{++} y\n' + display + '\n\nC ++} D.', ['\nx++ y\n', 'C ++} D.'], 1, display + '\nx^{+\\relax+} y\n' + display + '\n\nC +\\+} D.'],
+    ['a display equation', display + '\nx^{++} y\n' + display + '\n\nC ++} D.', ['x++ y', 'C ++} D.'], 1, display + '\nx^{+\\relax+} y\n' + display + '\n\nC +\\+} D.'],
   ])('keeps the paragraphs apart for %s', async (_name, md, paragraphs, equations, expected) => {
     const once = await exported(md);
     expect(once.paragraphs).toEqual(paragraphs);
