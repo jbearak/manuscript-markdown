@@ -3938,18 +3938,19 @@ describe('List blockquote round-trip', () => {
   it.each([
     // A lazy line indented as code, which export ends the quote before, so
     // it's a code block
-    ['a grid table after code on a lazy line', '> q\n    code\n\n+---+\n| a |\n+---+\n', '+-----+\n| a   |\n+-----+'],
-    ['a pipe table after code on a lazy line', '> q\n    code\n\n| a |\n|---|\n| b |\n', '| a |\n| --- |\n| b |'],
-    ['a paragraph after code on a lazy line', '> q\n    code\n\nnext\n', 'next'],
-    // Two blank lines after the quote, which went after the code
-    ['a paragraph after code two blank lines after a quote', '> q\n\n\n    code\n\nnext\n', 'next'],
-    ['a paragraph after a fence right after a quote', '> q\n```\ncode\n```\n\nnext\n', 'next'],
-  ])('keeps one blank line before %s, the same over a second trip', async (_name, md, after) => {
+    ['a grid table after code on a lazy line', '> q\n    code\n\n+---+\n| a |\n+---+\n', '+-----+\n| a   |\n+-----+', '\n\n'],
+    ['a pipe table after code on a lazy line', '> q\n    code\n\n| a |\n|---|\n| b |\n', '| a |\n| --- |\n| b |', '\n\n'],
+    ['a paragraph after code on a lazy line', '> q\n    code\n\nnext\n', 'next', '\n\n'],
+    // Two blank lines after the quote, which went after the code, and which
+    // come back before it
+    ['a paragraph after code two blank lines after a quote', '> q\n\n\n    code\n\nnext\n', 'next', '\n\n\n'],
+    ['a paragraph after a fence right after a quote', '> q\n```\ncode\n```\n\nnext\n', 'next', '\n\n'],
+  ])('keeps one blank line before %s, the same over a second trip', async (_name, md, after, gap) => {
     // The blank lines after the quote, which import writes before the
     // first paragraph after it, went after the code block instead, as the
-    // quote's, which the blank line before the fence had written already
+    // quote's, which the blank lines before the fence had written already
     const once = await roundTripBody(md);
-    expect(once).toBe('> q\n\n```\ncode\n```\n\n' + after);
+    expect(once).toBe('> q' + gap + '```\ncode\n```\n\n' + after);
     expect(await roundTripBody(once)).toBe(once);
   });
 
