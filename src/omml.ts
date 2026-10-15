@@ -1303,15 +1303,17 @@ function trimPart(latex: string): string {
  *  character. Only where each space is one of those or one LaTeX ignores,
  *  so none is lost, as an en space would be; otherwise as before.
  *
- *  A space right after the number that is the whole text of one of the
- *  equation's runs, `children`, is written as \ , which export writes so,
- *  as in 2\ x. Export writes a space LaTeX ignores so too, but in Markdown
- *  one follows a number there only after what exports as nothing, as in
- *  2{} x, since $2 and a space read as currency; \ keeps it an equation. */
+ *  A space or tab right after the number in the text of the equation's
+ *  runs, `children`, is written as \ , which export writes as a space, as
+ *  in 2\ x. Word shows it, in a run of its own, as export writes \ , or in
+ *  the number's, as Word can write 2 x. Export writes a space LaTeX ignores
+ *  as a run too, but in Markdown one follows a number there only after
+ *  what exports as nothing, as in 2{} x, since $2 and a space read as
+ *  currency; \ keeps it an equation. */
 export function apartFromCurrency(latex: string, children: XmlNode[]): string {
   const [, number, spaces] = /^(\d[\d,.]*)(\s+)/.exec(latex) ?? [];
   if (!spaces) return latex;
-  const shown = Math.min(spacesInRunsAfter(number, children), /^ */.exec(spaces)![0].length);
+  const shown = Math.min(spacesInRunsAfter(number, children), /^[ \t]*/.exec(spaces)![0].length);
   const head = number + '\\ '.repeat(shown);
   const after = spaces.slice(shown);
   const rest = latex.slice(number.length + spaces.length);
@@ -1324,25 +1326,21 @@ export function apartFromCurrency(latex: string, children: XmlNode[]): string {
   return head + commands + gap + rest;
 }
 
-/** How many ASCII spaces follow `number` at the start of an equation in
- *  runs of their own, of spaces alone, after runs of the number alone, as
- *  export writes 2\ x. Runs of whitespace before the number, which
+/** How many spaces and tabs follow `number` at the start of an equation in
+ *  the text of the runs it starts with, in the number's run or in their
+ *  own, as 2 x and 2\ x. Runs of whitespace before the number, which
  *  ommlToLatex trims, are skipped. */
 function spacesInRunsAfter(number: string, children: XmlNode[]): number {
   let text = '';
-  let spaces = 0;
   for (const child of children) {
     if (!('m:r' in child)) break;
     const latex = translateNode(child);
     if (!text && !latex.trim()) continue;
-    if (text.length < number.length) {
-      text += latex;
-      continue;
-    }
-    if (!/^ +$/.test(latex)) break;
-    spaces += latex.length;
+    text += latex;
+    // Past the number and the spaces after it
+    if (/[^ \t]/.test(text.slice(number.length))) break;
   }
-  return text === number ? spaces : 0;
+  return text.startsWith(number) ? /^[ \t]*/.exec(text.slice(number.length))![0].length : 0;
 }
 
 /** The spaces export writes for \quad, \;, \: and \, (see latex-to-omml.ts) */

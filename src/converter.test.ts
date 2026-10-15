@@ -16394,16 +16394,32 @@ describe('Display math\'s rows and the spaces at their edges', () => {
   const word = (runs: string[]) => buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">A </w:t></w:r><m:oMath>'
     + runs.map(text => '<m:r><m:t xml:space="preserve">' + text + '</m:t></m:r>').join('') + '</m:oMath><w:r><w:t xml:space="preserve"> C.</w:t></w:r></w:p>'));
   test.each([
-    ['a space in a run of its own after a number', ['2', ' ', 'x'], 'A $2\\ x$ C.', 1],
-    ['a space in a run of its own after a number, with one before it', [' ', '2', ' ', 'x'], 'A $2\\ x$ C.', 1],
-    // As before, though $2 and the space read as currency, so the next
-    // export writes no equation
-    ['a space in a run with the number', ['2 ', 'x'], 'A $2 x$ C.', 0],
-    ['a space in a run with the number and more', ['2 x'], 'A $2 x$ C.', 0],
-  ])('writes %s at the start of an inline equation', async (_name, runs, expected, count) => {
+    ['a space in a run of its own after a number', ['2', ' ', 'x'], 'A $2\\ x$ C.'],
+    ['a space in a run of its own after a number, with one before it', [' ', '2', ' ', 'x'], 'A $2\\ x$ C.'],
+    // In the number's run, as Word writes 2 x typed in an equation, it came
+    // back as the space, and $2 and the space read as currency, so the next
+    // export wrote no equation
+    ['a space in a run with the number', ['2 ', 'x'], 'A $2\\ x$ C.'],
+    ['a space in a run with the number and more', ['2 x'], 'A $2\\ x$ C.'],
+    ['spaces in a run with the number and more', ['2   x'], 'A $2\\ \\ \\ x$ C.'],
+    ['a tab in a run with the number and more', ['2\tx'], 'A $2\\ x$ C.'],
+    ['a space in a run with 2.5 and more', ['2.5 x'], 'A $2.5\\ x$ C.'],
+    ['a space and an em space in a run with the number and more', ['2  x'], 'A $2\\ \\quad x$ C.'],
+  ])('writes %s at the start of an inline equation as \\ ', async (_name, runs, expected) => {
     const back = strip((await convertDocx(await word(runs))).markdown);
     expect(back).toBe(expected);
-    expect(await allEquations(back)).toHaveLength(count);
+    expect(await allEquations(back)).toHaveLength(1);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Away from a number at the start, as before
+  test.each([
+    ['a space after a letter', ['x y'], 'A $x y$ C.'],
+    ['a space after a number not at the start', ['x 2 y'], 'A $x 2 y$ C.'],
+  ])('writes %s in a run of an inline equation as a space, as before', async (_name, runs, expected) => {
+    const back = strip((await convertDocx(await word(runs))).markdown);
+    expect(back).toBe(expected);
+    expect(await allEquations(back)).toHaveLength(1);
     expect(await roundTrip(back)).toBe(back);
   });
 

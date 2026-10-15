@@ -470,7 +470,7 @@ a \quad b  % em space
 a \qquad b % double em space
 ```
 
-At the start or end of an equation, a row, a cell or a group, re-import writes the spaces that `\quad`, `\qquad`, `\;`, `\:` and `\,` export as those commands. So it does after a number that starts an inline equation, as in `$2\quad x$`, since `$2` followed by a space reads as a dollar amount, not math. There it writes a space that is a run of its own in Word as `\ `, as in `$2\ x$`. Elsewhere it writes the space itself, as U+2003 for `\quad` or a space for `\ `.
+At the start or end of an equation, a row, a cell or a group, re-import writes the spaces that `\quad`, `\qquad`, `\;`, `\:` and `\,` export as those commands. So it does after a number that starts an inline equation, as in `$2\quad x$`, since `$2` followed by a space reads as a dollar amount, not math. There it writes a space or tab as `\ `, as in `$2\ x$`, whether Word has it in a run of its own, as export writes `\ `, or in the number's run, as Word writes `2 x` typed in an equation. Elsewhere it writes the space itself, as U+2003 for `\quad` or a space for `\ `.
 
 ## Text Inside Equations
 
