@@ -647,3 +647,154 @@ describe('CriticMarkup\'s openers in raw HTML in a paragraph\'s text', () => {
     expect(time(16_000) / time(4_000)).toBeLessThan(8);
   }, 30000);
 });
+
+describe('CriticMarkup\'s openers in an equation, and the breaks no rule reads', () => {
+  const display = '$'.repeat(2);
+  const span = ' {++one\n\ntwo $\\alpha$ three++}';
+  async function exported(md: string): Promise<{ paragraphs: string[]; equations: number; revisions: number; placeholder: boolean; markdown: string }> {
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr'));
+    const paragraphs = (body.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? [])
+      .map(p => (p.match(/<(?:w|m):t(?: [^>]*)?>[^<]*<\/(?:w|m):t>/g) ?? []).map(t => t.replace(/<[^>]+>/g, '')).join(''));
+    const imported = await convertDocx(docx);
+    return {
+      paragraphs,
+      equations: (body.match(/<m:oMath>/g) ?? []).length,
+      revisions: (body.match(/<w:(?:ins|del) /g) ?? []).length,
+      placeholder: xml.includes('\uE000'),
+      markdown: imported.markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim(),
+    };
+  }
+
+  it.each([
+    // The opener in the equation paired with the closer in the next
+    // paragraph, which joined the paragraphs, and Word showed PARA where
+    // the break was
+    ['a closer in the next paragraph', 'A $x^{++}$ B.\n\nC ++} D.', ['A x++ B.', 'C ++} D.'], 1, 'A $x^{+\\relax+}$ B.\n\nC +\\+} D.'],
+    ['an opener in the next paragraph\'s equation', 'A $x^{++}$ B.\n\nC $y^{++}$ D.', ['A x++ B.', 'C y++ D.'], 2, 'A $x^{+\\relax+}$ B.\n\nC $y^{+\\relax+}$ D.'],
+    // And Word showed LINE in the equation too
+    ['a display equation', display + '\nx^{++} y\n' + display + '\n\nC ++} D.', ['\nx++ y\n', 'C ++} D.'], 1, display + '\nx^{+\\relax+} y\n' + display + '\n\nC +\\+} D.'],
+  ])('keeps the paragraphs apart for %s', async (_name, md, paragraphs, equations, expected) => {
+    const once = await exported(md);
+    expect(once.paragraphs).toEqual(paragraphs);
+    expect(once.equations).toBe(equations);
+    expect(once.revisions).toBe(0);
+    expect(once.placeholder).toBe(false);
+    expect(once.markdown).toBe(expected);
+    expect((await exported(expected)).markdown).toBe(expected);
+    const html = renderWithPlugin(md);
+    expect(html.match(/<p>/g)).toHaveLength(2);
+    expect(html).not.toContain('\uE000');
+  });
+
+  it.each([
+    ['in an equation', 'A $a{++b++}$ B.\n\nC.', 2, 1, 1, 'A $a{++b++}$ B.\n\nC.'],
+    ['with an equation in it', 'A {++a $x$ b++} B.\n\nC.', 2, 1, 1, 'A {++a $x$ b++} B.\n\nC.'],
+    // It joins the equation's lines, which the equation holds
+    ['in an equation over a blank line, after a \\text{}', 'A $x {++a \\text{b}\n\nc++}$ B.', 1, 1, 1, 'A $x {++a \\mathrm{b}\n\nc++}$ B.'],
+    ['in an equation, after a \\text{}, with a closer in the next paragraph', 'A $x {++a \\text{b} c++}$ B.\n\nC ++} D.', 2, 1, 1, 'A $x {++a \\mathrm{b} c++}$ B.\n\nC +\\+} D.'],
+    ['between equations', 'A $x$ {++b\n\nc++} $y$.', 2, 2, 3, 'A $x$ {++b\n\nc++} $y$.'],
+    // markdown-it reads the dollar sign of a list item before alone, and
+    // one in raw HTML as the HTML's, so neither opens an equation
+    ['after a dollar sign in the list item before', '- $a\n- b {++c$ d\n\ne++}', 3, 0, 3, '- $a\n- b {++c$ d\n\n  e++}'],
+    ['after a dollar sign in raw HTML', 'A <span title="$"> {++b $ c\n\nd++}</span>', 2, 0, 3, 'A <span title="$"> {++b $ c\n\nd++}</span>'],
+    // Nor one in a link's destination or title, an autolink or a bare URL,
+    // which markdown-it reads first, where the equation that paired it with
+    // the one in the span kept the span apart
+    ['after a dollar sign in a link\'s destination', '[link](/$path)' + span, 2, 1, 3, '[link](/$path)' + span],
+    ['after a dollar sign in an image\'s destination', '![i](/$p.png)' + span, 2, 1, 3, '![i](/$p.png)' + span],
+    ['after a dollar sign in a link\'s title', '[link](/p "a $b")' + span, 2, 1, 3, '[link](/p)' + span],
+    ['after a dollar sign in an autolink', '<https://e.com/$a>' + span, 2, 1, 3, 'https://e.com/$a' + span],
+    ['after a dollar sign in an email\'s autolink', '<x.$b@e.com>' + span, 2, 1, 3, '[x.$b\\@e.com](mailto:x.$b@e.com)' + span],
+    ['after a dollar sign in a bare URL', 'https://e.com/$a' + span, 2, 1, 3, 'https://e.com/$a' + span],
+    // Nor one in a citation, which the citation rule reads first; Word
+    // gets a paragraph for the key no bibliography has
+    ['after a dollar sign in a citation\'s prefix', '[see $x @key]' + span, 3, 1, 3, '[see \\$x @key]' + span + '\n\nCitation data for @key was not found in the bibliography file.'],
+    ['after a dollar sign in a citation\'s locator', '[@key, p. $3]' + span, 3, 1, 3, '[@key, p. $3]' + span + '\n\nCitation data for @key was not found in the bibliography file.'],
+    // A reference definition is no paragraph's text
+    ['after a reference definition with dollar signs', '[link]: /$path "a $b"\n[link]' + span, 2, 1, 3, '[link](/$path)' + span],
+    // Nor one that pairs with a dollar sign past a blank line, where it
+    // would open an equation over paragraphs, as one in a highlight's
+    // text, CDATA, an image's path with a space, or a citation's key
+    ['after a dollar sign in a highlight', '==cost $==' + span, 2, 1, 3, '==cost \\$==' + span],
+    ['after a dollar sign in CDATA', 'A <![CDATA[$]]>' + span, 2, 1, 3, 'A \\<![CDATA[\\$]]>' + span],
+    ['after a dollar sign in an image\'s path with a space', '![i](a $b.png)' + span, 2, 1, 3, '![i](a $b.png)' + span],
+    ['after a dollar sign in a citation\'s key', '[@$x]' + span, 3, 1, 3, '[@$x]' + span + '\n\nCitation data for @$x was not found in the bibliography file.'],
+    // A citation's key may start with a [, which pairs with a dollar sign
+    // in the span's first line
+    ['after a dollar sign in a citation\'s key after a [', '[@[@$x] {++a $\n\nb++}', 3, 0, 3, '[@[@$x] {++a $\n\nb++}\n\nCitation data for @[@$x was not found in the bibliography file.'],
+    // Nor one that pairs with a dollar sign in the span's first line
+    ['after a dollar sign in a highlight, with an equation in the span', '==cost $== {++one $\\alpha$\n\ntwo++}', 2, 1, 3, '==cost \\$== {++one $\\alpha$\n\ntwo++}'],
+    // Nor one in a quote before a line without a >, a paragraph of its own
+    // in export, which the preview read as the quote's
+    ['after a dollar sign in a quote, before a line without a >', '> A $\n{++one $\\alpha$\n\ntwo++}', 5, 1, 3, '> A $\n{++one $\\alpha$\n\ntwo++}'],
+  ])('reads a span %s as before', async (_name, md, paragraphs, equations, revisions, expected) => {
+    const once = await exported(md);
+    expect(once.paragraphs).toHaveLength(paragraphs);
+    expect(once.equations).toBe(equations);
+    expect(once.revisions).toBe(revisions);
+    expect(once.placeholder).toBe(false);
+    expect(once.markdown).toBe(expected);
+    expect((await exported(expected)).markdown).toBe(expected);
+    const html = renderWithPlugin(md);
+    expect(html).not.toContain('\uE000');
+    expect(html).toContain('<ins class="manuscript-markdown-addition">');
+  });
+
+  it('reads a span after an escaped [ before a dollar sign as before', async () => {
+    // Where the scan read [see $x @key] as a citation, its y $ opened an
+    // equation with the span's first dollar sign. Import writes the [
+    // without its backslash, as on main, so the next trip reads a citation
+    const md = '\\[see $x @key] y $ {++one $\\alpha$\n\ntwo++}';
+    const once = await exported(md);
+    expect(once.paragraphs).toHaveLength(2);
+    expect(once.equations).toBe(2);
+    expect(once.revisions).toBe(3);
+    expect(once.placeholder).toBe(false);
+    expect(once.markdown).toBe('[see $x @key] y$ {++one $\\alpha$\n\ntwo++}');
+    expect(renderWithPlugin(md)).toContain('<ins class="manuscript-markdown-addition">');
+  });
+
+  it.each([
+    ['a blank line in text, as a space for each line end', 'A <!-- $ {++ --> b\n\nc ++} d.', 'b  c', 'b  c'],
+    ['a line end in text, as a space', 'A <!-- $ {++ --> b\nc ++} d.', 'b c', 'b c'],
+    ['a blank line in a code span, as a space', 'A <!-- $ {++ --> `b\n\nc` ++} d.', 'b c', '`b c`'],
+    ['a blank line in an equation, as itself', 'A <!-- $ {++ --> $b\n\nc$ ++} d.', 'b\n\nc', '$b\n\nc$'],
+  ])('writes %s, not as its placeholder, where no rule read it', async (_name, md, word, markdown) => {
+    // The opener in the comment, which markdown-it reads as raw HTML, joined
+    // the lines, and Word showed PARA or LINE, and the preview the
+    // placeholder
+    const once = await exported(md);
+    expect(once.paragraphs).toEqual(['A ​&lt;!-- $ {++ --&gt; ' + word + ' ++} d.']);
+    expect(once.placeholder).toBe(false);
+    const expected = 'A <!-- $ {++ --> ' + markdown + ' +\\+} d.';
+    expect(once.markdown).toBe(expected);
+    expect((await exported(expected)).markdown).toBe(expected);
+    expect(renderWithPlugin(md)).not.toContain('');
+  });
+
+  it('writes the line ends of an HTML block a span\'s joined lines make, not their placeholder', async () => {
+    // The joined line is a whole tag, which markdown-it reads as an HTML
+    // block, and Word showed PARA in its text
+    const md = '> <b t="a {==\n\nx==}">';
+    const once = await exported(md);
+    expect(once.paragraphs.filter(Boolean)).toEqual(['&lt;b t="a {==x==}"&gt;']);
+    expect(once.placeholder).toBe(false);
+    const expected = '> &lt;b t="a \\{\\==\\\n> \\\n> x\\==}"&gt;';
+    expect(once.markdown).toBe(expected);
+    expect((await exported(expected)).markdown).toBe(expected);
+    expect(renderWithPlugin(md)).toContain('<b t="a {==\n\nx==}">');
+  });
+
+  it('reads the equations at many openers in linear time', () => {
+    // A paragraph of many lines, many openers before its last dollar sign,
+    // and many paragraphs, each read again from its start
+    const time = (count: number) => {
+      const text = 'A $x^{++}$ B <b title="$">c</b> [l](/$p "$q") <https://e.com/$r> [see $c @k] {--d $y$\ne--} $z {==f==}\n'.repeat(count) + '{--g--} '.repeat(count) + '$h$\n\n'
+        + 'A $x^{++}$ B {--d--}\n\n'.repeat(count) + 'i ++}\n';
+      return fastestRun(() => preprocessCriticMarkup(text));
+    };
+    expect(time(16_000) / time(4_000)).toBeLessThan(8);
+  }, 30000);
+});

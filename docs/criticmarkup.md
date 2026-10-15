@@ -70,6 +70,8 @@ A pipe table's cell holds one line, so a change over a line end can't start in o
 
 An opener in raw HTML in a paragraph's or a heading's text, as in a comment or a tag's attribute, is the HTML's, so it starts no change: in `z <!-- {++ -->`, the `{++` is the comment's, and `{++real++}` on the next line is a change of its own. Where the HTML could be in an equation, which reads CriticMarkup in it, with a dollar sign before it and another after it anywhere in the document, the opener is read as before.
 
+A change that opens in an equation ends in it, as `$a{++b++}$` does. An opener whose closer is past the end of its equation is the equation's text: in `$x^{++}$`, then a blank line and `C ++} D.`, the `{++` is the superscript's, and the two paragraphs stay apart. This holds for an equation that ends in its paragraph, where nothing before it in the paragraph is a link, a citation, a tag, code, a highlight, an escape, a URL, a quote or other markup that is read before the equation. Elsewhere, an opener is read as before. So a change between dollar signs over a blank line, as `$x {++a`, a blank line and `b++}$`, keeps the lines together.
+
 ## Nesting Rules
 
 - CriticMarkup patterns **cannot be nested** within the same type

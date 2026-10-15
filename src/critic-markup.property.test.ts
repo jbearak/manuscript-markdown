@@ -233,8 +233,10 @@ describe('Property 6: Streaming Preprocessor Equivalence', () => {
   ).map(parts => parts.join(' '));
 
   test('streaming builder matches original slice-and-rebuild', () => {
+    // The reference reads no equation, an opener in which pairs only with a
+    // closer in it (see equationsAtOpeners in critic-markup.ts)
     fc.assert(
-      fc.property(textGen.filter(text => !hasReferenceHtmlBlock(text)), (text) => {
+      fc.property(textGen.filter(text => !hasReferenceHtmlBlock(text) && !text.includes('$')), (text) => {
         expect(preprocessCriticMarkup(text)).toBe(preprocessCriticMarkupReference(text));
       }),
       { numRuns: 200 }

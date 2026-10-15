@@ -1,7 +1,8 @@
 import type MarkdownIt from 'markdown-it';
+import type StateCore from 'markdown-it/lib/rules_core/state_core.mjs';
 import type Token from 'markdown-it/lib/token.mjs';
 import { type CodeRegion, computeMarkdownRegions, isInsideCodeRegion, mergeRegions } from './code-regions';
-import { computeDollarMathRegions, DOCX_DOLLAR_MATH_OPTIONS, isEscapedAt } from './math-delimiters';
+import { computeDollarMathRegions, DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-delimiters';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines } from './line-map';
 
 // Placeholder used to preserve paragraph breaks inside CriticMarkup spans.
@@ -59,6 +60,66 @@ export function criticBreaksInRawHtml(md: MarkdownIt): void {
     }
   };
   md.core.ruler.after('inline', 'critic_breaks_in_raw_html', state => restore(state.tokens));
+}
+
+/** Put back the line breaks preprocessCriticMarkup wrote as placeholders
+ * that no rule read, which a span's would have, as where it joined the
+ * paragraphs around an opener markdown-it read in raw HTML, as in
+ * z <!-- $ {++ --> a, a blank line and b ++}, and where Word export wrote
+ * the placeholder in Word's text and the preview in its HTML, and in a
+ * quote, > <b t="a {==, a blank line and x==}">, whose joined lines are an
+ * HTML block: a text token's as a softbreak, two for a blank line, as a
+ * placeholder at a token's start is read (see paraPlaceholderRule), a code
+ * span's as spaces, as markdown-it reads its line ends, and another
+ * token's, as an equation's or an HTML block's, as the line ends. Preview
+ * and Word export must install the same rule, last. */
+export function criticBreaksLeftOver(md: MarkdownIt): void {
+  const restore = (state: StateCore, tokens: Token[]): Token[] => {
+    let restored: Token[] | undefined;
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
+      if (token.children) token.children = restore(state, token.children);
+      const breaks = token.content.includes(CRITIC_BREAK_SENTINEL) ? [...iterateCriticBreaks(token.content)] : [];
+      if (breaks.length > 0 && token.type !== 'text') {
+        token.content = token.type === 'code_inline'
+          ? token.content.replace(CRITIC_BREAK_PLACEHOLDER_RE, ' ')
+          : restoreCriticLineBreaks(token.content);
+      }
+      if (breaks.length === 0 || token.type !== 'text') {
+        restored?.push(token);
+        continue;
+      }
+      restored ??= tokens.slice(0, index);
+      const content = token.content;
+      const push = (type: string, text: string) => {
+        const piece = new state.Token(type, type === 'softbreak' ? 'br' : '', 0);
+        piece.level = token.level;
+        piece.content = text;
+        restored!.push(piece);
+      };
+      let last = 0;
+      for (const found of breaks) {
+        if (found.index > last) {
+          if (last === 0) {
+            token.content = content.slice(0, found.index);
+            restored.push(token);
+          } else {
+            push('text', content.slice(last, found.index));
+          }
+        }
+        for (let line = 0; line < found.lineCount; line++) push('softbreak', '');
+        last = found.index + found.length;
+      }
+      if (last < content.length) push('text', content.slice(last));
+    }
+    return restored ?? tokens;
+  };
+  md.core.ruler.push('critic_breaks_left_over', state => {
+    for (const token of state.tokens) {
+      if (token.children) token.children = restore(state, token.children);
+      else if (token.content.includes(CRITIC_BREAK_SENTINEL)) token.content = restoreCriticLineBreaks(token.content);
+    }
+  });
 }
 
 export type CriticBreakKind = 'line' | 'paragraph';
@@ -146,6 +207,9 @@ interface CriticBlockAnalysis {
   // where an opener is text, as markdown-it reads the HTML first, but whose
   // code and equations the inert regions' readers read as text's
   inlineHtmlRegions: CodeRegion[];
+  // The lines of each paragraph's, heading's and table row's text, which
+  // markdown-it's inline parse reads on its own (see equationsAtOpeners)
+  inlineBlocks: CodeRegion[];
 }
 
 /** `tableRegions` but for those a dollar math span with a line end
@@ -256,11 +320,12 @@ function computeCriticBlockAnalysis(
   content: string,
   includeLists = false,
 ): CriticBlockAnalysis | CriticLeadingBreakAnalysis {
-  const { codeRegions, htmlRegions, listRegions, tableRegions, inlineHtmlRegions } = computeMarkdownRegions(content, {
+  const { codeRegions, htmlRegions, listRegions, tableRegions, inlineHtmlRegions, inlineBlocks } = computeMarkdownRegions(content, {
     html: 'all',
     includeLists,
     includeTables: true,
     inlineHtml: true,
+    inlineBlocks: true,
   });
   const inertRegions = mergeRegions([...codeRegions, ...htmlRegions]);
   const analysis: CriticBlockAnalysis = {
@@ -268,6 +333,7 @@ function computeCriticBlockAnalysis(
     inertRegions,
     tableRegions: tablesOutsideMath(content, tableRegions, inertRegions),
     inlineHtmlRegions: outsideDollars(content, inlineHtmlRegions),
+    inlineBlocks,
   };
   return includeLists ? { ...analysis, listRegions } : analysis;
 }
@@ -605,10 +671,12 @@ function findNextCriticOpener(src: string, pos: number): CriticOpener | undefine
  *  opener in a table's cell pairs only with a closer on its line (see
  *  isInTableCell). A span with a line end, whose lines preprocessing joins,
  *  takes the tables it reaches out of their rows, so the openers after it
- *  are read with the end of the last. */
+ *  are read with the end of the last. An opener in an equation pairs only
+ *  with a closer in it (see equationsAtOpeners). */
 function* criticSpans(analysis: CriticBlockAnalysis): IterableIterator<{ start: number; contentStart: number; closeIdx: number }> {
   const { source, inertRegions, tableRegions, inlineHtmlRegions } = analysis;
   const closers = criticCloserSearch(source);
+  const equations = equationsAtOpeners(analysis);
   let searchFrom = 0;
   // The end of the line of the last opener read, and of the last span
   // with a line end
@@ -622,10 +690,12 @@ function* criticSpans(analysis: CriticBlockAnalysis): IterableIterator<{ start: 
     searchFrom = contentStart;
     if (isInsideCodeRegion(candidate.index, inertRegions) || isInsideCodeRegion(candidate.index, inlineHtmlRegions)
       || isEscapedAt(source, candidate.index)) continue;
+    const equation = equations.at(candidate.index);
     const closeIdx = candidate.nested
       ? closers.matching(contentStart)
       : closers.next(candidate.close, contentStart);
     if (closeIdx === -1) continue;
+    if (equation && closeIdx + candidate.close.length > equation.end) continue;
     if (candidate.open === '{~~') {
       const separatorPos = closers.next('~>', contentStart);
       if (separatorPos === -1 || separatorPos >= closeIdx) continue;
@@ -639,8 +709,100 @@ function* criticSpans(analysis: CriticBlockAnalysis): IterableIterator<{ start: 
     yield { start: candidate.index, contentStart, closeIdx };
     if (overLines) joinedEnd = closeIdx;
     searchFrom = closeIdx + candidate.close.length;
+    equations.past(searchFrom);
   }
 }
+
+/** The equation export's inline parse reads an opener in (see mathRule in
+ *  md-to-docx.ts), for the openers of criticSpans in order. The dollar math
+ *  pairs a dollar sign with the next over any line end, as preprocessing's
+ *  placeholders, so an opener in an equation, as in $x^{++}$, paired with
+ *  a closer past it, in the next paragraph's text or its equation, joined
+ *  the paragraphs, and the equation, which ends first, kept the placeholder,
+ *  which went into Word's text. So such an opener starts no span. A span in
+ *  an equation, as $a{++b++}$, is the equation's change, and joins its
+ *  lines, which the equation holds.
+ *  The equations are read only where this reads them as markdown-it does,
+ *  and an opener is read as in none elsewhere, as before: an equation
+ *  counts only if the text before it from its paragraph's start, or a
+ *  heading's or a table row's, holds no construct markdown-it may read
+ *  first, whose text may hold a dollar sign (see UNMODELED), nor a dollar
+ *  sign that opens one past the paragraph's end, and if it ends in that
+ *  paragraph. Then markdown-it reads each dollar sign there as
+ *  findDollarMathAt does, and the equation, whatever it holds. A paragraph
+ *  that starts in a span before is that span's paragraph's, whose text
+ *  holds its {. */
+function equationsAtOpeners({ source, inlineBlocks }: CriticBlockAnalysis): {
+  at(offset: number): { start: number; end: number } | undefined;
+  past(offset: number): void;
+} {
+  // The next paragraph to read, the end of the last, where it's read to,
+  // or -1 past a construct, the first dollar sign and construct from there,
+  // or the source's end, and the last equation read
+  let next = 0;
+  let paragraphEnd = -1;
+  let from = -1;
+  let dollar = -1;
+  let construct = -1;
+  let equation: { start: number; end: number } | undefined;
+  return {
+    at(offset) {
+      while (next < inlineBlocks.length && inlineBlocks[next].start <= offset) {
+        from = inlineBlocks[next].start;
+        paragraphEnd = inlineBlocks[next++].end;
+        equation = undefined;
+      }
+      if (equation && equation.end > offset) return equation;
+      equation = undefined;
+      while (from !== -1 && from < offset) {
+        if (dollar < from) {
+          dollar = source.indexOf('$', from);
+          if (dollar === -1) dollar = source.length;
+        }
+        if (construct < from) {
+          UNMODELED.lastIndex = from;
+          construct = UNMODELED.exec(source)?.index ?? source.length;
+        }
+        const to = Math.min(dollar, offset);
+        if (construct < to) {
+          from = -1;
+          break;
+        }
+        if (to === offset) {
+          from = offset;
+          break;
+        }
+        const match = findDollarMathAt(source, to, DOCX_DOLLAR_MATH_OPTIONS);
+        if (match?.kind !== 'math') {
+          from = to + 1;
+        } else if (match.end > paragraphEnd) {
+          // A span after may join the paragraphs to its end
+          from = -1;
+          break;
+        } else {
+          from = match.end;
+          if (match.end > offset) return equation = match;
+        }
+      }
+      return undefined;
+    },
+    // After a span, whose lines it joins, so a paragraph that starts in it
+    // is its paragraph's
+    past(offset) {
+      while (next < inlineBlocks.length && inlineBlocks[next].start < offset) paragraphEnd = inlineBlocks[next++].end;
+    },
+  };
+}
+
+/** What markdown-it may read before the math rule reads a dollar sign in it
+ *  or after it: a link, an image or a citation's bracket, a footnote's, a
+ *  tag, a comment or an autolink, a highlight, a code span, an escape, a
+ *  URL, an email, CriticMarkup, and a table's cell, which is read on its
+ *  own. And a quote, whose lines without a > export reads as a paragraph
+ *  of their own (see deLazifyBlockquotesWithLines in block-preprocess.ts),
+ *  where the parse that reads the paragraphs here reads them as the
+ *  quote's. */
+const UNMODELED = /[[\]<>`\\@{}!|]|==|:\/\/|mailto:|www\./gi;
 
 /** The spans of criticSpans whose lines preprocessing joins, those with a
  *  line end, in order */

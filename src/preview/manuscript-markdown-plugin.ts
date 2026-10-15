@@ -12,6 +12,7 @@ import {
   LINE_PLACEHOLDER,
   criticBreaksEndLinks,
   criticBreaksInRawHtml,
+  criticBreaksLeftOver,
   criticCloserSearchOf,
   hasCriticBreak,
   iterateCriticBreaks,
@@ -2396,6 +2397,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
     };
     citationsAsText(state.tokens);
   });
+  md.use(criticBreaksLeftOver);
 
   // Register renderers for each Manuscript Markdown token type
   for (const pattern of patterns) {
