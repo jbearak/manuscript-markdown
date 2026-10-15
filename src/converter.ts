@@ -15383,6 +15383,15 @@ function buildMarkdownOnce(
     return Math.max(1, blockquotePostContentBlankLines?.get(pendingPostContentGroupIndex) ?? 1);
   }
 
+  /** Before a list, a heading or code: right after a quote, the blank lines
+   *  the source had there, which export wrote an empty paragraph for each
+   *  of, or else one. None comes back as one, as export writes one for a
+   *  block right after a quote's line */
+  function separatorAfterQuote(): string {
+    const count = pendingPostContentGroupIndex === undefined ? undefined : blockquotePostContentBlankLines?.get(pendingPostContentGroupIndex);
+    return '\n' + '\n'.repeat(count !== undefined && count >= 1 ? count : 1);
+  }
+
   // Before a quote group with no blank line before it, after another. Where
   // it's the shallower, in the same list item or none, the source had a
   // line that ended the deeper one's paragraph, as a bare >, without which
@@ -15837,7 +15846,7 @@ function buildMarkdownOnce(
         if (incomingRecorded) {
           output.push(incomingSep!);
         } else if (output.length > 0) {
-          output.push('\n\n');
+          output.push(separatorAfterQuote());
         }
         endListContext();
         lastAlertParagraphKey = undefined;
@@ -16052,6 +16061,8 @@ function buildMarkdownOnce(
           } else {
             output.push('\n\n');
           }
+        } else if (!item.blockquoteLevel && (item.headingLevel || item.listMeta)) {
+          output.push(separatorAfterQuote());
         } else {
           output.push('\n\n');
         }
