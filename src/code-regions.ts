@@ -8,6 +8,7 @@ import MarkdownIt from 'markdown-it';
 import { HTML_OPEN_CLOSE_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import type Token from 'markdown-it/lib/token.mjs';
 import blockquote from 'markdown-it/lib/rules_block/blockquote.mjs';
+import { parseGfmAlertMarker } from './gfm';
 import { commentEnds } from './inline-html-comments';
 import { normalizeNewlines } from './newlines';
 
@@ -106,6 +107,17 @@ const QUOTE_MARKERS_RE = /^(?: {0,3}> ?)+/;
  *  CriticMarkup span or a definition, as a lazy line export keeps in a
  *  quote must (see keepsLazyLine) */
 const PLAIN_LINE_RE = /^ {0,3}(?![-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|[#>`~<|{[$\\:=_!*-])\S/;
+/** A line that starts with emphasis, *a* or _a_, an equation, $a$, a
+ *  citation, [@a], or a note's reference, [^1], which starts no block
+ *  either, but for a thematic break, or a definition, which
+ *  holdsNoLineBreak keeps out */
+const MARKUP_START_RE = /^ {0,3}(?:[*_](?![ \t]|$)|\$(?!\$)|\[(?:-?@|\^[\w-]+\]))/;
+const THEMATIC_BREAK_RE = /^ {0,3}([*_])(?:[ \t]*\1){2,}[ \t]*$/;
+/** Whether `text` is a line of plain text (see PLAIN_LINE_RE), or one
+ *  that starts with such markup */
+function isPlainLine(text: string): boolean {
+	return PLAIN_LINE_RE.test(text) || MARKUP_START_RE.test(text) && !THEMATIC_BREAK_RE.test(text);
+}
 /** Whether `text` ends in a line break: a \ that isn't escaped, an odd
  *  number of them, or two spaces or more after text, but not after a \
  *  that escapes the first */
@@ -124,35 +136,67 @@ function endsInLineBreak(text: string): boolean {
  *  break, or split a table's row into cells, where a \ at its end is a
  *  cell's text */
 const NO_LINE_BREAK_RE = /[<`$[\]|]/;
+/** An equation that ends on its line, $a$, as export reads one (see
+ *  findDollarMathAt): its $ after no word, $ or \, its text starting with
+ *  no digit, as a sum of money does, and holding no $ but an escaped one's
+ *  \ before it, nor CriticMarkup's openers or closers, nor what
+ *  NO_LINE_BREAK_RE matches but a < that opens no HTML, and its last $
+ *  before no word or $ */
+const LINE_MATH_RE = /(?<![\w$\\])\$(?!\d)(?![^$]*?(?:\{(?:\+\+|--|~~|==|>>|#)|(?:\+\+|--|~~|==|<<)\}))(?:[^$\\`<[\]|]|<(?![A-Za-z/!?])|\\[^$`<[\]|])+\$(?![\w$])/g;
+/** Brackets that end on their line, with nothing NO_LINE_BREAK_RE matches
+ *  between them, and no ( after them that a link's may be, nor a
+ *  definition's : */
+const LINE_BRACKETS_RE = /\[([^[\]<`$|]*)\](?![(:])/g;
+/** What such brackets hold where they're a citation's, [@a] or [see @a,
+ *  p. 1], or a note's reference's, [^1] */
+const CITATION_OR_NOTE_RE = /^\^[\w-]+$|(?:^|\s)-?@/;
+
+/** Whether `text` may open what NO_LINE_BREAK_RE says, past an equation,
+ *  a citation or a note's reference that ends on its line */
+function holdsNoLineBreak(text: string): boolean {
+	if (!NO_LINE_BREAK_RE.test(text)) return false;
+	return NO_LINE_BREAK_RE.test(text.replace(LINE_MATH_RE, ' ')
+		.replace(LINE_BRACKETS_RE, (brackets, inner: string) => CITATION_OR_NOTE_RE.test(inner) ? ' ' : brackets));
+}
 
 /** Whether export keeps line `at` of `lines` on a quote's paragraph, where
  *  markdown-it reads it lazily, and export would end the quote before it
  *  (see deLazifyBlockquotesWithLines in block-preprocess.ts): a line of
- *  plain text after a quote's line of plain text that ends in a line break,
- *  as markdown-it reads it, or after a line export keeps so, `kept`. Only
- *  where a blank line or the end follows the lines of plain text in a row
- *  from it: any other line may go on the paragraph, or underline it as a
- *  setext heading's text, which a lazy line can't be. Not where a line of
- *  the quote's paragraph or of those may open HTML, a code span, an
- *  equation or a link, which may go on past a line's end, or holds a |, as
- *  a table's row does, so that the spaces or \ are no line break */
+ *  plain text (see isPlainLine) after a quote's line of plain text that
+ *  ends in a line break, as markdown-it reads it, or after a line export
+ *  keeps so, `kept`. Only where a blank line or the end follows the lines
+ *  of plain text in a row from it: any other line may go on the paragraph,
+ *  or underline it as a setext heading's text, which a lazy line can't be.
+ *  Not where a line of the quote's paragraph, past an alert's marker, or of
+ *  those may open HTML, a code span, an equation or a link, which may go on
+ *  past a line's end, or holds a |, as a table's row does, so that the
+ *  spaces or \ are no line break (see holdsNoLineBreak) */
 export function keepsLazyLine(lines: readonly string[], at: number, kept: boolean): boolean {
-	if (!PLAIN_LINE_RE.test(lines[at])) return false;
+	if (!isPlainLine(lines[at])) return false;
 	if (kept) return true;
 	if (at === 0 || !QUOTE_LINE_RE.test(lines[at - 1])) return false;
-	const text = lines[at - 1].replace(QUOTE_MARKERS_RE, '');
-	if (!PLAIN_LINE_RE.test(text) || !endsInLineBreak(text)) return false;
+	const text = quoteLineText(lines, at - 1);
+	if (!isPlainLine(text) || !endsInLineBreak(text)) return false;
 	// Nor where the quote's paragraph, from its first line, may hold one
 	for (let start = at - 1; start >= 0 && QUOTE_LINE_RE.test(lines[start]); start--) {
-		const own = lines[start].replace(QUOTE_MARKERS_RE, '');
+		const own = quoteLineText(lines, start);
 		if (own.trim() === '') break;
-		if (NO_LINE_BREAK_RE.test(own)) return false;
+		if (holdsNoLineBreak(own)) return false;
 	}
 	let end = at;
-	for (; end < lines.length && PLAIN_LINE_RE.test(lines[end]); end++) {
-		if (NO_LINE_BREAK_RE.test(lines[end])) return false;
+	for (; end < lines.length && isPlainLine(lines[end]); end++) {
+		if (holdsNoLineBreak(lines[end])) return false;
 	}
 	return end === lines.length || lines[end].trim() === '';
+}
+
+/** A quote's line `at` of `lines` past its markers, and past an alert's
+ *  marker where it's the quote's first line, which is no link, and which
+ *  export takes as the alert's */
+function quoteLineText(lines: readonly string[], at: number): string {
+	const text = lines[at].replace(QUOTE_MARKERS_RE, '');
+	if (at > 0 && QUOTE_LINE_RE.test(lines[at - 1])) return text;
+	return parseGfmAlertMarker(text)?.rest ?? text;
 }
 
 const HTML_COMMENT_ONLY_RE = /^<!--[\s\S]*?-->\s*$/;

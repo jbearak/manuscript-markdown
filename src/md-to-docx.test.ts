@@ -3878,6 +3878,71 @@ describe('List blockquote round-trip', () => {
     expect(await roundTripBody(back)).toBe(back);
   });
 
+  const bibtex = '@article{doe2020, author={Doe, Jane}, title={T}, journal={J}, year={2020}}';
+  /** `md` after a trip, and each of Word's paragraphs on the trip and on
+   *  the next, as its style and its text, an equation's too, with a | for
+   *  a line break */
+  async function trips(md: string): Promise<{ back: string; first: string[][]; second: string[][] }> {
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const paragraphs = async (docx: Uint8Array) => {
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      return [...xml.matchAll(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g)].map(([p]) => [/<w:pStyle w:val="(\w+)"/.exec(p)?.[1] ?? '',
+        [...p.matchAll(/<([wm]):t(?: [^>]*)?>([^<]*)<\/\1:t>|<w:br\/>/g)].map(t => t[2] ?? '|').join('')]);
+    };
+    const first = (await convertMdToDocx(md, { bibtex })).docx;
+    const once = (await convertDocx(first)).markdown;
+    const second = (await convertMdToDocx(once, { bibtex })).docx;
+    expect((await convertDocx(second)).markdown).toBe(once);
+    return { back: once.replace(/^---\n[\s\S]*?\n---\n?/, '').trim(), first: await paragraphs(first), second: await paragraphs(second) };
+  }
+
+  // So does one that holds, or starts with, emphasis, or an equation, a
+  // citation or a note's reference that ends on its line, and one after an
+  // alert's line, whose marker is no link's text
+  it.each([
+    ['emphasis', '> a\\\n**b** c', '> a\\\n> **b** c', 'GitHubBlockquote a|b c'],
+    ['emphasis, on a line after the lazy line', '> a\\\ne\n*f*', '> a\\\n> e *f*', 'GitHubBlockquote a|e f'],
+    ['an equation', '> a\\\n$x$ b', '> a\\\n> $x$ b', 'GitHubBlockquote a|x b'],
+    ['an equation with braces and a <', '> a\\\n$x^{2} < 1$ b', '> a\\\n> $x^2 < 1$ b', 'GitHubBlockquote a|x2 &lt; 1 b'],
+    ['a citation', '> a\\\nb [@doe2020]', '> a\\\n> b [@doe2020]', 'GitHubBlockquote a|b (Doe, 2020)'],
+    ['a citation, first', '> a\\\n[@doe2020] says', '> a\\\n> [@doe2020] says', 'GitHubBlockquote a|(Doe, 2020) says'],
+    ['a note\'s reference', '> a\\\nb[^1]\n\n[^1]: n', '> a\\\n> b[^1]\n\n[^1]: n', 'GitHubBlockquote a|b'],
+    ['each, on the quote\'s line', '> **a** $x$ [@doe2020][^1]\\\nb\n\n[^1]: n', '> **a** $x$ [@doe2020][^1]\\\n> b\n\n[^1]: n', 'GitHubBlockquote a x (Doe, 2020)|b'],
+    ['an alert', '> [!NOTE]\n> a\\\nb', '> [!NOTE]\n> a\\\n> b', 'GitHubNote \u203B Note| a|b'],
+    ['an alert, after its marker', '> [!NOTE] a\\\nb', '> [!NOTE] a\\\n> b', 'GitHubNote \u203B Note|a|b'],
+  ])('keeps a lazy line after a line break, with %s, in the quote', async (_name, md, back, quote) => {
+    const trip = await trips(md);
+    // Each paragraph with text, but a bibliography's, is the quote's
+    expect(trip.first.filter(([style, text]) => text.trim() && style !== 'Bibliography').map(([style, text]) => style + ' ' + text)).toEqual([quote]);
+    expect(trip.back).toBe(back);
+    expect(trip.second).toEqual(trip.first);
+    expect((await trips(back)).back).toBe(back);
+  });
+
+  // But for a list item, a heading, a thematic break, display math or a
+  // table's row, which a line that starts with a * or a $ or holds a |
+  // may be, an equation or a citation that goes on past its line, or
+  // CriticMarkup or HTML in an equation: as before
+  it.each([
+    ['a | after emphasis', '> a\\\n**b** | c', '> a\\\\\n**b** | c'],
+    ['a list item', '> a\\\n* b', '> a\\\\\n\n- b'],
+    ['a heading', '> a\\\n# b', '> a\\\\\n\n# b'],
+    ['a thematic break', '> a\\\n***', '> a\\\\\n---'],
+    ['display math', '> a\\\n$$\nx\n$$', '> a\\\\\n$$\nx\n$$'],
+    ['an equation that goes on past its line', '> a\\\nb $x\nc$', '> a\\\\\nb $x\nc$'],
+    ['a sum of money', '> a\\\nb $5 and $6', '> a\\\\\nb $5 and $6'],
+    ['CriticMarkup in an equation', '> a\\\nb $x {++y++}$ c', '> a\\\\\nb $x {++y++}$ c'],
+    ['HTML in an equation', '> a\\\nb $a<b$ c', '> a\\\\\nb $a<b$ c'],
+    ['a citation that goes on past its line', '> a\\\nb [@doe2020,\np. 5]', '> a\\\\\nb [@doe2020, p. 5]'],
+    ['an alert\'s line with a link that goes on past it', '> [!NOTE]\n> [a](u "t\\\nb")', '> [!NOTE]\n> \\[a](u "t\\\\\nb")'],
+  ])('keeps a line after a quote\'s line break with %s as before', async (_name, md, back) => {
+    const trip = await trips(md);
+    expect(trip.back).toBe(back);
+    expect(trip.second).toEqual(trip.first);
+    expect((await trips(back)).back).toBe(back);
+  });
+
   it.each([
     ['after a quote\'s line with no line break', '> b gamma\nc d', '> b gamma\nc d'],
     ['a quote\'s line, after a line break', '> b gamma\\\n> c d', '> b gamma\\\n> c d'],
@@ -3902,7 +3967,7 @@ describe('List blockquote round-trip', () => {
     ['a table\'s row, then an indented line', '> a | b\n> --- | ---\n> c | d\\\ne\n    f', 'e f'],
     ['a line with a |', '> c | d\\\ne', '> c | d\\\\\ne'],
     ['an indented line after the lazy line', '> a\\\ne\n    f', '> a\\\\\ne f'],
-    ['emphasis on a line after the lazy line', '> a\\\ne\n*f*', '> a\\\\\ne *f*'],
+    ['a # on a line after the lazy line', '> a\\\ne\n#f', '> a\\\\\ne #f'],
   ])('keeps a line after a quote\'s line in %s as before', async (_name, md, back) => {
     expect(await roundTripBody(md)).toBe(back);
     expect(await roundTripBody(back)).toBe(back);
