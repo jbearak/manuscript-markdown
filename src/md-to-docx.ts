@@ -9461,6 +9461,19 @@ function unstyledInStyleBlock(token: MdToken): boolean {
     || token.type === 'code_block' || token.type === 'table' || token.type === 'hr');
 }
 
+/** Whether the style block that opens at tokens[at] holds only blocks Word
+ *  can't give its style (see unstyledInStyleBlock), at least one, up to its
+ *  closing fence. Word has no paragraph of its style, so import drops its
+ *  fences, and writes those blocks as it would with none */
+function stylesNothing(tokens: MdToken[], at: number): boolean {
+  for (let j = at + 1; j < tokens.length; j++) {
+    const token = tokens[j];
+    if (token.customStyleClose && !isImplicitStyleClose(token)) return j > at + 1;
+    if (!unstyledInStyleBlock(token)) return false;
+  }
+  return false;
+}
+
 /** Whether `token`, a block after the closing fence of a block of code
  *  alone, is a paragraph of text, a list item, a heading or a quote */
 function followsCodeAlone(token: MdToken): boolean {
@@ -10497,11 +10510,11 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
 export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
   tokens = withQuoteCommentBodiesMerged(tokens);
   const omitsCommentBodies = commentBodiesOmitted(tokens);
-  // The block Word gets after the one at index ti
-  const nextBlock = (ti: number): MdToken | undefined => {
+  // The index of the block Word gets after the one at index ti
+  const nextBlockAt = (ti: number): number => {
     let next = ti + 1;
     while (next < tokens.length && (omitsCommentBodies(next, tokens[ti]) || isImplicitStyleClose(tokens[next]))) next++;
-    return tokens[next];
+    return next;
   };
   let body = '';
   // The empty paragraphs export writes to keep blocks apart, with no
@@ -10587,6 +10600,12 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // paragraph of its style (see recording), and writes the empty paragraph
   // after a code block for
   let codeAloneBefore: MdToken | undefined;
+  // A code block right before the opening fence of a style block that
+  // styles nothing, whose fences import drops (see stylesNothing), so it
+  // writes the block in it as right after the code. Not the last block of
+  // one a paragraph took the style of, which import closes with a fence
+  // there, after which the next export writes no empty paragraph
+  let codeBeforeUnstyled: MdToken | undefined;
   // The token before this one as import counts list blocks: a style fence
   // writes no paragraph, so import finds no boundary at one, and the lists
   // on either side of it are one block there (see listBlockPlaces)
@@ -10856,9 +10875,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     }
     const codeAcrossFence = codeBeforeFence && token.type === 'code_block';
     const codeAlone = codeAloneBefore;
+    const codeOverFence = codeBeforeUnstyled;
     if (!isStyleDirective(token)) {
       codeBeforeFence = false;
       codeAloneBefore = undefined;
+      codeBeforeUnstyled = undefined;
       // Not a section's fence or the bibliography's place, which Word gets
       // no paragraph of the block's for
       const marker = marksSectionOrBibliography(token);
@@ -11019,6 +11040,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // paragraph (see isStyleDirective).
     if (isStyleDirective(token)) {
       let closesCodeAlone = false;
+      // Whether the block open before this fence has a paragraph in its
+      // style, which import closes with a fence of its own after its last
+      // block, even where this one opens another with none
+      const closesStyled = !!styleBlock?.styled;
       if (token.customStyleOpen && frontmatter?.styles && !frontmatter.styles[token.customStyleOpen]) {
         // Validate that the style is declared in frontmatter
         state.warnings.push('Custom style "' + token.customStyleOpen + '" used in <!-- style: --> directive but not declared in frontmatter styles.');
@@ -11081,6 +11106,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       hiddenXml = hiddenXmlBefore;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       if (prevToken?.type === 'code_block') codeBeforeFence = true;
+      codeBeforeUnstyled = token.customStyleOpen && !closesStyled && prevToken?.type === 'code_block' && stylesNothing(tokens, ti) ? prevToken : undefined;
       // Only right after the fence that closes the block, a blank line
       // before what comes next, as one opening after it starts a block
       // import may write
@@ -11172,11 +11198,13 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // trip gives Word the same paragraphs. Not in a style block, where
     // import can write the block's fence between them, as it does before a
     // list where a template's style numbers paragraphs, after which the next
-    // export writes none
-    const codeBefore = prevToken?.type === 'code_block' ? prevToken : followsCodeAlone(token) ? codeAlone : undefined;
+    // export writes none. In one that styles nothing, though, import drops
+    // the fences (see stylesNothing), and writes the block in it as right
+    // after the code
+    const codeBefore = prevToken?.type === 'code_block' ? prevToken : codeOverFence ?? (followsCodeAlone(token) ? codeAlone : undefined);
     if (codeBefore && token.type !== 'code_block') {
       const needsSep = codeBefore.trailingBlankLine || (token.type === 'blockquote' && token.alertFirst)
-        || codeBefore === prevToken && !state.activeCustomStyle && followsCodeAfterBlankLine(token);
+        || (codeBefore === prevToken && !state.activeCustomStyle || codeBefore === codeOverFence) && followsCodeAfterBlankLine(token);
       if (needsSep) {
         body += separatorParagraph;
       }
@@ -11338,7 +11366,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // list, a quote in a list item keeps its spacing in the metadata alone.
     // An item that starts another list, as 1. y does after - x, gets the
     // empty paragraphs as after any quote.
-    const nextToken = nextBlock(ti);
+    const nextAt = nextBlockAt(ti);
+    const nextToken = tokens[nextAt];
     const nextLevel = nextToken?.level ?? 1;
     const listGoesOn = !!token.listContinuation && (nextToken?.type === 'list_item'
       ? nextLevel > token.listContinuation.level || openListOrdered[nextLevel - 1] === !!nextToken.ordered
@@ -11365,11 +11394,22 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       // item, which import writes at least one blank line before (see
       // blankLinesAfterListQuote), but for a comment or a fence, which it
       // writes as they were, or the empty paragraph of comment bodies that
-      // ends the list before another (see commentBodiesOmitted)
+      // ends the list before another (see commentBodiesOmitted). Past the
+      // opening fence of a style block that styles nothing, whose fences
+      // import drops (see stylesNothing), as it writes the block in it as
+      // right after the quote: a quote of no alert at the top level too,
+      // after a blank line, where this one ends at the top level in no list
+      // item, and any other in this quote, with no empty paragraph between.
+      // Not where this quote ends a block a paragraph took the style of,
+      // which import closes with a fence after it, as after code (see
+      // codeBeforeUnstyled)
+      const unstyled = !styleBlock?.styled && !!nextToken?.customStyleOpen && stylesNothing(tokens, nextAt);
+      const shownNext = unstyled ? tokens[nextAt + 1] : nextToken;
       let blankCount = state.blockquotePostContentBlankLines.get(token.blockquoteGroupIndex) ?? 0;
       if (blankCount === 0 && state.blockquotePostContentBlankLines.has(token.blockquoteGroupIndex)
-        && (['list_item', 'heading', 'code_block', 'table'].includes(nextToken?.type ?? '')
-          || !!token.listContinuation && (nextToken?.type === 'hr'
+        && (['list_item', 'heading', 'code_block', 'table'].includes(shownNext?.type ?? '')
+          || unstyled && !token.listContinuation && token.level === 1 && shownNext.type === 'blockquote' && shownNext.level === 1 && !shownNext.alertType
+          || !!token.listContinuation && (shownNext?.type === 'hr'
             || nextToken?.type === 'paragraph' && !isHiddenParagraph(nextToken) && !isCommentBodyParagraph(nextToken) && !isStyleDirective(nextToken)
               && !marksSectionOrBibliography(nextToken)))) {
         blankCount = 1;
