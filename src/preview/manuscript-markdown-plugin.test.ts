@@ -2408,6 +2408,65 @@ describe('Table numeric formatting preview', () => {
   });
 });
 
+// Import writes Word's highlight on part of an equation in {==...==} only at
+// an inline equation's top level, so the preview, which splits an inline
+// equation at CriticMarkup, gives KaTeX pieces that are each an equation. It
+// leaves display math to the host's renderer, markers and all, so import
+// writes none there
+describe('a highlight inside an equation, as import writes it', () => {
+  function render(markdown: string): string {
+    const md = new MarkdownIt({ html: true });
+    md.inline.ruler.after('escape', 'test_host_display_math', (state: any, silent: boolean) => {
+      if (state.src.slice(state.pos, state.pos + 2) !== '$$') return false;
+      const closePos = state.src.indexOf('$$', state.pos + 2);
+      if (closePos === -1) return false;
+      if (!silent) {
+        const token = state.push('test_host_display_math', 'math', 0);
+        token.content = state.src.slice(state.pos + 2, closePos);
+      }
+      state.pos = closePos + 2;
+      return true;
+    });
+    md.renderer.rules.test_host_display_math = (tokens, idx) => '<katex-display>' + escapeHtml(tokens[idx].content) + '</katex-display>';
+    md.renderer.rules.math_inline = (tokens, idx) => '<katex>' + escapeHtml(tokens[idx].content) + '</katex>';
+    md.use(manuscriptMarkdownPlugin);
+    return md.render(markdown);
+  }
+
+  /** Whether `latex` closes each brace it opens, as an equation does */
+  function whole(latex: string): boolean {
+    let depth = 0;
+    for (const [brace] of latex.matchAll(/\\.|[{}]/g)) {
+      if (brace === '{') depth++;
+      else if (brace === '}' && --depth < 0) return false;
+    }
+    return depth === 0;
+  }
+
+  const shapes = ['a{==b==}c', 'a{==b+c==}d', 'a{==\\frac{b}{c}==}d', 'a{===b==}c'];
+
+  it.each(shapes)('gives KaTeX whole equations for $%s$, and highlights its part', latex => {
+    const html = render('A $' + latex + '$ B.');
+    const pieces = [...html.matchAll(/<katex>([\s\S]*?)<\/katex>/g)].map(match => match[1]);
+    expect(pieces).toHaveLength(3);
+    for (const piece of pieces) expect(whole(piece)).toBe(true);
+    expect(html).toContain('<mark class="manuscript-markdown-highlight"><katex>');
+  });
+
+  // Why import writes none in a structure
+  it('gives KaTeX pieces that aren\'t equations for a highlight in a fraction', () => {
+    const pieces = [...render('A $\\frac{a}{{==b==}}$ B.').matchAll(/<katex>([\s\S]*?)<\/katex>/g)].map(match => match[1]);
+    expect(pieces.some(piece => !whole(piece))).toBe(true);
+  });
+
+  // Why import writes none in display math
+  it.each(shapes)('gives the host display math of %s with its markers as they are', latex => {
+    const html = render('$$\n' + latex + '\n$$');
+    expect([...html.matchAll(/<katex-display>([\s\S]*?)<\/katex-display>/g)].map(match => match[1])).toEqual(['\n' + latex + '\n']);
+    expect(html).not.toContain('<katex>');
+  });
+});
+
 describe('CriticMarkup inside inline equations', () => {
   it('recognizes a math opener preceded by an even run of backslashes', () => {
     const html = renderWithPlugin('\\\\$a{++b++}$');
