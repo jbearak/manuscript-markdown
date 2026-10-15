@@ -8515,6 +8515,54 @@ describe('A page or column break Word puts in a paragraph', () => {
   });
 });
 
+describe('A line break Word puts in the title', () => {
+  /** The Markdown import gives the export of `md` with `from` in its
+   *  document replaced by `to`, as a Word user edits it */
+  const imported = async (md: string, from: string, to: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain(from);
+    zip.file('word/document.xml', xml.replace(from, () => to));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+  /** The text of each Title paragraph in the export of `md` */
+  const titles = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<w:p\b(?:(?!<\/w:p>).)*?<w:pStyle w:val="Title"\/>.*?<\/w:p>/gs) ?? []).map(p => p.replace(/<[^>]+>/g, ''));
+  };
+  const md = '---\ntitle: one two\n---\n\nnext\n';
+  const BR = '<w:br/>';
+
+  // Its lines go in title lines of their own, as export writes each in a
+  // Title paragraph. Import wrote the break in the title as \, and export
+  // dropped the line after it
+  test.each([
+    ['between its words', '<w:t>one</w:t>' + BR + '<w:t>two</w:t>', 'title: one\ntitle: two\n', ['one', 'two']],
+    ['between its words, with spaces beside it', '<w:t xml:space="preserve">one </w:t>' + BR + '<w:t xml:space="preserve"> two</w:t>', 'title: one\ntitle: two\n', ['one', 'two']],
+    ['at its start', BR + '<w:t>one two</w:t>', 'title: one two\n', ['one two']],
+    ['at its end', '<w:t>one two</w:t>' + BR, 'title: one two\n', ['one two']],
+  ])('keeps the words %s', async (_name, to, frontmatter, lines) => {
+    const markdown = await imported(md, '<w:t>one two</w:t>', to);
+    expect(markdown).toContain('\n' + frontmatter + '---\n');
+    expect(await titles(markdown)).toEqual(lines);
+    const again = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(again).toBe(markdown);
+    expect((await convertDocx((await convertMdToDocx(again)).docx)).markdown).toBe(markdown);
+  });
+
+  test('keeps a title of two paragraphs, as before', async () => {
+    const markdown = (await convertDocx((await convertMdToDocx('---\ntitle: one\ntitle: two\n---\n\nnext\n')).docx)).markdown;
+    expect(markdown).toContain('\ntitle: one\ntitle: two\n');
+    expect(await titles(markdown)).toEqual(['one', 'two']);
+  });
+
+  // #630's: a page break there, which shows a page's end, import drops
+  test('writes nothing for a page break in it, as before', async () => {
+    const markdown = await imported(md, '<w:t>one two</w:t>', '<w:t>one</w:t><w:br w:type="page"/><w:t>two</w:t>');
+    expect(markdown).toContain('\ntitle: onetwo\n');
+  });
+});
+
 describe('line break semantics', () => {
   test('trailing backslash produces w:br and round-trips', async () => {
     const md = 'Hello world\\\nNew line here';
