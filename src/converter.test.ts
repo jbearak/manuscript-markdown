@@ -8245,14 +8245,15 @@ describe('w:br line break handling', () => {
     expect(result.markdown).toContain('a\\\nb');
   });
 
-  test('w:br with type="page" does not emit newline', async () => {
-    const xml = wrapDocumentXml(
-      '<w:p><w:r><w:t>a</w:t></w:r><w:r><w:br w:type="page"/><w:t>b</w:t></w:r></w:p>'
-    );
-    const buf = await buildSyntheticDocx(xml);
-    const result = await convertDocx(buf);
-    expect(result.markdown).not.toContain('a\\\nb');
-    expect(result.markdown).not.toContain('a\nb');
+  // The line break a page or column break shows between text, which keeps
+  // the words apart; import dropped it and joined them
+  test.each([
+    ['a page break', '<w:r><w:t>a</w:t></w:r><w:r><w:br w:type="page"/><w:t>b</w:t></w:r>'],
+    ['a column break', '<w:r><w:t>a</w:t><w:br w:type="column"/><w:t>b</w:t></w:r>'],
+    ['a page break in a run of its own', '<w:r><w:t>a</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>b</w:t></w:r>'],
+  ])('w:br of %s between text emits backslash-newline', async (_name, runs) => {
+    const result = await convertDocx(await buildSyntheticDocx(wrapDocumentXml('<w:p>' + runs + '</w:p>')));
+    expect(result.markdown).toBe('a\\\nb\n');
   });
 
   test('w:br round-trips through md→docx→md', async () => {
@@ -8266,6 +8267,251 @@ describe('w:br line break handling', () => {
     const { docx: docx2 } = await convertMdToDocx(pass1.markdown);
     const pass2 = await convertDocx(docx2);
     expect(pass2.markdown).toContain('line one\\\nline two');
+  });
+});
+
+describe('A page or column break Word puts in a paragraph', () => {
+  const PAGE = '<w:br w:type="page"/>';
+  const tracked = (tag: string, inner: string) => '<w:' + tag + ' w:id="90" w:author="A" w:date="2024-01-15T10:30:00Z">' + inner + '</w:' + tag + '>';
+  const HIDDEN = '<w:r><w:rPr><w:vanish/></w:rPr><w:t>hid</w:t></w:r>';
+  const PAGE_RUN = '<w:r>' + PAGE + '</w:r>';
+  const MARK = '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>';
+  const strip = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  /** The Markdown import gives the export of `md` with `from` in its `part`
+   *  replaced by `to`, as a Word user edits it */
+  const bibtex = '@article{smith2020,\n  author = {Smith, Jane},\n  title = {T},\n  journal = {J},\n  year = {2020},\n}';
+  const imported = async (md: string, from: string, to: string, part = 'word/document.xml') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx);
+    const xml = await zip.file(part)!.async('string');
+    expect(xml).toContain(from);
+    zip.file(part, xml.replace(from, () => to));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  // Between text, it shows a line break, which keeps the words apart, as one
+  // the text wraps at does. Import dropped it and joined them
+  test.each([
+    ['in a run', 'one two\n', '<w:t>one two</w:t>', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>', 'one\\\ntwo\n'],
+    ['as a column break', 'one two\n', '<w:t>one two</w:t>', '<w:t>one</w:t><w:br w:type="column"/><w:t>two</w:t>', 'one\\\ntwo\n'],
+    ['in a run of its own', 'one two\n', '<w:t>one two</w:t></w:r>', '<w:t>one</w:t></w:r><w:r>' + PAGE + '</w:r><w:r><w:t>two</w:t></w:r>', 'one\\\ntwo\n'],
+    ['in bold', 'a **one two** b\n', '<w:t>one two</w:t>', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>', 'a **one\\\ntwo** b\n'],
+    ['in a heading', '# one two\n', '<w:t>one two</w:t>', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>', '# one<br>two\n'],
+    ['in a quote', '> one two\n', '<w:t>one two</w:t>', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>', '> one\\\n> two\n'],
+    ['in a link', 'a [one two](https://example.com/x) b\n', '<w:t>one two</w:t>', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>', 'a [one\\\ntwo](https://example.com/x) b\n'],
+    ['in a table\'s cell', '| A | B |\n| --- | --- |\n| one two | x |\n', '<w:t>one two</w:t>', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>', '| A | B |\n| --- | --- |\n| one<br>two | x |\n'],
+    ['in an insertion', 'one {++two three++} four\n', '<w:t>two three</w:t>', '<w:t>two</w:t>' + PAGE + '<w:t>three</w:t>', 'one {++two\\\nthree++} four\n'],
+    ['in a deletion', 'one {--two three--} four\n', '<w:delText>two three</w:delText>', '<w:delText>two</w:delText>' + PAGE + '<w:delText>three</w:delText>', 'one {--two\\\nthree--} four\n'],
+    ['inserted alone', 'one two\n', '<w:t>one two</w:t></w:r>', '<w:t>one</w:t></w:r>' + tracked('ins', '<w:r>' + PAGE + '</w:r>') + '<w:r><w:t>two</w:t></w:r>', 'one{++\\\n++}two\n'],
+    ['deleted alone', 'one two\n', '<w:t>one two</w:t></w:r>', '<w:t>one</w:t></w:r>' + tracked('del', '<w:r>' + PAGE + '</w:r>') + '<w:r><w:t>two</w:t></w:r>', 'one{--\\\n--}two\n'],
+    ['before a hidden run', 'one two\n', '<w:t>one two</w:t></w:r>', '<w:t>one</w:t>' + PAGE + '</w:r>' + HIDDEN + '<w:r><w:t>two</w:t></w:r>', 'one\\\ntwo\n'],
+    ['after a hidden run', 'one two\n', '<w:t>one two</w:t></w:r>', '<w:t>one</w:t></w:r>' + HIDDEN + '<w:r>' + PAGE + '<w:t>two</w:t></w:r>', 'one\\\ntwo\n'],
+  ])('shows a line break %s, as import writes it', async (_name, md, from, to, expected) => {
+    const markdown = await imported(md, from, to);
+    expect(strip(markdown)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  test.each([
+    ['in a note', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>', 'a[^1]\n\n[^1]:\n\n    one\\\n    two\n'],
+    ['at a note\'s start', PAGE + '<w:t>one two</w:t>', 'a[^1]\n\n[^1]: one two\n'],
+    ['at a note\'s end', '<w:t>one two</w:t>' + PAGE, 'a[^1]\n\n[^1]: one two\n'],
+  ])('in a note, as in the body, %s', async (_name, to, expected) => {
+    const markdown = await imported('a[^1]\n\n[^1]: one two\n', '<w:t>one two</w:t>', to, 'word/footnotes.xml');
+    expect(strip(markdown)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // Before the paragraph's text or after it, it shows no line, so import
+  // writes none, as it wrote nothing for it before. Nor where Word hides it
+  test.each([
+    ['at the start', '<w:t>one two</w:t>', PAGE + '<w:t>one two</w:t>', 'one two\n\nnext\n'],
+    ['at the end', '<w:t>one two</w:t>', '<w:t>one two</w:t>' + PAGE, 'one two\n\nnext\n'],
+    ['at the end, before a space', '<w:t>one two</w:t>', '<w:t>one two</w:t>' + PAGE + '<w:t xml:space="preserve"> </w:t>', 'one two\n\nnext\n'],
+    ['at the end, before a hidden run', '<w:t>one two</w:t></w:r>', '<w:t>one two</w:t>' + PAGE + '</w:r>' + HIDDEN, 'one two\n\nnext\n'],
+    ['inserted at the end', '<w:t>one two</w:t></w:r>', '<w:t>one two</w:t></w:r>' + tracked('ins', '<w:r>' + PAGE + '</w:r>'), 'one two\n\nnext\n'],
+    ['alone in a paragraph', '<w:t>one two</w:t></w:r></w:p>', '<w:t>one two</w:t></w:r></w:p><w:p><w:r>' + PAGE + '</w:r></w:p>', 'one two\n\nnext\n'],
+    ['in a hidden run', '<w:t>one two</w:t></w:r>', '<w:t>one</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr>' + PAGE + '</w:r><w:r><w:t>two</w:t></w:r>', 'onetwo\n\nnext\n'],
+  ])('writes no line for one %s', async (_name, from, to, expected) => {
+    expect(strip(await imported('one two\n\nnext\n', from, to))).toBe(expected);
+  });
+
+  // A comment on it alone keeps its place, as a comment on nothing, which
+  // import wrote it as before
+  test('keeps a comment on one alone at a paragraph\'s end', async () => {
+    const markdown = await imported('one {==two==}{>>c<<}\n\nnext\n', '<w:t>two</w:t>', PAGE);
+    expect(strip(markdown)).toBe('one {>>c<<}\n\nnext\n');
+  });
+
+  // A comment whose range starts on one alone and goes on into the next
+  // paragraph is the next paragraph's, as before. An earlier draft kept the
+  // empty item of a range that ends there in the paragraph with the break,
+  // which then held the comment's start alone
+  const START = '<w:commentRangeStart w:id="0"/>';
+  const ON_INTO_NEXT = START + '<w:r>' + PAGE + '</w:r></w:p><w:p>';
+  test.each([
+    ['its text', '{==two==}{>>c<<}\n\nnext\n', ON_INTO_NEXT, '{==two==}{>>c<<}\n\nnext\n'],
+    ['its end before any text', '{==two==}{>>c<<}\n\nnext\n', ON_INTO_NEXT + '<w:commentRangeEnd w:id="0"/>', '{>>c<<}two\n\nnext\n'],
+  ])('reads a comment from one alone on into %s in the next paragraph', async (_name, md, to, expected) => {
+    const markdown = await imported(md, START, to);
+    expect(strip(markdown)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // Many paragraphs, each with a comment on breaks alone at its end. An
+  // earlier draft looked for the comment's other items in all the
+  // document's before each break. Four times the paragraphs take about
+  // four times as long, not sixteen
+  test('reads many paragraphs with a comment on breaks alone in linear time', async () => {
+    const time = async (paragraphs: number) => {
+      const md = Array.from({ length: paragraphs }, (_, i) => 'p' + i + ' {==x==}{>>c<<}').join('\n\n') + '\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace(/<w:t>x<\/w:t>/g, PAGE.repeat(8)));
+      const docx = await zip.generateAsync({ type: 'uint8array' });
+      return await fastestRunAsync(async () => convertDocx(docx));
+    };
+    await time(500);
+    const small = await time(2000);
+    expect(await time(8000) / small).toBeLessThan(8);
+  }, 60000);
+
+  // Between the halves of a hidden comment Word split, where readHiddenText
+  // reads the second half on from the first, it goes, as before. An earlier
+  // draft's line break between them ended the comment at the first half,
+  // and lost the second's text, or all of it, split in its <!--
+  const HIDDEN_COMMENT = '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t>\u200B&lt;!-- a b --&gt;</w:t></w:r>';
+  const hiddenRun = (text: string) => '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  test.each([
+    ['in its text', 'word/document.xml', '\u200B&lt;!-- a', ' b --&gt;'],
+    ['in its <!--', 'word/document.xml', '\u200B&lt;!', '-- a b --&gt;'],
+    ['in its text, in a note', 'word/footnotes.xml', '\u200B&lt;!-- a', ' b --&gt;'],
+    ['in its <!--, in a note', 'word/footnotes.xml', '\u200B&lt;!', '-- a b --&gt;'],
+  ])('writes nothing for one in a hidden comment Word split %s', async (_name, part, first, second) => {
+    const md = part === 'word/document.xml' ? 'x <!-- a b --> y\n' : 'a[^1]\n\n[^1]: x <!-- a b --> y\n';
+    expect(strip(await imported(md, HIDDEN_COMMENT, hiddenRun(first) + PAGE_RUN + hiddenRun(second), part))).toBe(md);
+  });
+
+  // As before where Word split a hidden comment's <!-- at a paragraph's end
+  // and the next paragraph goes on with it. Its start's place moves back
+  // with a break dropped before it, as an empty item for a comment does. An
+  // earlier draft left it past the break, which the next paragraph's text
+  // then took: its comment went or came where it hadn't
+  const NOTE_PARA = '</w:p><w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>';
+  const editedAll = async (md: string, part: string, edits: [string, string][]) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    let xml = await zip.file(part)!.async('string');
+    for (const [from, to] of edits) {
+      expect(xml).toContain(from);
+      xml = xml.replace(from, () => to);
+    }
+    zip.file(part, xml);
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+  test.each([
+    ['after one at a paragraph\'s end', 'x\n\ny\n', 'word/document.xml', [
+      ['<w:t>x</w:t></w:r>', '<w:t>x</w:t></w:r>' + PAGE_RUN + hiddenRun('\u200B&lt;!')],
+      ['<w:r><w:t>y</w:t></w:r>', hiddenRun('\u200B&lt;!--') + hiddenRun(' a --&gt;') + '<w:r><w:t>y</w:t></w:r>'],
+    ], 'x\n\n<!-- a -->y\n'],
+    ['after one at a note paragraph\'s end', 'a[^1]\n\n[^1]: x\n\n    y\n', 'word/footnotes.xml', [
+      ['<w:t>x</w:t></w:r>', '<w:t>x</w:t></w:r>' + PAGE_RUN + hiddenRun('\u200B&lt;!')],
+      ['<w:r><w:t>y</w:t></w:r>', hiddenRun('-- a --&gt;') + '<w:r><w:t>y</w:t></w:r>'],
+    ], 'a[^1]\n\n[^1]: x\n\n    <!-- a -->y\n'],
+    // One before a paragraph's text writes no item, as before
+    ['before one at a note paragraph\'s start', 'a[^1]\n\n[^1]: NTX\n', 'word/footnotes.xml', [
+      ['<w:r><w:t>NTX</w:t></w:r>', hiddenRun('\u200B&lt;!') + NOTE_PARA + PAGE_RUN + hiddenRun('\u200B&lt;!-- a') + hiddenRun(' b --&gt;') + '<w:r><w:t>one</w:t></w:r>'],
+    ], 'a[^1]\n\n[^1]: <!-- a b -->one\n'],
+    // Not a start the paragraph before left, after the space after the
+    // note's mark went, where one between text is a line break
+    ['left in the paragraph before', 'a[^1]\n\n[^1]: NTX\n', 'word/footnotes.xml', [
+      ['<w:r><w:t>NTX</w:t></w:r>', hiddenRun('\u200B&lt;!') + NOTE_PARA + '<w:r><w:t>two</w:t><w:br w:type="column"/><w:t>two</w:t></w:r>'],
+    ], 'a[^1]\n\n[^1]:\n\n    two\\\n    two\n'],
+  ] as [string, string, string, [string, string][], string][])('reads a start of a hidden comment %s as before', async (_name, md, part, edits, expected) => {
+    const markdown = await editedAll(md, part, edits);
+    expect(strip(markdown)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // A comment on one alone at a paragraph's end, in the range of another
+  // that ends first, comes back as before. The empty item it leaves has the
+  // comments open where its range ends, as endComment's has. An earlier
+  // draft's had the other's too, which then went on over it
+  test.each([
+    ['in the body', '{#1}one {#2}two{/1}{/2}\n\n{#1>>@A | outer<<}\n{#2>>@A | inner<<}\n', 'word/document.xml', '{==one ==}{>>@A | outer<<}{>>@A | inner<<}\n'],
+    ['in a note', 'a[^1]\n\n[^1]: {#1}one {#2}two{/1}{/2}\n\n    {#1>>@A | outer<<}\n    {#2>>@A | inner<<}\n', 'word/footnotes.xml', 'a[^1]\n\n[^1]: {==one ==}{>>@A | outer<<}{>>@A | inner<<}\n'],
+  ])('keeps a comment on one alone in another comment\'s range %s', async (_name, md, part, expected) => {
+    const markdown = await imported(md, '<w:t>two</w:t>', PAGE, part);
+    expect(strip(markdown)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // In a field's result whose text import doesn't write, a citation's or a
+  // cross-reference's, which writes the citation or reference in its place,
+  // it went before the whole citation. Its text keeps, as before, what
+  // Word shows apart from it
+  test.each([
+    ['a citation in the body', 'one [@smith2020] two\n', 'word/document.xml', '<w:t>(Smith, 2020)</w:t>', '<w:t>(Smith,</w:t>' + PAGE + '<w:t xml:space="preserve"> 2020)</w:t>', 'one [@smith2020] two\n'],
+    ['a citation in a note', 'a[^1]\n\n[^1]: one [@smith2020] two\n', 'word/footnotes.xml', '<w:t>(Smith, 2020)</w:t>', '<w:t>(Smith,</w:t>' + PAGE + '<w:t xml:space="preserve"> 2020)</w:t>', 'a[^1]\n\n[^1]: one [@smith2020] two\n'],
+    ['a citation in a note, as a line break', 'a[^1]\n\n[^1]: one [@smith2020] two\n', 'word/footnotes.xml', '<w:t>(Smith, 2020)</w:t>', '<w:t>(Smith,</w:t><w:br/><w:t xml:space="preserve"> 2020)</w:t>', 'a[^1]\n\n[^1]: one [@smith2020] two\n'],
+    ['a cross-reference in the body', 'a[^1] b[^1] c\n\n[^1]: n\n', 'word/document.xml', '<w:t>1</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:fldChar w:fldCharType="end"/>',
+      PAGE + '<w:t>1</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:fldChar w:fldCharType="end"/>', 'a[^1] b[^1] c\n\n[^1]: n\n'],
+    ['a cross-reference in a note', 'a[^1] b[^2]\n\n[^1]: n\n\n[^2]: see[^1] m\n', 'word/footnotes.xml', '<w:t>1</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:fldChar w:fldCharType="end"/>',
+      PAGE + '<w:t>1</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:fldChar w:fldCharType="end"/>', 'a[^1] b[^2]\n\n[^1]: n\n\n[^2]: see[^1] m\n'],
+  ])('writes nothing for one in the result of %s', async (_name, md, part, from, to, expected) => {
+    expect(strip(await imported(md, from, to, part))).toBe(expected);
+  });
+
+  // A link's, which import writes the text of, shows it as a link's
+  test('shows a line break in a hyperlink field\'s result', async () => {
+    const field = (result: string) => '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> HYPERLINK "https://example.com/x" </w:instrText></w:r>'
+      + '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r>' + result + '</w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
+    const markdown = await imported('one two three\n', '<w:t>one two three</w:t></w:r>',
+      '<w:t xml:space="preserve">one </w:t></w:r>' + field('<w:t>tw</w:t>' + PAGE + '<w:t>o</w:t>') + '<w:r><w:t xml:space="preserve"> three</w:t></w:r>');
+    expect(strip(markdown)).toBe('one [tw\\\no](https://example.com/x) three\n');
+  });
+
+  // Before a note's mark, it's no text, which the space Word puts after the
+  // mark follows, so the space goes, as after one after the mark. An earlier
+  // draft kept it, as text a space starts
+  test.each([
+    ['before a note\'s mark', PAGE_RUN + MARK, 'one two'],
+    ['after a note\'s mark', MARK + PAGE_RUN, 'one two'],
+    // A space of the note's own after the mark's stays, once
+    ['before a note\'s mark, with a space of the note\'s own', PAGE_RUN + MARK, '&#32;one two'],
+  ])('writes no line for one %s, nor the space after the mark', async (_name, runs, text) => {
+    const md = 'a[^1]\n\n[^1]: ' + text + '\n';
+    expect(strip(await imported(md, MARK, runs, 'word/footnotes.xml'))).toBe(md);
+  });
+
+  // In a paragraph that could be raw HTML, a line break would be the HTML's
+  // line end, or end the block or break it up, so one there goes, as before.
+  // An earlier draft read one as a line break in an HTML block on one line,
+  // which escaped its tag, and before an older export's carriage returns,
+  // which import reads as the block's line ends after it found the block.
+  // One after found no tag in a block's tags split between runs
+  const SPLIT_DIV = '&lt;</w:t></w:r><w:r><w:t>div&gt;one</w:t>' + PAGE + '<w:t>two&lt;</w:t></w:r><w:r><w:t>/div&gt;</w:t>';
+  const LEGACY_PRE = '<w:t>&lt;pre&gt;&#13;</w:t></w:r><w:r><w:t>a</w:t></w:r><w:r>' + PAGE + '</w:r><w:r><w:t>b&#13;</w:t></w:r><w:r><w:t>&lt;/pre&gt;</w:t></w:r>';
+  test.each([
+    ['an HTML block', '<div>\na b\n</div>\n\nnext\n', 'word/document.xml', '<w:t>a b</w:t>', '<w:t>a</w:t>' + PAGE + '<w:t>b</w:t>', '<div>\nab\n</div>\n\nnext\n'],
+    ['an HTML block on one line', '<div>one two</div>\n\nnext\n', 'word/document.xml', '&lt;div&gt;one two&lt;/div&gt;</w:t>', '&lt;div&gt;one</w:t>' + PAGE + '<w:t>two&lt;/div&gt;</w:t>', '<div>onetwo</div>\n\nnext\n'],
+    ['an HTML block on one line, in a note', 'a[^1]\n\n[^1]: <div>one two</div>\n', 'word/footnotes.xml', '&lt;div&gt;one two&lt;/div&gt;</w:t>', '&lt;div&gt;one</w:t>' + PAGE + '<w:t>two&lt;/div&gt;</w:t>', 'a[^1]\n\n[^1]: <div>onetwo</div>\n'],
+    ['an HTML block on one line, its tags split between runs', '<div>one two</div>\n\nnext\n', 'word/document.xml', '&lt;div&gt;one two&lt;/div&gt;</w:t>', SPLIT_DIV, '<div>onetwo</div>\n\nnext\n'],
+    ['an HTML block on one line, its tags split between runs, in a note', 'a[^1]\n\n[^1]: <div>one two</div>\n', 'word/footnotes.xml', '&lt;div&gt;one two&lt;/div&gt;</w:t>', SPLIT_DIV, 'a[^1]\n\n[^1]: <div>onetwo</div>\n'],
+    ['an older export\'s HTML block, its lines ended by carriage returns', 'x\n\nnext\n', 'word/document.xml', '<w:t>x</w:t></w:r>', LEGACY_PRE, '<pre>\nab\n</pre>\n\nnext\n'],
+    ['an older export\'s HTML block, its lines ended by carriage returns, in a note', 'a[^1]\n\n[^1]: x\n', 'word/footnotes.xml', '<w:t>x</w:t></w:r>', LEGACY_PRE, 'a[^1]\n\n[^1]:\n\n    <pre>\n    ab\n    </pre>\n'],
+    ['a paragraph with a tag', 'a <span>one two</span> b\n', 'word/document.xml', 'one two', 'one</w:t>' + PAGE + '<w:t>two', 'a <span>onetwo</span> b\n'],
+  ])('writes nothing for one in %s', async (_name, md, part, from, to, expected) => {
+    const markdown = await imported(md, from, to, part);
+    expect(strip(markdown)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // The title's paragraph, which import writes in the frontmatter, where a
+  // line break isn't kept. An earlier draft wrote one there, and export
+  // dropped the line after it
+  test('writes nothing for one in the title', async () => {
+    const markdown = await imported('---\ntitle: one two\n---\n\nnext\n', '<w:t>one two</w:t>', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>');
+    expect(markdown).toContain('\ntitle: onetwo\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 });
 
