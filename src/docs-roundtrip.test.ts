@@ -340,11 +340,13 @@ describe('CriticMarkup round-trip: md -> docx -> md', () => {
     expect(warnings).toEqual([]);
 
     const rt = await convertDocx(docx);
+    // The span's lines after its first without the list's indent, which
+    // export keeps in them, and so in the equation (see linesInContainer)
     expect(rt.markdown).toBe(
       '5. {++before++}\n\n'
       + '   {++$$\n'
-      + '   x\n'
-      + '   $$++}\n\n'
+      + 'x\n'
+      + '$' + '$++}\n\n'
       + '   {++after++}\n'
       + '6. next\n',
     );

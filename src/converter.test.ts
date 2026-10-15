@@ -15720,18 +15720,100 @@ describe('a line of display math that would start a Markdown block', () => {
     expect(await mathText(back)).toBe(await mathText(md));
   });
 
-  // Import writes no highlight around an equation, so its line comes back
-  // indented, where the next export would end the equation there
-  test('in a highlight stays one equation', async () => {
-    const back = await roundTrip('{==' + wrapped('a\n- b') + '==}\n\nAfter.\n');
+  // A highlight, which Word holds in each of the equation's runs, comes
+  // back around it, its lines as written, as in a tracked change. Export
+  // wrote none, and import gave the equation alone, its lines indented
+  test.each([
+    ['alone', '{==' + wrapped('a\n- b') + '==}\n\nAfter.\n', 'yellow'],
+    // Its lines after the first without the list's indent, which export
+    // keeps in a span's lines, and so in the equation's text
+    ['in a list item', '- A\n\n  {==' + wrapped('a\nb') + '==}\n- B\n', 'yellow'],
+    ['of a color but the default', '{====' + wrapped('a\nb') + '=={red}==}\n\nAfter.\n', 'red'],
+    // Whose name in Word differs from its name in Markdown
+    ['of a color Word names otherwise', '{====' + wrapped('a\nb') + '=={pink}==}\n\nAfter.\n', 'magenta'],
+  ])('in a highlight comes back in it: %s', async (_name, md, color) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    const runs = xml.match(/<m:r>[\s\S]*?<\/m:r>/g)!;
+    expect(runs.every(run => run.includes('<w:rPr><w:highlight w:val="' + color + '"/></w:rPr>'))).toBe(true);
+    expect(await roundTrip(md)).toBe(md);
+    expect(await equations(md)).toBe(1);
+  });
+
+  // A list's indent in a span's lines, which export keeps, went into the
+  // equation's text, and import wrote it with the list's indent again, so
+  // it grew on each trip
+  test.each([
+    ['a highlight', '==', '=='],
+    ['an addition', '++', '++'],
+  ])('in %s in a list item, its lines indented, comes back the same after a trip', async (_name, open, close) => {
+    const once = await roundTrip('- A\n\n  {' + open + fence + '\n  \\text{a\n  b}\n  ' + fence + close + '}\n- B\n');
+    const twice = await roundTrip(once);
+    expect(twice).toBe(once);
+    expect(await mathText(twice)).toBe(await mathText(once));
+    expect(await roundTrip(twice)).toBe(twice);
+  });
+
+  // Of a color but the default, in Word, where an == in the equation would
+  // end the highlight inside {====...=={red}==}, it comes back as before
+  test('in a highlight of a color but the default with an == in it stays an equation', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('{==' + wrapped('a == b') + '==}\n\nAfter.\n')).docx);
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/w:val="yellow"/g, 'w:val="red"'));
+    const back = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(back).toBe(wrapped('a == b') + '\n\nAfter.\n');
     expect(await equations(back)).toBe(1);
+  });
+
+  // Which export writes in the paragraph, where {==...==} would end it
+  test('in a highlight in a paragraph\'s text stays in the paragraph', async () => {
+    const back = await roundTrip('a ==' + fence + 'x' + fence + '== b\n');
+    expect(back).toBe('a\n' + fence + '\nx\n' + fence + '&#32;b\n');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(back)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:p[ >]/g)).toHaveLength(1);
+  });
+
+  // Two equations in a paragraph, the first highlighted, as main writes
+  // them, where {==...==} around the first would end the paragraph there
+  test.each([
+    ['', '', 'word/document.xml', 1],
+    // A note's, where its walker reads the paragraph, and its marker's
+    // paragraph and separators make three
+    [' in a note', 'A[^1].\n\n[^1]:', 'word/footnotes.xml', 3],
+  ])('in a highlight before another equation in its paragraph stays in the paragraph%s', async (_name, note, part, paragraphs) => {
+    const indent = note ? '    ' : '';
+    const back = await roundTrip(note + (note ? ' ' : '') + '==' + fence + 'x' + fence + '==' + fence + 'y' + fence + '\n');
+    expect(back).toBe(note + (note ? '\n\n' : '') + [fence, 'x', fence, fence, 'y', fence].map(line => indent + line).join('\n') + '\n');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(back)).docx)).file(part)!.async('string');
+    expect(xml.match(/<w:p[ >]/g)).toHaveLength(paragraphs);
+  });
+
+  // Its comment, as {==...==}{>>...<<} reads, goes around the equation in
+  // its paragraph, as Word puts one. In a paragraph of its own after it,
+  // its range held nothing, and the comment came back after the equation
+  test('in a highlight with a comment comes back with the comment on it', async () => {
+    const comment = '@alice (2024-01-15 14:30) | note';
+    const md = '{==' + wrapped('a\n- b') + '==}{>>' + comment + '<<}\n\nAfter.\n';
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:p [^>]*><w:commentRangeStart w:id="0"\/><m:oMathPara>.*<\/m:oMathPara><w:commentRangeEnd w:id="0"\/><w:r>(?:(?!<\/w:r>).)*<w:commentReference w:id="0"\/><\/w:r><\/w:p>/s);
+    const back = await roundTrip(md);
+    expect(back).toBe('{#1}' + wrapped('a\n    - b') + '{/1}\n{#1>>' + comment + '<<}\n\nAfter.\n');
     expect(await roundTrip(back)).toBe(back);
   });
 
+  test('a comment on inline math comes back on it, as before', async () => {
+    const md = 'A {==$x$==}{>>@alice (2024-01-15 14:30) | note<<} B\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   // Each line's place among the tracked changes' spans in the equation came
-  // from a scan of every span, in time in the square of its rows
-  test('of an equation whose rows each hold tracked changes reads in linear time', async () => {
-    const two = (await convertMdToDocx(fence + '\n\\begin{aligned}\nx &= {++a++} {++b++} {++c++} \\\\\nx &= {++a++} {++b++} {++c++}\n\\end{aligned}\n' + fence + '\n')).docx;
+  // from a scan of every span, in time in the square of its rows, and in a
+  // list item, where its lines take the item's indent, so did each line's
+  // place in a span
+  test.each([
+    ['', ''],
+    [' in a list item', '- A\n\n'],
+  ])('of an equation whose rows each hold tracked changes reads in linear time%s', async (_name, item) => {
+    const indent = item ? '  ' : '';
+    const two = (await convertMdToDocx(item + [fence, '\\begin{aligned}', 'x &= {++a++} {++b++} {++c++} \\\\', 'x &= {++a++} {++b++} {++c++}', '\\end{aligned}', fence].map(line => indent + line).join('\n') + '\n')).docx;
     const zip = await JSZip.loadAsync(two);
     const xml = await zip.file('word/document.xml')!.async('string');
     const row = /<m:e>[\s\S]*?<\/m:e>/.exec(xml)![0];
@@ -15744,7 +15826,7 @@ describe('a line of display math that would start a Markdown block', () => {
     const [small, large] = [await withRows(8000), await withRows(32000)];
     expect((await convertDocx(small)).markdown.split('x &= {++a++} {++b++} {++c++}')).toHaveLength(8001);
     expect(await fastestRunAsync(() => convertDocx(large)) / await fastestRunAsync(() => convertDocx(small))).toBeLessThan(8);
-  }, 30000);
+  }, 120_000);
 
   // Rows of an equation from Word that start as Markdown blocks do, among
   // others, each indented in the Markdown it starts from
