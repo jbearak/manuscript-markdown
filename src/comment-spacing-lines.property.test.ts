@@ -65,7 +65,8 @@ const isComment = (block: Block | undefined) => block?.kind === 'comment' || blo
  *  preprocessing rewrites `as` written, with x for their text, or each such
  *  block a line of text, but those export splits, one right after a
  *  comment export splits from its paragraph, and code, a table or a quote
- *  in a style block Word has no paragraph of in its style, and `trailing`
+ *  in a style block Word has no paragraph of in its style, or first or
+ *  last in one, and `trailing`
  *  blank lines at the end. Or 'spaced', as written, with a blank line more
  *  on each side of a block a comment is split from, between blocks in
  *  PLAIN_KINDS */
@@ -78,10 +79,19 @@ function markdownOf({ frontmatter, blocks, trailing }: { frontmatter: boolean; b
   // lines would be recorded. An opening fence while a block is open goes on
   // in it, as they're all of one style
   const unstyled: boolean[] = [];
+  // And whether each is the first or the last block of a style block that
+  // Word gets anything of, where a line would be a paragraph in the
+  // block's style, which would join the block to another of the style
+  // beside it, with nothing between that Word gets, as import reads two
+  // such blocks as one. As written, they're two, and export records the
+  // blank lines of the fences between
+  const edge: boolean[] = [];
   let members: number[] | undefined;
   let styled = false;
   const closeBlock = () => {
     for (const k of members ?? []) unstyled[k] = !styled;
+    const shown = (members ?? []).filter(k => !['comment', 'note', 'definition'].includes(blocks[k].block.kind));
+    if (shown.length > 0) edge[shown[0]] = edge[shown[shown.length - 1]] = true;
     members = undefined;
   };
   blocks.forEach(({ block }, k) => {
@@ -120,7 +130,7 @@ function markdownOf({ frontmatter, blocks, trailing }: { frontmatter: boolean; b
     // stays too, as a line would give the block a paragraph in its style
     else if (as === 'line' && block.kind !== 'latexComment' && !SPLIT_KINDS.includes(block.kind)
       && !(blank === 0 && (blocks[k - 1]?.block.kind === 'mathComment' || blocks[k - 1]?.block.kind === 'breakComment'))
-      && !(unstyled[k] && (block.kind === 'code' || block.kind === 'grid' || block.kind === 'quote'))) {
+      && !((unstyled[k] || edge[k]) && (block.kind === 'code' || block.kind === 'grid' || block.kind === 'quote'))) {
       // A note's definition stays one, which Word gets nothing of
       text = block.kind === 'definition' ? '[^d' + n++ + ']: x' : 'x' + n++;
     } else {
@@ -244,6 +254,25 @@ describe('Comment spacing through preprocessing', () => {
     // comment is the second
     const spacing = await commentSpacing((await convertMdToDocx(markdownOf(document, 'written'))).docx);
     expect(spacing).toContain('MANUSCRIPT_HTML_COMMENT_AFTER_GAPS_1={"1":0}');
+    await expectSameSpacing(document);
+  });
+
+  test.each([['\\r\\n', '\r\n'], ['\\r', '\r']])('is the same with code first in a style block right after another, with %s', async (_name, lineEnd) => {
+    // The property below found this: the variant with each block a line
+    // had a paragraph in the block's style in the code's place, so import
+    // read the two blocks as one, and export recorded none of the blank
+    // lines of the fences between. The variant keeps the code
+    const document: Document = {
+      frontmatter: false,
+      blocks: [
+        { block: { kind: 'open' }, blank: 0 }, { block: { kind: 'para' }, blank: 0 }, { block: { kind: 'close' }, blank: 0 },
+        { block: { kind: 'open' }, blank: 0 }, { block: { kind: 'code' }, blank: 0 }, { block: { kind: 'para' }, blank: 0 },
+      ],
+      trailing: 0,
+      lineEnd,
+    };
+    expect(await commentSpacing((await convertMdToDocx(markdownOf(document, 'written'))).docx))
+      .toEqual(['MANUSCRIPT_SENTINEL_GAPS_1={"cso0":0,"csoa0":0,"csc0":0,"csca0":0,"cso1":0,"csoa1":0}']);
     await expectSameSpacing(document);
   });
 
