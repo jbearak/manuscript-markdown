@@ -529,7 +529,7 @@ describe('CriticMarkup\'s markers in a pipe table\'s cells', () => {
       const text = '| a | b |\n|---|---|\n' + '| {++ | x |\n'.repeat(rows) + '\nz ++}\n';
       return fastestRun(() => preprocessCriticMarkup(text));
     };
-    expect(time(20_000) / time(5_000)).toBeLessThan(8);
+    expect(time(80_000) / time(20_000)).toBeLessThan(8);
   }, 30000);
 
   it('reads many comments with one in them in a table\'s cells before later closers in linear time', () => {
