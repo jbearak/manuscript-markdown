@@ -1467,3 +1467,105 @@ describe('equation numbers', () => {
     expect(await trip(back)).toBe(back);
   });
 });
+
+// Word's cancel, a border box with its sides hidden and a strike, came
+// back as \boxed, and its linear and skewed fractions as \frac, which Word
+// then showed as a box, where the term was struck, and stacked
+describe('Word\'s cancel and linear fractions', () => {
+  const hideAll = '<m:hideTop m:val="1"/><m:hideBot m:val="1"/><m:hideLeft m:val="1"/><m:hideRight m:val="1"/>';
+  const borderBox = (pr: string, content = run('x')) => '<m:borderBox><m:borderBoxPr>' + pr + '</m:borderBoxPr><m:e>' + content + '</m:e></m:borderBox>';
+  const fraction = (type: string, num = run('a'), den = run('b')) => '<m:f><m:fPr><m:type m:val="' + type + '"/></m:fPr><m:num>' + num + '</m:num><m:den>' + den + '</m:den></m:f>';
+  const cancels: [string, string, string][] = [
+    ['\\cancel', 'from bottom left to top right', '<m:strikeBLTR m:val="1"/>'],
+    ['\\bcancel', 'from top left to bottom right', '<m:strikeTLBR m:val="1"/>'],
+    ['\\xcancel', 'on both diagonals', '<m:strikeBLTR m:val="1"/><m:strikeTLBR m:val="1"/>'],
+    ['\\sout', 'across', '<m:strikeH m:val="1"/>'],
+  ];
+
+  test.each(cancels)('%s is a border box with its sides hidden, struck %s, on import and export', (command, _how, strike) => {
+    expect(importOmml(borderBox(hideAll + strike))).toBe(command + '{x}');
+    expect(latexToOmml(command + '{x}')).toBe(borderBox(hideAll + strike));
+    expect(importOmml(borderBox(hideAll.replace(/"1"/g, '"on"') + strike.replace(/"1"/g, '"on"'), run('a') + run('+') + run('b')))).toBe(command + '{a+b}');
+  });
+
+  test('a linear fraction is {a}/{b}, both ways', () => {
+    expect(importOmml(fraction('lin'))).toBe('{a}/{b}');
+    expect(importOmml(fraction('lin', run('a') + run('+') + run('1'), latexToOmml('x^2')))).toBe('{a+1}/{x^2}');
+    expect(latexToOmml('{a}/{b}')).toBe(fraction('lin'));
+    expect(latexToOmml('{a+1}/{x^2}')).toBe(fraction('lin', run('a') + run('+') + run('1'), latexToOmml('x^2')));
+  });
+
+  test('a skewed fraction is a linear one', () => {
+    expect(importOmml(fraction('skw'))).toBe('{a}/{b}');
+  });
+
+  test.each([
+    ['as a base', '<m:sSup><m:e>' + fraction('lin') + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup>', '{{a}/{b}}^2'],
+    ['as an n-ary body', '<m:nary><m:naryPr><m:chr m:val="∑"/><m:subHide m:val="1"/><m:supHide m:val="1"/></m:naryPr><m:sub></m:sub><m:sup></m:sup><m:e>' + fraction('lin') + '</m:e></m:nary>', '\\sum{{a}/{b}}'],
+  ])('a linear fraction %s keeps its parts', (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  // A script after a group takes the group alone
+  test.each([
+    ['{a}/{b}^2', run('a') + run('/') + '<m:sSup><m:e>' + run('b') + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup>'],
+    ['{a}/{b}_i', run('a') + run('/') + '<m:sSub><m:e>' + run('b') + '</m:e><m:sub>' + run('i') + '</m:sub></m:sSub>'],
+    ['{a} / {b}', run('a') + run(' ') + run('/') + run(' ') + run('b')],
+    ['a/b', run('a') + run('/') + run('b')],
+  ])('%s exports as before', (latex, omml) => {
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  // In text or a style's group, as for units, the / and both parts are text
+  test.each([
+    ['\\mathrm{{m}/{s}}', '\\mathrm{m/s}'],
+    ['\\mathbf{{m}/{s}}', '\\mathbf{m/s}'],
+    ['\\text{{m}/{s}}', '\\text{m/s}'],
+  ])('%s exports as %s did, and again', async (latex, plain) => {
+    expect(latexToOmml(latex)).toBe(latexToOmml(plain));
+    const markdown = 'A $x' + latex + '$ B.\n';
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe((await convertDocx((await convertMdToDocx('A $x' + plain + '$ B.\n')).docx)).markdown);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
+
+  // A script after a comment's line end takes the {b} alone too, with the
+  // comment, as on main. Import then writes the comment in the script's
+  // base, {b%}, whose brace the comment holds, a bug on main
+  test.each([
+    ['{a}/{b}%\n^2', 'a/{b%\n}^2', 'a/{b%}^2'],
+    ['{a}/{b}% note\n^2', 'a/{b% note\n}^2', 'a/{b% note}^2'],
+    ['{a}/{b} % note\n_i', 'a/{b % note\n}_i', 'a/{b % note}_i'],
+  ])('%j exports with its script on the {b}, as on main', async (latex, same, back) => {
+    const omml = latexToOmml(latex);
+    expect(omml).not.toContain('<m:type m:val="lin"/>');
+    expect(omml).toBe(latexToOmml(same));
+    expect((await convertDocx((await convertMdToDocx('$$\n' + latex + '\n$$\n')).docx)).markdown).toBe('$$\n' + back + '\n$$\n');
+  });
+
+  /** A document from Word with an inline equation of `omml` */
+  async function wordDocx(omml: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A $x$ B.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  test.each([
+    ...cancels.map(([command, , strike]): [string, string, string, string] => [command, borderBox(hideAll + strike), command + '{x}', borderBox(hideAll + strike)]),
+    ['a linear fraction', fraction('lin'), '{a}/{b}', fraction('lin')],
+    ['a skewed fraction', fraction('skw'), '{a}/{b}', fraction('lin')],
+    // As on main
+    ['a border box with sides hidden and no strike', borderBox('<m:hideTop m:val="1"/><m:hideBot m:val="1"/>'), '\\boxed{x}', '<m:borderBox><m:e>' + run('x') + '</m:e></m:borderBox>'],
+    ['a border box with a strike and its sides shown', borderBox('<m:strikeBLTR m:val="1"/>'), '\\boxed{x}', '<m:borderBox><m:e>' + run('x') + '</m:e></m:borderBox>'],
+    ['a fraction', fraction('bar'), '\\frac{a}{b}', '<m:f><m:num>' + run('a') + '</m:num><m:den>' + run('b') + '</m:den></m:f>'],
+  ])('%s from Word comes back, and again, and Word gets it as it was', async (_name, omml, latex, exported) => {
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    expect(markdown).toBe('A $' + latex + '$ B.\n');
+    const docx = (await convertMdToDocx(markdown)).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(/<m:oMath>([\s\S]*?)<\/m:oMath>/.exec(xml)![1]).toBe(exported);
+    expect((await convertDocx(docx)).markdown).toBe(markdown);
+  });
+});
