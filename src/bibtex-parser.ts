@@ -147,13 +147,13 @@ const BIBTEX_TEXT_LITERAL_COMMANDS: ReadonlyArray<readonly [string, string]> = B
 // The commands of letters and symbols LaTeX prints in text, as the
 // characters it prints, as citation-js reads them. \SS isn't one: pandoc
 // drops it, as a command it doesn't know, and it stays as written, as such
-// a command does here. Nor are the commands of characters that are BibTeX's
-// or TeX's syntax, which stay as written until the reader keeps a value's
-// escapes: a brace, which the field scanner and the names' split count
-// (\textbraceleft, \textbraceright); a backslash, which starts a command
-// (\textbackslash); a dollar sign, which starts math (\textdollar); a tie
-// and a circumflex (\textasciitilde, \textasciicircum); and the quotes that
-// make a ligature in pairs (\textquotesingle, \textasciigrave). Nor the
+// a command does here. Nor are the commands of a brace and a dollar sign,
+// which read as escapes (see BIBTEX_TEX_SYMBOLS), nor of the other
+// characters that are BibTeX's or TeX's syntax, which stay as written: a
+// backslash (\textbackslash), whose escape, \\, LaTeX reads as a line
+// break; a tie and a circumflex (\textasciitilde, \textasciicircum); and
+// the quotes that make a ligature in pairs (\textquotesingle,
+// \textasciigrave). Nor the
 // commands of characters that complete markup citeproc reads in a field:
 // brackets, which make a tag of formatting with text written as it is, as
 // <i\textgreater{} does, which citeproc reads as italic and drops
@@ -186,6 +186,19 @@ export const BIBTEX_TEXT_SYMBOLS: Readonly<Record<string, string>> = Object.free
   textbar: '|', textunderscore: '_',
 });
 
+// The commands of the characters that are BibTeX's or TeX's syntax a
+// value as TeX keeps escaped (see BibtexEntry.texFields), as those
+// escapes, whose text is the character: a brace, which the field scanner
+// counts, escaped or not, so a brace alone is written back as its command
+// (see escapeBibtexText), and a dollar sign, which starts math. Not in
+// names, which keep them as written, as on main, as the names' split counts
+// a brace.
+const BIBTEX_TEX_SYMBOLS: Readonly<Record<string, string>> = Object.freeze({
+  textbraceleft: '\\{',
+  textbraceright: '\\}',
+  textdollar: '\\' + '$',
+});
+
 // A text symbol's command, as \ss, and what ends it: an empty group, as in
 // \ss{}, or the spaces and tabs after it, which TeX reads as the command's
 // end, but not a note's line end or a no-break space, which it reads as a
@@ -193,12 +206,16 @@ export const BIBTEX_TEXT_SYMBOLS: Readonly<Record<string, string>> = Object.free
 const TEXT_SYMBOL_AT = /\\([A-Za-z]+)(?![A-Za-z])(\{\}|[ \t]*)/y;
 
 /** Decode a text symbol's command at slashIndex, as \ss, \ss{} or \ss and
- *  the spaces after it */
+ *  the spaces after it, outside names, as TeX (see BIBTEX_TEX_SYMBOLS) */
 function tryDecodeTextSymbolAt(input: string, slashIndex: number): DecodedCommand | undefined {
   TEXT_SYMBOL_AT.lastIndex = slashIndex;
   const symbol = TEXT_SYMBOL_AT.exec(input);
-  if (!symbol || !Object.prototype.hasOwnProperty.call(BIBTEX_TEXT_SYMBOLS, symbol[1])) return undefined;
-  return { value: BIBTEX_TEXT_SYMBOLS[symbol[1]], nextIndex: slashIndex + symbol[0].length };
+  if (!symbol) return undefined;
+  const value = Object.prototype.hasOwnProperty.call(BIBTEX_TEXT_SYMBOLS, symbol[1])
+    ? BIBTEX_TEXT_SYMBOLS[symbol[1]]
+    : Object.prototype.hasOwnProperty.call(BIBTEX_TEX_SYMBOLS, symbol[1]) ? BIBTEX_TEX_SYMBOLS[symbol[1]] : undefined;
+  if (value === undefined) return undefined;
+  return { value, nextIndex: slashIndex + symbol[0].length };
 }
 
 const BIBTEX_SIMPLE_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
@@ -663,14 +680,38 @@ export function unescapeBibtexPunctuation(s: string): string {
  *  distinct from their accent-command spellings, and, but not in `names`,
  *  which the parser reads as main did, with an empty group after each
  *  hyphen or quote TeX would join to the next, as -{}-, which reads as --,
- *  where -- reads as an en dash. */
+ *  where -- reads as an en dash, and a brace that pairs with no other as
+ *  its command, as \textbraceleft{}. */
 export function escapeBibtexText(s: string, names = false): string {
-  return s.replace(names ? /[&%$#_{}~^\\]/g : /[&%$#_{}~^\\]|([-`'])(?=\1)/g, (char, joined: string | undefined) => {
-    if (typeof joined === 'string') return joined + '{}';
-    if (char === '~') return '\\textasciitilde{}';
-    if (char === '^') return '\\textasciicircum{}';
-    return '\\' + char;
+  if (names) return s.replace(/[&%$#_{}~^\\]/g, escapeBibtexChar);
+  // A brace alone as its command, as the scanner counts an escaped brace,
+  // so the entry reads back whole (see BIBTEX_TEX_SYMBOLS)
+  const lone = loneBraces(s);
+  return s.replace(/[&%$#_{}~^\\]|([-`'])(?=\1)/g, (char: string, joined: string | undefined, offset: number) => {
+    if (joined !== undefined) return joined + '{}';
+    if (lone.has(offset)) return char === '{' ? '\\textbraceleft{}' : '\\textbraceright{}';
+    return escapeBibtexChar(char);
   });
+}
+
+function escapeBibtexChar(char: string): string {
+  if (char === '~') return '\\textasciitilde{}';
+  if (char === '^') return '\\textasciicircum{}';
+  return '\\' + char;
+}
+
+/** The braces in `text` that pair with no other */
+function loneBraces(text: string): Set<number> {
+  const lone = new Set<number>();
+  const open: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') open.push(i);
+    else if (text[i] !== '}') continue;
+    else if (open.length > 0) open.pop();
+    else lone.add(i);
+  }
+  for (const i of open) lone.add(i);
+  return lone;
 }
 
 function escapeBibtex(s: string, names = false): string {

@@ -279,6 +279,9 @@ const BIBTEX_SPECIALS = new Set('&%$#_{}~^\\'.split(''));
 const BIBTEX_LITERAL_COMMANDS = [
   '\\textasciitilde{}',
   '\\textasciicircum{}',
+  // A brace that pairs with no other
+  '\\textbraceleft{}',
+  '\\textbraceright{}',
 ];
 
 function hasUnescapedSpecial(output: string): boolean {
@@ -349,6 +352,23 @@ describe('Feature: zotero-citation-roundtrip, Property 5: BibTeX special charact
     fc.assert(
       fc.property(bibtexInputArb, (input) => {
         expect(hasUnescapedSpecial(escapeBibtex(input))).toBe(false);
+      }),
+      { numRuns: 200 },
+    );
+  });
+
+  // A brace alone was written escaped, which BibTeX counts, so the entry
+  // read on past its end
+  it('escapeBibtex output\'s braces pair, escaped ones too', () => {
+    fc.assert(
+      fc.property(bibtexInputArb, (input) => {
+        let depth = 0;
+        for (const char of escapeBibtex(input)) {
+          if (char === '{') depth++;
+          else if (char === '}') depth--;
+          expect(depth).toBeGreaterThanOrEqual(0);
+        }
+        expect(depth).toBe(0);
       }),
       { numRuns: 200 },
     );
