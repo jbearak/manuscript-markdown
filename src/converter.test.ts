@@ -15536,6 +15536,61 @@ describe('Blockquote round-trip', () => {
     expect(strip(once)).toBe(expected);
     expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
   });
+
+  test.each([
+    ['a list right after a quote', '> a\n- x\n', '> a\n\n- x\n'],
+    ['a list right after a quote of two lines', '> a\n> b\n- x\n', '> a b\n\n- x\n'],
+    ['a list right after a quote ending with a backslash', '> a\\\n- x\n', '> a\\\\\n\n- x\n'],
+    ['a numbered list right after a quote', '> a\n1. x\n', '> a\n\n1. x\n'],
+    ['a heading right after a quote', '> a\n# H\n', '> a\n\n# H\n'],
+    ['code right after a quote', '> a\n```\nc\n```\n', '> a\n\n```\nc\n```\n'],
+    ['a table right after a quote', '> a\n| x |\n|---|\n| 1 |\n', '> a\n\n| x |\n| --- |\n| 1 |\n'],
+    ['a list of another kind right after a quote in a list item', '- y\n  > a\n1. x\n', '- y\n  > a\n\n1. x\n'],
+    // Guards: a blank line between, as import writes, and what follows a
+    // quote in Word with no empty paragraph between
+    ['a list a blank line after a quote', '> a\n\n- x\n', '> a\n\n- x\n'],
+    ['a paragraph a blank line after a quote', '> a\n\nb\n', '> a\n\nb\n'],
+    ['more of the list right after a quote in a list item', '- y\n  > a\n- x\n', '- y\n  > a\n- x\n'],
+  ])('gives Word the same paragraphs on each trip for %s', async (_name, md, expected) => {
+    // Import writes a blank line between a quote and a list, a heading,
+    // code or a table, which export wrote an empty paragraph for, where
+    // the source had none, so each trip after the first added one. Export
+    // writes one for a block right after the quote as for one a blank line
+    // after it
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    // Each paragraph's properties and text
+    const paragraphs = async (docx: Uint8Array) => {
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => (/<w:pPr>[\s\S]*?<\/w:pPr>/.exec(p[0])?.[0] ?? '')
+        + [...p[0].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+    };
+    const first = (await convertMdToDocx(md)).docx;
+    const once = (await convertDocx(first)).markdown;
+    expect(strip(once)).toBe(expected);
+    const second = (await convertMdToDocx(once)).docx;
+    expect(await paragraphs(first)).toEqual(await paragraphs(second));
+    expect((await convertDocx(second)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['right after a quote', '> q\n- a\n', '> q\n\n- a\n'],
+    ['a blank line after a quote', '> q\n\n- a\n', '> q\n\n- a\n'],
+    ['a blank line after code', '```\nc\n```\n\n- a\n', '```\nc\n```\n\n- a\n'],
+  ])('adds no list item before a list %s where a template numbers paragraphs but not quotes', async (_name, md, expected) => {
+    // The empty paragraph export writes before the list had no numbering
+    // of its own, so the template's default paragraph style numbered it,
+    // and import read it as an empty item before the list
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const styles = (await zip.file('word/styles.xml')!.async('string'))
+      .replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/, (match: string) => match + '<w:numPr><w:numId w:val="2"/></w:numPr>')
+      .replace(/<w:style [^>]*w:styleId="GitHubBlockquote"[^>]*>[^]*?<w:pPr>/, (match: string) => match + '<w:numPr><w:numId w:val="0"/></w:numPr>');
+    zip.file('word/styles.xml', styles);
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    const once = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(strip(once)).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(once, { templateDocx })).docx)).markdown).toBe(once);
+  });
 });
 
 describe('A quote after a deeper one', () => {

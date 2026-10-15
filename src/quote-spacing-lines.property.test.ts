@@ -70,10 +70,13 @@ function markdownOf({ blocks, trailing, tableDigits, calloutLabels }: { blocks: 
       // too, as a line of its own
       text = as === 'line' ? '[^d' + n++ + ']: x' : 'Citation data for @k' + n++ + ' was not found in the bibliography file.';
     } else if (as === 'line' && block.kind !== 'latexQuote') {
-      // A note's definition stays one, which Word gets nothing of. Another
-      // is a comment, which no quote's text goes on into, as a line of
-      // text after one would
-      text = block.kind === 'definition' ? '[^d' + n++ + ']: x' : '<!-- x -->';
+      // A note's definition stays one, which Word gets nothing of. A code
+      // block or a table is a heading, which export, as for them, writes
+      // the empty paragraph a blank line gives before right after a quote.
+      // Another is a comment, which no quote's text goes on into, as a line
+      // of text after one would
+      text = block.kind === 'definition' ? '[^d' + n++ + ']: x'
+        : block.kind === 'code' || block.kind === 'grid' || block.kind === 'numbers' ? '# x' : '<!-- x -->';
     } else {
       switch (block.kind) {
         case 'code': text = '```\n' + like('> q') + '\n' + like('    > q') + '\n```'; break;
