@@ -15760,6 +15760,107 @@ describe('a line of display math that would start a Markdown block', () => {
   });
 });
 
+describe('Display math\'s rows and the spaces at their edges', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const fence = '$' + '$';
+  const em = '\u2003';
+  // Word's equations, but for runs of whitespace alone, which LaTeX ignores
+  const equations = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<m:oMath>[\s\S]*?<\/m:oMath>/g) ?? []).map(math => math.replace(/<m:r><m:t(?: [^>]*)?>[ \t\r\n]*<\/m:t><\/m:r>/g, ''));
+  };
+  const rows = (omml: string[]) => omml.join('').match(/<m:e>/g)?.length ?? 0;
+
+  test.each([
+    // The row break went after the comment, in it, so the next export read
+    // one row
+    ['a row that ends in a comment, in gathered', '\\begin{gathered}\na %c\n\\\\ b\n\\end{gathered}', '\\begin{gathered}\na %c\n\\\\\nb\n\\end{gathered}'],
+    ['a row that ends in a comment, in aligned', '\\begin{aligned}\na &= 1 %c\n\\\\ b &= 2\n\\end{aligned}', '\\begin{aligned}\na &= 1 %c\n\\\\\nb &= 2\n\\end{aligned}'],
+    ['a row that ends in a comment, in cases', '\\begin{cases}\na %c\n\\\\ b\n\\end{cases}', '\\begin{cases}\na %c\n\\\\\nb\n\\end{cases}'],
+    ['a row and a cell that end in a comment, in a matrix', '\\begin{pmatrix}\na %c\n& b %d\n\\\\ c & d\n\\end{pmatrix}', '\\begin{pmatrix} a %c\n & b %d\n \\\\ c & d \\end{pmatrix}'],
+    // The space of a \quad, \qquad, \;, \: or \, at an edge was trimmed
+    // as a space. It comes back as the command, as written
+    ['a \\quad at the start', '\\quad b', '\\quad b'],
+    ['a \\quad at the end', 'b\\quad', 'b\\quad'],
+    ['a \\quad at the start of a row', '\\begin{aligned}\na &= 1 \\\\\n\\quad &= 2\n\\end{aligned}', '\\begin{aligned}\na &= 1 \\\\\n\\quad &= 2\n\\end{aligned}'],
+    ['a \\quad at the start of a matrix\'s cell', '\\begin{matrix}\n\\quad a & b\n\\end{matrix}', '\\begin{matrix} \\quad a & b \\end{matrix}'],
+    ['a \\qquad and a \\; at the edges', '\\qquad b\\;', '\\qquad b\\;'],
+    ['a \\, and a \\: at the edges', '\\, b\\:', '\\, b\\:'],
+    ['spaces at the edges of a group', '\\frac{\\quad a}{b\\,}', '\\frac{\\quad a}{b\\,}'],
+    ['a \\quad on the line after a comment', 'a %c\n\\quad', 'a %c\n\\quad'],
+    // A row of whitespace alone in Word was dropped
+    ['an empty row, in aligned', '\\begin{aligned}\na &= 1 \\\\\n \\\\\nc &= 2\n\\end{aligned}', '\\begin{aligned}\na &= 1 \\\\\n\\\\\nc &= 2\n\\end{aligned}'],
+    ['an empty row, in gathered', '\\begin{gathered}\na \\\\\n \\\\\nc\n\\end{gathered}', '\\begin{gathered}\na \\\\\n\\\\\nc\n\\end{gathered}'],
+    ['an empty row, in cases', '\\begin{cases}\na \\\\\n \\\\\nc\n\\end{cases}', '\\begin{cases}\na \\\\\n\\\\\nc\n\\end{cases}'],
+    ['an empty first row', '\\begin{gathered}\n\\\\\nb \\\\\nc\n\\end{gathered}', '\\begin{gathered}\n\\\\\nb \\\\\nc\n\\end{gathered}'],
+    // A \\ after the last row, which export reads as a row of its line end
+    ['an empty last row', '\\begin{gathered}\na \\\\\nb \\\\\n\\end{gathered}', '\\begin{gathered}\na \\\\\nb \\\\\n\\end{gathered}'],
+    ['two empty rows', '\\begin{gathered}\n\\\\\n\\end{gathered}', '\\begin{gathered}\n\\\\\n\\end{gathered}'],
+    // A matrix in a row, whose rows import splits as the row's
+    ['an empty row of a matrix in a row', '\\begin{aligned}\nx &= \\begin{pmatrix} a \\\\ \\\\ b \\end{pmatrix} \\\\\ny &= 2\n\\end{aligned}', '\\begin{aligned}\nx &= \\begin{pmatrix} a \\\\\n\\\\\nb \\end{pmatrix} \\\\\ny &= 2\n\\end{aligned}'],
+    ['a comment in a matrix in a row', '\\begin{gathered}\n\\begin{matrix} a %c\n\\\\ b \\end{matrix} \\\\\ny\n\\end{gathered}', '\\begin{gathered}\n\\begin{matrix} a %c\n\\\\\nb \\end{matrix} \\\\\ny\n\\end{gathered}'],
+  ])('keeps %s', async (_name, latex, expected) => {
+    const md = fence + '\n' + latex + '\n' + fence;
+    const back = await roundTrip(md);
+    expect(back).toBe(fence + '\n' + expected + '\n' + fence);
+    // Export reads it back as the same rows, comments and spaces
+    expect(await equations(back)).toEqual(await equations(md));
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  test.each([
+    // A matrix, which import writes on one line, kept its empty rows
+    ['an empty row in a matrix', '\\begin{matrix}\na \\\\\n \\\\\nc\n\\end{matrix}', '\\begin{matrix} a \\\\  \\\\ c \\end{matrix}', 3],
+    // A comment on the last row was followed by its line end
+    ['a comment on the last row', '\\begin{gathered}\na \\\\\nb %c\n\\end{gathered}', '\\begin{gathered}\na \\\\\nb %c\n\\end{gathered}', 2],
+  ])('keeps %s, as before', async (_name, latex, expected, count) => {
+    const md = fence + '\n' + latex + '\n' + fence;
+    const back = await roundTrip(md);
+    expect(back).toBe(fence + '\n' + expected + '\n' + fence);
+    expect(rows(await equations(back))).toBe(count);
+    expect(await equations(back)).toEqual(await equations(md));
+  });
+
+  // A comment's spaces are its text, not the equation's, so a space at its
+  // end is trimmed, as before, not written as a \quad after it, which Word
+  // would show
+  test.each([
+    ['in display math', 'a %note' + em, 'a %note'],
+    ['in a row', '\\begin{gathered}\na %note' + em + '\n\\\\ b\n\\end{gathered}', '\\begin{gathered}\na %note\n\\\\\nb\n\\end{gathered}'],
+  ])('trims a space at the end of a comment %s', async (_name, latex, expected) => {
+    const back = await roundTrip(fence + '\n' + latex + '\n' + fence);
+    expect(back).toBe(fence + '\n' + expected + '\n' + fence);
+    expect((await equations(back)).join('')).not.toContain(em);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Inline, the space's character at the end would read as currency after
+  // a number, and the Markdown as no equation
+  test.each([
+    ['a \\quad at the end of an inline equation, after a number', 'A $2\\quad$ C.', 'A $2\\quad$ C.'],
+    ['a \\quad at the start of an inline equation', 'A $\\quad b$ C.', 'A $\\quad b$ C.'],
+    ['a \\quad at the end of an inline equation', 'A $b \\quad$ C.', 'A $b\\quad$ C.'],
+    ['a \\, at the end of an inline equation, after a number', 'A $2\\,$ C.', 'A $2\\,$ C.'],
+  ])('keeps %s', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await equations(back)).toEqual(await equations(md));
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Within an equation the space stays its character, and an equation of
+  // spaces alone is none
+  test.each([
+    ['a \\quad within an inline equation', 'A $a\\quad b$ C.', 'A $a' + em + ' b$ C.'],
+    ['an inline equation of a \\quad alone', 'A $\\quad$ C.', 'A  C.'],
+  ])('writes %s as before', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+  });
+});
+
 describe('parseCodeBlockStyle', () => {
   test('returns true for CodeBlock style', () => {
     const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'CodeBlock' } }];
