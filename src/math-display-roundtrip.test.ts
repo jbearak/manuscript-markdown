@@ -192,6 +192,125 @@ describe('counterfactuals fixture round-trip', () => {
   });
 });
 
+// Export gives Word display math in a heading in the heading's paragraph,
+// but import wrote it after the heading, on lines of its own, as a heading
+// can't go on past its line, so the next export gave Word an empty heading
+// and the equation in a paragraph of its own. An equation that's all of its
+// heading goes on the heading's line; any other goes after it, as before
+describe('display math in a heading', () => {
+  const fence = '$'.repeat(2);
+  const roundTrip = async (md: string) => stripFrontmatter((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  // Each of Word's paragraphs, by its style and its text, with each display
+  // equation as [equation] and each inline one as [math]
+  const paragraphs = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).map(p => {
+      const marked = p.replace(/<m:oMathPara>[\s\S]*?<\/m:oMathPara>/g, '<w:t>[equation]</w:t>').replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '<w:t>[math]</w:t>');
+      return (/<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? '') + ': ' + [...marked.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('');
+    });
+  };
+
+  it.each([
+    ['alone', '# ' + fence + 'x' + fence + '\n', ['Heading1: [equation]']],
+    ['of the second level', '## ' + fence + 'x' + fence + '\n', ['Heading2: [equation]']],
+    ['in a heading between paragraphs', 'A.\n\n# ' + fence + 'x' + fence + '\n\nB.\n', [': A.', 'Heading1: [equation]', ': B.']],
+    // Import writes the line ends of its rows as spaces
+    ['of an environment\'s rows', '# ' + fence + '\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}' + fence + '\n', ['Heading1: [equation]']],
+    ['with a tracked change in it', '# ' + fence + '{++x++}' + fence + '\n', ['Heading1: [equation]']],
+    // As before
+    ['as inline math', '# a $x$ b\n', ['Heading1: a [math] b']],
+  ])('keeps an equation in the heading: %s', async (_name, md, expected) => {
+    const once = await paragraphs(md);
+    expect(once).toEqual(expected);
+    const back = await roundTrip(md);
+    expect(back).toBe(md);
+    expect(await paragraphs(back)).toEqual(once);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Export writes no heading in a list item, so the equation goes on in the
+  // item's text, as before
+  it('keeps the paragraphs of a heading in a list item', async () => {
+    const md = '- # a ' + fence + 'x' + fence + ' b\n';
+    const once = await paragraphs(md);
+    expect(once).toHaveLength(1);
+    expect(once[0]).toEndWith('a [equation] b');
+    const back = await roundTrip(md);
+    expect(back).toBe('- a\n  ' + fence + '\n  x\n  ' + fence + '&#32;b\n');
+    expect(await paragraphs(back)).toEqual(once);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  /** A document from Word, `md`'s with its XML changed by `change` */
+  const fromWord = async (md: string, change: (xml: string) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    zip.file('word/document.xml', change(await zip.file('word/document.xml')!.async('string')));
+    return stripFrontmatter((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const equation = '<m:oMathPara><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara>';
+  const bold = /<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*XX<\/w:t><\/w:r>/;
+  const after = fence + '\nx\n' + fence + '\n';
+
+  // Any other goes after the heading, on lines of its own, as on main: one
+  // beside an equation or text, whose $, \ or HTML tag would run into its
+  // fences, one with a $ in its LaTeX, beside which a preview may read no
+  // fence, a highlighted one, and one Word has after the heading
+  it.each([
+    ['right after an inline equation', () => fromWord('# $y$**XX**\n', xml => xml.replace(bold, () => equation)), '# $y$\n\n' + after],
+    ['Word has outside the heading\'s paragraph', () => fromWord('# H\n', xml => xml.replace(/(<w:p[ >](?:(?!<\/w:p>)[\s\S])*?Heading1[\s\S]*?<\/w:p>)/, (_match, heading: string) => heading + equation)), '# H\n\n' + after],
+    ['that\'s highlighted', () => roundTrip('# ==' + fence + 'x' + fence + '=={red}\n'), '# \n\n{====' + fence + '\nx\n' + fence + '=={red}==}\n'],
+    // Two display equations' fences side by side, as $$x$$$$y$$, which a
+    // preview may not read
+    ['right beside another display equation', () => fromWord('# **XX**\n', xml => xml.replace(bold, () => equation + equation.replace('>x<', '>y<'))), '# \n\n' + after + fence + '\ny\n' + fence + '\n'],
+    ['right after a dollar sign', () => fromWord('# Price \\$**XX**\n', xml => xml.replace(bold, () => equation)), '# Price $\n\n' + after],
+    ['right after a backslash', () => fromWord('# Price \\\\**XX**\n', xml => xml.replace(bold, () => equation)), '# Price \\\\\n\n' + after],
+    ['with text right after it', () => fromWord('# **XX**b\n', xml => xml.replace(bold, () => equation)), '# \n\n' + fence + '\nx\n' + fence + 'b\n'],
+    ['with \\$ in it', () => roundTrip('# ' + fence + 'a\\$b' + fence + '\n'), '# \n\n' + fence + '\na\\$b\n' + fence + '\n'],
+    ['ending in \\$', () => roundTrip('# ' + fence + 'x\\$ ' + fence + '\n'), '# \n\n' + fence + '\nx\\$\n' + fence + '\n'],
+    // Its line ends, which a space can't take the place of in text
+    ['holding an upright run over lines', () => fromWord('# **XX**\n', xml => xml.replace(bold, () => equation.replace('<m:r><m:t>x</m:t></m:r>', '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t xml:space="preserve">a\n  b</m:t></m:r>'))),
+      '# \n\n' + fence + '\n\\text{a\n  b}\n' + fence + '\n'],
+  ])('keeps an equation %s out of the heading\'s line', async (_name, imported, expected) => {
+    const back = await imported();
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+    expect(await paragraphs(await roundTrip(back))).toEqual(await paragraphs(back));
+  });
+
+  // Which Markdown reads as a line end, so on the heading's line it ended
+  // the heading in the equation. After the heading, import writes it as it
+  // is, and export reads it as a line end, as on main, so it comes back
+  // once as one
+  it.each([
+    ['a carriage return', 'x&#13;y', 'x\ry'],
+    ['a carriage return and a line feed', 'x&#13;&#10;y', 'x\r\ny'],
+  ])('keeps an equation holding %s out of the heading\'s line', async (_name, text, latex) => {
+    const back = await fromWord('# **XX**\n', xml => xml.replace(bold, () => equation.replace('>x<', '>' + text + '<')));
+    expect(back).toBe('# \n\n' + fence + '\n' + latex + '\n' + fence + '\n');
+    const next = await roundTrip(back);
+    expect(next).toBe('# \n\n' + fence + '\nx\ny\n' + fence + '\n');
+    expect(await roundTrip(next)).toBe(next);
+    expect(await paragraphs(next)).toEqual(await paragraphs(back));
+    expect(await paragraphs(await roundTrip(next))).toEqual(await paragraphs(back));
+  });
+
+  // Main's form for an equation after text, whose space the next import
+  // trims at the heading's end. Beside the text, <a title= $$a>b$$ would
+  // read as an HTML tag, and the next export would write the fences as text
+  it.each([
+    ['after text', () => roundTrip('## a ' + fence + 'x' + fence + ' b\n'), '## a ', '\n\n' + fence + '\nx\n' + fence + '&#32;b\n'],
+    ['after text that opens an HTML tag', () => fromWord('# &lt;a title= **XX**\n', xml => xml.replace(bold, () => equation.replace('>x<', '>a&gt;b<'))), '# <a title= ', '\n\n' + fence + '\na>b\n' + fence + '\n'],
+  ])('writes an equation %s after the heading, as on main', async (_name, imported, heading, rest) => {
+    const back = await imported();
+    expect(back).toBe(heading + rest);
+    const next = await roundTrip(back);
+    expect(next).toBe(heading.trimEnd() + rest);
+    expect(await roundTrip(next)).toBe(next);
+    expect(await paragraphs(next)).toEqual(await paragraphs(back));
+    expect(await paragraphs(await roundTrip(next))).toEqual(await paragraphs(back));
+  });
+});
+
 // An environment with no OMML form showed its \begin as text and lost its
 // \end, and its argument's braces, so it came back as LaTeX that doesn't parse
 describe('environments with no OMML form', () => {
@@ -258,14 +377,17 @@ describe('environments with no OMML form', () => {
 
   // Rejecting the insertion leaves the array with no \end, so that view is
   // read as before, and aligned keeps its rows and its one \end in both. It
-  // comes back as a substitution of the whole equation, as on main, whose
-  // blank lines grow on each trip, as on main
+  // comes back as a substitution of the whole equation, as before. Its sides
+  // gained a blank line each on each trip, from the line ends of the fences
+  // export wrote into Word, which it no longer does
   it('keeps the rows of aligned around an array whose \\end is inserted', async () => {
     const md = fence + '\n\\begin{aligned}\nx &= \\begin{array}{c} a {++\\end{array}++} \\\\\ny &= c\n\\end{aligned}\n' + fence;
-    for (const back of [await roundTrip(md), await roundTrip(await roundTrip(md))]) {
-      expect(back.match(/\\end\{aligned\}/g)).toHaveLength(2);
-      expect(back).toContain('\\begin{aligned} x &= \\begin{array}{c} a \\end{array} \\\\ y &= c \\end{aligned}');
-      expect(back).toContain('\\begin{aligned} x &= \\begin{array}c a \\\\ y &= c \\end{aligned}');
+    const expected = fence + '\n{~~\\begin{aligned} x &= \\begin{array}c a \\\\ y &= c \\end{aligned}' +
+      '~>\\begin{aligned} x &= \\begin{array}{c} a \\end{array} \\\\ y &= c \\end{aligned}~~}\n' + fence;
+    let back = md;
+    for (let trip = 1; trip <= 3; trip++) {
+      back = await roundTrip(back);
+      expect(back).toBe(expected);
     }
   });
 
