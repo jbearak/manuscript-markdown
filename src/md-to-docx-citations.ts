@@ -1,5 +1,5 @@
 import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText } from './bibtex-parser';
-import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_INSERTION_COMMAND, type TrackChange } from './latex-to-omml';
+import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 import { decodeHtmlCharacterReferences } from './html-entities';
@@ -1262,7 +1262,7 @@ const LATEX_OPENER: Record<string, string> = { '}': '{', '\\right': '\\left', '\
 const LATEX_STRUCTURE_RE = /\\(?:left|right|begin|end)(?![a-zA-Z])|\\.|%[^\n]*|[{}]/g;
 
 /** The private commands of trackedEquationLatex, as a user might also write them */
-const PRIVATE_COMMAND_RE = /\\mmCritic(?:Ins|Del)(?![A-Za-z])/;
+const PRIVATE_COMMAND_RE = /\\mmCritic(?:Ins|Del|Hl)(?![A-Za-z])/;
 
 /** Whether `latex` closes every unescaped brace, \left and \begin it opens, in order, and opens every one it closes. */
 function latexSelfContained(latex: string): boolean {
@@ -1275,6 +1275,12 @@ function latexSelfContained(latex: string): boolean {
   return open.length === 0;
 }
 
+/** Whether `latex` holds a % comment, which export writes as a hidden run */
+export function holdsLatexComment(latex: string): boolean {
+  for (const [token] of latex.matchAll(LATEX_STRUCTURE_RE)) if (token.startsWith('%')) return true;
+  return false;
+}
+
 /** Whether `latex` ends in a % comment, which would take in what follows it. */
 function endsInComment(latex: string): boolean {
   let last: RegExpMatchArray | undefined;
@@ -1283,9 +1289,10 @@ function endsInComment(latex: string): boolean {
 }
 
 /**
- * An equation with CriticMarkup inside as LaTeX in which each tracked span is
- * a private command (CRITIC_INSERTION_COMMAND, CRITIC_DELETION_COMMAND), so it
- * parses as one expression and a change inside a fraction or script stays in
+ * An equation with CriticMarkup inside as LaTeX in which each tracked or
+ * highlighted span is a private command (CRITIC_INSERTION_COMMAND,
+ * CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND), so it parses as one
+ * expression and a change or highlight inside a fraction or script stays in
  * it. With `untracked`, each span is a plain group instead, which shows every
  * part where it belongs. Undefined when a span opens a brace, \left or \begin
  * it doesn't close or closes one it doesn't open, as in {++a}{b++} or
@@ -1305,6 +1312,7 @@ export function trackedEquationLatex(parts: CriticMathPart[], untracked = false)
     if (part.type === 'math') piece = part.content;
     else if (part.type === 'addition') piece = tracked(CRITIC_INSERTION_COMMAND, part.content);
     else if (part.type === 'deletion') piece = tracked(CRITIC_DELETION_COMMAND, part.content);
+    else if (part.type === 'highlight') piece = tracked(CRITIC_HIGHLIGHT_COMMAND, part.content);
     else if (part.type === 'substitution') {
       const oldLatex = tracked(CRITIC_DELETION_COMMAND, part.oldContent);
       const newLatex = tracked(CRITIC_INSERTION_COMMAND, part.newContent);
@@ -1321,7 +1329,7 @@ export function trackedEquationLatex(parts: CriticMathPart[], untracked = false)
 function equationViewLatex(parts: CriticMathPart[], accepted: boolean): string {
   let latex = '';
   for (const part of parts) {
-    const piece = part.type === 'math' ? part.content
+    const piece = part.type === 'math' || part.type === 'highlight' ? part.content
       : part.type === 'substitution' ? (accepted ? part.newContent : part.oldContent)
         : part.type === (accepted ? 'addition' : 'deletion') ? part.content : '';
     // A newline ends a comment that would otherwise take what follows, and {}
@@ -1361,7 +1369,8 @@ function joinedRuns(omml: string): string {
  * \sum{++\limits++} or {++\frac++}{1}{2}.
  */
 function tracksInPlace(latex: string, parts: CriticMathPart[], numbered: boolean): boolean {
-  const omml = trackedLatexToOmml(latex, (element, content) => '<' + element + '>' + content + '</' + element + '>', undefined, numbered);
+  const omml = trackedLatexToOmml(latex, (element, content) => '<' + element + '>' + content + '</' + element + '>', undefined, numbered)
+    .split(MATH_HIGHLIGHT_RPR).join('');
   const view = (accepted: boolean) => {
     const [keep, drop] = accepted ? ['w:ins', 'w:del'] : ['w:del', 'w:ins'];
     return omml.replace(new RegExp('<' + drop + '>[\\s\\S]*?</' + drop + '>', 'g'), '').replace(new RegExp('</?' + keep + '>', 'g'), '');
@@ -1392,6 +1401,11 @@ export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChan
   const latex = trackedEquationLatex(parts);
   if (latex !== undefined && tracksInPlace(latex, parts, numbered)) {
     return equation(trackedLatexToOmml(latex, track, unknownCommandWarning(warnings), numbered));
+  }
+  // An equation with highlights and no change in it is the equation, without
+  // a highlight that holds syntax rather than math, as x{==^2==}
+  if (parts.every(part => part.type === 'math' || part.type === 'highlight')) {
+    return equation(equationViewOmml(equationViewLatex(parts, true), warnings, numbered));
   }
   const view = (accepted: boolean) => {
     const omml = equationViewOmml(equationViewLatex(parts, accepted), warnings, numbered);

@@ -371,6 +371,21 @@ type ParseMode = 'math' | 'styled' | 'text';
  */
 export const CRITIC_INSERTION_COMMAND = '\\mmCriticIns';
 export const CRITIC_DELETION_COMMAND = '\\mmCriticDel';
+/** A highlight inside an equation, as a private command (see
+ *  CRITIC_INSERTION_COMMAND), whose runs Word highlights, each run of it */
+export const CRITIC_HIGHLIGHT_COMMAND = '\\mmCriticHl';
+
+/** The highlight of a run of CRITIC_HIGHLIGHT_COMMAND, in the default color
+ *  of {==...==}, which import reads back as one */
+export const MATH_HIGHLIGHT_RPR = '<w:rPr><w:highlight w:val="yellow"/></w:rPr>';
+
+/** `omml` with each of its runs highlighted (see MATH_HIGHLIGHT_RPR), as
+ *  Word holds a highlight on part of an equation, but for one with run
+ *  properties already, as a hidden comment's, which shows nothing */
+function highlightedRuns(omml: string): string {
+  return omml.replace(/<m:r>((?:<m:rPr>(?:(?!<\/m:rPr>)[\s\S])*<\/m:rPr>)?)(<w:rPr>)?/g,
+    (run: string, mathProps: string, props: string | undefined) => props === undefined ? '<m:r>' + mathProps + MATH_HIGHLIGHT_RPR : run);
+}
 
 /** Wraps a tracked part's OMML in w:ins or w:del. */
 export type TrackChange = (element: 'w:ins' | 'w:del', omml: string) => string;
@@ -570,6 +585,7 @@ class Parser {
   }
 
   private parseCommand(cmd: string): string {
+    if (this.track && cmd === CRITIC_HIGHLIGHT_COMMAND) return highlightedRuns(this.parseGroup());
     if (this.track && (cmd === CRITIC_INSERTION_COMMAND || cmd === CRITIC_DELETION_COMMAND)) {
       const start = this.pos;
       const omml = this.parseGroup();
@@ -1513,7 +1529,8 @@ export function latexToOmml(latex: string, onUnknownCommand?: (command: string) 
 
 /**
  * As latexToOmml, with each CRITIC_INSERTION_COMMAND or CRITIC_DELETION_COMMAND
- * span's OMML passed through `track`.
+ * span's OMML passed through `track`, and each CRITIC_HIGHLIGHT_COMMAND
+ * span's runs highlighted.
  */
 export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownCommand?: (command: string) => void, display = false): string {
   if (!latex.trim()) {

@@ -46,6 +46,32 @@ keeps the change. The whitespace around a command, as in
 Word has no form for the command, as in `$a{++ \! ++}b$`, Word shows no change,
 and the change doesn't come back on import.
 
+A highlight works inside an inline equation too, in a fraction or script as
+well, as in `$a{==b==}c$` or `$\frac{a}{{==b==}}$`. Word gets one equation
+with the highlighted part's runs highlighted. Word's highlight on
+part of an equation comes back in `{==...==}` where it's at the top level of
+an inline equation, as on `b` or on all of `\frac{b}{c}` in
+`$a{==\frac{b}{c}==}d$`. One inside a structure, as on the denominator alone,
+doesn't come back: the preview renders an inline equation in pieces at
+CriticMarkup, and a piece of a fraction, as `\frac{a}{`, isn't an equation it
+can render. Nor does one on an equation array, whose equation numbers it
+would hold. A highlight on all of an
+equation's content is on the equation, as Word holds it: `${==abc==}$` comes
+back as `==$abc$==`. A highlight inside an equation takes no color, so Word's
+in a color other than yellow doesn't come back. Nor does a highlight in a
+change, or one inside `\mathbf{}`, `\text{}` or another style's group, which
+writes its text as one run. One on syntax rather than math, as in
+`$x{==^2==}$`, or on a structure with no text, as `\sum`, is left out, and the
+equation stays whole. An inline equation still splits at a highlight with
+CriticMarkup or a `%` comment in it, or one that opens a brace it doesn't
+close, and at a comment. So does one in a highlight, as `==$a{==b==}c$==`, whose pieces each
+take the highlight around them.
+
+In display math, a highlight inside the equation is LaTeX, as before: Word
+shows `$$a{==b==}c$$` as `a==b==c`. The preview leaves display math to VS
+Code's KaTeX, which shows the markers too. Word's highlight on part of a
+display equation doesn't come back.
+
 Since CriticMarkup works inside an equation, a group whose content starts
 with `++`, `--`, `==`, `~~` or `>>` reads as the start of a change, and one
 that ends with `++`, `--`, `==`, `~~` or `<<` reads as the end of one, even in

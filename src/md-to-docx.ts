@@ -4,7 +4,7 @@ import { codeSpansOfSpaces } from './code-spans';
 import { linearInlineComments } from './inline-html-comments';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXmlText, textElements, orderPPr, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, HIDDEN_PARAGRAPH_PPR, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXmlText, textElements, orderPPr, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, holdsLatexComment, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, HIDDEN_PARAGRAPH_PPR, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -1139,12 +1139,18 @@ function mathRule(state: StateInline, silent: boolean): boolean {
   const content = state.src.slice(match.contentStart, match.contentEnd);
   const isDisplay = match.delimiterLength === 2;
   const criticParts = splitCriticMarkupInMath(content);
-  if (criticParts && criticParts.every(isTrackedMathPart)) {
+  // A highlight inside display math is LaTeX, as before: import reads none
+  // there, which the preview leaves to VS Code's KaTeX (see
+  // ommlChildrenToLatex in omml.ts)
+  const highlighted = criticParts?.some(part => part.type === 'highlight');
+  if (criticParts && criticParts.every(isTrackedMathPart)
+    && (!highlighted || !isDisplay && trackedEquationLatex(criticParts) !== undefined)) {
     pushTrackedMathToken(state, criticParts, isDisplay);
     return true;
   }
-  // A highlight or comment splits an inline equation; a display equation
-  // can't be split into inline ones and keeps it as LaTeX
+  // A comment, or a highlight that one equation can't hold, splits an inline
+  // equation; a display equation can't be split into inline ones and keeps
+  // it as LaTeX
   if (criticParts && !isDisplay) {
     pushCriticMathTokens(state, criticParts);
     return true;
@@ -1154,13 +1160,19 @@ function mathRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
-/** Whether Word can record a part as a change inside an equation. */
+/** Whether Word can record a part inside an equation: a change, or a
+ *  highlight, which Word holds on its runs, without CriticMarkup in it,
+ *  which no span inside an equation can hold, or a % comment, whose hidden
+ *  run takes no highlight, so import wouldn't read the highlight back. An
+ *  equation with any other highlight splits, as before. */
 function isTrackedMathPart(part: CriticMathPart): boolean {
-  return part.type === 'math' || part.type === 'addition' || part.type === 'deletion' || part.type === 'substitution';
+  return part.type === 'math' || part.type === 'addition' || part.type === 'deletion' || part.type === 'substitution'
+    || part.type === 'highlight' && splitCriticMarkupInMath(part.content) === undefined && !holdsLatexComment(part.content);
 }
 
-/** An equation with insertions, deletions and substitutions inside, which
- *  become tracked runs in one equation (see generateTrackedMathXml). */
+/** An equation with insertions, deletions, substitutions and highlights
+ *  inside, which become tracked or highlighted runs in one equation (see
+ *  generateTrackedMathXml). */
 function pushTrackedMathToken(state: StateInline, parts: CriticMathPart[], display: boolean): void {
   const token = pushManuscriptToken(state, 'math', '', 0);
   // For rendering without a tracker, as inside a deleted span: every part
@@ -1173,6 +1185,36 @@ function pushTrackedMathToken(state: StateInline, parts: CriticMathPart[], displ
 
 function wrapInlineMathFragment(content: string): string {
   return content.length > 0 ? '$' + content + '$' : '';
+}
+
+/** Whether `run` is an inline equation with a highlight inside, which
+ *  generateRuns writes without a highlight around it, as one with a change
+ *  inside, so that in a highlight it's split at its CriticMarkup, as before
+ *  (see splitAtCriticMarkup) */
+function splitsInHighlight(run: MdRun): boolean {
+  return run.type === 'math' && !run.display && !!run.mathParts?.some(part => part.type === 'highlight');
+}
+
+/** The runs of an inline equation split at its CriticMarkup, as the tokens
+ *  pushCriticMathTokens writes give them, each with the equation's
+ *  formatting */
+function splitAtCriticMarkup(run: MdRun): MdRun[] {
+  const { mathParts, ...equation } = run;
+  const runs: MdRun[] = [];
+  for (const part of mathParts ?? []) {
+    if (part.type === 'math') {
+      if (part.content) runs.push({ ...equation, type: 'math', text: part.content });
+    } else if (part.type === 'substitution') {
+      const oldText = wrapInlineMathFragment(part.oldContent);
+      const newText = wrapInlineMathFragment(part.newContent);
+      runs.push({ ...equation, type: 'critic_sub', text: oldText, newText, oldRuns: parseCriticInnerRuns(oldText), newRuns: parseCriticInnerRuns(newText) });
+    } else {
+      const text = wrapInlineMathFragment(part.content);
+      const type = part.type === 'addition' ? 'critic_add' : part.type === 'deletion' ? 'critic_del' : 'critic_highlight';
+      runs.push({ ...equation, type, text, innerRuns: parseCriticInnerRuns(text) });
+    }
+  }
+  return runs;
 }
 
 /** An inline equation split at its highlights and comments, which can't sit inside an equation. */
@@ -4411,16 +4453,19 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         });
         break;
         
-      case 'math':
-        runs.push({
+      case 'math': {
+        const run: MdRun = {
           type: 'math',
           text: token.content,
           display: token.display,
           ...(token.criticMathParts ? { mathParts: token.criticMathParts } : {}),
           ...formatStack,
           href: currentHref
-        });
+        };
+        if (formatStack.highlight && splitsInHighlight(run)) pushAll(runs, splitAtCriticMarkup(run));
+        else runs.push(run);
         break;
+      }
 
       case 'comment_range_start':
         runs.push({
@@ -8269,6 +8314,10 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       // In the link around it, as text is
       const href = run.href || outer.href || forced.href;
       formatted.push(href ? { ...run, href } : run);
+      continue;
+    }
+    if ((outer.highlight || forced.highlight) && splitsInHighlight(run)) {
+      pushAll(formatted, formatCriticInnerRuns(splitAtCriticMarkup(run), outer, forced) ?? []);
       continue;
     }
     if (run.type === 'math' && (run.display || !run.mathParts) && (outer.highlight || forced.highlight)) {

@@ -1586,13 +1586,18 @@ let displayEquation = false;
  */
 export function ommlToLatex(children: XmlNode[], display = false): string {
   const outerDisplay = displayEquation;
+  // An equation highlighted whole is in a highlight, which converter.ts
+  // writes around it (see mathHighlight there), not in {==...==} in it
+  const whole = partDepth === 0 && highlightedWhole(children);
   if (partDepth === 0) displayEquation = display;
+  if (whole) highlightDepth++;
   partDepth++;
   try {
     const latex = trimPart(ommlChildrenToLatex(children));
     return partDepth > 1 ? beforeCloser(apartFromMarkup(latex)) : latex;
   } finally {
     partDepth--;
+    if (whole) highlightDepth--;
     displayEquation = outerDisplay;
   }
 }
@@ -1768,6 +1773,33 @@ function ommlChildrenToLatex(nodes: XmlNode[]): string {
   // Whether the last markup's content ends with a command
   let markupEndsInCommand = false;
   for (let i = 0; i < children.length; i++) {
+    // Word's highlight on part of an equation, on each of its runs, as
+    // {==...==} around them, as export writes it (see CRITIC_HIGHLIGHT_COMMAND
+    // in latex-to-omml.ts), only where the preview shows it: at an inline
+    // equation's top level. The preview splits an inline equation at
+    // CriticMarkup, and renders each piece as an equation of its own, which a
+    // structure's piece isn't, as \frac{a}{ of \frac{a}{{==b==}}. It leaves
+    // display math to VS Code's KaTeX, which would show the markers. Nor is
+    // one read around an equation array, whose numbers a highlight would
+    // hold, which export doesn't number (see generateTrackedMathXml in
+    // md-to-docx-citations.ts). Those aren't read, as before
+    if (partDepth === 1 && !displayEquation && highlightDepth === 0 && isHighlightedPart(children[i])) {
+      let end = i + 1;
+      while (end < children.length && isHighlightedPart(children[end])) end++;
+      highlightDepth++;
+      let latex: string;
+      try {
+        latex = ommlChildrenToLatex(children.slice(i, end));
+      } finally {
+        highlightDepth--;
+      }
+      i = end - 1;
+      if (latex) {
+        result += /\\tag\b/.test(latex) ? latex : '{==' + latex + '==}';
+        markupEndsInCommand = false;
+      }
+      continue;
+    }
     const change = trackedChange(children[i]);
     if (!change) {
       let latex = translateNode(children[i]);
@@ -1808,9 +1840,62 @@ function ommlChildrenToLatex(nodes: XmlNode[]): string {
  *  whitespace without xml:space="preserve", which Word drops and so shows as no
  *  change. Export writes one so for the padding of a change such as
  *  {++ \! ++}, whose command Word has no form for (see keepWhitespaceChanges
- *  in latex-to-omml.ts). */
+ *  in latex-to-omml.ts). A highlight in it isn't read, as no span inside an
+ *  equation can hold another. */
 function trackedChangeLatex(children: XmlNode[]): string {
-  return isDroppedChange(children) ? '' : ommlChildrenToLatex(children);
+  if (isDroppedChange(children)) return '';
+  highlightDepth++;
+  try {
+    return ommlChildrenToLatex(children);
+  } finally {
+    highlightDepth--;
+  }
+}
+
+/**
+ * How deep translation is in a highlight, a tracked change or an equation
+ * highlighted whole, where import reads no highlight on part of it, as no
+ * span inside an equation can hold another.
+ */
+let highlightDepth = 0;
+
+/** The highlight colors of the runs of text in `nodes`: each run's w:val,
+ *  'none' for a run without one, and 'change' where there's a tracked change */
+function runHighlights(nodes: XmlNode[], colors = new Set<string>()): Set<string> {
+  for (const node of nodes) for (const key of Object.keys(node)) {
+    if (key === ':@' || key === '#text') continue;
+    const children = asXmlNodes(node[key]);
+    if (key === 'w:ins' || key === 'w:del') colors.add('change');
+    if (key !== 'm:r') {
+      runHighlights(children, colors);
+    } else if (children.some(child => child['m:t'] !== undefined)) {
+      const highlight = findChildNode(findChild(children, 'w:rPr'), 'w:highlight');
+      colors.add(String(highlight?.[':@']?.['@_w:val'] ?? '') || 'none');
+    }
+  }
+  return colors;
+}
+
+/** Whether every run of text in an equation's `children` has a highlight,
+ *  of one color, as mathHighlight in converter.ts reads it */
+function highlightedWhole(children: XmlNode[]): boolean {
+  const colors = runHighlights(children);
+  colors.delete('change');
+  return colors.size === 1 && !colors.has('none');
+}
+
+/** Whether `node` shows only text highlighted in the color of {==...==}: a
+ *  run, or a structure whose every run of text is, with no tracked change
+ *  and no equation array, whose rows can hold Word's numbers */
+function isHighlightedPart(node: XmlNode): boolean {
+  const colors = runHighlights([node]);
+  return colors.size === 1 && colors.has('yellow') && !holdsEquationArray([node]);
+}
+
+/** Whether `nodes` hold an m:eqArr, at any depth */
+function holdsEquationArray(nodes: XmlNode[]): boolean {
+  return nodes.some(node => Object.keys(node).some(key =>
+    key === 'm:eqArr' || (key !== ':@' && key !== '#text' && holdsEquationArray(asXmlNodes(node[key])))));
 }
 
 /** Whether a tracked change's content is only runs of whitespace without

@@ -2234,3 +2234,187 @@ describe('equation number edges', () => {
     ['a number of a delimiter with a # in it alone', array(run('x#') + parens(run('A#B'))), 'x \\tag{A\\#B}'],
   ])('%s comes back as before, and again', (_name, omml, latex) => expectFromWord(omml, display(latex)));
 });
+
+// A highlight inside an inline equation split it in three: export wrote the
+// math before it, the highlight's and the math after it as equations of
+// their own, so one inside a structure, as \frac{a}{{==b==}}, left the
+// structure empty. Import read no highlight on part of an equation. Export
+// now writes one equation, its highlighted part's runs highlighted, as Word
+// does, and import writes them in {==...==}, as a change inside an equation.
+// Display math is as on main
+describe('a highlight inside an equation', () => {
+  const marked = (t: string) => '<m:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><m:t>' + t + '</m:t></m:r>';
+  const inline = (latex: string) => 'A $' + latex + '$ B.\n';
+  const display = (latex: string) => '$$\n' + latex + '\n$$\n';
+
+  /** The document Word gets for `markdown` */
+  async function documentXml(markdown: string): Promise<string> {
+    return (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+  }
+
+  /** The equations Word gets for `markdown` */
+  async function equations(markdown: string): Promise<string[]> {
+    return [...(await documentXml(markdown)).matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]);
+  }
+
+  /** A document from Word with an equation of `omml`, inline or on its own line */
+  async function wordDocx(omml: string, isDisplay: boolean): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(isDisplay ? '$$\nx\n$$\n' : 'A $x$ B.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** `markdown` comes back as `back`, and again */
+  async function expectTrips(markdown: string, back = markdown): Promise<void> {
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(back);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(back);
+  }
+
+  // Each with how import writes it, inline and in display math. At an inline
+  // equation's top level, import writes it in {==...==}. In a structure,
+  // which the preview, splitting the equation at CriticMarkup, would render
+  // in pieces that aren't equations, as \frac{a}{, and in display math,
+  // which the preview leaves to VS Code's KaTeX, it reads none, as before
+  const shapes: [string, string, string, string, string][] = [
+    ['a run', 'a{==b==}c', run('a') + marked('b') + run('c'), 'a{==b==}c', 'abc'],
+    ['runs', 'a{==b+c==}d', run('a') + marked('b') + marked('+') + marked('c') + run('d'), 'a{==b+c==}d', 'ab+cd'],
+    ['a fraction', 'a{==\\frac{b}{c}==}d', run('a') + '<m:f><m:num>' + marked('b') + '</m:num><m:den>' + marked('c') + '</m:den></m:f>' + run('d'), 'a{==\\frac{b}{c}==}d', 'a\\frac{b}{c}d'],
+    ['an operator', 'a{===b==}c', run('a') + marked('=') + marked('b') + run('c'), 'a{===b==}c', 'a=bc'],
+    ['a fraction\'s denominator', '\\frac{a}{{==b==}}', '<m:f><m:num>' + run('a') + '</m:num><m:den>' + marked('b') + '</m:den></m:f>', '\\frac{a}{b}', '\\frac{a}{b}'],
+    ['a superscript', 'x^{{==2==}}', '<m:sSup><m:e>' + run('x') + '</m:e><m:sup>' + marked('2') + '</m:sup></m:sSup>', 'x^2', 'x^2'],
+  ];
+  test.each(shapes.map(([name, latex, omml, back]) => [name, inline(latex), omml, inline(back)]))(
+    'on %s, inline, is one equation with its runs highlighted, and comes back as import writes it, and again', async (_name, markdown, omml, back) => {
+      expect(await equations(markdown)).toEqual([omml]);
+      await expectTrips(markdown, back);
+    });
+
+  test('beside a change, inline, comes back, and again', async () => {
+    const markdown = inline('a{==b==}{++c++}d');
+    expect(await equations(markdown)).toHaveLength(1);
+    await expectTrips(markdown);
+  });
+
+  // As on main: in display math, which import reads no highlight in, a
+  // highlight is LaTeX, whose == Word shows
+  test.each([
+    ['a{==b==}c', 'a==b==c'],
+    ['a{==b+c==}d', 'a==b+c==d'],
+    ['a{==\\frac{b}{c}==}d', 'a==\\frac{b}{c}==d'],
+    ['a{===b==}c', 'a===b==c'],
+    ['\\frac{a}{{==b==}}', '\\frac{a}{=\\relax=b=\\relax=}'],
+    ['x^{{==2==}}', 'x^{=\\relax=2=\\relax=}'],
+    ['a{==b==}{++c++}d', 'a==b==++c++d'],
+    ['{==abc==}', '==abc=='],
+  ])('in display math, %s is LaTeX, as on main, and comes back, and again', async (latex, back) => {
+    const omml = await equations(display(latex));
+    expect(omml).toHaveLength(1);
+    expect(omml[0]).not.toContain('w:highlight');
+    expect(omml[0]).toContain('<m:t>=</m:t>');
+    await expectTrips(display(latex), display(back));
+  });
+
+  test('in display math in a green highlight, is LaTeX, as on main, the equation green, and comes back, and again', async () => {
+    const omml = await equations('==$$a{==b==}c$$=={green}\n');
+    expect(omml).toEqual([['a', '=', '=', 'b', '=', '=', 'c'].map(t => marked(t).replace('yellow', 'green')).join('')]);
+    await expectTrips('==$$a{==b==}c$$=={green}\n', display('a==b==c'));
+  });
+
+  test.each(shapes.flatMap(([name, , omml, back, displayBack]) => [[name, 'inline', omml, inline(back)], [name, 'in display math', omml, display(displayBack)]]))(
+    'from Word, on %s, %s, comes back as import writes it, and again', async (_name, _where, omml, markdown) => {
+      expect((await convertDocx(await wordDocx(omml, markdown.startsWith('$$')))).markdown).toBe(markdown);
+      await expectTrips(markdown);
+    });
+
+  // In a highlight, which an equation with a highlight inside doesn't take,
+  // it's split at its CriticMarkup, as on main, and each piece takes the
+  // highlight around it
+  test.each([
+    ['a green highlight', 'A ==$a{==b==}c$=={green} B.\n', ['a', 'b', 'c'].map(t => marked(t).replace('yellow', 'green')), 'A ==$a$$b$$c$=={green} B.\n'],
+    ['a highlight', 'A ==$a{==b==}c$== B.\n', ['a', 'b', 'c'].map(marked), 'A ==$a$$b$$c$== B.\n'],
+    ['a highlight, beside an insertion', 'A ==$a{==b==}{++c++}d$== B.\n', [marked('a'), marked('b'), run('c'), marked('d')], 'A ==$a$$b$=={++$c$++}==$d$== B.\n'],
+  ])('in %s, is split at its CriticMarkup, as on main, and comes back, and again', async (_name, markdown, omml, back) => {
+    expect(await equations(markdown)).toEqual(omml);
+    await expectTrips(markdown, back);
+  });
+
+  // With a % comment in it, whose hidden run export doesn't highlight, so
+  // import wouldn't read the highlight back, it's split at its CriticMarkup,
+  // as on main; a comment outside it doesn't matter
+  test.each([
+    ['in a fraction', 'A $a{==\\frac{b % c\n}{c}==}d$ B.\n', 'A $a$$\\frac{b % c\n}{c}$$d$ B.\n'],
+    ['in a radical', 'A $a{==\\sqrt{b % c\n}==}d$ B.\n', 'A $a$$\\sqrt{b % c\n}$$d$ B.\n'],
+    ['after a run', 'A $a{==b % c\n==}d$ B.\n', 'A $a$==$b % c$==$d$ B.\n'],
+  ])('with a comment in it, %s, is split at its CriticMarkup, as on main, and comes back, and again', async (_name, markdown, back) => {
+    const omml = await equations(markdown);
+    expect(omml).toHaveLength(3);
+    expect([omml[0], omml[2]]).toEqual([run('a'), run('d')]);
+    expect(omml[1]).toContain('<w:vanish/><w:highlight w:val="yellow"/>');
+    await expectTrips(markdown, back);
+  });
+
+  test.each([
+    ['before it', 'A $a % c\n{==b==}d$ B.\n'],
+    ['after it', 'A $a{==b==}c % n\n$ B.\n', 'A $a{==b==}c % n$ B.\n'],
+  ])('beside a comment %s, is one equation, and comes back, and again', async (_name, markdown, back = markdown) => {
+    const omml = await equations(markdown);
+    expect(omml).toHaveLength(1);
+    expect(omml[0]).toContain(marked('b'));
+    await expectTrips(markdown, back);
+  });
+
+  // In other formatting, its one equation takes what an equation did on
+  // main: no bold, and all of a link or an insertion
+  test.each([
+    ['bold', 'A **$a{==b==}c$** B.\n', '<m:oMath>', 'A $a{==b==}c$ B.\n'],
+    ['a link', 'A [$a{==b==}c$](u) B.\n', '"><m:oMath>', 'A [$a{==b==}c$](u) B.\n'],
+    ['an insertion', 'A {++$a{==b==}c$++} B.\n', '"><m:oMath>', 'A {++$a{==b==}c$++} B.\n'],
+  ])('in %s, is one equation with its runs highlighted, and comes back, and again', async (_name, markdown, before, back) => {
+    const xml = await documentXml(markdown);
+    expect([...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1])).toEqual([run('a') + marked('b') + run('c')]);
+    expect(xml).toContain(before + run('a') + marked('b') + run('c') + '</m:oMath>' + (before === '<m:oMath>' ? '' : '</w:'));
+    await expectTrips(markdown, back);
+  });
+
+  // An equation array's rows can hold Word's numbers, which export doesn't
+  // write for a highlight that holds them, so import reads none around one
+  const array = (...rows: string[]) => '<m:eqArr>' + rows.map(row => '<m:e>' + row + '</m:e>').join('') + '</m:eqArr>';
+  test.each([
+    ['in display math, numbered, of one row', run('a+') + array(marked('x#(1)')), true, '$$\na+x \\tag{1}\n$$\n'],
+    ['in display math, numbered, of two rows', run('a+') + array(marked('x#(1)'), marked('y#(2)')), true, '$$\na+\\begin{gather*} x \\tag{1} \\\\ y \\tag{2} \\end{gather*}\n$$\n'],
+    ['inline', run('a+') + array(marked('x'), marked('y')), false, 'A $a+\\begin{gathered} x \\\\ y \\end{gathered}$ B.\n'],
+    ['inline, after a highlighted run', run('a') + marked('b') + array(marked('x'), marked('y')), false, 'A $a{==b==}\\begin{gathered} x \\\\ y \\end{gathered}$ B.\n'],
+  ])('from Word, on an equation array beside text, %s, comes back without the highlight around the array, and again', async (_name, omml, isDisplay, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, isDisplay))).markdown).toBe(markdown);
+    await expectTrips(markdown);
+  });
+
+  // As on main: a highlight on the whole equation is around it, one in a
+  // change or of another color isn't read
+  test.each([
+    ['on the whole inline equation', run('a').replace('<m:r>', '<m:r><w:rPr><w:highlight w:val="yellow"/></w:rPr>') + marked('b'), false, 'A ==$ab$== B.\n'],
+    ['on the whole display equation', marked('a') + marked('b'), true, '{==$$\nab\n$$==}\n'],
+    ['in an insertion', run('a') + '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + marked('b') + '</w:ins>' + run('c'), false, 'A $a{++b++}c$ B.\n'],
+    ['of another color', run('a') + marked('b').replace('yellow', 'red') + run('c'), false, 'A $abc$ B.\n'],
+  ])('from Word, %s, comes back as before, and again', async (_name, omml, isDisplay, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, isDisplay))).markdown).toBe(markdown);
+    await expectTrips(markdown);
+  });
+
+  // On all of an equation's content, it's on the equation, as Word holds one;
+  // on syntax rather than math, the equation stays whole without it
+  test.each([
+    ['all of an inline equation\'s content', inline('{==abc==}'), 'A ==$abc$== B.\n'],
+    ['a superscript\'s ^', inline('x{==^2==}'), inline('x^2')],
+  ])('on %s comes back as Word holds it, and again', (_name, markdown, back) => expectTrips(markdown, back));
+
+  test.each([
+    'A ==$abc$== B.\n',
+    'A $a{++b++}c$ B.\n',
+    'A $a{--b--}c$ B.\n',
+    'A $a{~~b~>d~~}c$ B.\n',
+    '$$\na{++b++}c\n$$\n',
+  ])('%j comes back as before, and again', markdown => expectTrips(markdown));
+});
