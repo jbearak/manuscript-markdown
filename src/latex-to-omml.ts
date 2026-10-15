@@ -375,12 +375,38 @@ export const CRITIC_DELETION_COMMAND = '\\mmCriticDel';
 /** Wraps a tracked part's OMML in w:ins or w:del. */
 export type TrackChange = (element: 'w:ins' | 'w:del', omml: string) => string;
 
+/** A \tag's text, and whether it is \tag*, which LaTeX shows without parentheses. */
+interface EquationTag { text: string; star: boolean }
+
+/**
+ * Whether `omml` shows anything, which a row of spaces alone or a hidden
+ * comment doesn't: text, or a structure, as \sum's or \left(\right)'s.
+ */
+function shows(omml: string): boolean {
+  return /<m:t(?: [^>]*)?>(?!\u200B)[^<]*[^\s<]/.test(omml) || /<m:/.test(omml.replace(/<m:r>[\s\S]*?<\/m:r>/g, ''));
+}
+
+/**
+ * Word's equation number for a \tag, at the end of a row of an equation
+ * array: a # and then the number, (x) as a delimiter for \tag, as Word
+ * builds up #(x), and x alone for \tag*. omml.ts reads it back as the tag
+ * (see rowNumber there).
+ */
+function equationNumberOmml(tag: EquationTag): string {
+  const number = makeRun(tag.text);
+  return makeRun('#') + (tag.star ? number : '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>' + number + '</m:e></m:d>');
+}
+
 class Parser {
   private tokens: Token[];
   private pos: number;
   private onUnknownCommand?: (command: string) => void;
   private mode: ParseMode;
   private track?: TrackChange;
+  /** Whether a \tag becomes Word's equation number, as in display math */
+  numbered = false;
+  /** The last \tag read and not yet written as a row's number */
+  private tag?: EquationTag;
 
   constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, mode: ParseMode = 'math', track?: TrackChange) {
     this.tokens = tokens;
@@ -715,12 +741,11 @@ class Parser {
         return groupChr;
       }
 
-      // Tags and labels (silently consumed)
-      case '\\tag': {
-        this.consumeStarVariant();
-        this.discardGroup();
+      // A tag is written as its row's number, or the equation's (see
+      // rowNumber and numberedEquation); labels are consumed
+      case '\\tag':
+        this.readTag();
         return '';
-      }
 
       case '\\label': {
         this.discardGroup();
@@ -871,7 +896,11 @@ class Parser {
           const rest = token.value.slice(j + 1);
           // eslint-disable-next-line no-restricted-syntax -- one token at most
           this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
-          return new Parser(operand, this.onUnknownCommand, this.mode, this.track).parseExpression(false);
+          // A \tag in it numbers the equation, as in a group
+          const parser = new Parser(operand, this.onUnknownCommand, this.mode, this.track);
+          const omml = parser.parseExpression(false);
+          this.tag = parser.tag ?? this.tag;
+          return omml;
         }
       }
     }
@@ -1082,18 +1111,23 @@ class Parser {
         return '<m:d><m:dPr><m:begChr m:val="{"/><m:endChr m:val=""/></m:dPr><m:e><m:eqArr>' + content + '</m:eqArr></m:e></m:d>';
       }
 
+      case 'aligned':
+      case 'gathered':
+      case 'split': {
+        const content = this.parseEqArrayContent();
+        this.consumeEnd(envName);
+        return '<m:eqArr>' + content + '</m:eqArr>';
+      }
+
       case 'align':
       case 'align*':
-      case 'aligned':
       case 'gather':
       case 'gather*':
-      case 'gathered':
-      case 'split':
       case 'multline':
       case 'multline*':
       case 'flalign':
       case 'flalign*': {
-        const content = this.parseEqArrayContent();
+        const content = this.parseEqArrayContent(true);
         this.consumeEnd(envName);
         return '<m:eqArr>' + content + '</m:eqArr>';
       }
@@ -1104,7 +1138,7 @@ class Parser {
         if (this.peek()?.type === 'lbrace') {
           this.parseGroup();
         }
-        const content = this.parseEqArrayContent();
+        const content = this.parseEqArrayContent(true);
         this.consumeEnd(envName);
         return '<m:eqArr>' + content + '</m:eqArr>';
       }
@@ -1242,7 +1276,12 @@ class Parser {
     return rows;
   }
 
-  private parseEqArrayContent(): string {
+  /**
+   * The rows of an equation array. With `numberRows`, for the environments
+   * that number their rows in LaTeX, a row's \tag is its number in Word;
+   * otherwise, as in aligned or cases, it stays the equation's.
+   */
+  private parseEqArrayContent(numberRows = false): string {
     const rows: string[] = [];
 
     const remaining = this.parseAtoms(
@@ -1250,13 +1289,18 @@ class Parser {
       (token, atoms) => {
         if (token.type === 'command' && token.value === '\\\\') {
           this.consume();
-          rows.push('<m:e>' + atoms.join('') + '</m:e>');
+          const row = atoms.join('');
+          rows.push('<m:e>' + row + this.rowNumber(numberRows, row) + '</m:e>');
           atoms.length = 0;
           return true;
         }
-        if (token.type === 'command' && (token.value === '\\tag' || token.value === '\\label')) {
+        if (token.type === 'command' && token.value === '\\tag') {
           this.consume();
-          if (token.value === '\\tag') this.consumeStarVariant();
+          this.readTag();
+          return true;
+        }
+        if (token.type === 'command' && token.value === '\\label') {
+          this.consume();
           this.discardGroup();
           return true;
         }
@@ -1273,11 +1317,49 @@ class Parser {
       },
     );
 
+    const row = remaining.join('');
+    const number = this.rowNumber(numberRows, row);
     if (remaining.length > 0) {
-      rows.push('<m:e>' + remaining.join('') + '</m:e>');
+      rows.push('<m:e>' + row + number + '</m:e>');
     }
 
     return rows.join('');
+  }
+
+  /** Read a \tag's star and group, after the \tag, as the tag to write. */
+  private readTag(): void {
+    const star = this.consumeStarVariant();
+    const onUnknownCommand = this.onUnknownCommand;
+    this.onUnknownCommand = undefined;
+    try {
+      this.tag = { text: this.extractText(this.parseGroupIn('text')).trim(), star };
+    } finally {
+      this.onUnknownCommand = onUnknownCommand;
+    }
+  }
+
+  /**
+   * Word's number for a row ending here, `row`, from the tag read in it, if
+   * rows are numbered. A row with nothing to number drops it, as before, as
+   * import reads a # with nothing before it as no number.
+   */
+  private rowNumber(numberRows: boolean, row: string): string {
+    if (!numberRows || !this.numbered || !this.tag) return '';
+    const tag = this.tag;
+    this.tag = undefined;
+    return shows(row) ? equationNumberOmml(tag) : '';
+  }
+
+  /**
+   * `omml`, a whole equation, as a row of an equation array with its number
+   * when a \tag in it is no row's, as Word numbers an equation; dropped
+   * where it isn't numbered, as in inline math.
+   */
+  numberedEquation(omml: string): string {
+    const tag = this.tag;
+    this.tag = undefined;
+    if (!this.numbered || !tag || !shows(omml)) return omml;
+    return '<m:eqArr><m:e>' + omml + equationNumberOmml(tag) + '</m:e></m:eqArr>';
   }
 
   private parseUntilEnd(): string {
@@ -1351,27 +1433,30 @@ class Parser {
 /**
  * Convert a LaTeX math string to OMML XML string. `onUnknownCommand` hears
  * each command or environment that has no OMML form and is exported as
- * literal text.
+ * literal text. In `display` math a \tag is Word's equation number.
  */
-export function latexToOmml(latex: string, onUnknownCommand?: (command: string) => void): string {
+export function latexToOmml(latex: string, onUnknownCommand?: (command: string) => void, display = false): string {
   if (!latex.trim()) {
     return '';
   }
 
   const tokens = tokenize(latex);
   const parser = new Parser(tokens, onUnknownCommand, 'math');
-  return parser.parseExpression(false);
+  parser.numbered = display;
+  return parser.numberedEquation(parser.parseExpression(false));
 }
 
 /**
  * As latexToOmml, with each CRITIC_INSERTION_COMMAND or CRITIC_DELETION_COMMAND
  * span's OMML passed through `track`.
  */
-export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownCommand?: (command: string) => void): string {
+export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownCommand?: (command: string) => void, display = false): string {
   if (!latex.trim()) {
     return '';
   }
-  return keepWhitespaceChanges(new Parser(tokenize(latex), onUnknownCommand, 'math', track).parseExpression(false));
+  const parser = new Parser(tokenize(latex), onUnknownCommand, 'math', track);
+  parser.numbered = display;
+  return keepWhitespaceChanges(parser.numberedEquation(parser.parseExpression(false)));
 }
 
 /** The mark on the w:ins or w:del of a tracked change whose source is only

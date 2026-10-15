@@ -1317,3 +1317,153 @@ describe('Word math text that reads as CriticMarkup beside braces', () => {
     }), { numRuns: 2000 });
   });
 });
+
+// Word numbers an equation with a # at the end of a row of an equation array,
+// then the number, which it builds up from (1) into a delimiter. Import wrote
+// the # into the LaTeX, which doesn't parse, and export dropped a \tag
+describe('equation numbers', () => {
+  const fence = '$'.repeat(2);
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const trip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const equations = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return xml.match(/<m:oMath>[\s\S]*?<\/m:oMath>/g) ?? [];
+  };
+  /** A document from Word with display math of `omml` alone */
+  async function wordDisplay(omml: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(fence + '\nx\n' + fence + '\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+  const array = (...rows: string[]) => '<m:eqArr><m:eqArrPr><m:ctrlPr/></m:eqArrPr>' + rows.map(row => '<m:e>' + row + '</m:e>').join('') + '</m:eqArr>';
+  const parens = (omml: string) => '<m:d><m:dPr><m:ctrlPr/></m:dPr><m:e>' + omml + '</m:e></m:d>';
+  const squared = '<m:sSup><m:e>' + run('c') + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup>';
+  const number = (text: string) => '<m:r><m:t>#</m:t></m:r><m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e><m:r><m:t>' + text + '</m:t></m:r></m:e></m:d>';
+
+  test.each([
+    ['a row with #(1)', array(run('E=m') + squared + run('#') + parens(run('1'))), fence + '\nE=mc^2 \\tag{1}\n' + fence, ['1']],
+    ['two rows, each with its own number', array(run('a&amp;=b#') + parens(run('1')), run('c&amp;=d#') + parens(run('2'))),
+      fence + '\n\\begin{align*}\na&=b \\tag{1} \\\\\nc&=d \\tag{2}\n\\end{align*}\n' + fence, ['1', '2']],
+    ['#(1) in the run of the equation', array(run('x=1#(1)')), fence + '\nx=1 \\tag{1}\n' + fence, ['1']],
+    ['a number without parentheses', array(run('x=1#A.1')), fence + '\nx=1 \\tag*{A.1}\n' + fence, []],
+    // Apart from the tag's braces, as text is, so that they make no {++ or
+    // ++}, which the next export read as an insertion
+    ['a number of ++A++', array(run('x#') + parens(run('++A++'))), fence + '\nx \\tag{+{}+A+{}+}\n' + fence, ['++A++']],
+    ['a number of --A--', array(run('x#') + parens(run('--A--'))), fence + '\nx \\tag{-{}-A-{}-}\n' + fence, ['--A--']],
+    ['a number of ++A++ without parentheses', array(run('x#++A++')), fence + '\nx \\tag*{+{}+A+{}+}\n' + fence, []],
+    // An on/off property that is off leaves a run of math
+    ['a # and number with normal text off', array(run('x') + '<m:r><m:rPr><m:nor m:val="0"/></m:rPr><m:t>#</m:t></m:r>' + parens('<m:r><m:rPr><m:nor m:val="0"/></m:rPr><m:t>1</m:t></m:r>')), fence + '\nx \\tag{1}\n' + fence, ['1']],
+    ['a # with literal off', array('<m:r><m:rPr><m:lit m:val="0"/></m:rPr><m:t>x#</m:t></m:r>' + parens(run('1'))), fence + '\nx \\tag{1}\n' + fence, ['1']],
+    ['a # with hidden off', array('<m:r><w:rPr><w:vanish w:val="0"/></w:rPr><m:t>x#</m:t></m:r>' + parens(run('1'))), fence + '\nx \\tag{1}\n' + fence, ['1']],
+    // A structure is something to number, though it has no text
+    ['a sum alone', array('<m:nary><m:naryPr><m:chr m:val="∑"/><m:subHide m:val="1"/><m:supHide m:val="1"/></m:naryPr><m:sub/><m:sup/><m:e/></m:nary>' + run('#') + parens(run('1'))), fence + '\n\\sum \\tag{1}\n' + fence, ['1']],
+  ])('reads %s from Word as \\tag', async (_name, omml, expected, numbers) => {
+    const back = strip((await convertDocx(await wordDisplay(omml))).markdown);
+    expect(back).toBe(expected);
+    const [math] = await equations(back);
+    expect(math).not.toMatch(/<w:(?:ins|del)\b/);
+    for (const text of numbers) expect(math).toContain(number(text));
+    expect(await trip(back)).toBe(back);
+    expect(await equations(await trip(back))).toEqual(await equations(back));
+  });
+
+  // A # that isn't a row's number stays as before
+  test.each([
+    ['in a fraction in a row', array('<m:f><m:num>' + run('a#') + '</m:num><m:den>' + run('b') + '</m:den></m:f>'), fence + '\n\\begin{gathered}\n\\frac{a#}{b}\n\\end{gathered}\n' + fence],
+    ['before a superscript', array(run('a#') + squared), fence + '\n\\begin{gathered}\na#c^2\n\\end{gathered}\n' + fence],
+    ['outside an equation array', run('a#') + parens(run('1')), fence + '\na#(1)\n' + fence],
+    ['with nothing before it to number', array(run('#') + parens(run('1'))), fence + '\n\\begin{gathered}\n#(1)\n\\end{gathered}\n' + fence],
+    // Escaped by a \ that ends the run of math before it, as Word may split
+    // x\#(1), which import joins as \#
+    ['escaped by the run before', array(run('x\\') + run('#(1)')), fence + '\n\\begin{gathered}\nx\\#(1)\n\\end{gathered}\n' + fence],
+    ['escaped by the run before, before (1)', array(run('x\\') + run('#') + parens(run('1'))), fence + '\n\\begin{gathered}\nx\\#(1)\n\\end{gathered}\n' + fence],
+    ['escaped by the run before an empty one', array(run('x\\') + run('') + run('#(1)')), fence + '\n\\begin{gathered}\nx\\#(1)\n\\end{gathered}\n' + fence],
+  ])('reads a # %s as before', async (_name, omml, expected) => {
+    const back = strip((await convertDocx(await wordDisplay(omml))).markdown);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
+  // In inline math, whose \tag export drops, Word's number stays as before
+  test('reads a numbered row of an inline equation as before', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A $x$ B.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + array(run('x#') + parens(run('1'))) + '</m:oMath>'));
+    const back = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(back).toBe('A $\\begin{gathered} x#(1) \\end{gathered}$ B.');
+    expect(await trip(back)).toBe(back);
+  });
+
+  // A # in a row that export writes as text, escaped or in a comment is no
+  // number, as before
+  test.each([
+    ['in \\text{}', fence + '\n\\begin{gathered}\n\\text{item \\#3}\n\\end{gathered}\n' + fence, fence + '\n\\begin{gathered}\n\\text{item \\#3}\n\\end{gathered}\n' + fence],
+    ['escaped before (1)', fence + '\n\\begin{gathered}\na \\#(1)\n\\end{gathered}\n' + fence, fence + '\n\\begin{gathered}\na \\#(1)\n\\end{gathered}\n' + fence],
+    ['in a comment', fence + '\n\\begin{gathered}\na % see #3\n\\end{gathered}\n' + fence, fence + '\n\\begin{gathered}\na % see #3\n\\end{gathered}\n' + fence],
+    ['in \\mathrm{} before (1)', fence + '\n\\begin{gathered}\n\\mathrm{a\\#}(1)\n\\end{gathered}\n' + fence, fence + '\n\\begin{gathered}\n\\text{a\\#}(1)\n\\end{gathered}\n' + fence],
+  ])('keeps a # %s as before', async (_name, md, expected) => {
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
+  test.each([
+    ['\\tag{1}', fence + '\nE=mc^2 \\tag{1}\n' + fence, ['1']],
+    ['a \\tag on each of two rows', fence + '\n\\begin{align*}\na &= b \\tag{1} \\\\\nc &= d \\tag{2}\n\\end{align*}\n' + fence, ['1', '2']],
+    ['\\tag{A.1}', fence + '\nE \\tag{A.1}\n' + fence, ['A.1']],
+    ['\\tag*{A}', fence + '\nE \\tag*{A}\n' + fence, []],
+    ['a \\tag on one row of gather*', fence + '\n\\begin{gather*}\na \\tag{1} \\\\\nc\n\\end{gather*}\n' + fence, ['1']],
+    ['a \\tag after a comment', fence + '\nE % note\n\\tag{1}\n' + fence, ['1']],
+    ['a \\tag after a substitution', fence + '\n{~~E~>F~~} \\tag{1}\n' + fence, ['1']],
+    ['a \\tag with a space', fence + '\nE \\tag{1 a}\n' + fence, ['1 a']],
+    ['a \\tag on a sum alone', fence + '\n\\sum \\tag{1}\n' + fence, ['1']],
+    // An & in text or escaped aligns nothing, so the rows stay gathered
+    ['a \\tag on a row of gather* with an & in \\text{}', fence + '\n\\begin{gather*}\n\\text{A\\&B} \\tag{1} \\\\\nc\n\\end{gather*}\n' + fence, ['1']],
+    ['a \\tag on a row of gather* with \\&', fence + '\n\\begin{gather*}\na \\& b \\tag{1} \\\\\nc\n\\end{gather*}\n' + fence, ['1']],
+  ])('writes %s as Word\'s number, which comes back', async (_name, md, numbers) => {
+    const [math] = await equations(md);
+    expect(math).toContain('<m:eqArr>');
+    for (const text of numbers) expect(math).toContain(number(text));
+    if (md.includes('\\tag*')) expect(math).toContain('<m:r><m:t>#</m:t></m:r><m:r><m:t>A</m:t></m:r>');
+    const back = await trip(md);
+    expect(back).toBe(md);
+    expect(await equations(back)).toEqual(await equations(md));
+    expect(await trip(back)).toBe(back);
+  });
+
+  // A \tag in an environment that doesn't number its rows, or in none, is
+  // the equation's, at its end
+  test.each([
+    ['in equation', fence + '\n\\begin{equation}\nE \\tag{2}\n\\end{equation}\n' + fence, fence + '\nE \\tag{2}\n' + fence],
+    ['in aligned', fence + '\n\\begin{aligned}\na &= b \\tag{3} \\\\\nc &= d\n\\end{aligned}\n' + fence, fence + '\n\\begin{aligned} a &= b \\\\ c &= d \\end{aligned} \\tag{3}\n' + fence],
+    ['in cases', fence + '\nx = \\begin{cases} a & b \\tag{1} \\end{cases}\n' + fence, fence + '\nx = \\begin{cases} a & b \\end{cases} \\tag{1}\n' + fence],
+    // Word's delimiter comes back as characters, as on main
+    ['on an empty delimiter', fence + '\n\\left(\\right) \\tag{1}\n' + fence, fence + '\n() \\tag{1}\n' + fence],
+    // In an operand in brackets, as in a group; its brackets come back as
+    // they do without one
+    ['in a function\'s operand in parentheses', fence + '\n\\sin(x \\tag{1})\n' + fence, fence + '\n\\sin(x ) \\tag{1}\n' + fence],
+    ['in a root\'s degree', fence + '\n\\sqrt[n \\tag{2}]{y}\n' + fence, fence + '\n\\sqrt[n]{y} \\tag{2}\n' + fence],
+  ])('writes a \\tag %s as the equation\'s number', async (_name, md, expected) => {
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+    expect(await equations(await trip(back))).toEqual(await equations(back));
+  });
+
+  // As before
+  test.each([
+    ['\\label and \\notag', fence + '\n\\begin{align}\na &= b \\label{x} \\\\\nc &= d \\notag\n\\end{align}\n' + fence, fence + '\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n' + fence],
+    ['a \\label alone', fence + '\nE \\label{eq:1}\n' + fence, fence + '\nE\n' + fence],
+    ['a \\tag in inline math', 'A $x \\tag{1}$ B.', 'A $x$ B.'],
+    ['a \\tag in an insertion', fence + '\nE {++\\tag{1}++}\n' + fence, fence + '\nE\n' + fence],
+    ['a \\tag on a row of its own', fence + '\n\\begin{align*}\na \\\\\n\\tag{2}\n\\end{align*}\n' + fence, fence + '\n\\begin{gathered}\na \\\\\n\\end{gathered}\n' + fence],
+    ['an equation of a \\tag alone', fence + '\n\\tag{1}\n' + fence, ''],
+    ['a \\tag with an insertion in it', fence + '\nx \\tag{++A++}\n' + fence, fence + '\n{~~\nx ~>\nx A\n~~}\n' + fence],
+  ])('drops %s, as before', async (_name, md, expected) => {
+    expect((await equations(md)).join('')).not.toContain('#');
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+});
