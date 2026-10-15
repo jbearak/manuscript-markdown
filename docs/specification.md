@@ -27,6 +27,8 @@ title: Second Paragraph of Title
 ---
 ```
 
+Import writes a line break in a Word title paragraph the same way, each line of the paragraph in a `title` entry of its own, which export writes as a Title paragraph. It writes no entry for a break at the paragraph's start or end, or for the spaces beside one.
+
 The frontmatter may also include citation-related fields (`csl`, `locale`, `zotero-notes`) and metadata (`author`, `timezone`). See [converter](converter.md) for details on how these fields are handled during conversion.
 
 | Field | Description |

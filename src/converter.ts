@@ -3002,9 +3002,9 @@ function endedRange(id: string, target: ContentItem[], start: { target: ContentI
  * break could be the HTML's line end, or end or break up an HTML block,
  * whose lines import reads from all the paragraph's text, carriage returns
  * too (see readParagraphLineFeeds). And any with `all`, for a paragraph
- * import writes in the frontmatter, the title's, whose line breaks it
- * doesn't keep (see extractTitleLines). Import wrote nothing for them before
- * it wrote the others.
+ * import writes in the frontmatter, the title's, which keeps a line break
+ * only as a title line of its own (see extractTitleLines). Import wrote
+ * nothing for them before it wrote the others.
  * One a comment's range holds alone leaves the empty item endComment pushes
  * for an empty range, where the range ended, in `ended`, with its start in
  * `target`, as endComment found it. The item is the one endComment pushes
@@ -17450,10 +17450,12 @@ export function generateBibTeX(
 
 /**
  * Extract consecutive Title-styled paragraphs from the beginning of the document.
- * Returns the plain text of each title paragraph. Removes the extracted items
- * (para markers and their text runs) from the content array in place, and
- * adds each title paragraph's XML to `paragraphs`, for the title font style
- * (see titleOwnProperties).
+ * Returns the plain text of each title paragraph, a line of the title for
+ * each line its line breaks give it, as export writes each line in a Title
+ * paragraph of its own, but none for one at its start or end. Removes the
+ * extracted items (para markers and their text runs) from the content array
+ * in place, and adds each title paragraph's XML to `paragraphs`, for each
+ * line it gives, for the title font style (see titleOwnProperties).
  */
 export function extractTitleLines(content: ContentItem[], paragraphs: string[] = []): string[] {
   const titles: string[] = [];
@@ -17472,12 +17474,23 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
     // Collect text runs following this title para marker
     const startIdx = i;
     i++;
-    let text = '';
+    const lines = [''];
     while (i < content.length && content[i].type === 'text') {
-      text += (content[i] as { type: 'text'; text: string }).text;
+      const text = (content[i] as { type: 'text'; text: string }).text;
+      if (text === lineBreakText()) lines.push('');
+      else lines[lines.length - 1] += text;
       i++;
     }
-    titles.push(text);
+    // Not those its line breaks give with nothing in them, at its start or
+    // end or between two, nor the spaces beside a break, which a title line
+    // doesn't keep
+    const shown = lines.map((line, k) => {
+      const start = k > 0 ? line.trimStart() : line;
+      return k < lines.length - 1 ? start.trimEnd() : start;
+    }).filter(line => line.trim() !== '');
+    const own = shown.length > 0 ? shown : [lines.join('')];
+    pushAll(titles, own);
+    for (let k = 1; k < own.length; k++) paragraphs.push(item.titleXml ?? '');
     // Remove extracted items
     content.splice(startIdx, i - startIdx);
     i = startIdx;
