@@ -17072,6 +17072,21 @@ function buildMarkdownOnce(
       return indented + text.slice(last);
     };
     textOut = prefixLines(textOut);
+    // Inline math right after an equation's closing fence would run into
+    // it, a run of three dollars, after which export reads the math's $ as
+    // text, and a preview drops what follows a closing fence on its line.
+    // So it goes on the next line, as an equation right after one does, a
+    // line end export reads as a space, and so does inline math after a
+    // space there, which the line end stands for. Not where a line end is a
+    // line break (breaks: true), which export would write in Word there
+    const fenceBefore = mergedContent[i - 1];
+    if (!options?.breaks && fenceBefore?.type === 'math' && fenceBefore.display && lastLine(output).endsWith(MATH_FENCE)) {
+      const space = items[0]?.type === 'text' && items[0].text === ' ' ? 1 : 0;
+      const math = items[space];
+      if (math?.type === 'math' && !math.display && textOut.startsWith(space ? '&#32;$' : '$')) {
+        textOut = '\n' + (currentPara ? paragraphLinePrefix(currentPara) : '') + textOut.slice(space ? 5 : 0);
+      }
+    }
     listHtmlBlockOpen = !!listLinePrefix && startsHtmlBlock(textOut) && !HTML_BLOCK_ENDS_AT_MARKER.test(textOut.trimStart());
     if (rendered.deferredComments.length > 0) {
       // Before an equation, whose line end is the one after the bodies (see

@@ -450,3 +450,110 @@ describe("the line ends at a display equation's fences", () => {
     expect(await roundTrip(md)).toContain('\nx % note\n' + fence);
   });
 });
+
+// Inline math right after a display equation in its paragraph ran into the
+// equation's closing fence, a run of three dollars, after which export read
+// the inline math's $ as text, and the next import escaped it. It goes on
+// the line after the fence, which export reads as a space, as it does the
+// line end before an opening fence, and where a preview shows it
+describe('inline math right after a display equation', () => {
+  const fence = '$'.repeat(2);
+  const breaks = '---\nbreaks: true\n---\n';
+  // Without its frontmatter, but where a line end is a line break
+  const readBack = (md: string) => md.startsWith(breaks) ? md : stripFrontmatter(md);
+  const roundTrip = async (md: string) => readBack((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  // Each of Word's paragraphs, by its style and its text, with each display
+  // equation as [equation], each inline one as [math] and each line break
+  // as <br>
+  const paragraphs = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).map(p => {
+      const marked = p.replace(/<m:oMathPara>[\s\S]*?<\/m:oMathPara>/g, '<w:t>[equation]</w:t>').replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '<w:t>[math]</w:t>');
+      return (/<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? '') + ': ' + [...marked.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:br\/>/g)].map(m => m[1] ?? '<br>').join('');
+    });
+  };
+  /** The Markdown import writes for a document from Word, `md`'s with its
+   *  bold run's place taken by `runs` */
+  const fromWord = async (md: string, runs: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*XX<\/w:t><\/w:r>/, () => runs));
+    return readBack((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const display = (latex: string) => '<m:oMathPara><m:oMath><m:r><m:t>' + latex + '</m:t></m:r></m:oMath></m:oMathPara>';
+  const inline = (latex: string) => '<m:oMath><m:r><m:t>' + latex + '</m:t></m:r></m:oMath>';
+  const text = (t: string) => '<w:r><w:t xml:space="preserve">' + t + '</w:t></w:r>';
+  /** `md` with `prefix` on each line after its first, as a list item's or a quote's */
+  const within = (prefix: string, md: string) => md.replace(/\n(?=.)/g, '\n' + prefix);
+  const x = fence + '\nx\n' + fence;
+  const z = fence + '\nz\n' + fence;
+
+  const back = async (md: string, runs: string, expected: string, paras: string[]) => {
+    const once = await fromWord(md, runs);
+    expect(once).toBe(expected);
+    expect(await paragraphs(once)).toEqual(paras);
+    const twice = await roundTrip(once);
+    expect(twice).toBe(once);
+    expect(await paragraphs(twice)).toEqual(paras);
+    expect(await roundTrip(twice)).toBe(twice);
+  };
+
+  it.each([
+    ['in a paragraph', 'a **XX** b.\n', display('x') + inline('y'), 'a\n' + x + '\n$y$ b.\n', [': a [equation] [math] b.']],
+    ['alone with it in a paragraph', '**XX**\n', display('x') + inline('y'), x + '\n$y$\n', [': [equation] [math]']],
+    ['between two display equations', 'a **XX** b.\n', display('x') + inline('y') + display('z'), 'a\n' + x + '\n$y$\n' + z + '&#32;b.\n',
+      [': a [equation] [math] [equation] b.']],
+    // A space there goes as the line end, which export reads as one, or the
+    // first row would come back with it as &#32; on the fence's line
+    ['after a space', 'a **XX** b.\n', display('x') + text(' ') + inline('y'), 'a\n' + x + '\n$y$ b.\n', [': a [equation] [math] b.']],
+    ['in a list item', '- a **XX** b.\n', display('x') + inline('y'), '- ' + within('  ', 'a\n' + x + '\n$y$ b.\n'),
+      [': a [equation] [math] b.']],
+    ['between two display equations in a list item', '- a **XX** b.\n', display('x') + inline('y') + display('z'),
+      '- ' + within('  ', 'a\n' + x + '\n$y$\n' + z + '&#32;b.\n'), [': a [equation] [math] [equation] b.']],
+    ['in a quote', '> a **XX** b.\n', display('x') + inline('y'), '> ' + within('> ', 'a\n' + x + '\n$y$ b.\n'),
+      [': ', 'GitHubBlockquote: a [equation] [math] b.', ': ']],
+    ['between two display equations in a quote', '> a **XX** b.\n', display('x') + inline('y') + display('z'),
+      '> ' + within('> ', 'a\n' + x + '\n$y$\n' + z + '&#32;b.\n'), [': ', 'GitHubBlockquote: a [equation] [math] [equation] b.', ': ']],
+    // After a heading, where import writes an equation that isn't all of it
+    ['in a heading', '# **XX**\n', display('x') + inline('y'), '# \n\n' + x + '\n$y$\n', ['Heading1: ', ': [equation] [math]']],
+  ])('keeps inline math %s', async (_name, md, runs, expected, paras) => {
+    await back(md, runs, expected, paras);
+  });
+
+  // Where a line end is a line break (breaks: true), export would write one
+  // in Word for the line end after the fence, so a space there stays on the
+  // fence's line, as on main
+  it.each([
+    ['in a paragraph', '**XX** b.\n', display('x') + text(' ') + inline('y'), x + '&#32;$y$ b.\n', [': [equation] [math] b.']],
+    ['in a list item', '- **XX** b.\n', display('x') + text(' ') + inline('y'), '- ' + within('  ', x + '&#32;$y$ b.\n'), [': [equation] [math] b.']],
+    ['in a quote', '> **XX** b.\n', display('x') + text(' ') + inline('y'), '> ' + within('> ', x + '&#32;$y$ b.\n'),
+      [': ', 'GitHubBlockquote: [equation] [math] b.', ': ']],
+  ])('keeps inline math after a space %s where a line end is a line break', async (_name, md, runs, expected, paras) => {
+    await back(breaks + md, runs, breaks + expected, paras);
+  });
+
+  // As on main: inline math before the equation, on the line before its
+  // fence; text between them, whose letter before the math is a reference;
+  // more than a space, as references; a $ that starts text after it,
+  // escaped; and inline math in a tracked change, whose {++ keeps it apart
+  it.each([
+    ['inline math before it', 'a **XX**b.\n', inline('y') + display('x'), 'a $y$\n' + x + 'b.\n', [': a [math] [equation]b.']],
+    ['text between them', 'a **XX** b.\n', display('x') + text('c') + inline('y'), 'a\n' + x + '&#99;$y$ b.\n', [': a [equation]c[math] b.']],
+    ['two spaces between them', 'a **XX** b.\n', display('x') + text('  ') + inline('y'), 'a\n' + x + '&#32;&#32;$y$ b.\n',
+      [': a [equation]  [math] b.']],
+    ['a dollar sign after it', 'a **XX** b.\n', display('x') + text('$y$'), 'a\n' + x + '\\$y$ b.\n', [': a [equation]$y$ b.']],
+    ['inline math in a tracked change after it', 'a **XX** b.\n',
+      display('x') + '<w:ins w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z">' + inline('y') + '</w:ins>', 'a\n' + x + '{++$y$++} b.\n',
+      [': a [equation][math] b.']],
+    ['inline math before it in a list item', '- a **XX**b.\n', inline('y') + display('x'), '- ' + within('  ', 'a $y$\n' + x + 'b.\n'),
+      [': a [math] [equation]b.']],
+    ['text between them in a list item', '- a **XX** b.\n', display('x') + text('c') + inline('y'), '- ' + within('  ', 'a\n' + x + '&#99;$y$ b.\n'),
+      [': a [equation]c[math] b.']],
+    ['inline math before it in a quote', '> a **XX**b.\n', inline('y') + display('x'), '> ' + within('> ', 'a $y$\n' + x + 'b.\n'),
+      [': ', 'GitHubBlockquote: a [math] [equation]b.', ': ']],
+    ['text between them in a quote', '> a **XX** b.\n', display('x') + text('c') + inline('y'), '> ' + within('> ', 'a\n' + x + '&#99;$y$ b.\n'),
+      [': ', 'GitHubBlockquote: a [equation]c[math] b.', ': ']],
+  ])('writes %s as on main', async (_name, md, runs, expected, paras) => {
+    await back(md, runs, expected, paras);
+  });
+});
