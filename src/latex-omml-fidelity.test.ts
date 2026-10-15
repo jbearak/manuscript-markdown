@@ -1074,3 +1074,190 @@ describe('an empty script, base, or fraction part', () => {
     expect(importOmml(omml)).toContain('[UNSUPPORTED: ' + element + ']');
   });
 });
+
+describe('Word math text that reads as CriticMarkup beside braces', () => {
+  const sSub = (base: string, sub: string) => '<m:sSub><m:e>' + base + '</m:e><m:sub>' + sub + '</m:sub></m:sSub>';
+  const sSup = (base: string, sup: string) => '<m:sSup><m:e>' + base + '</m:e><m:sup>' + sup + '</m:sup></m:sSup>';
+  const ins = (omml: string) => '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:ins>';
+  const del = (omml: string) => '<w:del w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:del>';
+  const plus = run('+') + run('+');
+
+  /** A document from Word with an inline equation of each of `equations`,
+   *  each in a paragraph of its own */
+  async function wordDocx(...equations: string[]): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(equations.map(() => '$x$').join('\n\n') + '\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    let i = 0;
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, () => '<m:oMath>' + equations[i++] + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  // \relax between the two characters keeps a group's braces from making
+  // them CriticMarkup's {++ or ++}; LaTeX sets them the same, and export
+  // writes the same runs
+  test.each([
+    ['a subscript\'s base of ++, twice', [sSub(plus, run('i')) + run('+') + sSub(plus, run('j'))], ['{+\\relax+}_i+{+\\relax+}_j']],
+    ['a superscript of ++, twice', [sSup(styled('Ca'), plus) + run('+') + sSup(styled('Mg'), plus)], ['\\mathrm{Ca}^{+\\relax+}+\\mathrm{Mg}^{+\\relax+}']],
+    ['a superscript of ++ in each of two paragraphs', [sSup(run('x'), plus), sSup(run('y'), plus)], ['x^{+\\relax+}', 'y^{+\\relax+}']],
+    ['a fraction of -- over x--', ['<m:f><m:num>' + run('-') + run('-') + '</m:num><m:den>' + run('x') + run('-') + run('-') + '</m:den></m:f>' + run('+') + sSup(run('y'), run('--'))], ['\\frac{-\\relax-}{x-\\relax-}+y^{-\\relax-}']],
+    ['a group ending in ++ in an insertion', [ins(sSup(run('x'), run('a++'))) + run('y')], ['{++x^{a+\\relax+}++}y']],
+    ['upright text ending in ++ in an insertion', [ins(styled('C++')) + run('y')], ['{++\\mathrm{C+\\relax+}++}y']],
+    ['a superscript of == and one of >>', [sSup(run('x'), run('==')) + run('+') + sSup(run('y'), run('>>')) + run('&lt;') + sSup(run('z'), run('&lt;&lt;'))], ['x^{=\\relax=}+y^{>\\relax>}<z^{<\\relax<}']],
+    // Export ends a substitution's old text at its first ~>
+    ['a substitution of a superscript of ~>', [run('x') + del(sSup(run('a'), run('~&gt;'))) + ins(run('c'))], ['x{~~a^{~\\relax>}~>c~~}']],
+    ['a substitution of a~>b', [run('x') + del(run('a~&gt;b')) + ins(run('c'))], ['x{~~a~\\relax>b~>c~~}']],
+  ])('%s comes back as it was', async (_name, equations, latex) => {
+    const docx = await wordDocx(...equations);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(latex.map(equation => '$' + equation + '$').join('\n\n') + '\n');
+    const exported = (await convertMdToDocx(markdown)).docx;
+    expect((await convertDocx(exported)).markdown).toBe(markdown);
+    // Word shows the same text, in the same changes
+    const changes = async (file: Uint8Array) => [...(await (await JSZip.loadAsync(file)).file('word/document.xml')!.async('string'))
+      .matchAll(/<m:oMath>[\s\S]*?<\/m:oMath>/g)].map(math => [...math[0].matchAll(/<w:(ins|del)\b[^>]*>|<\/w:(?:ins|del)>|<m:t( xml:space="preserve")?>([^<]*)<\/m:t>/g)]
+      .map(t => t[1] ? '[' + t[1] + ' ' : t[0].startsWith('</w:') ? ']' : t[2] ? t[3] : t[3].trim()).join('')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+    expect(await changes(exported)).toEqual(await changes(docx));
+  });
+
+  // {} is an ordinary atom, which at full size puts space beside a relation
+  // or binary operator: \mathrm{>{}>} is wider than >>. \relax makes no atom,
+  // so TeX sets the characters as without it, and export ignores it.
+  const pairs = ['++', '--', '==', '>>', '<<', '~~'].map(pair => pair.replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+  const unescape = (xml: string) => xml.replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  test.each(pairs.flatMap(pair => [
+    ['upright, as \\mathrm', run('a') + styled(pair) + run('b'), 'a\\mathrm{' + unescape(pair) + '}b'],
+    ['in \\sqrt', '<m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/><m:e>' + run(pair) + '</m:e></m:rad>', '\\sqrt{' + unescape(pair) + '}'],
+    ['over b', '<m:f><m:num>' + run('a') + run(pair) + '</m:num><m:den>' + run('b') + '</m:den></m:f>', '\\frac{a' + unescape(pair) + '}{b}'],
+    ['as a base', sSub(run(pair), run('i')), '{' + unescape(pair) + '}_i'],
+    ['in a superscript', sSup(run('x'), run('a') + run(pair)), 'x^{a' + unescape(pair) + '}'],
+  ].filter(([name]) => !(name.startsWith('upright') && pair === '~~')).map(([name, omml, bare]) => [unescape(pair) + ' ' + name, omml, bare])))(
+    '%s is set and exported as the characters alone', (_name, omml, bare) => {
+      const latex = importOmml(omml);
+      expect(latex).not.toMatch(/\{(?:\+\+|--|~~|==|>>)|(?:\+\+|--|~~|==|<<)\}/);
+      expect(latex).not.toContain('{}');
+      expect(latex.replace(/\\relax/g, '')).toBe(bare);
+      expect(latexToOmml(latex)).toBe(latexToOmml(bare));
+    });
+
+  // Word's structure of an equation: its parts and their text, in however
+  // many runs, but for whitespace export writes between math, which Word drops
+  const parts = (omml: string) => omml.replace(/<m:rPr>[\s\S]*?<\/m:rPr>/g, '')
+    .match(/<\/?m:(?:f|num|den|nary|sub|sup|e|sSup|sSub|m|mr|d|eqArr|borderBox|func|fName)>|<m:t>[^<]*<\/m:t>/g)!
+    .map(part => part.replace(/^<m:t>([^<]*)<\/m:t>$/, (_, text: string) => text.trim())).join('');
+  const sum = (sub: string, sup: string, body: string) => '<m:nary><m:naryPr><m:chr m:val="∑"/>' +
+    (sub ? '' : '<m:subHide m:val="1"/>') + (sup ? '' : '<m:supHide m:val="1"/>') +
+    '</m:naryPr><m:sub>' + sub + '</m:sub><m:sup>' + sup + '</m:sup><m:e>' + run(body) + '</m:e></m:nary>';
+  const overX = (num: string) => '<m:f><m:num>' + num + '</m:num><m:den>' + run('x') + '</m:den></m:f>';
+  const cell = (omml: string) => '<m:m><m:mr><m:e>' + omml + '</m:e></m:mr></m:m>';
+  const rows = (omml: string) => '<m:eqArr><m:e>' + omml + '</m:e><m:e>' + run('y') + '</m:e></m:eqArr>';
+
+  // \relax is nothing where export reads an operand, as everywhere else: an
+  // operator's body is the character after it, where {} would be an empty
+  // body, even in a script. \boxed's content is at full size in a script
+  // too, where {} would add space. A matrix's cells and cases' and gathered
+  // rows are beside no brace, and need no break.
+  test.each([
+    ['a sum with an upper limit of + and a body of +, over x', overX(sum('', run('+'), '+')), '\\frac{\\sum^+\\relax+}{x}'],
+    ['a sum with a lower limit of + and a body of +, over x', overX(sum(run('+'), '', '+')), '\\frac{\\sum_+\\relax+}{x}'],
+    ['a sum with an upper limit of = and a body of =, in a superscript', sSup(run('x'), sum('', run('='), '=')), 'x^{\\sum^=\\relax=}'],
+    ['a matrix of >> in a superscript', sSup(run('x'), cell(run('&gt;&gt;'))), 'x^{\\begin{matrix} >> \\end{matrix}}'],
+    ['cases of ++ in a superscript', sSup(run('x'), '<m:d><m:dPr><m:begChr m:val="{"/><m:endChr m:val=""/></m:dPr><m:e>' + rows(run('++')) + '</m:e></m:d>'),
+      'x^{\\begin{cases} ++ \\\\ y \\end{cases}}'],
+    ['gathered rows of == in a superscript', sSup(run('x'), rows(run('=='))), 'x^{\\begin{gathered} == \\\\ y \\end{gathered}}'],
+    ['a box of -- in a superscript', sSup(run('x'), '<m:borderBox><m:e>' + run('--') + '</m:e></m:borderBox>'), 'x^{\\boxed{-\\relax-}}'],
+  ])('%s comes back with the same parts', (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+    expect(parts(latexToOmml(latex))).toBe(parts(omml));
+  });
+
+  // A part beside no brace, as a delimiter's content, a matrix's cell, a row,
+  // a root's degree or an n-ary operator's body of one operand, needs no
+  // break, and comes back as Word has it, as on main
+  test.each([
+    ['$\\left(a++\\right)$', '$(a++)$'],
+    ['$\\left\\{--a\\right\\}$', '$\\left\\{--a\\right\\}$'],
+    ['$\\left[==\\right]$', '$[==]$'],
+    ['$\\begin{pmatrix} a++ \\\\ ==b \\end{pmatrix}$', '$\\begin{pmatrix} a++ \\\\ ==b \\end{pmatrix}$'],
+    ['$\\begin{cases} ++ \\\\ y \\end{cases}$', '$\\begin{cases} ++ \\\\ y \\end{cases}$'],
+    ['$\\begin{aligned} x &= 1 \\\\ ~~~ &= 2 \\end{aligned}$', '$\\begin{aligned} x &= 1 \\\\ ~~~ &= 2 \\end{aligned}$'],
+    ['$\\sqrt[++]{x}$', '$\\sqrt[++]{x}$'],
+    ['$\\sum\\sum^++$', '$\\sum\\sum^++$'],
+    // Beside one
+    ['$x^{\\sum\\sum^++}$', '$x^{\\sum\\sum^+\\relax+}$'],
+  ])('%s comes back from Word as %s', async (markdown, back) => {
+    expect((await convertDocx((await convertMdToDocx(markdown + '\n')).docx)).markdown).toBe(back + '\n');
+  });
+
+  // TeX reads a script past \relax, and an n-ary operator's or function's
+  // operand is only the atom after it
+  test.each([
+    ['\\frac{\\sum^+\\relax+}{x}', '\\frac{\\sum^{+}{+}}{x}'],
+    ['\\frac{\\sum_+\\relax+}{x}', '\\frac{\\sum_{+}{+}}{x}'],
+    ['\\frac{\\sin^+\\relax+}{x}', '\\frac{\\sin^{+}{+}}{x}'],
+    ['\\sin\\relax x', '\\sin x'],
+    ['\\sum\\relax (a)', '\\sum (a)'],
+    ['x^\\relax 2', 'x^2'],
+    ['x\\relax^2', 'x^2'],
+    ['a+\\relax+_i', 'a++_i'],
+  ])('%s is exported as %s', (latex, bare) => {
+    expect(latexToOmml(latex)).toBe(latexToOmml(bare));
+  });
+
+  // An element import doesn't read comes back as text, whose end is a group's
+  test('an unsupported element ending in ++ in an insertion comes back as it was', async () => {
+    const markdown = (await convertDocx(await wordDocx(ins('<m:box><m:e>' + run('a++') + '</m:e></m:box>') + run('y')))).markdown;
+    expect(markdown).toBe('${++\\text{[UNSUPPORTED: box] a+{}+}++}y$\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // Runs of CriticMarkup's characters, and a letter, in parts of structures
+  // and between them, as a Word user may type them
+  const marks = fc.array(fc.constantFrom('+', '-', '=', '~', '>', '<', 'a'), { minLength: 1, maxLength: 3 })
+    .map(chars => run(chars.join('').replace(/</g, '&lt;').replace(/>/g, '&gt;')));
+  const runs = fc.array(marks, { minLength: 1, maxLength: 2 }).map(pieces => pieces.join(''));
+  const piece = fc.oneof(runs, runs.map(sup => sSup(run('x'), sup)), fc.tuple(runs, runs).map(([base, sub]) => sSub(base, sub)),
+    fc.tuple(runs, runs).map(([num, den]) => '<m:f><m:num>' + num + '</m:num><m:den>' + den + '</m:den></m:f>'));
+  const equation = fc.array(piece, { minLength: 1, maxLength: 3 }).map(pieces => pieces.join(''));
+  // What Word shows of an equation: its runs' text, but for whitespace
+  // export writes between math, which Word drops
+  const shown = (xml: string) => [...xml.matchAll(/<m:oMath>[\s\S]*?<\/m:oMath>/g)]
+    .map(math => [...math[0].matchAll(/<m:t( xml:space="preserve")?>([^<]*)<\/m:t>/g)].map(t => t[1] ? t[2] : t[2].trim()).join(''));
+
+  test('any of it in equations in paragraphs of their own comes back as it was, with no change in Word', async () => {
+    await fc.assert(fc.asyncProperty(fc.array(equation, { minLength: 1, maxLength: 2 }), async equations => {
+      const docx = await wordDocx(...equations);
+      const markdown = (await convertDocx(docx)).markdown;
+      const exported = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+      const xml = await exported.file('word/document.xml')!.async('string');
+      expect(xml).not.toMatch(/<w:(?:ins|del)\b/);
+      const original = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(shown(xml)).toEqual(shown(original));
+      expect((await convertDocx(await exported.generateAsync({ type: 'uint8array' }))).markdown).toBe(markdown);
+    }), { numRuns: 100 });
+  });
+
+  // The same runs nested in parts, as limits and bodies of n-ary operators,
+  // cells of a matrix and boxes too, whose parts a break between two parts'
+  // characters could move
+  const nested: fc.Arbitrary<string> = fc.letrec<{ piece: string }>(tie => ({
+    piece: fc.oneof({ depthSize: 'small', withCrossShrink: true }, runs,
+      fc.tuple(runs, tie('piece')).map(([base, sup]) => sSup(base, sup)),
+      fc.tuple(runs, tie('piece')).map(([base, sub]) => sSub(base, sub)),
+      fc.tuple(tie('piece'), tie('piece')).map(([num, den]) => '<m:f><m:num>' + num + '</m:num><m:den>' + den + '</m:den></m:f>'),
+      fc.tuple(fc.option(runs, { nil: '' }), fc.option(runs, { nil: '' }), runs).map(([sub, sup, body]) =>
+        '<m:nary><m:naryPr><m:chr m:val="∑"/>' + (sub ? '' : '<m:subHide m:val="1"/>') + (sup ? '' : '<m:supHide m:val="1"/>') +
+        '</m:naryPr><m:sub>' + sub + '</m:sub><m:sup>' + sup + '</m:sup><m:e>' + body + '</m:e></m:nary>'),
+      tie('piece').map(content => cell(content)),
+      tie('piece').map(content => '<m:borderBox><m:e>' + content + '</m:e></m:borderBox>')),
+  })).piece;
+
+  test('any of it nested in parts comes back with the same parts', () => {
+    fc.assert(fc.property(fc.array(nested, { minLength: 1, maxLength: 3 }), pieces => {
+      const omml = pieces.join('');
+      const latex = importOmml(omml);
+      expect(parts(latexToOmml(latex))).toBe(parts(omml));
+      expect(importOmml(latexToOmml(latex))).toBe(latex);
+    }), { numRuns: 2000 });
+  });
+});

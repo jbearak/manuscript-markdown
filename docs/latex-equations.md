@@ -38,6 +38,16 @@ keeps the change. The whitespace around a command, as in
 Word has no form for the command, as in `$a{++ \! ++}b$`, Word shows no change,
 and the change doesn't come back on import.
 
+Since CriticMarkup works inside an equation, a group whose content starts
+with `++`, `--`, `==`, `~~` or `>>` reads as the start of a change, and one
+that ends with `++`, `--`, `==`, `~~` or `<<` reads as the end of one, even in
+another paragraph. Write `\relax` between the two characters, as in
+`$\mathrm{Ca}^{+\relax+}$` or `$\sqrt{x+\relax+}$`. LaTeX sets them as
+without it, and export writes the same characters to Word. `{}` there would
+add space around them outside a superscript or subscript, and after an
+operator such as `\sum^+` would be its body. Import does the same with such
+characters from Word: a superscript of `++` comes back as `x^{+\relax+}`.
+
 ## Quick Examples
 
 ```markdown

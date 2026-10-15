@@ -307,8 +307,36 @@ export function tokenize(latex: string): Token[] {
       i = j;
     }
   }
-  
-  return tokens;
+
+  return withoutRelax(tokens);
+}
+
+/**
+ * `tokens` without \relax, which does nothing, and the spaces after it,
+ * which TeX skips after a command word, with the text on either side as one
+ * token, so that nothing reads it as an operand, as a script's, an n-ary
+ * operator's or a function's: x+\relax+ is x++. Import writes it between
+ * two characters that would read as CriticMarkup beside a brace, as in
+ * \frac{\sum^+\relax+}{x} (see apartFromMarkup in omml.ts).
+ */
+function withoutRelax(tokens: Token[]): Token[] {
+  if (!tokens.some(token => token.type === 'command' && token.value === '\\relax')) return tokens;
+  const kept: Token[] = [];
+  for (let k = 0; k < tokens.length; k++) {
+    const token = tokens[k];
+    if (token.type !== 'command' || token.value !== '\\relax') {
+      kept.push(token);
+      continue;
+    }
+    const next = tokens[k + 1];
+    if (next?.type !== 'text') continue;
+    k++;
+    const rest = next.value.replace(/^[ \t\r\n]+/, '');
+    const last = kept[kept.length - 1];
+    if (last?.type === 'text') kept[kept.length - 1] = { ...last, value: last.value + rest };
+    else if (rest) kept.push({ type: 'text', value: rest, pos: next.pos + next.value.length - rest.length });
+  }
+  return kept;
 }
 
 // ---------------------------------------------------------------------------
