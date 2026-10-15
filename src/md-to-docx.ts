@@ -1965,6 +1965,43 @@ function blankLinesPastDropped(lines: string[], dropped: DroppedLines, from: num
   return count;
 }
 
+/** Whether `lines` from `from` on hold nothing but blank lines and the
+ *  blocks Word gets nothing of, `dropped` */
+function onlyDroppedFrom(lines: string[], dropped: DroppedLines, from: number): boolean {
+  let line = from;
+  for (let past: number | undefined = from; past !== undefined; past = dropped.after.get(line)) {
+    line = past;
+    while (line < lines.length && lines[line].trim() === '') line++;
+  }
+  return line >= lines.length;
+}
+
+/** The tokens in a style block at the top level of `tokens` that no
+ *  fence of its own closes, after which import writes a closing fence
+ *  where it writes the block (see addLinesWordLacks) */
+function inStyleBlockNoFenceCloses(tokens: MdToken[]): Set<number> {
+  const inside = new Set<number>();
+  let open: { style: string; tokens: number[] } | undefined;
+  const end = (fenced: boolean) => {
+    if (open && !fenced) for (const at of open.tokens) inside.add(at);
+    open = undefined;
+  };
+  for (const [at, token] of tokens.entries()) {
+    const run = token.type === 'paragraph' && !token.listContinuation && token.runs.length === 1 ? token.runs[0] : undefined;
+    const fence = run?.type === 'html_comment' ? styleFence(run.text) : undefined;
+    if (fence?.kind === 'open') {
+      if (startsStyleBlock(open?.style, fence.style)) {
+        end(false);
+        open = { style: fence.style, tokens: [] };
+      }
+    } else if (fence?.kind === 'close') end(true);
+    else if (fence?.kind === 'inline' || token.itemStyleOpen !== undefined) end(false);
+    else open?.tokens.push(at);
+  }
+  end(false);
+  return inside;
+}
+
 function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceLines: string[], parsedLines: string[]): void {
   // Its lines, from start, past the lines of a block its quote dropped
   // before it
@@ -2017,6 +2054,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
   const dropped = droppedBlocksOf(tokens, source);
   addLinesWordLacks(tokens, source, dropped);
   const blankRunPastDropped = (from: number, step: 1 | -1) => blankLinesPastDropped(sourceLines, dropped, from, step);
+  const unfenced = inStyleBlockNoFenceCloses(tokens);
   groups.forEach((group, g) => {
     if (!group) return;
     const previous = groups[g - 1];
@@ -2033,8 +2071,10 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
     else {
       // Not before definitions, of notes or links, with none of the body
       // after them, after which import writes notes' after a blank line of
-      // its own
-      if (below.line < sourceLines.length && group.last + 1 < tokens.length
+      // its own, nor before the end past what Word gets nothing of, as a
+      // comment's body or a style block's fences, where the quote is last,
+      // but in a block no fence closes, after which import writes one
+      if (below.line < sourceLines.length && group.last + 1 < tokens.length && (unfenced.has(group.last) || !onlyDroppedFrom(sourceLines, dropped, below.line))
         && !(next && !next.markerLine && below.line === next.start)) spacing.after = blankRunPastDropped(group.end + 1, 1);
       if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
     }
@@ -9402,6 +9442,13 @@ function unstyledInStyleBlock(token: MdToken): boolean {
     || token.type === 'code_block' || token.type === 'table' || token.type === 'hr');
 }
 
+/** Whether `token`, a block after the closing fence of a block of code
+ *  alone, is a paragraph of text, a list item, a heading or a quote */
+function followsCodeAlone(token: MdToken): boolean {
+  if (token.type === 'paragraph') return !marksSectionOrBibliography(token) && token.runs.some(run => run.type === 'text' && !run.rawHtml && run.text.trim() !== '');
+  return token.type === 'list_item' || token.type === 'heading' || token.type === 'blockquote';
+}
+
 /** Whether `token` marks a section's fence or the bibliography's place,
  *  which Word gets no paragraph of a style block's for */
 function marksSectionOrBibliography(token: MdToken): boolean {
@@ -10499,6 +10546,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // Whether the block before the style fences since it is code, which a
   // code block after them joins in Word, as the fences write nothing
   let codeBeforeFence = false;
+  // A code block that was all of a style block, right before the fence that
+  // closes it, which import drops with the block's fences, as Word has no
+  // paragraph of its style (see recording), and writes the empty paragraph
+  // after a code block for
+  let codeAloneBefore: MdToken | undefined;
   // The token before this one as import counts list blocks: a style fence
   // writes no paragraph, so import finds no boundary at one, and the lists
   // on either side of it are one block there (see listBlockPlaces)
@@ -10767,8 +10819,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       if (fenced) placeUnfencedClose(token);
     }
     const codeAcrossFence = codeBeforeFence && token.type === 'code_block';
+    const codeAlone = codeAloneBefore;
     if (!isStyleDirective(token)) {
       codeBeforeFence = false;
+      codeAloneBefore = undefined;
       // Not a section's fence or the bibliography's place, which Word gets
       // no paragraph of the block's for
       const marker = marksSectionOrBibliography(token);
@@ -10928,6 +10982,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // just a state flag that generateParagraph reads), for which Word gets no
     // paragraph (see isStyleDirective).
     if (isStyleDirective(token)) {
+      let closesCodeAlone = false;
       if (token.customStyleOpen && frontmatter?.styles && !frontmatter.styles[token.customStyleOpen]) {
         // Validate that the style is declared in frontmatter
         state.warnings.push('Custom style "' + token.customStyleOpen + '" used in <!-- style: --> directive but not declared in frontmatter styles.');
@@ -10955,6 +11010,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         // since its last paragraph in its style takes the place of that
         // closing fence (see splitsAtSections)
         const placed = !isImplicitStyleClose(token) && !!styleBlock?.styled;
+        closesCodeAlone = !isImplicitStyleClose(token) && !!styleBlock && !styleBlock.styled && styleBlock.lead === 1;
         if (placed) {
           if (token.blankLinesBefore !== undefined) sentinelGaps['csc' + sentinelCscIdx] = token.blankLinesBefore;
           if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
@@ -10989,6 +11045,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       hiddenXml = hiddenXmlBefore;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       if (prevToken?.type === 'code_block') codeBeforeFence = true;
+      // Only right after the fence that closes the block, a blank line
+      // before what comes next, as one opening after it starts a block
+      // import may write
+      codeAloneBefore = closesCodeAlone && token.blankLinesAfter === 1 && prevToken?.type === 'code_block' ? prevToken : undefined;
       // Which goes between a list item's paragraphs, where nothing else does
       if (!isImplicitStyleClose(token)) prevToken = undefined;
       continue;
@@ -11066,8 +11126,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     //   (a) Source had a blank line after the fence → always insert separator.
     //   (b) Callout alert immediately follows (no blank line) → still need a
     //       separator so the callout border doesn't sit flush against the code.
-    if (prevToken?.type === 'code_block' && token.type !== 'code_block') {
-      const needsSep = prevToken.trailingBlankLine || (token.type === 'blockquote' && token.alertFirst);
+    // Past the fence of a block of code alone, before a paragraph of text,
+    // a list, a heading or a quote, which import writes after a blank line
+    // past the code, and not, as before, a table, whose separator import
+    // writes as blank lines (see dropCodeBlockSeparators), or HTML or a
+    // comment, which it writes right after the code
+    const codeBefore = prevToken?.type === 'code_block' ? prevToken : followsCodeAlone(token) ? codeAlone : undefined;
+    if (codeBefore && token.type !== 'code_block') {
+      const needsSep = codeBefore.trailingBlankLine || (token.type === 'blockquote' && token.alertFirst);
       if (needsSep) {
         body += separatorParagraph;
       }
