@@ -322,7 +322,7 @@ The converter supports standard amsmath environments for multi-line equations:
 | `alignat`, `alignat*` | Aligned with explicit column count |
 | `subequations` | Wrapper (content passed through) |
 
-These environments are converted to OMML equation arrays on export. On re-import, the original environment name is not preserved: arrays with `&` markers become `aligned`, those without become `gathered`.
+These environments are converted to OMML equation arrays on export. On re-import, the original environment name is not preserved: arrays with `&` markers become `aligned`, those without become `gathered`. Every row comes back, an empty one too, so the next export has the same rows. A row that ends in a `%` comment has its `\\` on the next line, out of the comment.
 
 Within these environments, `\tag{...}`, `\tag*{...}`, `\label{...}`, `\notag`, and `\nonumber` are consumed silently (OMML has no equivalent). `\intertext{...}` and `\shortintertext{...}` are emitted as plain text. `\shoveleft{...}` and `\shoveright{...}` emit their inner content.
 
@@ -465,6 +465,8 @@ a \ b      % normal space
 a \quad b  % em space
 a \qquad b % double em space
 ```
+
+At the start or end of an equation, a row, a cell or a group, re-import writes the spaces that `\quad`, `\qquad`, `\;`, `\:` and `\,` export as those commands. Elsewhere it writes the space itself, as U+2003 for `\quad`.
 
 ## Text Inside Equations
 

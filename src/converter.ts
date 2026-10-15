@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
+import { asXmlNodes, endsInLatexComment, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
 import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
@@ -8102,6 +8102,12 @@ function keepLinesInEquation(latex: string): string {
   return lines.join('\n');
 }
 
+/** Display math's LaTeX with a multiline environment's rows each on a line
+ *  of its own. Every row stays, an empty one too, as Word has it: export
+ *  reads a line of \\ alone as an empty row, and one after the last as a
+ *  row of its line end. A row that ends in a comment takes its \\ on the
+ *  next line, out of the comment, where export reads it as the row's end,
+ *  and a \\ in a comment is the comment's (see latexRows). */
 function canonicalizeDisplayMathLatex(latex: string): string {
   const trimmed = latex.trim();
   const envMatch = trimmed.match(/^\\begin\{([a-zA-Z*]+)\}\s*([\s\S]*?)\s*\\end\{\1\}$/);
@@ -8109,11 +8115,37 @@ function canonicalizeDisplayMathLatex(latex: string): string {
   const envName = envMatch[1];
   const multilineEnvs = new Set(['aligned', 'align', 'align*', 'gathered', 'cases']);
   if (!multilineEnvs.has(envName)) return trimmed;
-  const inner = envMatch[2].trim();
-  if (!inner) return `\\begin{${envName}}\n\\end{${envName}}`;
-  const rows = inner.split(/\\\\/).map(row => row.trim()).filter(row => row.length > 0);
-  if (rows.length === 0) return `\\begin{${envName}}\n\\end{${envName}}`;
-  return `\\begin{${envName}}\n${rows.join(' \\\\\n')}\n\\end{${envName}}`;
+  const rows = latexRows(envMatch[2]).map(row => row.trim());
+  const lines: string[] = [];
+  for (let i = 0; i < rows.length - 1; i++) {
+    lines.push(rows[i] === '' ? '\\\\' : rows[i] + (endsInLatexComment(rows[i]) ? '\n' : ' ') + '\\\\');
+  }
+  if (rows[rows.length - 1]) lines.push(rows[rows.length - 1]);
+  return '\\begin{' + envName + '}\n' + (lines.length > 0 ? lines.join('\n') + '\n' : '') + '\\end{' + envName + '}';
+}
+
+/** `latex` split at each \\ outside a comment, which runs from a % to the
+ *  end of its line, as an environment's rows. A backslash escapes the
+ *  character after it, so \% is no comment. */
+function latexRows(latex: string): string[] {
+  const rows: string[] = [];
+  let from = 0;
+  for (let i = 0; i < latex.length; i++) {
+    const char = latex.charCodeAt(i);
+    if (char === 0x25) { // %
+      const lineEnd = latex.indexOf('\n', i);
+      if (lineEnd === -1) break;
+      i = lineEnd;
+    } else if (char === 0x5C) { // \
+      if (latex.charCodeAt(i + 1) === 0x5C) {
+        rows.push(latex.slice(from, i));
+        from = i + 2;
+      }
+      i++;
+    }
+  }
+  rows.push(latex.slice(from));
+  return rows;
 }
 
 /** `text` in a span of `rev`. Text with the span's closer in it, as code,

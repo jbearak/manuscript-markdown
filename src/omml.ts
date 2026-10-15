@@ -363,10 +363,9 @@ function translateMatrixAsEnv(matrixChildren: XmlNode[], envName: string): strin
   const rowStrings: string[] = [];
   for (const rowChildren of rows) {
     const cells = findAllChildren(rowChildren, 'm:e');
-    const cellStrings = cells.map(cell => unbracedToLatex(cell));
-    rowStrings.push(cellStrings.join(' & '));
+    rowStrings.push(joinLatexParts(cells.map(cell => unbracedToLatex(cell)), ' & '));
   }
-  return `\\begin{${envName}} ${rowStrings.join(' \\\\ ')} \\end{${envName}}`;
+  return latexEnvironment(envName, rowStrings);
 }
 
 // ---------------------------------------------------------------------------
@@ -826,8 +825,7 @@ function translateDelimiter(children: XmlNode[]): string {
       const eqArrChildren = findChild(eChildren, 'm:eqArr');
       if (eqArrChildren.length > 0 && isSoleContent(eChildren, 'm:eqArr')) {
         const rows = findAllChildren(eqArrChildren, 'm:e');
-        const rowStrings = rows.map(rowChildren => unbracedToLatex(rowChildren));
-        return `\\begin{cases} ${rowStrings.join(' \\\\ ')} \\end{cases}`;
+        return latexEnvironment('cases', rows.map(rowChildren => unbracedToLatex(rowChildren)));
       }
     }
 
@@ -941,10 +939,9 @@ function translateMatrix(children: XmlNode[]): string {
   for (const rowChildren of rows) {
     // Each row contains m:e cells
     const cells = findAllChildren(rowChildren, 'm:e');
-    const cellStrings = cells.map(cell => unbracedToLatex(cell));
-    rowStrings.push(cellStrings.join(' & '));
+    rowStrings.push(joinLatexParts(cells.map(cell => unbracedToLatex(cell)), ' & '));
   }
-  return `\\begin{matrix} ${rowStrings.join(' \\\\ ')} \\end{matrix}`;
+  return latexEnvironment('matrix', rowStrings);
 }
 
 
@@ -1049,8 +1046,7 @@ function translateEqArray(children: XmlNode[]): string {
     if (/(?<!\\)&/.test(rowLatex)) hasAlignment = true;
   }
 
-  const envName = hasAlignment ? 'aligned' : 'gathered';
-  return `\\begin{${envName}} ${rowStrings.join(' \\\\ ')} \\end{${envName}}`;
+  return latexEnvironment(hasAlignment ? 'aligned' : 'gathered', rowStrings);
 }
 
 
@@ -1234,7 +1230,7 @@ let partDepth = 0;
 export function ommlToLatex(children: XmlNode[]): string {
   partDepth++;
   try {
-    const latex = ommlChildrenToLatex(children).trim();
+    const latex = trimPart(ommlChildrenToLatex(children));
     return partDepth > 1 ? apartFromMarkup(latex) : latex;
   } finally {
     partDepth--;
@@ -1251,7 +1247,7 @@ export function ommlToLatex(children: XmlNode[]): string {
 function unbracedToLatex(children: XmlNode[]): string {
   partDepth++;
   try {
-    return ommlChildrenToLatex(children).trim();
+    return trimPart(ommlChildrenToLatex(children));
   } finally {
     partDepth--;
   }
@@ -1278,6 +1274,72 @@ function apartFromMarkup(latex: string, text = false): string {
   return latex
     .replace(/^([+=~>-])(?=\1)/, ch => ch + between)
     .replace(/([+=~<-])(?=\1$)/, ch => ch + between);
+}
+
+/** A part's LaTeX without the whitespace at its edges, as before, but with
+ *  each space there that export writes for a spacing command written as
+ *  that command, as \quad for an em space, since Word shows it. Its
+ *  character would end an inline equation there: $2 and an em space reads
+ *  as currency. Within the part, import writes the character. Nothing for
+ *  spaces alone, as before, which export reads as no equation. */
+function trimPart(latex: string): string {
+  const body = latex.trim();
+  if (!body) return '';
+  const before = spaceCommands(latex.slice(0, latex.length - latex.trimStart().length));
+  let trailing = latex.slice(latex.trimEnd().length);
+  // A comment's spaces, to its line end, are its text, trimmed as before
+  const comment = endsInLatexComment(body);
+  if (comment) trailing = trailing.slice(trailing.indexOf('\n') + 1 || trailing.length);
+  const after = spaceCommands(trailing);
+  return (before ? before + ' ' : '') + body + (after && comment ? '\n' : '') + after;
+}
+
+/** The spaces export writes for \quad, \;, \: and \, (see latex-to-omml.ts) */
+const SPACE_COMMANDS: ReadonlyMap<string, string> = new Map([
+  ['\u2003', '\\quad'], ['\u2004', '\\;'], ['\u205F', '\\:'], ['\u2009', '\\,'],
+]);
+
+/** The spacing commands for `spaces`, two em spaces as \qquad, and nothing
+ *  for a space that has none */
+function spaceCommands(spaces: string): string {
+  let commands = '';
+  for (let i = 0; i < spaces.length; i++) {
+    if (spaces.startsWith('\u2003\u2003', i)) {
+      commands += '\\qquad';
+      i++;
+    } else {
+      commands += SPACE_COMMANDS.get(spaces[i]) ?? '';
+    }
+  }
+  return commands;
+}
+
+/** Whether the last line of `latex` ends in a comment: has a % after no
+ *  backslash or an even run of them, as \\% has, but not \% */
+export function endsInLatexComment(latex: string): boolean {
+  const lineStart = latex.lastIndexOf('\n') + 1;
+  for (let at = latex.indexOf('%', lineStart); at !== -1; at = latex.indexOf('%', at + 1)) {
+    let backslashes = 0;
+    while (at - 1 - backslashes >= lineStart && latex.charCodeAt(at - 1 - backslashes) === 0x5C) backslashes++;
+    if (backslashes % 2 === 0) return true;
+  }
+  return false;
+}
+
+/** `parts`, an environment's rows or a row's cells, joined by `separator`,
+ *  with a line end after each that ends in a comment, which would hold the
+ *  separator, as a row of a %c and a row of b, which came back as
+ *  a %c \\ b, one row. Word keeps the comment's line end in a hidden run,
+ *  but a row's LaTeX is trimmed (see ommlToLatex) */
+function joinLatexParts(parts: string[], separator: string): string {
+  return parts.map((part, i) => i < parts.length - 1 && endsInLatexComment(part) ? part + '\n' : part).join(separator);
+}
+
+/** The environment `name` of `rows` (see joinLatexParts), its \end on a
+ *  line of its own after a comment */
+function latexEnvironment(name: string, rows: string[]): string {
+  const body = joinLatexParts(rows, ' \\\\ ');
+  return '\\begin{' + name + '} ' + body + (endsInLatexComment(body) ? '\n' : ' ') + '\\end{' + name + '}';
 }
 
 /** ommlToLatex without the trim, for the content of a tracked change, which
