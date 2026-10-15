@@ -4,6 +4,7 @@
 // already contain literal characters (e.g. &amp; → &).
 
 import { xmlOn } from './xml-elements';
+import { wordNumbersTag } from './latex-to-omml';
 
 // ---------------------------------------------------------------------------
 // fast-xml-parser preserve-order structures
@@ -1165,7 +1166,8 @@ function translateEqArray(children: XmlNode[]): string {
 /**
  * Word's equation number at the end of a row of an equation array: a # in
  * a run of math, then (x), as Word builds it up into a delimiter or as
- * characters, which is \tag{x}, or any other text, which is \tag*{x}, as
+ * characters, which is \tag{x}, or any other text, with such delimiters in
+ * it or not, as a(1), which is \tag*{x}, as
  * LaTeX shows it without parentheses (see equationNumberOmml in
  * latex-to-omml.ts), with TeX's special characters in it escaped, as in
  * \text{}, so Word's 50% is \tag{50\%}. The row's children before the #,
@@ -1173,7 +1175,9 @@ function translateEqArray(children: XmlNode[]): string {
  * writes, or escaped, as export writes \#, is none, and so is one with
  * nothing before it to number. Nor is any in a row whose runs of math hold
  * more than one # that isn't escaped, as x#(A#B), where which one starts
- * the number is unclear.
+ * the number is unclear, or a \tag* that would hold one, as of x#a(A#B)
+ * with (A#B) built up, which export drops (see wordNumbersTag in
+ * latex-to-omml.ts).
  */
 function rowNumber(row: XmlNode[]): { equation: XmlNode[]; tag: string } | undefined {
   const content = row.filter(node => !Object.keys(node).every(key => key === ':@' || SKIP_TAGS.has(key)));
@@ -1197,14 +1201,14 @@ function rowNumber(row: XmlNode[]): { equation: XmlNode[]; tag: string } | undef
     for (let j = i - 1; preceding === '' && j >= 0 && isMathRun(content[j]); j--) preceding = shownText(asXmlNodes(content[j]['m:r']));
     if (!isMathRun(content[i]) || preceding.endsWith('\\')) return undefined;
     const after = content.slice(i + 1);
-    let number: string | undefined;
-    if (after.every(isMathRun)) {
-      number = split.after + after.map(node => shownText(asXmlNodes(node['m:r']))).join('');
-    } else if (after.length === 1 && !split.after) {
-      number = parenthesizedText(after[0]);
-    }
-    if (number === undefined) return undefined;
+    // All of the row after the #, as Word shows it: runs of math, and
+    // delimiters of ( and ) around runs, as Word builds (1) up into, in any
+    // order, as x#a(1)
+    const pieces = after.map(node => isMathRun(node) ? shownText(asXmlNodes(node['m:r'])) : parenthesizedText(node));
+    if (pieces.some(piece => piece === undefined)) return undefined;
+    const number = split.after + pieces.join('');
     const parenthesized = /^\s*\((.*)\)\s*$/.exec(number);
+    if (!wordNumbersTag(parenthesized ? { text: parenthesized[1].trim(), star: false } : { text: number.trim(), star: true })) return undefined;
     // The tag's text is escaped and apart from its braces, as \text{}'s
     // is, so that a number of ++A++ makes no {++ or ++} (see
     // apartFromMarkup)

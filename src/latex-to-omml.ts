@@ -376,7 +376,14 @@ export const CRITIC_DELETION_COMMAND = '\\mmCriticDel';
 export type TrackChange = (element: 'w:ins' | 'w:del', omml: string) => string;
 
 /** A \tag's text, and whether it is \tag*, which LaTeX shows without parentheses. */
-interface EquationTag { text: string; star: boolean }
+export interface EquationTag { text: string; star: boolean }
+
+/** Whether Word's number for `tag` reads back as it: not a \tag* with a #
+ *  in it, whose number, a # and its text, would hold another #, which
+ *  import can't tell from the number's (see rowNumber in omml.ts) */
+export function wordNumbersTag(tag: EquationTag): boolean {
+  return !(tag.star && tag.text.includes('#'));
+}
 
 /**
  * Whether `omml` shows anything, which a row of spaces alone or a hidden
@@ -1388,11 +1395,9 @@ class Parser {
     const onUnknownCommand = this.onUnknownCommand;
     this.onUnknownCommand = undefined;
     try {
-      const text = this.extractText(this.parseGroupIn('text')).trim();
-      // A \tag* with a # in it is dropped, as before: Word's number of it, a
-      // # and its text, would hold another #, which import can't tell from
-      // the number's (see rowNumber in omml.ts)
-      this.tag = star && text.includes('#') ? undefined : { text, star };
+      const tag = { text: this.extractText(this.parseGroupIn('text')).trim(), star };
+      // One Word can't number is dropped, as before
+      this.tag = wordNumbersTag(tag) ? tag : undefined;
     } finally {
       this.onUnknownCommand = onUnknownCommand;
     }

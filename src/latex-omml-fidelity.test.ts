@@ -2111,3 +2111,57 @@ describe('Word\'s symbol characters and zero-width spaces in an equation', () =>
     expect(importOmml(run('a') + '<m:r><w:rPr><w:vanish w:val="1"/></w:rPr><m:t>\u200B</m:t></m:r>' + run('b'))).toBe('ab');
   });
 });
+
+// Two edges of Word's equation numbers. Text after the # and before Word's
+// delimiter of the number, as x#a(1), was no number on import, and the next
+// trip read all of it as one, \tag*{a(1)}, as Word shows it. And a run of
+// math that ends in a lone \, which import keeps as it is, before a symbol
+// that import writes as a command, as α, made \\, LaTeX's line break, as
+// x\\alpha, which the next export wrote as \\ and letters
+describe('equation number edges', () => {
+  const fence = '$'.repeat(2);
+  const parens = (omml: string) => '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>' + omml + '</m:e></m:d>';
+  const array = (...rows: string[]) => '<m:eqArr>' + rows.map(row => '<m:e>' + row + '</m:e>').join('') + '</m:eqArr>';
+  const display = (latex: string) => fence + '\n' + latex + '\n' + fence + '\n';
+
+  /** A document from Word with display math of `omml` alone */
+  async function wordDisplay(omml: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(display('x'))).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** `omml` from Word comes back as `markdown`, and the next two trips give it again */
+  async function expectFromWord(omml: string, markdown: string): Promise<void> {
+    const once = (await convertDocx(await wordDisplay(omml))).markdown;
+    expect(once).toBe(markdown);
+    const twice = (await convertDocx((await convertMdToDocx(once)).docx)).markdown;
+    expect(twice).toBe(markdown);
+    expect((await convertDocx((await convertMdToDocx(twice)).docx)).markdown).toBe(markdown);
+  }
+
+  // Word's number is all of the row after its #
+  test.each([
+    ['a letter, then the number\'s delimiter', run('x#a') + parens(run('1')), 'x \\tag*{a(1)}'],
+    ['α, then the number\'s delimiter', run('x#α') + parens(run('1')), 'x \\tag*{α(1)}'],
+    ['a letter in a run of its own, then the delimiter', run('x#') + run('a') + parens(run('1')), 'x \\tag*{a(1)}'],
+    ['the delimiter, then a letter', run('x#') + parens(run('1')) + run('a'), 'x \\tag*{(1)a}'],
+  ])('a number of %s comes back as \\tag*, and again', async (_name, row, latex) => {
+    await expectFromWord(array(row), display(latex));
+    await expectFromWord(array(row, run('c')), display('\\begin{gather*}\n' + latex + ' \\\\\nc\n\\end{gather*}'));
+  });
+
+  // As on main
+  test.each([
+    ['a number after α', array(run('2+α#(1)')), '2+\\alpha \\tag{1}'],
+    ['a number in a delimiter', array(run('x#') + parens(run('1'))), 'x \\tag{1}'],
+    ['a number without parentheses', array(run('x#a')), 'x \\tag*{a}'],
+    ['a # a \\ escapes', array(run('x\\') + run('#(1)')), '\\begin{gathered}\nx\\#(1)\n\\end{gathered}'],
+    // A \tag* with a # in it, which export would drop (see wordNumbersTag)
+    ['a number of a letter, then a delimiter with a # in it', array(run('x#a') + parens(run('A#B'))), '\\begin{gathered}\nx#a(A#B)\n\\end{gathered}'],
+    ['the same in the first of two rows', array(run('x#a') + parens(run('A#B')), run('c')), '\\begin{gathered}\nx#a(A#B) \\\\\nc\n\\end{gathered}'],
+    ['a # in the number\'s run', array(run('x#a#b') + parens(run('1'))), '\\begin{gathered}\nx#a#b(1)\n\\end{gathered}'],
+    ['a number of a delimiter with a # in it alone', array(run('x#') + parens(run('A#B'))), 'x \\tag{A\\#B}'],
+  ])('%s comes back as before, and again', (_name, omml, latex) => expectFromWord(omml, display(latex)));
+});

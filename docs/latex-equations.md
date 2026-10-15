@@ -356,6 +356,7 @@ Word numbers an equation with a `#` at the end of a row of an equation array, fo
 Import reads Word's numbers in display math back as `\tag{...}`, or as `\tag*{...}` where the number has no parentheses:
 
 - A numbered equation of one row comes back as the row and its tag, as in `E=mc^2 \tag{1}`.
+- All of a row after its `#` is the number, as Word shows it, so `x#a(1)` comes back as `x \tag*{a(1)}`.
 - An equation array with more rows comes back as `align*` (with `&`) or `gather*`, with each number on its row. An `&` in a number aligns nothing.
 - LaTeX's special characters in a number are escaped, as in `\text{}`: Word's `#(50%)` comes back as `\tag{50\%}`, `#(a_b)` as `\tag{a\_b}`, and `#(a\b)` as `\tag{a\textbackslash{}b}`. Export writes such a tag's text as LaTeX shows it, so `\tag{50\%}` comes back as written. A text accent or a tie, as in `\tag*{x\^2}` or `\tag{a~b}`, is written as typed, and comes back as the characters Word shows, as in `\text{}`.
 
