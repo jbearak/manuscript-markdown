@@ -17125,6 +17125,90 @@ describe('Code block round-trip', () => {
     expect(body(twice)).toBe(code + md);
     expect(await roundTrip(twice)).toBe(twice);
   });
+
+  // Each paragraph's properties and text
+  const paragraphs = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => (/<w:pPr>[\s\S]*?<\/w:pPr>/.exec(p[0])?.[0] ?? '')
+      + [...p[0].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+  };
+
+  test.each([
+    ['a paragraph right after a code block', 'End.\n', '\nEnd.\n'],
+    ['a list right after a code block', '- x\n', '\n- x\n'],
+    ['a numbered list right after a code block', '1. x\n', '\n1. x\n'],
+    ['a list from 2 right after a code block', '2. x\n', '\n2. x\n'],
+    ['an empty list item right after a code block', '-\n', '\n- \n'],
+    ['a heading right after a code block', '# H\n', '\n# H\n'],
+    ['a table right after a code block', '| x |\n| --- |\n| 1 |\n', '\n| x |\n| --- |\n| 1 |\n'],
+    ['an HTML table right after a code block', '<table><tr><td>t</td></tr></table>\n', '\n<table>\n  <tr>\n    <td>\n      <p>t</p>\n    </td>\n  </tr>\n</table>\n'],
+    ['a rule right after a code block', '***\n', '\n---\n'],
+    ['display math right after a code block', '$' + '$\nx\n$' + '$\n', '\n$' + '$\nx\n$' + '$\n'],
+    ['an HTML block right after a code block', '<div>d</div>\n', '\n<div>d</div>\n'],
+    // Guards: a blank line between, as import writes, and what import
+    // writes right after the code, with the empty paragraph or none
+    ['a paragraph a blank line after a code block', '\nEnd.\n', '\nEnd.\n'],
+    ['a list a blank line after a code block', '\n- x\n', '\n- x\n'],
+    ['a quote right after a code block', '> q\n', '> q\n'],
+    ['a comment right after a code block', '<!-- c -->\nEnd.\n', '<!-- c -->\nEnd.\n'],
+    ['code right after a code block', '```\nd\n```\n', '\n```\nd\n```\n'],
+  ])('gives Word the same paragraphs on each trip for %s', async (_name, after, expected) => {
+    // Import writes a blank line between a code block and what follows it,
+    // which export wrote an empty paragraph for only where the source had
+    // a blank line, so the second trip added one. Export writes it for a
+    // block right after the fence as for one a blank line after it
+    const code = '```\nc\n```\n';
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    const first = (await convertMdToDocx(code + after)).docx;
+    const once = (await convertDocx(first)).markdown;
+    expect(strip(once)).toBe(code + expected);
+    const second = (await convertMdToDocx(once)).docx;
+    expect(await paragraphs(first)).toEqual(await paragraphs(second));
+    expect((await convertDocx(second)).markdown).toBe(once);
+  });
+
+  // A template whose default style numbers paragraphs
+  const numberedNormal = async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const styles = (await zip.file('word/styles.xml')!.async('string'))
+      .replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/, (match: string) => match + '<w:numPr><w:numId w:val="2"/></w:numPr>');
+    zip.file('word/styles.xml', styles);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  test('gives Word the same paragraphs on each trip for a list right after a code block where a template numbers paragraphs', async () => {
+    // The empty paragraph has no numbering of its own (see
+    // separatorParagraph), so that the template doesn't number it
+    const templateDocx = await numberedNormal();
+    const first = (await convertMdToDocx('```\nc\n```\n- a\n', { templateDocx })).docx;
+    const once = (await convertDocx(first)).markdown;
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe('```\nc\n```\n\n- a\n');
+    const second = (await convertMdToDocx(once, { templateDocx })).docx;
+    expect(await paragraphs(first)).toEqual(await paragraphs(second));
+    expect((await convertDocx(second)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['where a template numbers paragraphs', true, '```\nc\n```\n<!-- style: X -->\n- a\n<!-- /style -->\n'],
+    ['with no template', false, '<!-- style: X -->\n```\nc\n```\n\n- a\n<!-- /style -->\n'],
+  ])('writes no empty paragraph between a code block and a list right after it in a style block %s', async (_name, numbered, expected) => {
+    // Import can write the block's fence between them, as it does where the
+    // template's style numbers the list but not the code, after which the
+    // next export writes none
+    const options = numbered ? { templateDocx: await numberedNormal() } : {};
+    const source = '---\nstyles:\n  X:\n    font: Arial\n---\n\n<!-- style: X -->\n```\nc\n```\n- a\n<!-- /style -->\n';
+    const first = (await convertMdToDocx(source, options)).docx;
+    expect((await paragraphs(first)).map(p => p.replace(/^<w:pPr>.*?<w:pStyle w:val="(\w+)"\/>.*$/, '$1'))).toEqual(['CodeBlock', 'MsCustomX']);
+    const once = (await convertDocx(first)).markdown;
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected);
+    const second = (await convertMdToDocx(once, options)).docx;
+    const twice = (await convertDocx(second)).markdown;
+    expect(twice).toBe(once);
+    // Where import writes the fence between them, the same paragraphs from
+    // the first trip, and from the second where it writes it before the code
+    if (numbered) expect(await paragraphs(second)).toEqual(await paragraphs(first));
+    expect(await paragraphs((await convertMdToDocx(twice, options)).docx)).toEqual(await paragraphs(second));
+  });
 });
 
 describe('Inline code import (CodeChar detection)', () => {

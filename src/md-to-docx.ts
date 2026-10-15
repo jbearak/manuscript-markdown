@@ -9453,6 +9453,16 @@ function followsCodeAlone(token: MdToken): boolean {
   return token.type === 'list_item' || token.type === 'heading' || token.type === 'blockquote';
 }
 
+/** Whether `token`, a block right after a code block's closing fence, is
+ *  one import writes a blank line before: a paragraph Word shows, a list
+ *  item, a heading, a table or a thematic break, and not a quote, which
+ *  gets the empty paragraph anyway, nor a comment, which import writes
+ *  right after the code */
+function followsCodeAfterBlankLine(token: MdToken): boolean {
+  if (token.type === 'paragraph') return !isHiddenParagraph(token) && !marksSectionOrBibliography(token);
+  return token.type === 'list_item' || token.type === 'heading' || token.type === 'table' || token.type === 'hr';
+}
+
 /** Whether `token` marks a section's fence or the bibliography's place,
  *  which Word gets no paragraph of a style block's for */
 function marksSectionOrBibliography(token: MdToken): boolean {
@@ -11140,9 +11150,16 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // past the code, and not, as before, a table, whose separator import
     // writes as blank lines (see dropCodeBlockSeparators), or HTML or a
     // comment, which it writes right after the code
+    // And right after the fence, before a block import writes after a blank
+    // line past the code, as where the source had one, so that the next
+    // trip gives Word the same paragraphs. Not in a style block, where
+    // import can write the block's fence between them, as it does before a
+    // list where a template's style numbers paragraphs, after which the next
+    // export writes none
     const codeBefore = prevToken?.type === 'code_block' ? prevToken : followsCodeAlone(token) ? codeAlone : undefined;
     if (codeBefore && token.type !== 'code_block') {
-      const needsSep = codeBefore.trailingBlankLine || (token.type === 'blockquote' && token.alertFirst);
+      const needsSep = codeBefore.trailingBlankLine || (token.type === 'blockquote' && token.alertFirst)
+        || codeBefore === prevToken && !state.activeCustomStyle && followsCodeAfterBlankLine(token);
       if (needsSep) {
         body += separatorParagraph;
       }
