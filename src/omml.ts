@@ -453,6 +453,11 @@ type RunContext = 'math' | 'name';
  * In a group, a command ends with {} before a letter, since a space there
  * would export as a space; bare math keeps the readable space.
  */
+/** What math can't hold as it is, which an upright run writes as text (see
+ *  textModeLatex): whitespace, ', which math reads as a prime, and the
+ *  characters LaTeX reserves */
+const TEXT_MODE_CHARACTERS = /[\s'#$%&_{}~^\\]/;
+
 function runTextLatex(text: string, style: string, script: string, context: RunContext = 'math', preserved = false): string {
   if (text.charAt(0) === '\u200B') return hiddenCommentLatex(text);
   if (context === 'name') return unicodeToLatex(escapeLatex(text), false, '{}');
@@ -462,7 +467,7 @@ function runTextLatex(text: string, style: string, script: string, context: RunC
   const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
   const group = alphabet ?? (style === 'p' ? '\\mathrm' : '');
   if (!group) return mathLatex(text, ' ');
-  if (!alphabet && /[\s'#$%&_{}~^\\]/.test(text)) return textModeLatex(text);
+  if (!alphabet && TEXT_MODE_CHARACTERS.test(text)) return textModeLatex(text);
   // Word drops a space at an edge without xml:space="preserve", and keeps one
   // with it, which goes in \text{}, as \text{} keeps it, beside the math
   const [, lead, core, trail] = /^([ \t\r\n]*)([\s\S]*?)([ \t\r\n]*)$/.exec(text)!;
@@ -598,9 +603,14 @@ let scriptDepth = 0;
  * below a base), with its math-run primes as \prime (see translateRun).
  */
 function scriptToLatex(script: XmlNode[]): string {
+  return inScript(() => ommlToLatex(script));
+}
+
+/** `latex()` as a script's or a limit's, where ′ is \prime (see runTextLatex) */
+function inScript(latex: () => string): string {
   scriptDepth++;
   try {
-    return ommlToLatex(script);
+    return latex();
   } finally {
     scriptDepth--;
   }
@@ -1255,13 +1265,20 @@ function translatePhantom(children: XmlNode[]): string {
 function braceGroupContent(eChildren: XmlNode[], chr: string, pos: string): string | null {
   const groupChildren = findChild(eChildren, 'm:groupChr');
   if (groupChildren.length === 0 || !isSoleContent(eChildren, 'm:groupChr')) return null;
-  const pr = findChild(groupChildren, 'm:groupChrPr');
-  const chrNode = findChildNode(pr, 'm:chr');
-  const actualChr = chrNode ? getOmmlAttr(chrNode, 'val') : '⏞';
-  const posNode = findChildNode(pr, 'm:pos');
-  const actualPos = getOmmlAttr(posNode, 'val') || 'top';
-  if (actualChr !== chr || actualPos !== pos) return null;
+  const actual = groupChrProps(groupChildren);
+  if (actual.chr !== chr || actual.pos !== pos) return null;
   return ommlToLatex(findChild(groupChildren, 'm:e'));
+}
+
+/** An m:groupChr's character and position, as ECMA-376 has them where it
+ *  leaves them out: U+23DF (⏟) and bot */
+function groupChrProps(children: XmlNode[]): { chr: string; pos: string } {
+  const pr = findChild(children, 'm:groupChrPr');
+  const chrNode = findChildNode(pr, 'm:chr');
+  return {
+    chr: (chrNode ? getOmmlAttr(chrNode, 'val') : '') || '\u23DF',
+    pos: getOmmlAttr(findChildNode(pr, 'm:pos'), 'val') || 'bot',
+  };
 }
 
 /**
@@ -1315,21 +1332,22 @@ function translateBar(children: XmlNode[]): string {
 
 
 /**
- * Translate an m:groupChr element to LaTeX.
- * Checks chr and pos to determine overbrace vs underbrace.
+ * Translate an m:groupChr element to LaTeX: its character over or under its
+ * content (see groupChrProps for what it has where it says neither). A curly
+ * bracket is \overbrace or \underbrace by its character, as export writes
+ * them. Any other, as Word's arrows, is \overset or \underset of it by its
+ * position, as export has no form for \overrightarrow and the like.
  */
 function translateGroupChr(children: XmlNode[]): string {
-  const pr = findChild(children, 'm:groupChrPr');
-  const chrNode = findChildNode(pr, 'm:chr');
-  const chr = chrNode ? getOmmlAttr(chrNode, 'val') : '\u23DE';
-  const posNode = findChildNode(pr, 'm:pos');
-  const pos = getOmmlAttr(posNode, 'val');
+  const { chr, pos } = groupChrProps(children);
   const content = ommlToLatex(findChild(children, 'm:e'));
-
-  if (chr === '\u23DF' || pos === 'bot') {
-    return `\\underbrace{${content}}`;
-  }
-  return `\\overbrace{${content}}`;
+  if (chr === '\u23DE') return `\\overbrace{${content}}`;
+  if (chr === '\u23DF') return `\\underbrace{${content}}`;
+  // As a limit's run of it alone writes it, as \overset and \underset take
+  // it as one: math, or text, as an upright run's, where math can't hold it
+  // as it is, as \\, & or '
+  const mark = inScript(() => runTextLatex(chr, TEXT_MODE_CHARACTERS.test(chr) ? 'p' : '', ''));
+  return (pos === 'top' ? '\\overset{' : '\\underset{') + mark + '}{' + content + '}';
 }
 
 
