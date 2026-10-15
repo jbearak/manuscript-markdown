@@ -343,16 +343,18 @@ Word numbers an equation with a `#` at the end of a row of an equation array, fo
 Import reads Word's numbers in display math back as `\tag{...}`, or as `\tag*{...}` where the number has no parentheses:
 
 - A numbered equation of one row comes back as the row and its tag, as in `E=mc^2 \tag{1}`.
-- An equation array with more rows comes back as `align*` (with `&`) or `gather*`, with each number on its row.
+- An equation array with more rows comes back as `align*` (with `&`) or `gather*`, with each number on its row. An `&` in a number aligns nothing.
+- LaTeX's special characters in a number are escaped, as in `\text{}`: Word's `#(50%)` comes back as `\tag{50\%}`, `#(a_b)` as `\tag{a\_b}`, and `#(a\b)` as `\tag{a\textbackslash{}b}`. Export writes such a tag's text as LaTeX shows it, so `\tag{50\%}` comes back as written. A text accent or a tie, as in `\tag*{x\^2}` or `\tag{a~b}`, is written as typed, and comes back as the characters Word shows, as in `\text{}`.
 
 In inline math, which can't hold a `\tag`, a number stays as Word wrote it.
 
 Some tags are dropped, as before:
 
 - a `\tag` in inline math;
-- a `\tag` inside CriticMarkup, or with CriticMarkup inside it.
+- a `\tag` inside CriticMarkup, or with CriticMarkup inside it;
+- a `\tag*` with a `#` in it, whose number would be a row with two `#`s (see below).
 
-A number from Word that holds one of LaTeX's special characters, such as `{` or `\`, stays as Word wrote it.
+A row from Word with more than one `#` in its math, as `x#(A#B)`, stays as Word wrote it, since it's unclear which `#` starts the number. A `#` inside the parentheses Word builds up is no other `#`, so `\tag{A\#B}`, which export writes that way, comes back.
 
 ### Bare Environments
 

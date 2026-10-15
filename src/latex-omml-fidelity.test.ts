@@ -1346,6 +1346,10 @@ describe('equation numbers', () => {
     ['two rows, each with its own number', array(run('a&amp;=b#') + parens(run('1')), run('c&amp;=d#') + parens(run('2'))),
       fence + '\n\\begin{align*}\na&=b \\tag{1} \\\\\nc&=d \\tag{2}\n\\end{align*}\n' + fence, ['1', '2']],
     ['#(1) in the run of the equation', array(run('x=1#(1)')), fence + '\nx=1 \\tag{1}\n' + fence, ['1']],
+    ['#(1) after x in its run', array(run('x#(1)')), fence + '\nx \\tag{1}\n' + fence, ['1']],
+    // An escaped # is no other #, in its run or after a \ that ends the one before
+    ['#(1) after an escaped #', array(run('a\\#b#') + parens(run('1'))), fence + '\na\\#b \\tag{1}\n' + fence, ['1']],
+    ['#(1) after a # the run before escapes', array(run('a\\') + run('#b#(1)')), fence + '\na\\#b \\tag{1}\n' + fence, ['1']],
     ['a number without parentheses', array(run('x=1#A.1')), fence + '\nx=1 \\tag*{A.1}\n' + fence, []],
     // Apart from the tag's braces, as text is, so that they make no {++ or
     // ++}, which the next export read as an insertion
@@ -1358,6 +1362,18 @@ describe('equation numbers', () => {
     ['a # with hidden off', array('<m:r><w:rPr><w:vanish w:val="0"/></w:rPr><m:t>x#</m:t></m:r>' + parens(run('1'))), fence + '\nx \\tag{1}\n' + fence, ['1']],
     // A structure is something to number, though it has no text
     ['a sum alone', array('<m:nary><m:naryPr><m:chr m:val="∑"/><m:subHide m:val="1"/><m:supHide m:val="1"/></m:naryPr><m:sub/><m:sup/><m:e/></m:nary>' + run('#') + parens(run('1'))), fence + '\n\\sum \\tag{1}\n' + fence, ['1']],
+    // TeX's special characters in Word's number, escaped as in \text{}
+    ['a number with _', array(run('x#(a_b)')), fence + '\nx \\tag{a\\_b}\n' + fence, ['a_b']],
+    ['a number with %', array(run('x#(50%)')), fence + '\nx \\tag{50\\%}\n' + fence, ['50%']],
+    ['a number with &, which aligns nothing', array(run('x#(a&amp;b)')), fence + '\nx \\tag{a\\&b}\n' + fence, ['a&amp;b']],
+    ['a number with & on one of two rows', array(run('a#(b&amp;c)'), run('d')), fence + '\n\\begin{gather*}\na \\tag{b\\&c} \\\\\nd\n\\end{gather*}\n' + fence, ['b&amp;c']],
+    ['a number with braces', array(run('x#({1})')), fence + '\nx \\tag{\\{1\\}}\n' + fence, ['{1}']],
+    ['a number with $', array(run('x#($1)')), fence + '\nx \\tag{\\$1}\n' + fence, ['$1']],
+    ['a number with \\', array(run('x#(a\\b)')), fence + '\nx \\tag{a\\textbackslash{}b}\n' + fence, ['a\\b']],
+    ['a number with ~', array(run('x#(a~b)')), fence + '\nx \\tag{a\\textasciitilde{}b}\n' + fence, ['a~b']],
+    ['a number with ^ and no parentheses', array(run('x#x^2')), fence + '\nx \\tag*{x\\textasciicircum{}2}\n' + fence, []],
+    // The # in a delimiter is no other #, so the row has one
+    ['a number with # in its delimiter', array(run('x#') + parens(run('A#B'))), fence + '\nx \\tag{A\\#B}\n' + fence, ['A#B']],
   ])('reads %s from Word as \\tag', async (_name, omml, expected, numbers) => {
     const back = strip((await convertDocx(await wordDisplay(omml))).markdown);
     expect(back).toBe(expected);
@@ -1379,6 +1395,12 @@ describe('equation numbers', () => {
     ['escaped by the run before', array(run('x\\') + run('#(1)')), fence + '\n\\begin{gathered}\nx\\#(1)\n\\end{gathered}\n' + fence],
     ['escaped by the run before, before (1)', array(run('x\\') + run('#') + parens(run('1'))), fence + '\n\\begin{gathered}\nx\\#(1)\n\\end{gathered}\n' + fence],
     ['escaped by the run before an empty one', array(run('x\\') + run('') + run('#(1)')), fence + '\n\\begin{gathered}\nx\\#(1)\n\\end{gathered}\n' + fence],
+    // More than one # in a row's math leaves which starts the number
+    // unclear, so none does
+    ['with another # in its number', array(run('x#(A#B)')), fence + '\n\\begin{gathered}\nx#(A#B)\n\\end{gathered}\n' + fence],
+    ['with another # in the next run', array(run('x#(A') + run('#B)')), fence + '\n\\begin{gathered}\nx#(A#B)\n\\end{gathered}\n' + fence],
+    ['with another # in a number without parentheses', array(run('x#A#B')), fence + '\n\\begin{gathered}\nx#A#B\n\\end{gathered}\n' + fence],
+    ['with another # before it', array(run('a#b#(1)')), fence + '\n\\begin{gathered}\na#b#(1)\n\\end{gathered}\n' + fence],
   ])('reads a # %s as before', async (_name, omml, expected) => {
     const back = strip((await convertDocx(await wordDisplay(omml))).markdown);
     expect(back).toBe(expected);
@@ -1451,6 +1473,42 @@ describe('equation numbers', () => {
     expect(await equations(await trip(back))).toEqual(await equations(back));
   });
 
+  // TeX's special characters in a \tag, which export writes in Word's
+  // number as LaTeX shows them, come back escaped, as in \text{}
+  test.each([
+    ['\\_', fence + '\nx \\tag{a\\_b}\n' + fence, 'a_b'],
+    ['\\%', fence + '\nx \\tag{50\\%}\n' + fence, '50%'],
+    ['\\&', fence + '\nx \\tag{a\\&b}\n' + fence, 'a&amp;b'],
+    ['\\& on a row of gather*', fence + '\n\\begin{gather*}\na \\tag{a\\&b} \\\\\nc\n\\end{gather*}\n' + fence, 'a&amp;b'],
+    ['\\& on a row of align*', fence + '\n\\begin{align*}\na &= b \\tag{a\\&b} \\\\\nc &= d\n\\end{align*}\n' + fence, 'a&amp;b'],
+    ['\\{ and \\}', fence + '\nx \\tag{\\{1\\}}\n' + fence, '{1}'],
+    ['\\$', fence + '\nx \\tag{\\$1}\n' + fence, '$1'],
+    ['\\#', fence + '\nx \\tag{A\\#B}\n' + fence, 'A#B'],
+    ['\\textbackslash{}', fence + '\nx \\tag{a\\textbackslash{}b}\n' + fence, 'a\\b'],
+    ['\\textasciitilde{}', fence + '\nx \\tag{a\\textasciitilde{}b}\n' + fence, 'a~b'],
+    ['\\textasciicircum{}, starred', fence + '\nx \\tag*{x\\textasciicircum{}2}\n' + fence, 'x^2'],
+    ['\\_, starred', fence + '\nx \\tag*{a\\_b}\n' + fence, 'a_b'],
+  ])('writes a \\tag with %s as Word\'s number, which comes back', async (_name, md, shown) => {
+    const [math] = await equations(md);
+    expect(math).toContain('<m:r><m:t>#</m:t></m:r>');
+    expect(math).toContain('<m:t>' + shown + '</m:t>');
+    const back = await trip(md);
+    expect(back).toBe(md);
+    expect(await equations(back)).toEqual(await equations(md));
+    expect(await trip(back)).toBe(back);
+  });
+
+  // A text accent or tie, which export writes as typed, comes back as the
+  // characters Word shows, as \text{}'s does
+  test.each([
+    ['\\^', fence + '\nx \\tag*{x\\^2}\n' + fence, fence + '\nx \\tag*{x\\textbackslash{}\\textasciicircum{}2}\n' + fence],
+    ['a tie', fence + '\nx \\tag{a~b}\n' + fence, fence + '\nx \\tag{a\\textasciitilde{}b}\n' + fence],
+  ])('writes a \\tag with %s as Word shows it', async (_name, md, expected) => {
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await trip(back)).toBe(back);
+  });
+
   // As before
   test.each([
     ['\\label and \\notag', fence + '\n\\begin{align}\na &= b \\label{x} \\\\\nc &= d \\notag\n\\end{align}\n' + fence, fence + '\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n' + fence],
@@ -1459,6 +1517,8 @@ describe('equation numbers', () => {
     ['a \\tag in an insertion', fence + '\nE {++\\tag{1}++}\n' + fence, fence + '\nE\n' + fence],
     ['a \\tag on a row of its own', fence + '\n\\begin{align*}\na \\\\\n\\tag{2}\n\\end{align*}\n' + fence, fence + '\n\\begin{gathered}\na \\\\\n\\end{gathered}\n' + fence],
     ['an equation of a \\tag alone', fence + '\n\\tag{1}\n' + fence, ''],
+    // Its number, a # and its text, would hold another #
+    ['a \\tag* with a # in it', fence + '\nx \\tag*{A\\#B}\n' + fence, fence + '\nx\n' + fence],
     ['a \\tag with an insertion in it', fence + '\nx \\tag{++A++}\n' + fence, fence + '\n{~~\nx ~>\nx A\n~~}\n' + fence],
   ])('drops %s, as before', async (_name, md, expected) => {
     expect((await equations(md)).join('')).not.toContain('#');

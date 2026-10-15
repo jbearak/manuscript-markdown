@@ -1060,28 +1060,34 @@ function translateEqArray(children: XmlNode[]): string {
 
   // A numbered equation is its row and \tag, as LaTeX writes one; numbered
   // rows need an environment that numbers rows, as aligned and gathered
-  // don't. Only the array's own &, unescaped in its rows' runs of math,
-  // aligns them; one in a structure, as in cases, is that structure's, and
-  // one in text, as \text{A\&B} writes, is text.
-  const aligned = rows.some(row => row.some(node => isMathRun(node) && /(?<!\\)&/.test(extractText(asXmlNodes(node['m:r'])))));
+  // don't. Only the array's own &, unescaped in its rows' runs of math
+  // before their numbers, aligns them; one in a structure, as in cases, is
+  // that structure's, one in text, as \text{A\&B} writes, is text, and one
+  // in a number, as of \tag{a\&b}, is the number's.
+  const aligned = rows.some((row, k) => (numbers[k]?.equation ?? row).some(node => isMathRun(node) && /(?<!\\)&/.test(extractText(asXmlNodes(node['m:r'])))));
   if (rowStrings.length === 1 && !aligned) return rowStrings[0];
   return latexEnvironment(aligned ? 'align*' : 'gather*', rowStrings);
 }
-
-/** What a \tag can hold as Word's number: text without TeX's special characters */
-const TAG_TEXT_RE = /^[^{}\\%#$&^_~]*$/;
 
 /**
  * Word's equation number at the end of a row of an equation array: a # in
  * a run of math, then (x), as Word builds it up into a delimiter or as
  * characters, which is \tag{x}, or any other text, which is \tag*{x}, as
  * LaTeX shows it without parentheses (see equationNumberOmml in
- * latex-to-omml.ts). The row's children before the #, or undefined where
- * the row has no number. A # in text, as \text{} writes, or escaped, as
- * export writes \#, is none, and so is one with nothing before it to number.
+ * latex-to-omml.ts), with TeX's special characters in it escaped, as in
+ * \text{}, so Word's 50% is \tag{50\%}. The row's children before the #,
+ * or undefined where the row has no number. A # in text, as \text{}
+ * writes, or escaped, as export writes \#, is none, and so is one with
+ * nothing before it to number. Nor is any in a row whose runs of math hold
+ * more than one # that isn't escaped, as x#(A#B), where which one starts
+ * the number is unclear.
  */
 function rowNumber(row: XmlNode[]): { equation: XmlNode[]; tag: string } | undefined {
   const content = row.filter(node => !Object.keys(node).every(key => key === ':@' || SKIP_TAGS.has(key)));
+  // The runs of math side by side, as import joins them, so a \ that ends
+  // one escapes a # that starts the next
+  const mathText = content.map(node => isMathRun(node) ? extractText(asXmlNodes(node['m:r'])) : '\u0000').join('');
+  if ((mathText.match(/(?<!\\)(?:\\\\)*#/g) ?? []).length > 1) return undefined;
   for (let i = content.length - 1; i >= 0; i--) {
     if (content[i]['m:r'] === undefined) continue;
     const text = extractText(asXmlNodes(content[i]['m:r']));
@@ -1100,11 +1106,13 @@ function rowNumber(row: XmlNode[]): { equation: XmlNode[]; tag: string } | undef
     } else if (after.length === 1 && at === text.length - 1) {
       number = parenthesizedText(after[0]);
     }
-    if (number === undefined || !TAG_TEXT_RE.test(number)) return undefined;
+    if (number === undefined) return undefined;
     const parenthesized = /^\s*\((.*)\)\s*$/.exec(number);
-    // The tag's text is apart from its braces, as text is, so that a
-    // number of ++A++ makes no {++ or ++} (see apartFromMarkup)
-    const tag = parenthesized ? '\\tag{' + apartFromMarkup(parenthesized[1].trim(), true) + '}' : '\\tag*{' + apartFromMarkup(number.trim(), true) + '}';
+    // The tag's text is escaped and apart from its braces, as \text{}'s
+    // is, so that a number of ++A++ makes no {++ or ++} (see
+    // apartFromMarkup)
+    const tagText = (text: string) => apartFromMarkup(escapeLatex(text.trim()), true);
+    const tag = parenthesized ? '\\tag{' + tagText(parenthesized[1]) + '}' : '\\tag*{' + tagText(number) + '}';
     const before = text.slice(0, at);
     const equation = content.slice(0, i);
     // Something to number: text, or a structure, as \sum or a delimiter
