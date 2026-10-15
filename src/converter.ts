@@ -15518,6 +15518,10 @@ function buildMarkdownOnce(
   };
   let lastBlockquoteGroupIndex: number | undefined;
   let pendingPostContentGroupIndex: number | undefined;
+  // The paragraph after a quote that the blank lines the source had there
+  // went before, which display math first in it needs no more of: export
+  // reads a line of $ after a quote's line as ending the quote
+  let afterQuoteGap: number | undefined;
   // Real content outside a quote, a heading, a list, code or a table, ends
   // the quote group before it: the blank lines the source had after the
   // quote were those before it, which aren't the next paragraph's
@@ -16016,6 +16020,7 @@ function buildMarkdownOnce(
               // paragraph would go on, as a lazy line, where none were, as
               // where the item dropped a block between them
               output.push('\n' + '\n'.repeat(prevItemWasListQuote ? Math.max(1, blankCount) : blankCount));
+              afterQuoteGap = i;
             } else {
               output.push('\n\n');
             }
@@ -16495,7 +16500,7 @@ function buildMarkdownOnce(
             output.push('\n' + continued.prefix);
           }
         }
-      } else if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
+      } else if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n') && afterQuoteGap !== i - 1) {
         // Ensure blank line before display math
         output.push('\n\n');
       }

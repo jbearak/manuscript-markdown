@@ -15591,6 +15591,50 @@ describe('Blockquote round-trip', () => {
     expect(strip(once)).toBe(expected);
     expect((await convertDocx((await convertMdToDocx(once, { templateDocx })).docx)).markdown).toBe(once);
   });
+
+  test.each([
+    ['display math right after a quote', '> a\n$' + '$\nx\n$' + '$\n', '> a\n$' + '$\nx\n$' + '$\n', false],
+    ['display math right after a quote of two lines', '> a\n> b\n$' + '$\nx\n$' + '$\n', '> a b\n$' + '$\nx\n$' + '$\n', false],
+    ['display math right after a nested quote', '> > a\n$' + '$\nx\n$' + '$\n', '> > a\n$' + '$\nx\n$' + '$\n', false],
+    ['display math right after an alert', '> [!NOTE]\n> a\n$' + '$\nx\n$' + '$\n', '> [!NOTE]\n> a\n$' + '$\nx\n$' + '$\n', false],
+    ['display math right after a quote where a template numbers paragraphs', '> a\n$' + '$\nx\n$' + '$\n', '> a\n$' + '$\nx\n$' + '$\n', true],
+    // Guards: a blank line or two between, and what goes on a quote's
+    // paragraph or another's
+    ['display math a blank line after a quote', '> a\n\n$' + '$\nx\n$' + '$\n', '> a\n\n$' + '$\nx\n$' + '$\n', false],
+    ['display math two blank lines after a quote', '> a\n\n\n$' + '$\nx\n$' + '$\n', '> a\n\n\n$' + '$\nx\n$' + '$\n', false],
+    ['display math right after a quote in a list item', '- a\n  > b\n  $' + '$\n  x\n  $' + '$\n', '- a\n  > b\n\n  $' + '$\n  x\n  $' + '$\n', false],
+    ['display math right after a paragraph', 'a\n$' + '$\nx\n$' + '$\n', 'a\n$' + '$\nx\n$' + '$\n', false],
+  ])('gives Word the same paragraphs on each trip for %s', async (_name, md, expected, numbered) => {
+    // The source's blank lines after the quote, none, go before the
+    // paragraph the equation is in, after which import wrote a blank line
+    // before display math, as after a paragraph's text, so the next export
+    // wrote two empty paragraphs. Export reads a line of $ after a quote's
+    // line as ending the quote, as import writes it
+    // A template whose default paragraph style numbers paragraphs, but not
+    // its quote style
+    const template = async () => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+      const styles = (await zip.file('word/styles.xml')!.async('string'))
+        .replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/, (match: string) => match + '<w:numPr><w:numId w:val="2"/></w:numPr>')
+        .replace(/<w:style [^>]*w:styleId="GitHubBlockquote"[^>]*>[^]*?<w:pPr>/, (match: string) => match + '<w:numPr><w:numId w:val="0"/></w:numPr>');
+      zip.file('word/styles.xml', styles);
+      return zip.generateAsync({ type: 'uint8array' });
+    };
+    const options = numbered ? { templateDocx: await template() } : {};
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    // Each paragraph's properties and text
+    const paragraphs = async (docx: Uint8Array) => {
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => (/<w:pPr>[\s\S]*?<\/w:pPr>/.exec(p[0])?.[0] ?? '')
+        + [...p[0].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+    };
+    const first = (await convertMdToDocx(md, options)).docx;
+    const once = (await convertDocx(first)).markdown;
+    expect(strip(once)).toBe(expected);
+    const second = (await convertMdToDocx(once, options)).docx;
+    expect(await paragraphs(first)).toEqual(await paragraphs(second));
+    expect((await convertDocx(second)).markdown).toBe(once);
+  });
 });
 
 describe('A quote after a deeper one', () => {
