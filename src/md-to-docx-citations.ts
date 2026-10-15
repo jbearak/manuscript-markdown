@@ -1,4 +1,4 @@
-import { BibtexEntry } from './bibtex-parser';
+import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText } from './bibtex-parser';
 import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_INSERTION_COMMAND, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
@@ -725,26 +725,48 @@ export function generateCitation(
   };
 }
 
+// citeproc's own field in a note, which it reads there, to the first }
+const CITEPROC_NOTE_FIELD = /\{:(?:[-_a-z]+|[A-Z]+):[^}]+\}/;
+// The fields citeproc reads as numbers
+const NUMBER_FIELDS: ReadonlySet<string> = new Set(['volume', 'pages', 'number', 'edition']);
+
+/** A BibTeX field's text as citeproc's data holds it, with its groups'
+ *  braces off, which keep its case in BibTeX, as citeproc's nocase, which a
+ *  style that changes the case, as a title's or a publisher's first letter,
+ *  keeps; citeproc showed the braces. In a field citeproc reads as a number,
+ *  as volume, or where `plain`, as a name, as their text. A value with no
+ *  TeX, or one whose text has changed since it was read, as it is, and so a
+ *  note with citeproc's own field in braces, as {:original-date: 1850}, as a
+ *  span would hide it (see bibtexGroupsAsText). */
+export function citeprocFieldText(entry: BibtexEntry, field: string, plain = NUMBER_FIELDS.has(field)): string | undefined {
+  const value = entry.fields.get(field);
+  const tex = entry.texFields?.get(field);
+  if (value === undefined || tex === undefined || bibtexTexAsText(tex) !== value) return value;
+  if (field === 'note' && CITEPROC_NOTE_FIELD.test(tex)) return value;
+  return plain ? bibtexGroupsAsText(tex) : bibtexGroupsAsText(tex, '<span class="nocase">', '</span>');
+}
+
 export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   const itemData: CiteprocItemData = {
     type: mapBibtexTypeToCSL(entry.type)
   };
+  const text = (field: string) => citeprocFieldText(entry, field);
 
   const lowerType = entry.type.toLowerCase();
   if (lowerType === 'mastersthesis') itemData.genre = "Master's thesis";
   else if (lowerType === 'phdthesis') itemData.genre = "PhD thesis";
 
-  const title = entry.fields.get('title');
+  const title = text('title');
   if (title) itemData.title = title;
 
   const author = entry.fields.get('author');
-  const institution = entry.fields.get('institution');
+  const institution = text('institution');
   if (author) {
     itemData.author = parseAuthors(author);
   } else if (institution) {
     // Fallback for entries (commonly @techreport) that credit an organization
     // via `institution` instead of `author`; map to CSL literal name form.
-    itemData.author = [{ literal: institution }];
+    itemData.author = [{ literal: citeprocFieldText(entry, 'institution', true)! }];
   }
   // Preserve institution in a custom field for techreport roundtrip fidelity.
   if (institution && entry.type.toLowerCase() === 'techreport') {
@@ -756,17 +778,17 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
     itemData.issued = { 'date-parts': [[parseInt(year, 10)]] };
   }
 
-  const journal = entry.fields.get('journal');
-  const containerTitle = entry.fields.get('container-title');
+  const journal = text('journal');
+  const containerTitle = text('container-title');
   if (journal || containerTitle) itemData['container-title'] = journal ?? containerTitle;
 
-  const containerTitleShort = entry.fields.get('container-title-short');
+  const containerTitleShort = text('container-title-short');
   if (containerTitleShort) itemData['container-title-short'] = containerTitleShort;
 
-  const volume = entry.fields.get('volume');
+  const volume = text('volume');
   if (volume) itemData.volume = volume;
 
-  const pages = entry.fields.get('pages');
+  const pages = text('pages');
   if (pages) itemData.page = pages;
 
   const doi = entry.fields.get('doi');
@@ -776,10 +798,10 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   const editor = entry.fields.get('editor');
   if (editor) itemData.editor = parseAuthors(editor);
 
-  const publisher = entry.fields.get('publisher');
+  const publisher = text('publisher');
   if (publisher) itemData.publisher = publisher;
 
-  const address = entry.fields.get('address');
+  const address = text('address');
   if (address) itemData['publisher-place'] = address;
 
   const url = entry.fields.get('url');
@@ -803,23 +825,23 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   const issn = entry.fields.get('issn');
   if (issn) itemData.ISSN = issn;
 
-  const number = entry.fields.get('number');
+  const number = text('number');
   if (number) itemData.issue = number;
 
-  const edition = entry.fields.get('edition');
+  const edition = text('edition');
   if (edition) itemData.edition = edition;
 
   // booktitle → container-title, but only if no explicit container was set
-  const booktitle = entry.fields.get('booktitle');
+  const booktitle = text('booktitle');
   if (booktitle && !itemData['container-title']) itemData['container-title'] = booktitle;
 
-  const abstract_ = entry.fields.get('abstract');
+  const abstract_ = text('abstract');
   if (abstract_) itemData.abstract = abstract_;
 
-  const note = entry.fields.get('note');
+  const note = text('note');
   if (note) itemData.note = note;
 
-  const series = entry.fields.get('series');
+  const series = text('series');
   if (series) itemData['collection-title'] = series;
 
   return itemData;

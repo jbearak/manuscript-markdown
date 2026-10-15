@@ -7618,6 +7618,61 @@ describe('Zotero citation roundtrip', () => {
     expect(buildItemData([...parseBibtex(bibtex).values()][0]).author).toEqual([{ family: 'van Gogh', given: 'Vincent' }]);
   });
 
+  // Which it wrote as HTML, where BibTeX's group keeps the case
+  test.each([
+    ['a span in a title', 'title', 'The <span class="nocase">RNA</span> of iPhone users', 'title = {{The {RNA} of iPhone users}}'],
+    // In another group, as the reader takes a value's own for the field's
+    ['a span that is all of a journal', 'container-title', '<span class="nocase">iPhone</span>', 'journal = {{{iPhone}}}'],
+    ['a span at the start of a publisher', 'publisher', '<span class="nocase">the iPhone</span> Press', 'publisher = {{the iPhone} Press}'],
+    // Which stays as it is
+    ['a span beside other markup', 'title', '<i>A</i> <span class="nocase">RNA</span>', 'title = {{<i>A</i> {RNA}}}'],
+    // Which is written as its command
+    ['a span with a brace alone in it', 'title', 'a <span class="nocase">b{c</span>', String.raw`title = {{a {b\textbraceleft{}c}}}`],
+    ['a span in a note', 'note', 'Reprint of <span class="nocase">RNA</span> work', 'note = {Reprint of {RNA} work}'],
+  ])('generateBibTeX writes %s, citeproc\'s nocase, as a group', (_name, field, value, expected) => {
+    const item = { authors: [{ family: 'Doe', given: 'Jane' }], title: 'T', year: '2020', journal: 'J', volume: '', pages: '', doi: '', type: 'book', fullItemData: {} as Record<string, unknown> };
+    if (field === 'title') item.title = value;
+    else if (field === 'container-title') item.journal = value;
+    else item.fullItemData[field] = value;
+    const citations: ZoteroCitation[] = [{ plainCitation: '(T)', items: [item] }];
+    const bib = generateBibTeX(citations, buildCitationKeyMap(citations));
+    expect(bib).toContain(expected);
+    expect(buildItemData([...parseBibtex(bib).values()][0])[field]).toBe(value);
+  });
+
+  test.each([
+    // As an empty group is nothing
+    ['an empty span', 'title', 'a <span class="nocase"></span>b <span class="nocase">C</span>', 'title = {{a <span class="nocase"></span>b <span class="nocase">C</span>}}'],
+    // Which export gives citeproc as written, and citeproc ends at a
+    // group's }, so it showed {the iPhone
+    ['a span in citeproc\'s own field in a note', 'note', '{:publisher: <span class="nocase">the iPhone</span> Press}', String.raw`note = {\{:publisher: <span class="nocase">the iPhone</span> Press\}}`],
+  ])('generateBibTeX writes %s as it is where a group wouldn\'t read back as one', (_name, field, value, expected) => {
+    const item = { authors: [{ family: 'Doe', given: 'Jane' }], title: 'T', year: '2020', journal: 'J', volume: '', pages: '', doi: '', type: 'book', fullItemData: {} as Record<string, unknown> };
+    if (field === 'title') item.title = value;
+    else item.fullItemData[field] = value;
+    const citations: ZoteroCitation[] = [{ plainCitation: '(T)', items: [item] }];
+    const bib = generateBibTeX(citations, buildCitationKeyMap(citations));
+    expect(bib).toContain(expected);
+    expect(buildItemData([...parseBibtex(bib).values()][0])[field]).toBe(value);
+  });
+
+  test('writes a Zotero title\'s nocase span as a group, which export shows as Zotero did', async () => {
+    const title = 'The <span class="nocase">RNA</span> of iPhone users';
+    const field = zoteroFieldOf([{ id: 1, itemData: { id: 1, type: 'book', title, issued: { 'date-parts': [['2020']] } } }]);
+    const { markdown, bibtex } = await convertDocx(await buildSyntheticDocx(wrapDocumentXml('<w:p>' + field + '</w:p>')));
+    expect(bibtex).toContain('title = {{The {RNA} of iPhone users}}');
+    const { docx } = await convertMdToDocx(markdown, { bibtex });
+    expect((await zoteroFieldItems(docx, 'word/document.xml'))[0][0].itemData.title).toBe(title);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect([...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('')).toContain('The RNA of iPhone Users, 2020');
+  });
+
+  test('keeps the .bib export embeds as it is, groups and all', async () => {
+    const entry = '@book{b,\n  title = {The {RNA} of {iPhone} users},\n  publisher = {{the iPhone} Press},\n  year = {2020}\n}';
+    const { docx } = await convertMdToDocx('A [@b].', { bibtex: entry + '\n' });
+    expect((await convertDocx(docx)).bibtex).toContain(entry);
+  });
+
   test.each([
     ['a non-dropping particle', { family: 'Gogh', given: 'Vincent', 'non-dropping-particle': 'van' }, '{van Gogh}, Vincent'],
     ['a dropping particle', { family: 'Beethoven', given: 'Ludwig', 'dropping-particle': 'van' }, 'van Beethoven, Ludwig'],
