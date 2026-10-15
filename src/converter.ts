@@ -17,7 +17,7 @@ import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { readCitationItems } from './citation-syntax';
-import { bibtexNameParts } from './md-to-docx-citations';
+import { bibtexNameParts, citeprocFieldText } from './md-to-docx-citations';
 import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -16900,6 +16900,31 @@ export function escapeBibtex(s: string, names = false): string {
   return escapeBibtexText(s, names);
 }
 
+/** A field's text from citeproc's data, escaped, with each of citeproc's
+ *  nocase spans, as Zotero stores one in a title, written as the group that
+ *  keeps its case in BibTeX, so <span class="nocase">RNA</span> is {RNA},
+ *  which export gives citeproc as the span again (see citeprocFieldText).
+ *  Other markup is written as it is. So are the spans where the field, as
+ *  export reads it, would read otherwise with the groups: an empty one,
+ *  which is no group, or any in a note with citeproc's own field in braces,
+ *  which export gives citeproc as written, and which citeproc ends at a
+ *  group's }; but a value all in one group, whose braces the reader takes
+ *  for the field's, goes in another. `wrap` puts the value in a group, as a
+ *  title's. */
+function escapeBibtexField(s: string, field: string, wrap = false): string {
+  const inGroup = (value: string) => wrap ? '{' + value + '}' : value;
+  const asWritten = inGroup(escapeBibtex(s));
+  const parts = s.split(/<span class="nocase">([^<]*)<\/span>/);
+  if (parts.length === 1) return asWritten;
+  const read = (value: string) => {
+    const entry = parseBibtex('@misc{k,\n  ' + field + ' = {' + value + '}\n}').get('k');
+    return entry && citeprocFieldText(entry, field);
+  };
+  const asRead = read(asWritten);
+  const groups = inGroup(parts.map((part, i) => i % 2 === 1 ? '{' + escapeBibtex(part) + '}' : escapeBibtex(part)).join(''));
+  return [groups, '{' + groups + '}'].find(value => asRead !== undefined && read(value) === asRead) ?? asWritten;
+}
+
 /** Map CSL type back to the most appropriate BibTeX entry type. */
 export function mapCSLTypeToBibtex(cslType: string, genre?: string): string {
   switch (cslType) {
@@ -17013,20 +17038,20 @@ export function generateBibTeX(
     const alreadyEmitted = new Set<string>();
 
     if (authorStr) { fields.push(`  author = {${authorStr}}`); alreadyEmitted.add('author'); }
-    if (meta.title) { fields.push(`  title = {{${escapeBibtex(meta.title)}}}`); alreadyEmitted.add('title'); }
+    if (meta.title) { fields.push(`  title = {${escapeBibtexField(meta.title, 'title', true)}}`); alreadyEmitted.add('title'); }
 
     // Emit container-title as journal or booktitle depending on entry type
     if (meta.journal) {
       if (entryType === 'incollection' || entryType === 'inproceedings') {
-        fields.push(`  booktitle = {${escapeBibtex(meta.journal)}}`);
+        fields.push(`  booktitle = {${escapeBibtexField(meta.journal, 'booktitle')}}`);
       } else {
-        fields.push(`  journal = {${escapeBibtex(meta.journal)}}`);
+        fields.push(`  journal = {${escapeBibtexField(meta.journal, 'journal')}}`);
       }
       alreadyEmitted.add('container-title');
     }
 
-    if (meta.volume) { fields.push(`  volume = {${escapeBibtex(meta.volume)}}`); alreadyEmitted.add('volume'); }
-    if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); alreadyEmitted.add('page'); }
+    if (meta.volume) { fields.push(`  volume = {${escapeBibtexField(meta.volume, 'volume')}}`); alreadyEmitted.add('volume'); }
+    if (meta.pages) { fields.push(`  pages = {${escapeBibtexField(meta.pages, 'pages')}}`); alreadyEmitted.add('page'); }
     if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); alreadyEmitted.add('issued'); }
     if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); alreadyEmitted.add('DOI'); }
 
@@ -17044,11 +17069,11 @@ export function generateBibTeX(
     if (entryType === 'techreport') {
       const xInstitution = meta.fullItemData?.['x-institution'];
       if (typeof xInstitution === 'string' && xInstitution) {
-        fields.push(`  institution = {${escapeBibtex(xInstitution)}}`);
+        fields.push(`  institution = {${escapeBibtexField(xInstitution, 'institution')}}`);
       } else {
         const pub = meta.fullItemData?.publisher;
         if (typeof pub === 'string' && pub) {
-          fields.push(`  institution = {${escapeBibtex(pub)}}`);
+          fields.push(`  institution = {${escapeBibtexField(pub, 'institution')}}`);
           alreadyEmitted.add('publisher');
         }
       }
@@ -17061,7 +17086,7 @@ export function generateBibTeX(
       const val = meta.fullItemData?.[cslField];
       if (val != null && (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean')) {
         const strVal = String(val);
-        fields.push(`  ${bibtexField} = {${VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtex(strVal)}}`);
+        fields.push(`  ${bibtexField} = {${VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtexField(strVal, bibtexField)}}`);
         alreadyEmitted.add(cslField);
       }
     }

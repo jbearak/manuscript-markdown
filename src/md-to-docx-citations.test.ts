@@ -1084,7 +1084,129 @@ describe('BibTeX values as TeX in citeproc\'s data', () => {
 `;
     const engine = createCiteprocEngine(parseBibtex(bib), 'apa')!;
     engine.updateItems(['b']);
-    expect(renderBibliography(engine)!.entries[0]).toContain(String.raw`<i>A {x} {y} a\b $5 \textsc{z}</i>. {P} &#38; {Q}.`);
+    expect(renderBibliography(engine)!.entries[0]).toContain(String.raw`<i>A {x} y a\b $5 \textsc{z}</i>. P &#38; {Q}.`);
+  });
+});
+
+describe('BibTeX groups in citeproc\'s data', () => {
+  // A group's braces, which keep its case in BibTeX, reached citeproc as
+  // text, which showed them, as The {RNA} of {iPhone} users
+  const entry = (fields: string) => parseBibtex('@book{b,\n' + fields + '\n}').get('b')!;
+  const NOCASE = '<span class="nocase">';
+
+  it('writes a group in a title as one that keeps its case', () => {
+    const data = buildItemData(entry('  title = {The {RNA} of {iPhone} users},\n  journal = {{IEEE} Letters},\n  series = {{ACM} Series}'));
+    expect(data.title).toBe('The ' + NOCASE + 'RNA</span> of ' + NOCASE + 'iPhone</span> users');
+    expect(data['container-title']).toBe(NOCASE + 'IEEE</span> Letters');
+    expect(data['collection-title']).toBe(NOCASE + 'ACM</span> Series');
+  });
+
+  it('writes a group in a publisher, address, institution and note as one that keeps its case', () => {
+    const data = buildItemData(parseBibtex(String.raw`@techreport{r,
+  institution = {Research \{West\} {RNA} Lab},
+  publisher = {{ACM} Press},
+  address = {{New} York},
+  note = {{PMID:} 123}
+}`).get('r')!);
+    expect([data.publisher, data['publisher-place'], data.note]).toEqual([NOCASE + 'ACM</span> Press', NOCASE + 'New</span> York', NOCASE + 'PMID:</span> 123']);
+    expect(data['x-institution']).toBe('Research {West} ' + NOCASE + 'RNA</span> Lab');
+  });
+
+  it('writes a group in a name, and in a field citeproc reads as a number, as its text', () => {
+    const data = buildItemData(parseBibtex(String.raw`@techreport{r,
+  institution = {Research \{West\} {RNA} Lab},
+  number = {{S}2},
+  pages = {{e}101}
+}`).get('r')!);
+    expect(data.author).toEqual([{ literal: 'Research {West} RNA Lab' }]);
+    expect([data.issue, data.page]).toEqual(['S2', 'e101']);
+  });
+
+  it('keeps a note with citeproc\'s own field in braces as it is, which citeproc reads', () => {
+    const entries = parseBibtex('@book{b,\n  author = {Doe, Jane},\n  title = {T},\n  note = {Reprint {:original-date: 1850} of {RNA}},\n  year = {2020}\n}');
+    expect(buildItemData(entries.get('b')!).note).toBe('Reprint {:original-date: 1850} of {RNA}');
+    const engine = createCiteprocEngine(entries, 'apa')!;
+    engine.updateItems(['b']);
+    expect(renderBibliography(engine)!.entries[0]).toContain('(Original work published 1850)');
+  });
+
+  it.each([
+    ['an escaped brace', String.raw`Sets \{a,b\} of {RNA}`, 'Sets {a,b} of ' + NOCASE + 'RNA</span>'],
+    ['an escaped backslash before a group', String.raw`a\\{RNA}`, 'a\\' + NOCASE + 'RNA</span>'],
+    ['escaped dollars, which start no math', String.raw`Costs \$5 to {RNA} \$6`, 'Costs $5 to ' + NOCASE + 'RNA</span> $6'],
+    ['groups side by side', '{RNA}{iPhone}', NOCASE + 'RNA</span>' + NOCASE + 'iPhone</span>'],
+    ['a group in a group', 'a {The {RNA}} b', 'a ' + NOCASE + 'The RNA</span> b'],
+    ['a brace that pairs with none', String.raw`\{x} {RNA}`, '{x} ' + NOCASE + 'RNA</span>'],
+    ['brackets with no command before them', '[x] {RNA}', '[x] ' + NOCASE + 'RNA</span>'],
+  ])('writes %s in a title as its text, apart from a group', (_name, title, expected) => {
+    expect(buildItemData(entry('  title = {' + title + '}')).title).toBe(expected);
+  });
+
+  // Which TeX reads otherwise than as text, so they stay as main wrote them
+  it.each([
+    ['a command\'s argument', String.raw`A \foo{B} c of {RNA}`, String.raw`A \foo{B} c of ` + NOCASE + 'RNA</span>'],
+    ['a command\'s arguments one after another', String.raw`\textcolor{red} {x} {y} and {RNA}`, String.raw`\textcolor{red} {x} {y} and ` + NOCASE + 'RNA</span>'],
+    ['a group with a command in it', String.raw`{\em x} {RNA}`, String.raw`{\em x} ` + NOCASE + 'RNA</span>'],
+    ['math', String.raw`$x^{2}$ and {RNA}`, '$x^{2}$ and ' + NOCASE + 'RNA</span>'],
+    // Which took a group after a star or brackets for text, as
+    // \textcolor[rgb]1,0,0RNA
+    ['a command\'s argument after brackets', String.raw`\textcolor[rgb]{1,0,0}{RNA} and {DNA}`, String.raw`\textcolor[rgb]{1,0,0}{RNA} and ` + NOCASE + 'DNA</span>'],
+    ['a command\'s argument after its star', String.raw`\enquote*{RNA} and {DNA}`, String.raw`\enquote*{RNA} and ` + NOCASE + 'DNA</span>'],
+    ['a command\'s argument after brackets and a space', String.raw`\foo[x] {y} and {DNA}`, String.raw`\foo[x] {y} and ` + NOCASE + 'DNA</span>'],
+  ])('keeps %s in a title as written', (_name, title, expected) => {
+    expect(buildItemData(entry('  title = {' + title + '}')).title).toBe(expected);
+  });
+
+  // Whose tags a span would cross, as <span class="nocase"><i>RNA</span>
+  // study</i>, which citeproc showed as text
+  it.each([
+    ['a tag a group cuts in two', 'A {<i>RNA} study</i> of {DNA}', 'A {<i>RNA} study</i> of ' + NOCASE + 'DNA</span>'],
+    ['a tag closed in a group it opened before', '<i>A {b</i> RNA} of {DNA}', '<i>A {b</i> RNA} of ' + NOCASE + 'DNA</span>'],
+    ['a closing tag alone in a group', '<i>A {</i>}b of {DNA}', '<i>A {</i>}b of ' + NOCASE + 'DNA</span>'],
+    ['a group with a whole tag in it', '{<i>RNA</i>} study', NOCASE + '<i>RNA</i></span> study'],
+    ['a group in a tag', '<i>A {RNA}</i>', '<i>A ' + NOCASE + 'RNA</span></i>'],
+  ])('writes %s in a title as citeproc reads it', (_name, title, expected) => {
+    expect(buildItemData(entry('  title = {' + title + '}')).title).toBe(expected);
+  });
+
+  it('leaves a value with no TeX as it is', () => {
+    expect(buildItemData({ type: 'book', key: 'b', fields: new Map([['title', 'A } b {c}']]) }).title).toBe('A } b {c}');
+  });
+
+  it.each([
+    ['apa', 'The RNA of iPhone users and {x}. <i>IEEE Letters on RNA</i>'],
+    ['chicago-author-date', '“The RNA of iPhone Users and {x}.” <i>IEEE Letters on RNA</i>'],
+    ['ieee', '“The RNA of iPhone users and {x},” <i>IEEE letters on RNA</i>'],
+  ])('shows groups in %s without their braces, in the case they have', (style, expected) => {
+    const bib = String.raw`@article{a,
+  author = {Doe, Jane and {World Org}},
+  title = {The {RNA} of {iPhone} users and \{x\}},
+  journal = {{IEEE} letters on {RNA}},
+  year = {2020}
+}`;
+    const engine = createCiteprocEngine(parseBibtex(bib), style)!;
+    engine.updateItems(['a']);
+    const html = renderBibliography(engine)!.entries[0];
+    expect(html).toContain(expected);
+    expect(html).toContain('World Org');
+  });
+
+  // Which showed its braces, as {the iPhone} Press, and as its text, The
+  // iPhone Press in chicago-author-date, which capitalizes a publisher
+  it.each(['chicago-author-date', 'apa'])('keeps a group\'s case at the start of a publisher in %s', style => {
+    const engine = createCiteprocEngine(parseBibtex('@book{b,\n  author = {Doe, Jane},\n  title = {T},\n  publisher = {{the iPhone} Press},\n  year = {2020}\n}'), style)!;
+    engine.updateItems(['b']);
+    expect(renderBibliography(engine)!.entries[0]).toContain('<i>T</i>. the iPhone Press.');
+  });
+
+  it('writes a citation\'s plain text as Word shows it', () => {
+    const entries = parseBibtex('@book{b,\n  title = {The {RNA} of {iPhone} users},\n  publisher = {P},\n  year = {2021}\n}');
+    const result = generateCitation({ keys: ['b'], text: '@b' }, entries, createCiteprocEngine(entries, 'apa')!);
+    const csl = extractCsl(result.xml);
+    const shown = [...result.xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]).join('');
+    expect(csl.properties.plainCitation).toBe('(The RNA of iPhone Users, 2021)');
+    expect(shown).toBe(csl.properties.plainCitation);
+    expect(csl.citationItems[0].itemData.title).toBe('The ' + NOCASE + 'RNA</span> of ' + NOCASE + 'iPhone</span> users');
   });
 });
 

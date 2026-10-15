@@ -253,6 +253,88 @@ export function bibtexTexAsText(tex: string): string {
   return tex.replace(/\\([{}\\$])/g, '$1');
 }
 
+/** Whether the tags in `text`, as <i> and </i>, pair, each one opened in
+ *  it closed in it */
+function tagsPair(text: string): boolean {
+  const open: string[] = [];
+  for (const [tag, closing, name] of text.matchAll(/<(\/?)([a-zA-Z][\w-]*)[^<>]*>/g)) {
+    if (tag.endsWith('/>')) continue;
+    if (!closing) open.push(name.toLowerCase());
+    else if (open.pop() !== name.toLowerCase()) return false;
+  }
+  return open.length === 0;
+}
+
+/** A field's value as TeX (see BibtexEntry.texFields) as text, as
+ *  bibtexTexAsText reads it, but with each group's braces, which keep its
+ *  case in BibTeX, as {RNA}'s, taken off, and its text between `open` and
+ *  `close`, as citeproc's <span class="nocase"> and </span>. A group stays
+ *  as written where TeX reads it otherwise than as text, as the parser
+ *  doesn't read it yet: a command's argument, after its name, its star or
+ *  another of its arguments, in brackets too, as in \foo{B},
+ *  \textcolor{red}{x}, \textcolor[rgb]{1,0,0}{x} or \enquote*{x}; a group with a
+ *  command in it, as {\em x}; or one in math or in a \url's argument read
+ *  as written (see readUrlsAndMath). So does one whose tags, as <i>'s,
+ *  don't pair, between `open` and `close`, which would cross them. A group
+ *  in a group is its text. */
+export function bibtexGroupsAsText(tex: string, open = '', close = ''): string {
+  const { spans } = readUrlsAndMath(tex);
+  // Where the group each { opens ends, of the braces no \ escapes
+  const ends = new Map<number, number>();
+  const opens: number[] = [];
+  for (let i = 0; i < tex.length; i++) {
+    if (tex[i] === '\\') i++;
+    else if (tex[i] === '{') opens.push(i);
+    else if (tex[i] === '}' && opens.length > 0) ends.set(opens.pop()!, i);
+  }
+  let out = '';
+  let span = 0;
+  // Whether a command could take a group next: after its name, or after a
+  // group it could take, with spaces between
+  let argument = false;
+  let i = 0;
+  while (i < tex.length) {
+    while (span < spans.length && spans[span][1] <= i) span++;
+    if (span < spans.length && spans[span][0] <= i) {
+      out += bibtexTexAsText(tex.slice(i, spans[span][1]));
+      i = spans[span][1];
+      argument = false;
+      continue;
+    }
+    const end = ends.get(i);
+    if (tex[i] === '\\') {
+      let next = i + 2;
+      if (isAsciiLetter(tex[i + 1] ?? '')) while (next < tex.length && isAsciiLetter(tex[next])) next++;
+      out += bibtexTexAsText(tex.slice(i, next));
+      argument = isAsciiLetter(tex[i + 1] ?? '');
+      i = next;
+    } else if (end !== undefined) {
+      const group = tex.slice(i, end + 1);
+      // Or, between `open` and `close`, one whose tags don't pair, as in
+      // {<i>RNA} study</i>, which they'd cross, as citeproc shows them as text
+      const asWritten = argument || group.replace(/\\[{}\\$]/g, '').includes('\\')
+        || (span < spans.length && spans[span][0] < end) || (open !== '' && !tagsPair(group));
+      out += asWritten ? bibtexTexAsText(group) : open + group.slice(1, -1).replace(/\\([{}\\$])|[{}]/g, (_brace, escaped: string | undefined) => escaped ?? '') + close;
+      // And after a command's argument, it could take another
+      i = end + 1;
+    } else if (argument && (tex[i] === '*' || tex[i] === '[')) {
+      // A command's star, or an argument in brackets, after which it could
+      // take a group still, as \textcolor[rgb]{1,0,0}{RNA} or \enquote*{RNA}:
+      // as written, to the bracket that ends it, past its groups
+      let next = i + 1;
+      while (tex[i] === '[' && next < tex.length && tex[next] !== ']') next = tex[next] === '\\' ? next + 2 : (ends.get(next) ?? next) + 1;
+      next = Math.min(tex[i] === '[' ? next + 1 : next, tex.length);
+      out += bibtexTexAsText(tex.slice(i, next));
+      i = next;
+    } else {
+      out += tex[i];
+      if (tex[i] !== ' ' && tex[i] !== '\t') argument = false;
+      i++;
+    }
+  }
+  return out;
+}
+
 function isAsciiLetter(char: string): boolean {
   return /^[A-Za-z]$/.test(char);
 }
