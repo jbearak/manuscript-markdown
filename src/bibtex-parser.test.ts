@@ -459,34 +459,97 @@ describe('BibTeX text symbols', () => {
     ['a longer command it doesn\'t know', String.raw`\ssx b`, String.raw`\ssx b`],
     ['a symbol with its empty group in a group', String.raw`{\textasciicircum{}} x`, '{^} x'],
     ['an accent on a dotless i', String.raw`\"{\i}`, '\u00EF'],
-    // The commands of characters that are BibTeX's or TeX's syntax, which
-    // stay as written until the reader keeps a value's escapes
-    ['braces', String.raw`\textbraceleft{}a\textbraceright{}`, String.raw`\textbraceleft{}a\textbraceright{}`],
+    // The commands of the other characters that are BibTeX's or TeX's
+    // syntax, which stay as written: a backslash, whose escape, \\, LaTeX
+    // reads as a line break
     ['a backslash', String.raw`a\textbackslash{}b`, String.raw`a\textbackslash{}b`],
-    ['a dollar sign', String.raw`\textdollar{}5 or \textdollar 6`, String.raw`\textdollar{}5 or \textdollar 6`],
     ['a tilde and a circumflex without their empty group', String.raw`a\textasciitilde b\textasciicircum c`, String.raw`a\textasciitilde b\textasciicircum c`],
     ['quotes that make a ligature in pairs', String.raw`\textquotesingle\textquotesingle{} \textasciigrave\textasciigrave{}`, String.raw`\textquotesingle\textquotesingle{} \textasciigrave\textasciigrave{}`],
   ])('reads %s as before', (_name, value, expected) => {
     expect(field('title', value)).toBe(expected);
   });
 
-  // A lone brace's command read as a brace, which the .bib file written
-  // back held escaped, which the scanner counts, so the entry read on past
-  // its end, or ended at the brace
+  // The commands of a brace and a dollar sign, as the escapes a value as TeX
+  // keeps, which stayed as written while a value had no TeX
   it.each([
-    ['a left brace', String.raw`A \textbraceleft{} B`],
-    ['a right brace', String.raw`A \textbraceright{} B`],
-  ])('reads %s alone as before, and writes it back so the entry reads back whole', (_name, value) => {
+    ['braces', String.raw`\textbraceleft{}a\textbraceright{}`, '{a}', String.raw`\{a\}`],
+    ['braces in groups of their own', String.raw`{\textbraceleft}a{\textbraceright}`, '{a}', String.raw`\{a\}`],
+    ['a dollar sign', String.raw`\textdollar{}5 or \textdollar 6`, '$5 or $6', String.raw`\$5 or \$6`],
+  ])('reads %s as the characters, kept as TeX as their escapes', (_name, value, text, tex) => {
+    const entry = parseBibtex('@article{k,\n  title = {' + value + '}\n}').get('k')!;
+    expect(entry.fields.get('title')).toBe(text);
+    expect(entry.texFields?.get('title')).toBe(tex);
+  });
+
+  it('reads a title with each of their commands back the same once it\'s written', () => {
+    for (const command of ['textbraceleft', 'textbraceright', 'textdollar']) {
+      for (const written of ['A \\' + command + '{} B', 'A {\\' + command + '} B', 'A \\' + command + ' B']) {
+        const once = parseBibtex('@article{k,\n  title = {' + written + '},\n  year = {2020}\n}').get('k')!;
+        const twice = parseBibtex(serializeBibtex(new Map([['k', once]]))).get('k');
+        expect(twice?.fields.get('title')).toBe(once.fields.get('title'));
+        expect(twice?.texFields?.get('title')).toBe(once.texFields?.get('title'));
+        expect(twice?.fields.get('year')).toBe('2020');
+      }
+    }
+  });
+
+  // A lone brace's command read as written, as \textbraceleft{}, which the
+  // .bib file written back held escaped; or a brace alone in a value
+  // written back as an escaped brace, which the scanner counts, so the
+  // entry read on past its end, or ended at the brace
+  it.each([
+    ['a left brace alone', String.raw`A \textbraceleft{} B`, 'A { B', String.raw`{A \textbraceleft{} B}`],
+    ['a right brace alone', String.raw`A \textbraceright{} B`, 'A } B', String.raw`{A \textbraceright{} B}`],
+    ['a right brace before a left one, each alone', String.raw`\textbraceright{}A\textbraceleft{}`, '}A{', String.raw`{\textbraceright{}A\textbraceleft{}}`],
+    ['a brace alone among braces that pair', String.raw`\{a\} \textbraceright{} {b}`, '{a} } {b}', String.raw`{\{a\} \textbraceright{} \{b\}}`],
+  ])('reads %s as the brace, and writes it back as its command, so the entry reads back whole', (_name, value, text, written) => {
     const once = parseBibtex('@article{k,\n  title = {' + value + '},\n  year = {2020}\n}');
-    expect(once.get('k')!.fields.get('title')).toBe(value);
-    const twice = parseBibtex(serializeBibtex(once)).get('k');
-    expect(twice?.fields.get('title')).toBe(value);
+    expect(once.get('k')!.fields.get('title')).toBe(text);
+    const serialized = serializeBibtex(once);
+    expect(serialized).toContain('title = ' + written + ',');
+    const twice = parseBibtex(serialized).get('k');
+    expect(twice?.fields.get('title')).toBe(text);
     expect(twice?.fields.get('year')).toBe('2020');
+  });
+
+  // In math too
+  it('reads a brace alone in math as the brace, and writes the value as text, so the entry reads back whole', () => {
+    const once = parseBibtex('@article{k,\n  title = {' + String.raw`$\textbraceleft$ x` + '},\n  year = {2020}\n}');
+    expect(once.get('k')!.fields.get('title')).toBe('${$ x');
+    const serialized = serializeBibtex(once);
+    expect(serialized).toContain('title = {' + String.raw`\$\textbraceleft{}\$ x` + '},');
+    const twice = parseBibtex(serialized).get('k');
+    expect(twice?.fields.get('title')).toBe('${$ x');
+    expect(twice?.fields.get('year')).toBe('2020');
+  });
+
+  // A value with no TeX, as DOCX import's, whose brace alone was written
+  // escaped, so the entry read on past its end
+  it.each([
+    ['a left brace alone', 'A { B'],
+    ['a right brace alone', 'A } B'],
+    ['braces that don\'t pair', '}A{ {b}'],
+  ])('writes %s in a value with no TeX as commands, so the entry reads back whole', (_name, title) => {
+    const entry: BibtexEntry = { type: 'article', key: 'k', fields: new Map([['title', title], ['year', '2020']]) };
+    const twice = parseBibtex(serializeBibtex(new Map([['k', entry]]))).get('k');
+    expect(twice?.fields.get('title')).toBe(title);
+    expect(twice?.fields.get('year')).toBe('2020');
+  });
+
+  it('shows a brace\'s command as the brace in the language server', () => {
+    const entry = parseBibtex('@article{k,\n  title = {A \\textbraceleft{} {B} \\textdollar{}5}\n}').get('k')!;
+    expect(bibtexFieldAsPlainText(entry, 'title')).toBe('A { B $5');
   });
 
   // Braces read before the names were split hid the and between them
   it('splits names at an and between brace commands', () => {
     expect(parseAuthors(field('author', String.raw`Jane \textbraceleft{}Doe and Smith\textbraceright{}, John`)!)).toHaveLength(2);
+  });
+
+  it.each([
+    ['author', String.raw`\textbackslash{}Doe and \textdollar{}Smith, \textbraceleft{}Jane`],
+  ])('reads the commands of a brace, a backslash and a dollar sign in %s as before', (name, value) => {
+    expect(field(name, value)).toBe(value);
   });
 
   // A bracket's command read as the bracket, so a bracket with the rest of
