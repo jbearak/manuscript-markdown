@@ -1945,38 +1945,36 @@ describe('Custom Styles — Template replacement', () => {
     const oldBlock = extractStyleBlock(styles1, customStyleId('big-text'))!;
     expect(oldBlock).toContain('w:sz w:val="20"'); // 10pt = 20hp
 
-    // Step 2: save as template, re-generate with font-size: 18
-    const fs = await import('fs');
-    const os = await import('os');
-    const path = await import('path');
-    const tmpPath = path.join(os.tmpdir(), 'test-template-custom-style-' + Date.now() + '.docx');
-    fs.writeFileSync(tmpPath, Buffer.from(result1.docx));
-
-    try {
-      const md2 = [
-        '---',
-        'font: Times New Roman',
-        'font-size: 12',
-        'template: ' + tmpPath,
-        'styles:',
-        '  big-text:',
-        '    font-size: 18',
-        '    font-style: center',
-        '---',
-        '',
-        '<!-- style: big-text -->',
-        'Hello World',
-        '<!-- /style -->',
-      ].join('\n');
-      const result2 = await convertMdToDocx(md2);
-      const zip2 = await JSZip.loadAsync(result2.docx);
-      const styles2 = await zip2.file('word/styles.xml')!.async('string');
-      const newBlock = extractStyleBlock(styles2, customStyleId('big-text'))!;
-      expect(newBlock).toContain('w:sz w:val="36"'); // 18pt = 36hp
-      expect(newBlock).not.toContain('w:sz w:val="20"');
-    } finally {
-      try { fs.unlinkSync(tmpPath); } catch {}
-    }
+    // Step 2: use it as the template, as the CLI's --template and the
+    // extension do, with a style of its own that shows the result is built
+    // on it, and re-generate with font-size: 18. A template in the
+    // frontmatter, as this test had it, is none: export takes one only
+    // through templateDocx
+    zip1.file('word/styles.xml', styles1.replace('</w:styles>', () => '<w:style w:type="paragraph" w:customStyle="1" w:styleId="TemplateOwn"><w:name w:val="Template Own"/></w:style></w:styles>'));
+    const templateDocx = await zip1.generateAsync({ type: 'uint8array' });
+    const md2 = [
+      '---',
+      'font: Times New Roman',
+      'font-size: 12',
+      'styles:',
+      '  big-text:',
+      '    font-size: 18',
+      '    font-style: center',
+      '---',
+      '',
+      '<!-- style: big-text -->',
+      'Hello World',
+      '<!-- /style -->',
+    ].join('\n');
+    const result2 = await convertMdToDocx(md2, { templateDocx });
+    const zip2 = await JSZip.loadAsync(result2.docx);
+    const styles2 = await zip2.file('word/styles.xml')!.async('string');
+    expect(styles2).toContain('w:styleId="TemplateOwn"');
+    // The template's definition gives way to the new one, not beside it
+    expect(styles2.split('w:styleId="' + customStyleId('big-text') + '"')).toHaveLength(2);
+    const newBlock = extractStyleBlock(styles2, customStyleId('big-text'))!;
+    expect(newBlock).toContain('w:sz w:val="36"'); // 18pt = 36hp
+    expect(newBlock).not.toContain('w:sz w:val="20"');
   });
 });
 
