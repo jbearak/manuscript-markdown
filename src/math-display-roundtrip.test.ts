@@ -311,6 +311,217 @@ describe('display math in a heading', () => {
   });
 });
 
+// A display equation in a tracked change, in a paragraph with text around
+// it, came back in its paragraph, as a\n{++...++}&#32;b., which export split
+// into three paragraphs, the text before, the equation and the text after,
+// as it gave any span of display math a paragraph of its own. A highlight
+// on one there came back without it, as {==...==} would have split it too
+describe('a tracked display equation in its paragraph', () => {
+  const fence = '$'.repeat(2);
+  const roundTrip = async (md: string) => stripFrontmatter((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  // Each of Word's paragraphs, by its style and its text, with each display
+  // equation as [equation], or [highlighted equation], each inline one as
+  // [math], an insertion as {+...+}, a deletion as {-...-} and a comment's
+  // range as {c...c}
+  const paragraphs = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr'));
+    return (body.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).map(p => (/<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? '') + ': ' + p
+      .replace(/<w:pPr>[\s\S]*?<\/w:pPr>/g, '')
+      .replace(/<m:oMathPara>[\s\S]*?<\/m:oMathPara>/g, m => /<w:highlight /.test(m) ? '[highlighted equation]' : '[equation]')
+      .replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '[math]')
+      .replace(/<w:ins [^>]*>/g, '{+').replace(/<\/w:ins>/g, '+}').replace(/<w:del [^>]*>/g, '{-').replace(/<\/w:del>/g, '-}')
+      .replace(/<w:commentRangeStart [^>]*>/g, '{c').replace(/<w:commentRangeEnd [^>]*>/g, 'c}')
+      .replace(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g, '$1').replace(/<w:br\/>/g, '<br>')
+      .replace(/<[^>]+>/g, ''));
+  };
+  /** The Markdown import writes for a document from Word, `md`'s with the
+   *  run `target` matches put in place of `runs` */
+  const fromWord = async (md: string, target: RegExp, runs: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toMatch(target);
+    zip.file('word/document.xml', xml.replace(target, () => runs));
+    return stripFrontmatter((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const bold = /<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*XX<\/w:t><\/w:r>/;
+  // The text a comment's range holds, as export writes {==XX==}{>>c<<}
+  const commented = /<w:r><w:t>XX<\/w:t><\/w:r>/;
+  const equation = (latex: string, rPr = '') => '<m:oMathPara><m:oMath><m:r>' + rPr + '<m:t>' + latex + '</m:t></m:r></m:oMath></m:oMathPara>';
+  const highlighted = equation('x', '<w:rPr><w:highlight w:val="yellow"/></w:rPr>');
+  const inserted = (runs: string) => '<w:ins w:id="91" w:author="A" w:date="2024-01-01T00:00:00Z">' + runs + '</w:ins>';
+  const deleted = (runs: string) => '<w:del w:id="92" w:author="A" w:date="2024-01-01T00:00:00Z">' + runs + '</w:del>';
+  const x = fence + '\nx\n' + fence;
+  const z = fence + '\nz\n' + fence;
+  /** `md` with `prefix` on each line after its first, as a quote's */
+  const within = (prefix: string, md: string) => md.replace(/\n(?=.)/g, '\n' + prefix);
+
+  /** `md`, which import wrote, keeps Word's `paras` and stays the same over two trips */
+  const keeps = async (md: string, paras: string[]) => {
+    expect(await paragraphs(md)).toEqual(paras);
+    const once = await roundTrip(md);
+    expect(once).toBe(md);
+    expect(await paragraphs(once)).toEqual(paras);
+    expect(await roundTrip(once)).toBe(once);
+  };
+
+  it.each([
+    ['an insertion', 'a **XX** b.\n', bold, inserted(equation('x')), 'a\n{++' + x + '++}&#32;b.\n', [': a {+[equation]+} b.']],
+    ['a deletion', 'a **XX** b.\n', bold, deleted(equation('x')), 'a\n{--' + x + '--}&#32;b.\n', [': a {-[equation]-} b.']],
+    // A deletion and an insertion, which import writes on lines of their own,
+    // as two equations, whose line end export reads as a space between them
+    ['a substitution', 'a **XX** b.\n', bold, deleted(equation('x')) + inserted(equation('z')), 'a\n{--' + x + '--}\n{++' + z + '++}&#32;b.\n',
+      [': a {-[equation]-} {+[equation]+} b.']],
+    ['a highlight', 'a **XX** b.\n', bold, highlighted, 'a\n{==' + x + '==}&#32;b.\n', [': a [highlighted equation] b.']],
+    ['an insertion, with inline math after it', 'a **XX** b.\n', bold, inserted(equation('x')) + '<m:oMath><m:r><m:t>y</m:t></m:r></m:oMath>',
+      'a\n{++' + x + '++}$y$ b.\n', [': a {+[equation]+}[math] b.']],
+    // The span's lines after the first without the item's indent, as import
+    // writes a span's lines in a list item
+    ['an insertion, in a list item', '- a **XX** b.\n', bold, inserted(equation('x')), '- a\n  {++' + x + '++}&#32;b.\n', [': a {+[equation]+} b.']],
+    ['a highlight, in a list item', '- a **XX** b.\n', bold, highlighted, '- a\n  {==' + x + '==}&#32;b.\n', [': a [highlighted equation] b.']],
+    ['an insertion, in a quote', '> a **XX** b.\n', bold, inserted(equation('x')), '> ' + within('> ', 'a\n{++' + x + '++}&#32;b.\n'),
+      [': ', 'GitHubBlockquote: a {+[equation]+} b.', ': ']],
+    ['a deletion, in a quote', '> a **XX** b.\n', bold, deleted(equation('x')), '> ' + within('> ', 'a\n{--' + x + '--}&#32;b.\n'),
+      [': ', 'GitHubBlockquote: a {-[equation]-} b.', ': ']],
+    ['a highlight, in a quote', '> a **XX** b.\n', bold, highlighted, '> ' + within('> ', 'a\n{==' + x + '==}&#32;b.\n'),
+      [': ', 'GitHubBlockquote: a [highlighted equation] b.', ': ']],
+  ])('from Word, a display equation in %s stays in its paragraph', async (_name, md, target, runs, expected, paras) => {
+    const back = await fromWord(md, target, runs);
+    expect(back).toBe(expected);
+    await keeps(back, paras);
+  });
+
+  // A comment on one, which import writes in IDs, with its body after the
+  // paragraph. Export split one written as {==...==}{>>...<<} in the
+  // paragraph too
+  it('a comment on one in its paragraph stays in it', async () => {
+    const md = 'a\n{==' + x + '==}{>>c<<}&#32;b.\n';
+    const paras = [': a {c[equation]c} b.'];
+    expect(await paragraphs(md)).toEqual(paras);
+    const back = await roundTrip(md);
+    expect(back).toBe('a\n{#1}' + x + '{/1}&#32;b.\n{#1>>c<<}\n');
+    await keeps(back, paras);
+  });
+
+  // As before: one alone in its paragraph, an equation in no change in its
+  // paragraph, a comment on one from Word in its paragraph, and one in a
+  // heading's text, which goes after the heading, as a heading can't go on
+  // past its line, as export splits it
+  it.each([
+    ['an insertion alone in its paragraph', '**XX**\n', bold, inserted(equation('x')), '{++' + x + '++}\n', [': {+[equation]+}']],
+    ['a deletion alone in its paragraph', '**XX**\n', bold, deleted(equation('x')), '{--' + x + '--}\n', [': {-[equation]-}']],
+    ['no change, in a paragraph', 'a **XX** b.\n', bold, equation('x'), 'a\n' + x + '&#32;b.\n', [': a [equation] b.']],
+    ['a comment, in a paragraph', 'a {==XX==}{>>c<<} b.\n', commented, equation('x'), 'a\n{#1}' + x + '{/1}&#32;b.\n{#1>>c<<}\n', [': a {c[equation]c} b.']],
+  ])('from Word, %s comes back as before', async (_name, md, target, runs, expected, paras) => {
+    const back = await fromWord(md, target, runs);
+    expect(back).toBe(expected);
+    await keeps(back, paras);
+  });
+
+  it('one in a heading\'s text still goes after the heading', async () => {
+    const md = '# a {++' + fence + 'x' + fence + '++} b\n';
+    expect(await paragraphs(md)).toEqual(['Heading1: a ', ': {+[equation]+}', ':  b']);
+    const back = await roundTrip(md);
+    expect(back).toBe('# a\n\n{++' + x + '++}\n\n&#32;b\n');
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // A highlight on one with a comment right after it, a point comment, as
+  // before, without the highlight, as {==...==}{>>...<<} would put the
+  // comment over the equation; and with a comment over it, in IDs, which
+  // the highlight doesn't go in, as before
+  const point = /<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*XX<\/w:t><\/w:r>(?=<w:commentRangeStart)/;
+  it.each([
+    ['a point comment after a highlight on one', 'a **XX**{>>c<<} b.\n', point, highlighted, 'a\n' + x + '{>>c<<} b.\n',
+      [': a [highlighted equation]{cc} b.'], [': a [equation]{cc} b.']],
+    ['a point comment after a highlight on one alone in its paragraph', '**XX**{>>c<<}\n', point, highlighted, x + '{>>c<<}\n',
+      [': [highlighted equation]{cc}'], [': [equation]{cc}']],
+    ['a comment over a highlight on one', 'a {==XX==}{>>c<<} b.\n', commented, highlighted, 'a\n{#1}' + x + '{/1}&#32;b.\n{#1>>c<<}\n',
+      [': a {c[highlighted equation]c} b.'], [': a {c[equation]c} b.']],
+  ])('from Word, %s comes back as before', async (_name, md, target, runs, expected, before, paras) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toMatch(target);
+    zip.file('word/document.xml', xml.replace(target, () => runs));
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const back = stripFrontmatter((await convertDocx(docx)).markdown);
+    expect(back).toBe(expected);
+    await keeps(back, paras);
+    expect(paras).not.toEqual(before);
+  });
+
+  it('a point comment after a highlight on one in a note stays after it', async () => {
+    const md = 'Text.[^1]\n\n[^1]: a ==' + fence + 'x' + fence + '=={>>c<<} b.\n';
+    const back = await roundTrip(md);
+    expect(back).toBe('Text.[^1]\n\n[^1]:\n\n    a\n    ' + fence + '\n    x\n    ' + fence + '{>>c<<} b.\n');
+    expect(await roundTrip(back)).toBe(back);
+    const notes = await (await JSZip.loadAsync((await convertMdToDocx(back)).docx)).file('word/footnotes.xml')!.async('string');
+    expect(notes).toMatch(/<w:commentRangeStart w:id="(\d+)"\/><w:commentRangeEnd w:id="\1"\/>/);
+  });
+
+  // A comment that doesn't start right after the fence, as one in a block
+  // after the equation's, or over an equation after it in its paragraph,
+  // which goes on the next line in IDs, keeps the highlight
+  const start = '<w:commentRangeStart w:id="0"/>';
+  const end = '<w:commentRangeEnd w:id="0"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="0"/></w:r>';
+  const paragraph = (runs: string) => '<w:p>' + runs + '</w:p>';
+  it.each([
+    // Word's equations at the body's level, outside any paragraph
+    ['a comment on the next equation, in a block of its own', highlighted + start + equation('z') + end,
+      '{==' + x + '==}\n\n{#1}' + z + '{/1}\n{#1>>c<<}\n', [': [highlighted equation]', ': {c[equation]c}']],
+    ['a point comment at the next paragraph\'s start', highlighted + paragraph(start + end + '<w:r><w:t>b</w:t></w:r>'),
+      '{==' + x + '==}\n\n{>>c<<}b\n', [': [highlighted equation]', ': {cc}b']],
+    ['a point comment at the next paragraph\'s start, after one in a paragraph',
+      paragraph('<w:r><w:t xml:space="preserve">a </w:t></w:r>' + highlighted) + paragraph(start + end + '<w:r><w:t>b</w:t></w:r>'),
+      'a\n{==' + x + '==}\n\n{>>c<<}b\n', [': a [highlighted equation]', ': {cc}b']],
+    ['a comment on the next equation in its paragraph',
+      paragraph('<w:r><w:t xml:space="preserve">a </w:t></w:r>' + highlighted + start + equation('z') + end + '<w:r><w:t xml:space="preserve"> b</w:t></w:r>'),
+      'a\n{==' + x + '==}\n{#1}' + z + '{/1}&#32;b\n{#1>>c<<}\n', [': a [highlighted equation] {c[equation]c} b']],
+  ])('from Word, a highlight on one before %s stays', async (_name, body, expected, paras) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('a{>>c<<}\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/(<w:body>)[\s\S]*?(<w:sectPr)/, (_m, open: string, close: string) => open + body + close));
+    const back = stripFrontmatter((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(back).toBe(expected);
+    await keeps(back, paras);
+  });
+
+  // A span with a blank line, a paragraph break, between equations, which
+  // go in paragraphs of their own either side of it, as before
+  it.each([
+    ['a highlight', '{==', '==}', ': [highlighted equation]'],
+    ['an insertion', '{++', '++}', ': {+[equation]+}'],
+    ['a deletion', '{--', '--}', ': {-[equation]-}'],
+  ])('%s of equations with a paragraph break between them keeps the break', async (_name, open, close, para) => {
+    const md = open + fence + 'x' + fence + '\n\n' + fence + 'z' + fence + close + '\n';
+    expect(await paragraphs(md)).toEqual([para, para]);
+    const back = await roundTrip(md);
+    expect(back).toBe(open + x + close + '\n\n' + open + z + close + '\n');
+    await keeps(back, [para, para]);
+  });
+
+  it.each([
+    ['in a list item', '- {==' + fence + 'x' + fence + '\n\n  ' + fence + 'z' + fence + '==}\n'],
+    ['in a quote', '> {==' + fence + 'x' + fence + '\n>\n> ' + fence + 'z' + fence + '==}\n'],
+  ])('a highlight of equations with a paragraph break between them %s keeps the break', async (_name, md) => {
+    const paras = (await paragraphs(md)).filter(para => para.includes('equation'));
+    expect(paras).toEqual([expect.stringContaining('[highlighted equation]'), expect.stringContaining('[highlighted equation]')]);
+    const back = await roundTrip(md);
+    expect((await paragraphs(back)).filter(para => para.includes('equation'))).toEqual(paras);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // With its sides' empty spans in each paragraph, as before
+  it('a substitution of equations with a paragraph break between them keeps the break', async () => {
+    const md = '{~~' + fence + 'x' + fence + '\n\n' + fence + 'z' + fence + '~>c~~}\n';
+    expect(await paragraphs(md)).toEqual([': {-[equation]-}{++}', ': {-[equation]-}{++}', ': {--}{+c+}']);
+    const paras = [': {-[equation]-}', ': {-[equation]-}', ': {+c+}'];
+    const back = await roundTrip(md);
+    expect(back).toBe('{--' + x + '--}\n\n{--' + z + '--}\n\n{++c++}\n');
+    await keeps(back, paras);
+  });
+});
+
 // An environment with no OMML form showed its \begin as text and lost its
 // \end, and its argument's braces, so it came back as LaTeX that doesn't parse
 describe('environments with no OMML form', () => {

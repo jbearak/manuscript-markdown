@@ -15381,19 +15381,21 @@ function buildMarkdownOnce(
   /** A display equation's block with the ID markers of the comments over
    *  it, which open before its fences, unless open from the text before,
    *  and close after them, unless the range goes on; and the bodies of
-   *  those that close. */
-  function displayMathWithComments(item: ContentItem & { type: 'math' }, alone: boolean): { block: string; bodies: string[] } {
+   *  those that close. The item after it in its paragraph is `next`. */
+  function displayMathWithComments(item: ContentItem & { type: 'math' }, next: ContentItem | undefined): { block: string; bodies: string[] } {
     const over = [...(item.commentIds ?? [])];
     const open = renderOpts.openIdComments;
     // Those open from the text before in the order they opened, which those
     // that end together end in (see enterComments in renderInlineRangeWithIds)
     const ids = [...open].filter(id => over.includes(id)).concat(over.filter(id => !open.has(id)).sort());
-    // A highlight where no comment is over it, as export would put a
-    // comment's markers around a highlight in paragraphs of their own, and
-    // reads {==...==}{>>...<<} as a comment alone; and on an equation
-    // `alone` in its paragraph, as {==...==} would end one in a paragraph's
-    // text there
-    const block = revisedDisplayMathBlock(item.latex, item.revision, ids.length === 0 && alone ? item.highlight : undefined);
+    // A highlight where no comment is over it or starts right after it, as
+    // a point comment does, as export reads {==...==}{>>...<<} as a comment
+    // alone. In a paragraph's text too, where export keeps the span of the
+    // equation alone in the paragraph (see splitCriticDisplayMathParagraphs).
+    // Right after it is in its paragraph, from the closing fence; not an
+    // equation's, on a line of its own, nor a block's after it
+    const commentAfter = !!item.inParagraph && !!next && goesOnFromEquation(next) && 'commentIds' in next && !!next.commentIds?.size;
+    const block = revisedDisplayMathBlock(item.latex, item.revision, ids.length === 0 && !commentAfter ? item.highlight : undefined);
     const remap = (id: string) => commentIdRemap.get(id) ?? id;
     let before = '';
     let after = '';
@@ -16612,8 +16614,7 @@ function buildMarkdownOnce(
       const textFollows = goesOnFromEquation(mergedContent[i + 1]);
       // An equation right after it in its paragraph goes on in it too
       const equationNext = equationFollows(item, mergedContent[i + 1]);
-      // Alone in its paragraph where nothing comes before or after it there
-      const commented = displayMathWithComments(item, !continued && !textFollows && !equationNext);
+      const commented = displayMathWithComments(item, mergedContent[i + 1]);
       if (textFollows) pushAll(pendingEquationBodies, commented.bodies);
       const revisedMathBlock = [commented.block, ...(textFollows ? [] : commented.bodies)].join('\n');
       if (displayMathContainer) {
@@ -17274,9 +17275,7 @@ function buildMarkdownOnce(
             pushInline(inlinePart(part.text, !!item.inParagraph));
             pushAll(paragraphBodies, part.deferredComments);
           }
-          // Alone in its paragraph where nothing comes before or after it
-          // there, another equation included
-          const commented = displayMathWithComments(item, !(item.inParagraph && (paragraphPart !== undefined || goesOnFromEquation(bodyMerged[bi + 1]) || equationFollows(item, bodyMerged[bi + 1]))));
+          const commented = displayMathWithComments(item, bodyMerged[bi + 1]);
           if (item.inParagraph && paragraphPart !== undefined) {
             // In place of the space export wrote for the line's end, or after
             // the line end of a line break that ends the text

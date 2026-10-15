@@ -2744,7 +2744,14 @@ function splitCriticRunAtDisplayMath(run: MdRun): CriticDisplaySegment[] | undef
   ];
 }
 
-/** Give revised display equations their own Word paragraphs while retaining block context. */
+/** Whether a CriticMarkup span's source holds a blank line, a paragraph break */
+function holdsBlankLine(text: string | undefined): boolean {
+  return !!text && /\n[ \t]*\n/.test(text);
+}
+
+/** Give revised display equations their own Word paragraphs while retaining
+ *  block context, where their span holds text too or a paragraph break, or
+ *  they're in a heading */
 function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
   const output: MdToken[] = [];
   for (const token of tokens) {
@@ -2764,7 +2771,14 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
     for (let r = 0; r < token.runs.length; r++) {
       const run = token.runs[r];
       const segments = splitCriticRunAtDisplayMath(run);
-      if (!segments) {
+      // A revision's or a highlight's span of display math alone stays in
+      // its paragraph, list item or quote, with text around it, as an
+      // equation in none does, as import writes it there. Not in a heading,
+      // which can't go on past its line, so import writes it after it. Nor
+      // where the span's source holds a blank line, a paragraph break
+      // segments leave out, which the equations go on either side of
+      if (!segments || token.type !== 'heading' && !holdsBlankLine(run.text) && !holdsBlankLine(run.newText)
+        && segments.every(segment => segment.displayMath)) {
         currentRuns.push(run);
         continue;
       }
