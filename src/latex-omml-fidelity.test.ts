@@ -12,6 +12,7 @@ import { ommlToLatex } from './omml';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
 import { parserOptions, roundTrip } from './test-omml-helpers';
+import { fastestRun } from './test-timing';
 
 const run = (t: string) => '<m:r><m:t>' + t + '</m:t></m:r>';
 const styled = (t: string) => '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>' + t + '</m:t></m:r>';
@@ -208,9 +209,129 @@ describe('Word-authored n-ary bodies', () => {
     expect(latexToOmml(latex)).toEndWith(run('(') + run('x') + '</m:e></m:nary>');
   });
 
-  test('other bodies stay unbraced', () => {
+  // Export takes one piece and its scripts as the body, so more stays inside
+  // only in braces
+  test.each([
+    ['two runs', run('a') + run('b'), '\\prod{ab}'],
+    ['a run of two digits', run('12'), '\\prod{12}'],
+    ['a run of two symbols', run('αβ'), '\\prod{\\alpha\\beta}'],
+    ['a run with a prime', run('x′'), "\\prod{x'}"],
+    ['a structure and a run', latexToOmml('x_i') + run('y'), '\\prod{x_iy}'],
+    ['a run and a structure', run('d') + latexToOmml('x_i'), '\\prod{dx_i}'],
+    ['a fraction and a run', latexToOmml('\\frac{a}{b}') + run('y'), '\\prod{\\frac{a}{b}y}'],
+    ['a function and a run', latexToOmml('\\sin x') + run('y'), '\\prod{\\sin{x}y}'],
+    ['bars', run('|') + run('x') + run('|'), '\\prod{|x|}'],
+  ])('a body of more than one piece is braced: %s', (_name, body, latex) => {
+    expect(importOmml(nary(body))).toBe(latex);
+    const omml = latexToOmml(latex);
+    expect(omml.startsWith('<m:nary>') && omml.endsWith('</m:e></m:nary>')).toBe(true);
+  });
+
+  test.each([
+    'x_i', 'x_i^2', '{ab}^2', '\\frac{a}{b}', '\\sqrt[3]{x}', '\\sum_j y', '\\hat{x}', '\\sin x', '\\sin(x)',
+    '\\operatorname{f}x', '\\lim_{x\\to0}x', '\\boxed{x}', '\\overline{x}', '\\underbrace{x}_{y}', '\\binom{a}{b}',
+    '\\mathrm{ab}', '\\text{if}', '\\mathbf{x}', '\\underset{a}{b}', '(1-x)', '\\left\\langle{}x\\right\\rangle',
+  ])('a body of %s alone or with more after it keeps all of it in Word', body => {
+    expectStableExport('\\prod{' + body + '}');
+    expectStableExport('\\prod{' + body + '+y}');
+  });
+
+  // Export would take the bracket and what follows the operator as its body
+  test.each([
+    ['(', ')', '\\prod{(}x)'],
+    ['[', ']', '\\prod{[}x]'],
+  ])('a body of only %s is braced', (open, close, latex) => {
+    expect(importOmml(nary(run(open)) + run('x') + run(close))).toBe(latex);
+    expect(latexToOmml(latex)).toEndWith(run(open) + '</m:e></m:nary>' + run('x') + run(close));
+  });
+
+  test('a body of one piece, or one bracket group, stays unbraced', () => {
     expect(importOmml(nary(run('(') + run('1') + run('-') + run('x') + run(')')))).toBe('\\prod(1-x)');
     expect(importOmml(nary(run('x')))).toBe('\\prod x');
+    expect(importOmml(nary(run('α')))).toBe('\\prod\\alpha');
+    expect(importOmml(nary(styled('ab')))).toBe('\\prod\\mathrm{ab}');
+    expect(importOmml(nary(latexToOmml('x_i^2')))).toBe('\\prod x_i^2');
+    expect(importOmml(nary(latexToOmml('\\frac{a}{b}')))).toBe('\\prod\\frac{a}{b}');
+    expect(importOmml(nary(latexToOmml('\\sum_j a_{ij}')))).toBe('\\prod\\sum_ja_{ij}');
+    expect(importOmml(latexToOmml('\\sum_i a'))).toBe('\\sum_ia');
+    // A change of only a space, which Word shows as none, is no piece
+    expect(importOmml(nary(run('x') + '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + run(' ') + '</w:ins>'))).toBe('\\prod x');
+  });
+
+  // An n-ary operator takes a body, where a command such as \mathcal takes
+  // an argument, so the base of a script keeps its braces, whose script
+  // export would put on the body
+  test.each([
+    '{\\prod\\|}^2', '{\\prod{ab}}^2', '{\\prod{ab}}_i', '{\\prod{ab}}_i^2', '{\\prod{(1-x)y}}^2',
+  ])('an n-ary base of a script comes back with its braces in %s', latex => {
+    expect(roundTrip(latex)).toBe(latex);
+    expectStableExport(latex);
+  });
+
+  // Each change was read again for each operator around it
+  test('a chain of changes in n-ary bodies imports in time linear in its depth', () => {
+    const chain = (depth: number) => {
+      let omml = run('x');
+      for (let k = 0; k < depth; k++) omml = nary('<w:ins w:id="' + k + '" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:ins>');
+      return xmlParser(parserOptions).parse('<m:oMath>' + omml + '</m:oMath>')[0]['m:oMath'];
+    };
+    const time = (depth: number) => {
+      const nodes = chain(depth);
+      return fastestRun(() => {
+        for (let k = 0; k < 20; k++) expect(ommlToLatex(nodes)).toStartWith('\\prod{++\\prod');
+      });
+    };
+    time(3);
+    expect(time(12) / time(3)).toBeLessThan(8);
+  }, 60000);
+
+  // Word's pieces, as export writes them, which a Word user may put side by
+  // side in a body in any order
+  const piece = fc.constantFrom(
+    run('a'), run('12'), run('αβ'), run('x′'), run('+'), run('('), run(')'), run('|'), styled('ab'),
+    latexToOmml('x_i'), latexToOmml('\\frac{a}{b}'), latexToOmml('\\sin x'), latexToOmml('\\sum_j y'), latexToOmml('\\hat{x}'),
+  );
+  // What Word shows of runs' text, which drops a run's whitespace without
+  // xml:space="preserve", as export writes math's
+  const text = (omml: string) => [...omml.matchAll(/<m:t( xml:space="preserve")?>([^<]*)<\/m:t>/g)]
+    .map(match => match[1] ? match[2] : match[2].trim()).join('');
+
+  test('a body of any pieces from Word stays all under the operator, and comes back the same', () => {
+    fc.assert(fc.property(fc.array(piece, { minLength: 1, maxLength: 4 }), pieces => {
+      const body = pieces.join('');
+      const latex = importOmml(nary(body));
+      const omml = latexToOmml(latex);
+      expect(omml.startsWith('<m:nary>') && omml.endsWith('</m:e></m:nary>')).toBe(true);
+      // Its limits are empty, so all its text is the body's
+      expect(text(omml)).toBe(text(body));
+      expect(importOmml(omml)).toBe(latex);
+    }), { numRuns: 500 });
+  });
+
+  // A body of more than one piece came back without its braces, and the
+  // next export put only its first piece under the operator
+  test.each([
+    ['$\\prod{ab}$', '$\\prod{ab}$'],
+    ['$\\sum_i{x_iy_i}$', '$\\sum_i{x_iy_i}$'],
+    ['$\\int_0^1{f(x)dx}$', '$\\int_0^1{f(x)dx}$'],
+    ['$\\prod{12}$', '$\\prod{12}$'],
+    // A tracked change is one piece where its content is
+    ['$\\sum_i{a{++b++}}$', '$\\sum_i{a{++b++}}$'],
+    ['$\\sum_i{{++ab++}}$', '$\\sum_i{{++ab++}}$'],
+    ['$\\sum_i{{--ab--}}$', '$\\sum_i{{--ab--}}$'],
+    // As on main
+    ['$\\sum_i a$', '$\\sum_ia$'],
+    ['$\\prod(1-x)$', '$\\prod(1-x)$'],
+    ['$\\sum_i x_i y$', '$\\sum_ix_i y$'],
+    ['$\\sum_i{++a++}$', '$\\sum_i{++a++}$'],
+    ['$\\sum_i{++x_i++}$', '$\\sum_i{++x_i++}$'],
+    ['$\\sum_i{++(1-x)++}$', '$\\sum_i{++(1-x)++}$'],
+    ['$\\sum_i{--a--}$', '$\\sum_i{--a--}$'],
+  ])('comes back from Word, and again, in %s', async (math, back) => {
+    const throughWord = async (markdown: string) => (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    const markdown = await throughWord('A ' + math + ' B.\n');
+    expect(markdown).toBe('A ' + back + ' B.\n');
+    expect(await throughWord(markdown)).toBe(markdown);
   });
 });
 
