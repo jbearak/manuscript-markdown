@@ -479,7 +479,7 @@ x = 0 \text{ if } y > 1
 \mathrm{constant}
 ```
 
-Spaces at the edges of `\text{}` show in Word. Normal text from Word that contains a symbol imports with the symbol outside the text, as in `\text{a }\mathrm{\times}\text{ b}`, since `\text{}` cannot hold math commands.
+Spaces at the edges of `\text{}` show in Word. Word's Normal Text imports as upright text from Word does: as `\text{}`, with the spaces at its edges, where it holds a space or a character LaTeX reserves, such as `%`, and as `\mathrm{}` otherwise. Normal text from Word that contains a symbol imports with the symbol outside the text, as in `\text{a }\mathrm{\times}\text{ b}`, since `\text{}` cannot hold math commands.
 
 ## Mod
 
