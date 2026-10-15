@@ -8373,8 +8373,11 @@ function generateDeletedCriticContent(
       // A live Zotero field inside <w:del> is unsafe (Word serializes deleted
       // field instructions as w:delInstrText, and Zotero may refresh deleted
       // fields), so deleted citations keep their literal source syntax.
+      // As text, with the citation's formatting, which import writes
+      // inside the deletion, as {--*[@key]*--}
       const literal = '[' + run.text + ']';
-      const merged = mergeRunFormatting({ type: 'text', text: literal, highlight: run.highlight, highlightColor: run.highlightColor }, outer, forced);
+      const { bold, italic, underline, strikethrough, superscript, subscript, highlight, highlightColor } = run;
+      const merged = mergeRunFormatting({ type: 'text', text: literal, bold, italic, underline, strikethrough, superscript, subscript, highlight, highlightColor }, outer, forced);
       const rPr = generateRPr(merged, tableRunRPr(state, merged));
       emit('<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>');
       continue;

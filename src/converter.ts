@@ -8664,14 +8664,21 @@ function criticSpanStart(text: string, opener: string, closer: string, from: num
 
 /**
  * The last character of `markdown` between `from` and `to` with its tracked
- * changes accepted or rejected, skipping comments and the spans that view
- * drops. Only the CriticMarkup at the end of the range is read.
+ * changes accepted or rejected, skipping comments, an ID comment's markers
+ * and the spans that view drops. Only the CriticMarkup at the end of the
+ * range is read.
  */
 function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = markdown.length): string {
   let end = to;
   while (end > from) {
     end = textEnd(markdown, from, end);
     if (end <= from) break;
+    // An ID comment's marker, as {#c1} or {/c1}, which shows nothing
+    const marker = /\{[#/][a-zA-Z0-9_-]+\}$/.exec(markdown.slice(Math.max(from, end - 72), end));
+    if (marker) {
+      end -= marker[0].length;
+      continue;
+    }
     const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
     const start = closer ? criticSpanStart(markdown, CRITIC_OPENERS[closer[1]], closer[0], from, end) : -1;
     if (!closer || start < 0) return lastTextChar(markdown, from, end);
