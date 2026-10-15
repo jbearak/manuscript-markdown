@@ -8412,7 +8412,8 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'math') {
-      emit(generateMathXml(run.text, !!run.display, warnings));
+      // An inline equation in its link's element, as generateRuns writes it
+      emit(generateMathXml(run.text, !!run.display, warnings), run.display ? undefined : run);
       continue;
     }
     if (run.type === 'critic_add' || run.type === 'critic_del') {
@@ -8652,6 +8653,13 @@ function insertionXml(insertedXml: string, author: string, dateAttr: string, sta
 /** The runs a link's hyperlink holds: its text, line breaks, images, note references and tracked changes */
 const LINK_RUN_TYPES = new Set<MdRun['type']>(['text', 'softbreak', 'hardbreak', 'image', 'critic_add', 'critic_del', 'critic_sub', 'footnote_ref']);
 
+/** Whether a link's hyperlink holds the run: one of LINK_RUN_TYPES, or an
+ *  inline equation, which import reads back in the link's text. Not display
+ *  math, which import writes on lines of its own, out of the link. */
+function inHyperlink(run: MdRun): boolean {
+  return LINK_RUN_TYPES.has(run.type) || run.type === 'math' && !run.display;
+}
+
 /** Whether a run's tracked change holds a link to somewhere other than `href` */
 function holdsOtherLink(run: MdRun, href: string): boolean {
   return [run.innerRuns, run.oldRuns, run.newRuns].some(runs =>
@@ -8663,7 +8671,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
   for (let ri = 0; ri < inputRuns.length; ri++) {
     const run = inputRuns[ri];
     const nextRun = inputRuns[ri + 1];
-    if (run.href && LINK_RUN_TYPES.has(run.type) && !holdsOtherLink(run, run.href)) {
+    if (run.href && inHyperlink(run) && !holdsOtherLink(run, run.href)) {
       // The link's runs, with its line breaks and tracked changes, go in one
       // hyperlink, as Word writes one, which import reads back as one link;
       // the next link to the same place starts another. Inside it, no run,
@@ -8671,7 +8679,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       // that holds a link to another place ends it, and goes as it would
       // outside a link, which keeps that link.
       let end = ri + 1;
-      while (end < inputRuns.length && inputRuns[end].href === run.href && !inputRuns[end].linkStart && LINK_RUN_TYPES.has(inputRuns[end].type)
+      while (end < inputRuns.length && inputRuns[end].href === run.href && !inputRuns[end].linkStart && inHyperlink(inputRuns[end])
         && !holdsOtherLink(inputRuns[end], run.href)) end++;
       const withoutLink = (linkRun: MdRun): MdRun => ({
         ...linkRun, href: undefined,
