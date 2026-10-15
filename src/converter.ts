@@ -2917,6 +2917,102 @@ function markRawHtmlText(runChildren: XmlNode[], target: ContentItem[], start: n
 /** Whether an item is a line break of Word's in a run of raw HTML */
 const isRawHtmlBreak = (item: ContentItem): boolean => item.type === 'text' && item.text === '\\\n' && RAW_HTML_TEXT.has(item);
 
+// The line breaks import writes for Word's page and column breaks, which
+// keep the text on either side apart, as the line break Word shows there,
+// but which show no line before a paragraph's text or after it (see
+// dropUnshownPageBreaks)
+const PAGE_BREAKS = new WeakSet<ContentItem>();
+
+/** Whether `item` shows in its paragraph's text, around a page break: not
+ *  whitespace alone, a page break, or an HTML comment Word hides */
+function showsInParagraph(item: ContentItem): boolean {
+  return item.type === 'text' ? !PAGE_BREAKS.has(item) && /\S/.test(item.text) : item.type !== 'html_comment';
+}
+
+/** Where a comment's range started, as endComment found it at the range's
+ *  end, and the order the ranges ended in, for dropUnshownPageBreaks. With
+ *  the comments open there where it ended on a page or column break it
+ *  holds, the only place it can hold one alone, which leaves those for the
+ *  empty item endComment would have pushed */
+interface EndedRange { target: ContentItem[]; index: number; open?: ReadonlySet<string>; order: number }
+
+/** The record endComment keeps of the range of `id` it ends in `target`,
+ *  from `start`, where `open` are the comments open there (see EndedRange) */
+function endedRange(id: string, target: ContentItem[], start: { target: ContentItem[]; index: number }, open: ReadonlySet<string>, order: number): EndedRange {
+  const last = target[target.length - 1];
+  const onBreak = last !== undefined && PAGE_BREAKS.has(last) && 'commentIds' in last && !!last.commentIds?.has(id);
+  return { target: start.target, index: start.index, order, ...onBreak ? { open: new Set(open) } : {} };
+}
+
+/**
+ * Drops the page and column breaks of a paragraph's items in `target`, from
+ * `from` (see PAGE_BREAKS), that show no line: before its text or after it.
+ * And any in a paragraph that could be raw HTML, whose text holds a tag,
+ * across runs too, or with raw HTML's runs (see RAW_HTML_TEXT), where a line
+ * break could be the HTML's line end, or end or break up an HTML block,
+ * whose lines import reads from all the paragraph's text, carriage returns
+ * too (see readParagraphLineFeeds). And any with `all`, for a paragraph
+ * import writes in the frontmatter, the title's, whose line breaks it
+ * doesn't keep (see extractTitleLines). Import wrote nothing for them before
+ * it wrote the others.
+ * One a comment's range holds alone leaves the empty item endComment pushes
+ * for an empty range, where the range ended, in `ended`, with its start in
+ * `target`, as endComment found it. The item is the one endComment pushes
+ * for the first of those ranges to end, with the comments open there, which
+ * holds the others. One that a range still open at the paragraph's end
+ * holds goes, as the range's text may come after it, and endComment pushes
+ * that item if none does. Each looks for the range's other items from its
+ * start, as endComment does, not from the document's.
+ * The starts of the ranges after one, in `starts`, move back with the
+ * items, as does the place of hidden text's start after it (see
+ * pendingHiddenText). Returns where the dropped ones were in `target`, for
+ * other places in it after them.
+ */
+function dropUnshownPageBreaks(target: ContentItem[], from: number, starts: Map<string, { target: ContentItem[]; index: number }>,
+  ended: ReadonlyMap<string, EndedRange>, all = false): number[] {
+  const items = target.slice(from);
+  const dropped: number[] = [];
+  if (!items.some(item => PAGE_BREAKS.has(item))) return dropped;
+  const text = items.map(item => item.type === 'text' && !PAGE_BREAKS.has(item) ? item.text : '').join('');
+  const dropAll = all || /<[A-Za-z/!?]/.test(text) || items.some(item => item.type === 'text' && RAW_HTML_TEXT.has(item));
+  let first = -1;
+  let last = -1;
+  items.forEach((item, k) => {
+    if (!showsInParagraph(item)) return;
+    if (first === -1) first = k;
+    last = k;
+  });
+  for (let k = items.length - 1; k >= 0; k--) {
+    const item = items[k];
+    if (item.type !== 'text' || !PAGE_BREAKS.has(item) || !dropAll && k > first && k < last) continue;
+    let firstEnded: EndedRange | undefined;
+    for (const id of item.commentIds) {
+      const range = ended.get(id);
+      if (range?.target !== target || !range.open || firstEnded && firstEnded.order < range.order) continue;
+      let alone = true;
+      for (let j = Math.max(0, range.index - 1); j < target.length && alone; j++) {
+        const other = target[j];
+        if (other !== item && 'commentIds' in other && other.commentIds?.has(id)) alone = false;
+      }
+      if (alone) firstEnded = range;
+    }
+    if (firstEnded) {
+      target[from + k] = { type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(firstEnded.open), href: undefined };
+      continue;
+    }
+    target.splice(from + k, 1);
+    dropped.push(from + k);
+    for (const start of starts.values()) {
+      if (start.target === target && start.index > from + k) start.index--;
+    }
+    // And the place of the start of hidden text after it, which the next
+    // hidden run goes on, as before
+    const pending = pendingHiddenText.get(target);
+    if (pending && pending.at > from + k) pending.at--;
+  }
+  return dropped;
+}
+
 /**
  * The line ends of what import wrote for a paragraph, from `start` in
  * `target`, read from that, so what writes nothing, as an empty run or a
@@ -5465,13 +5561,6 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const lastItem = target[target.length - 1];
   const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
     && commentSetsEqual(lastItem.commentIds, activeComments);
-  /** Whether a comment's text has its end: a --> after its last <!--, or
-   *  the > or -> of an empty one that is all of it, <!--> or <!--->, but not
-   *  one in it, which may be in a comment Word split before it. Not a --!>,
-   *  which ends a comment in an HTML table's cell, as the browser reads it,
-   *  but not one inline Markdown reads to its --> (see
-   *  renderHtmlCellParagraph) */
-  const closed = (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4) || /^\s*<!---?>\s*$/.test(text);
   // But for a ZWSP and the start of a payload alone, which the next hidden
   // run shows the comment's or the next payload's (see pendingHiddenText).
   // In a Word comment's range or out of it too, where Word started or
@@ -5486,7 +5575,7 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const newPayload = rest.startsWith('\u200B') || lastItem?.type === 'html_comment' && lastItem.text.endsWith('\u200B');
   if (lastItem?.type === 'html_comment'
       && (continues ? !(/^\u200B*\s*<!--/.test(rest) && newPayload) : !newPayload)
-      && !/^\u200B+(?:!|<|<!|<!-|<i|<im)?$/i.test(rest) && !closed(lastItem.text)) {
+      && !/^\u200B+(?:!|<|<!|<!-|<i|<im)?$/i.test(rest) && !hiddenCommentClosed(lastItem.text)) {
     for (const id of activeComments) lastItem.commentIds.add(id);
     // With a ZWSP it starts with, which is the comment's own, before which
     // Word split its run
@@ -5516,7 +5605,7 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
     } else {
       // A ZWSP and the start of <!--, ![ or <img, for the next hidden run
       if (rest.startsWith('\u200B') && /^(?:!|<|<!|<!-|<i|<im)?$/i.test(payload)) {
-        pendingHiddenText.set(target, { text: rest, at: target.length });
+        pendingHiddenText.set(target, { text: rest, at: target.length, last: target[target.length - 1] });
       }
       break;
     }
@@ -5525,7 +5614,31 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
 
 /** The start of hidden text whose run Word split before it showed what it
  *  is, as a ZWSP and !, which the next hidden run in the same place goes on */
-const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number }>();
+const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number; last: ContentItem | undefined }>();
+
+/** Whether a comment's text has its end: a --> after its last <!--, or
+ *  the > or -> of an empty one that is all of it, <!--> or <!--->, but not
+ *  one in it, which may be in a comment Word split before it. Not a --!>,
+ *  which ends a comment in an HTML table's cell, as the browser reads it,
+ *  but not one inline Markdown reads to its --> (see
+ *  renderHtmlCellParagraph) */
+function hiddenCommentClosed(text: string): boolean {
+  return text.includes('-->', text.lastIndexOf('<!--') + 4) || /^\s*<!---?>\s*$/.test(text);
+}
+
+/** Whether readHiddenText may go on from the end of `target` with the next
+ *  hidden run: a comment or an image's Markdown whose end it hasn't read,
+ *  or the start of one it holds (see pendingHiddenText), where `target`
+ *  ends with the item it ended with then, not one at the same place after
+ *  what import took out, as the space after a note's mark. An item between
+ *  would end it there */
+function readsHiddenText(target: ContentItem[]): boolean {
+  const last = target[target.length - 1];
+  const pending = pendingHiddenText.get(target);
+  return pending?.at === target.length && pending.last === last
+    || last?.type === 'html_comment' && !hiddenCommentClosed(last.text)
+    || last?.type === 'image' && last.markdown !== undefined && !last.markdown.endsWith('\u200B');
+}
 
 /** What follows an image's alt text, as escapeMarkdownChars reads it, where
  *  the runs after the image aren't known: a link's ], which markdown-it
@@ -5701,7 +5814,9 @@ function parseNoteBody(
   let afterMark: number | undefined;
   const passMark = (target: ContentItem[]) => {
     skippedSelfRef = true;
-    if (target === content && content.every(item => item.type === 'text' && item.text === '')) afterMark = content.length;
+    // A page break before it, which writes no line there, is no text (see
+    // dropUnshownPageBreaks, which moves the boundary back past it)
+    if (target === content && content.every(item => item.type === 'text' && (item.text === '' || PAGE_BREAKS.has(item)))) afterMark = content.length;
   };
 
   // Field-tracking state (only used when context is provided)
@@ -5740,6 +5855,21 @@ function parseNoteBody(
   // not replies or those without a body
   const activeComments = new Set<string>();
   const commentStartTargetIndex = new Map<string, { target: ContentItem[]; index: number }>();
+  // The starts of the ranges that ended, for dropUnshownPageBreaks
+  const endedRanges = new Map<string, EndedRange>();
+  let rangesEnded = 0;
+  // The paragraph being walked, in `target` from `scanned`, and whether
+  // anything before there shows, before which a page or column break shows
+  // no line, and writes no item, as before (see paragraphShowsYet)
+  let walking: { target: ContentItem[] | undefined; scanned: number; shows: boolean } = { target: undefined, scanned: 0, shows: false };
+  /** Whether the paragraph being walked into `target` shows anything yet
+   *  (see showsInParagraph). Its items don't change while it's walked, but
+   *  for hidden text's, which shows nothing */
+  function paragraphShowsYet(target: ContentItem[]): boolean {
+    if (target !== walking.target) return true;
+    for (; !walking.shows && walking.scanned < target.length; walking.scanned++) walking.shows = showsInParagraph(target[walking.scanned]);
+    return walking.shows;
+  }
   const hasRange = (id: string) => !context?.replyIds?.has(id) && (!context?.commentBodies || context.commentBodies.has(id));
 
   function endComment(id: string, target: ContentItem[]): void {
@@ -5749,6 +5879,7 @@ function parseNoteBody(
       // without formatting, which would write code's `` as text
       target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
     }
+    if (startInfo) endedRanges.set(id, endedRange(id, target, startInfo, activeComments, rangesEnded++));
     commentStartTargetIndex.delete(id);
     activeComments.delete(id);
   }
@@ -5989,16 +6120,23 @@ function parseNoteBody(
             }
           }
         } else if (key === 'w:br') {
+          // A page or column break too, as the line break it shows between
+          // text (see dropUnshownPageBreaks). Not in a citation's or
+          // cross-reference's result, which the citation or reference
+          // replaces, as its text
           const brType = getAttr(node, 'type');
-          if (!brType || brType === 'textWrapping') {
-            target.push({
+          if ((!brType || ['textWrapping', 'page', 'column'].includes(brType)) && !noterefInfo && !(inCitationField && context)
+            && !(brType && brType !== 'textWrapping' && (!paragraphShowsYet(target) || readsHiddenText(target)))) {
+            const lineBreak: ContentItem = {
               type: 'text',
               text: '\\\n',
               commentIds: new Set(activeComments),
               formatting: currentFormatting,
               ...(currentRevision ? { revision: currentRevision } : {}),
               ...(currentHref ? { href: currentHref, link: currentLink } : {}),
-            });
+            };
+            if (brType === 'page' || brType === 'column') PAGE_BREAKS.add(lineBreak);
+            target.push(lineBreak);
           }
         } else if (key === 'w:p') {
           const precedingMark = trackedParaMark;
@@ -6045,7 +6183,14 @@ function parseNoteBody(
           }
           const lenBeforeContent = target.length;
           const markBefore = skippedSelfRef;
+          const outerWalking = walking;
+          walking = { target, scanned: lenBeforeContent, shows: false };
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          walking = outerWalking;
+          // Where the text after the note's mark starts, which moves back
+          // with the items after a page break dropped before the mark
+          const dropped = dropUnshownPageBreaks(target, lenBeforeContent, commentStartTargetIndex, endedRanges);
+          if (afterMark !== undefined && target === content) afterMark -= dropped.filter(at => at < afterMark!).length;
           // Whether the paragraph held anything, after which comments that
           // start at its mark go (see startRangesAtMark), though it held only
           // the space or tab after the note's mark, which goes below
@@ -7193,6 +7338,21 @@ export async function extractDocumentContent(
   // body (see commentBodies)
   const activeComments = new Set<string>();
   const commentStartTargetIndex = new Map<string, { target: ContentItem[], index: number }>();
+  // The starts of the ranges that ended, for dropUnshownPageBreaks
+  const endedRanges = new Map<string, EndedRange>();
+  let rangesEnded = 0;
+  // The paragraph being walked, in `target` from `scanned`, and whether
+  // anything before there shows, before which a page or column break shows
+  // no line, and writes no item, as before (see paragraphShowsYet)
+  let walking: { target: ContentItem[] | undefined; scanned: number; shows: boolean } = { target: undefined, scanned: 0, shows: false };
+  /** Whether the paragraph being walked into `target` shows anything yet
+   *  (see showsInParagraph). Its items don't change while it's walked, but
+   *  for hidden text's, which shows nothing */
+  function paragraphShowsYet(target: ContentItem[]): boolean {
+    if (target !== walking.target) return true;
+    for (; !walking.shows && walking.scanned < target.length; walking.scanned++) walking.shows = showsInParagraph(target[walking.scanned]);
+    return walking.shows;
+  }
   const commentBodies = options?.commentBodies;
   const hasRange = (id: string) => !replyIds?.has(id) && (!commentBodies || commentBodies.has(id));
   let inField = false;
@@ -7337,6 +7497,7 @@ export async function extractDocumentContent(
         target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
       }
     }
+    if (startInfo) endedRanges.set(id, endedRange(id, target, startInfo, activeComments, rangesEnded++));
     commentStartTargetIndex.delete(id);
     activeComments.delete(id);
   }
@@ -7570,19 +7731,29 @@ export async function extractDocumentContent(
           walk(walked, runFormatting, target, inTableCell, currentRevision);
           markRawHtmlText(runChildren, target, runStart);
         } else if (key === 'w:br') {
-          // Line break within a run (Shift+Enter in Word).
-          // Only emit for default/textWrapping breaks; skip page/column breaks.
+          // Line break within a run (Shift+Enter in Word), and a page or
+          // column break, as the line break it shows between text (see
+          // dropUnshownPageBreaks)
           const brType = getAttr(node, 'type');
-          if (!brType || brType === 'textWrapping') {
-            if (!inBibliographyField && !inCitationField) {
-              target.push({
+          if (!brType || ['textWrapping', 'page', 'column'].includes(brType)) {
+            // Not in a field's result that writes no text, as a citation's,
+            // which the citation replaces, or a cross-reference's
+            // Nor a page or column break before anything the paragraph shows,
+            // where it shows no line, or in hidden text Word split around
+            // it, which readHiddenText reads on after it (see
+            // readsHiddenText)
+            if (!inBibliographyField && !inCitationField && !inNoterefField
+              && !(brType && brType !== 'textWrapping' && (!paragraphShowsYet(target) || readsHiddenText(target)))) {
+              const lineBreak: ContentItem = {
                 type: 'text',
                 text: '\\\n',
                 commentIds: new Set(activeComments),
                 formatting: currentFormatting,
                 ...(currentRevision ? { revision: currentRevision } : {}),
                 ...(currentHref ? { href: currentHref, link: currentLink } : {}),
-              });
+              };
+              if (brType === 'page' || brType === 'column') PAGE_BREAKS.add(lineBreak);
+              target.push(lineBreak);
             }
           }
         } else if (key === 'w:t' || key === 'w:delText') {
@@ -7847,7 +8018,11 @@ export async function extractDocumentContent(
             }
             target.push(paraItem);
           }
+          const outerWalking = walking;
+          walking = { target, scanned: targetLenBeforePara + (needsPara ? 1 : 0), shows: false };
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          walking = outerWalking;
+          dropUnshownPageBreaks(target, targetLenBeforePara + (needsPara ? 1 : 0), commentStartTargetIndex, endedRanges, isTitle);
           readParagraphLineFeeds(target, targetLenBeforePara + (needsPara ? 1 : 0), !inTableCell && !headingLevel && !isTitle && !isCodeBlock, !!headingLevel || isTitle);
           const hasText = target.length > targetLenBeforePara + (needsPara ? 1 : 0);
           if (hasText && !inTableCell && !isCodeBlock && !inBibliographyField) {
