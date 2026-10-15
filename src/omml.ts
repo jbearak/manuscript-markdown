@@ -662,7 +662,7 @@ function translateRadical(children: XmlNode[]): string {
   if (!degree) {
     return `\\sqrt{${radicand}}`;
   }
-  return `\\sqrt[${degree}]{${radicand}}`;
+  return `\\sqrt[${beforeCloser(degree)}]{${radicand}}`;
 }
 
 
@@ -700,7 +700,7 @@ function translateNary(children: XmlNode[]): string {
   // In braces where it's more than one operand, and kept apart from
   // CriticMarkup there (see apartFromMarkup)
   const body = unbracedToLatex(bodyNodes);
-  return appendLatex(op + limits + sub + sup, !body || isOperand(bodyNodes, body) ? body : '{' + apartFromMarkup(body) + '}');
+  return appendLatex(op + limits + sub + sup, !body || isOperand(bodyNodes, body) ? body : '{' + beforeCloser(apartFromMarkup(body)) + '}');
 }
 
 /**
@@ -868,11 +868,11 @@ function translateDelimiter(children: XmlNode[]): string {
       const innerLatex = unbracedToLatex(eChildren);
       const pmodMatch = /^\\mathrm\{mod\}\s*(.+)$/.exec(innerLatex);
       if (pmodMatch) {
-        return `\\pmod{${apartFromMarkup(pmodMatch[1].trim())}}`;
+        return `\\pmod{${beforeCloser(apartFromMarkup(pmodMatch[1].trim()))}}`;
       }
 
       // Reuse already-computed innerLatex for default path
-      return delimitedLatex(begChr, innerLatex, endChr);
+      return delimitedLatex(begChr, beforeCloser(innerLatex), endChr);
     }
   }
 
@@ -883,7 +883,7 @@ function translateDelimiter(children: XmlNode[]): string {
   // any other, as a comma, or U+2223, which LaTeX has as the relation \mid,
   // or with neither bracket, where \middle can't go, the separator goes
   // between the parts as it is
-  const parts = elements.map(e => unbracedToLatex(e));
+  const parts = elements.map(e => beforeCloser(unbracedToLatex(e)));
   const left = sizedDelimiter(begChr);
   const middle = sizedDelimiter(sepChr);
   const right = sizedDelimiter(endChr);
@@ -1189,15 +1189,9 @@ function translateBorderBox(children: XmlNode[]): string {
  * goes on beside what follows, untrimmed, as a box's content does.
  */
 function translatePreScripts(children: XmlNode[]): string {
-  const sub = closableLatex(scriptToLatex(findChild(children, 'm:sub')));
-  const sup = closableLatex(scriptToLatex(findChild(children, 'm:sup')));
+  const sub = scriptToLatex(findChild(children, 'm:sub'));
+  const sup = scriptToLatex(findChild(children, 'm:sup'));
   return appendLatex('{}_' + scriptArg(sub) + '^' + scriptArg(sup), ommlChildrenToLatex(findChild(children, 'm:e')));
-}
-
-/** `latex` with a line end after it where it ends in a comment, which would
- *  hold the brace that closes its group, and what follows */
-function closableLatex(latex: string): string {
-  return endsInLatexComment(latex) ? latex + '\n' : latex;
 }
 
 /**
@@ -1248,7 +1242,7 @@ function translatePhantom(children: XmlNode[]): string {
   const command = zero('m:zeroWid') ? '\\vphantom' : zero('m:zeroAsc') && zero('m:zeroDesc') ? '\\hphantom' : '\\phantom';
   // Spacing alone, which a part's trim drops, is its commands, as \qquad
   const content = ommlToLatex(findChild(children, 'm:e')) || spaceCommands(ommlChildrenToLatex(findChild(children, 'm:e')));
-  return command + '{' + closableLatex(content) + '}';
+  return command + '{' + content + '}';
 }
 
 
@@ -1425,7 +1419,8 @@ let displayEquation = false;
  *
  * A part of a structure is kept apart from CriticMarkup (see
  * apartFromMarkup), as most go in braces; an equation goes in $ and needs
- * nothing, and nor does a part beside no brace (see unbracedToLatex).
+ * nothing, and nor does a part beside no brace (see unbracedToLatex). Its
+ * comment at its end keeps its line end (see beforeCloser).
  *
  * @param children - The child nodes of an m:oMath or m:oMathPara element
  * @param display - Whether the equation is display math, as in an
@@ -1439,7 +1434,7 @@ export function ommlToLatex(children: XmlNode[], display = false): string {
   partDepth++;
   try {
     const latex = trimPart(ommlChildrenToLatex(children));
-    return partDepth > 1 ? apartFromMarkup(latex) : latex;
+    return partDepth > 1 ? beforeCloser(apartFromMarkup(latex)) : latex;
   } finally {
     partDepth--;
     displayEquation = outerDisplay;
@@ -1570,6 +1565,14 @@ function spaceCommands(spaces: string): string {
     }
   }
   return commands;
+}
+
+/** `latex`, a part of an equation that a closing brace, bracket or
+ *  delimiter follows, with a line end after a comment at its end, which
+ *  would otherwise hold the closer and what follows it, as x^{a% c}y does.
+ *  A part's trim drops the line end Word keeps in the comment's run. */
+function beforeCloser(latex: string): string {
+  return endsInLatexComment(latex) ? latex + '\n' : latex;
 }
 
 /** Whether the last line of `latex` ends in a comment: has a % after no

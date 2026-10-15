@@ -1758,17 +1758,18 @@ describe('Word\'s cancel and linear fractions', () => {
   });
 
   // A script after a comment's line end takes the {b} alone too, with the
-  // comment, as on main. Import then writes the comment in the script's
-  // base, {b%}, whose brace the comment holds, a bug on main
+  // comment, which import writes in the script's base, before its line end
   test.each([
-    ['{a}/{b}%\n^2', 'a/{b%\n}^2', 'a/{b%}^2'],
-    ['{a}/{b}% note\n^2', 'a/{b% note\n}^2', 'a/{b% note}^2'],
-    ['{a}/{b} % note\n_i', 'a/{b % note\n}_i', 'a/{b % note}_i'],
-  ])('%j exports with its script on the {b}, as on main', async (latex, same, back) => {
+    ['{a}/{b}%\n^2', 'a/{b%\n}^2'],
+    ['{a}/{b}% note\n^2', 'a/{b% note\n}^2'],
+    ['{a}/{b} % note\n_i', 'a/{b % note\n}_i'],
+  ])('%j exports with its script on the {b}, and comes back, and again', async (latex, back) => {
     const omml = latexToOmml(latex);
     expect(omml).not.toContain('<m:type m:val="lin"/>');
-    expect(omml).toBe(latexToOmml(same));
-    expect((await convertDocx((await convertMdToDocx('$$\n' + latex + '\n$$\n')).docx)).markdown).toBe('$$\n' + back + '\n$$\n');
+    expect(omml).toBe(latexToOmml(back));
+    const markdown = (await convertDocx((await convertMdToDocx('$$\n' + latex + '\n$$\n')).docx)).markdown;
+    expect(markdown).toBe('$$\n' + back + '\n$$\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
   /** A document from Word with an inline equation of `omml` */
@@ -1794,5 +1795,50 @@ describe('Word\'s cancel and linear fractions', () => {
     const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
     expect(/<m:oMath>([\s\S]*?)<\/m:oMath>/.exec(xml)![1]).toBe(exported);
     expect((await convertDocx(docx)).markdown).toBe(markdown);
+  });
+});
+
+// A comment at the end of a braced part of an equation lost its line end on
+// import, so the brace that closes the part, and what follows, went into the
+// comment, which the next export hid
+describe('a comment at the end of a braced part', () => {
+  // Each with C where the comment goes, before its line end, and how
+  // import writes it, where that differs
+  const parts: [string, string, string?][] = [
+    ['a superscript', 'x^{aC\n}y'],
+    ['a subscript', 'x_{aC\n}y'],
+    ['both scripts', 'x_{aC\n}^{bC\n}y'],
+    ['a fraction', '\\frac{aC\n}{bC\n}y'],
+    ['a linear fraction', '{aC\n}/{bC\n}y'],
+    ['a binomial', '\\binom{aC\n}{bC\n}y'],
+    ['a root', '\\sqrt{xC\n}y'],
+    ['a root\'s degree', '\\sqrt[nC\n]{x}y'],
+    ['an accent', '\\hat{xC\n}y'],
+    ['an overline', '\\overline{xC\n}y'],
+    ['an underline', '\\underline{xC\n}y'],
+    ['a box', '\\boxed{xC\n}y'],
+    ['a cancel', '\\cancel{xC\n}y'],
+    ['an overbrace', '\\overbrace{xC\n}y'],
+    ['an underbrace and its label', '\\underbrace{xC\n}_{aC\n}y'],
+    ['\\overset', '\\overset{aC\n}{bC\n}y'],
+    ['\\underset', '\\underset{aC\n}{bC\n}y'],
+    ['a function\'s argument', '\\sin{xC\n}y'],
+    ['an operator name\'s argument', '\\operatorname{f}{xC\n}y'],
+    ['an n-ary operator\'s limits and body', '\\sum_{iC\n}^{nC\n}{a bC\n}y'],
+    ['a delimiter', '\\left\\langle{}xC\n\\right\\rangle y'],
+    ['parentheses', '\\left(xC\n\\right)y', '(xC\n)y'],
+    ['a delimiter\'s parts', '\\left(xC\n\\middle|yC\n\\right)z'],
+    ['a phantom', '\\phantom{xC\n}y'],
+    ['scripts on an empty base', '{}_{aC\n}^{bC\n}Xy'],
+  ];
+  const inline = (latex: string) => 'A $' + latex + '$ B.\n';
+  const display = (latex: string) => '$$\n' + latex + '\n$$\n';
+  const rows = parts.flatMap(([name, latex, back = latex]) => [['%', ''], ['% note', ' note']].flatMap(([comment, label]) =>
+    ([['inline', inline], ['in display math', display]] as const).map(([where, math]) =>
+      [name + ', with %' + label + ', ' + where, math(latex.replace(/C/g, comment)), math(back.replace(/C/g, comment))])));
+  test.each(rows)('in %s comes back, and again', async (_name, markdown, back) => {
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(back);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
   });
 });
