@@ -2678,7 +2678,8 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
     };
 
     let foundDisplayMath = false;
-    for (const run of token.runs) {
+    for (let r = 0; r < token.runs.length; r++) {
+      const run = token.runs[r];
       const segments = splitCriticRunAtDisplayMath(run);
       if (!segments) {
         currentRuns.push(run);
@@ -2693,6 +2694,13 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
         } else {
           currentRuns.push(segment.run);
         }
+      }
+      // A highlight's comment, and the replies after it, in the paragraph
+      // of the equation the highlight ends with, so its range goes around
+      // the equation, as Word puts one. In a paragraph of its own, its range
+      // held nothing, and import wrote it after the equation, unattached
+      if (run.type === 'critic_highlight' && segments[segments.length - 1].displayMath) {
+        while (token.runs[r + 1]?.type === 'critic_comment') splitRuns[splitRuns.length - 1].push(token.runs[++r]);
       }
     }
     flushCurrent();
@@ -8082,6 +8090,14 @@ function noteRelsXml(
 }
 
 /** The w:highlight property for a highlighted run, or nothing. */
+/** An equation's OMML with `highlight`, a w:highlight, in each of its runs'
+ *  properties, where Word holds a highlight on an equation, which import
+ *  reads on display math (see displayMathHighlight in converter.ts) */
+function mathWithHighlight(omml: string, highlight: string): string {
+  return omml.replace(/<m:r>((?:<m:rPr>(?:(?!<\/m:rPr>)[\s\S])*<\/m:rPr>)?)(?:<w:rPr>((?:(?!<\/w:rPr>)[\s\S])*)<\/w:rPr>)?/g,
+    (_run, mathProps: string, props: string | undefined) => '<m:r>' + mathProps + '<w:rPr>' + orderRPr((props ?? '') + highlight) + '</w:rPr>');
+}
+
 function highlightRPr(run: MdRun): string {
   return run.highlight ? '<w:highlight w:val="' + (COLOR_TO_OOXML[run.highlightColor || 'yellow'] || 'yellow') + '"/>' : '';
 }
@@ -8208,6 +8224,12 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       // In the link around it, as text is
       const href = run.href || outer.href || forced.href;
       formatted.push(href ? { ...run, href } : run);
+      continue;
+    }
+    if (run.type === 'math' && run.display && (outer.highlight || forced.highlight)) {
+      // Display math takes a highlight around it, which Word holds in the
+      // equation's runs (see mathWithHighlight), as a citation does
+      formatted.push({ ...run, highlight: true, highlightColor: run.highlightColor || outer.highlightColor || forced.highlightColor });
       continue;
     }
     if (run.type === 'math' || isCommentMarkerRun(run)) {
@@ -8811,9 +8833,10 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         }
       }
     } else if (run.type === 'math') {
-      xml += run.mathParts
+      const math = run.mathParts
         ? generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display)
         : generateMathXml(run.text, !!run.display, state.warnings);
+      xml += run.display && run.highlight ? mathWithHighlight(math, highlightRPr(run)) : math;
     } else if ((run.type === 'comment_range_start' || run.type === 'comment_range_end') && run.innerRangeMarker) {
       continue;
     } else if (run.type === 'comment_range_start') {

@@ -1600,7 +1600,7 @@ export type ContentItem =
     }
   // inParagraph: display math in a w:p, which goes on in its text, not a
   // body's m:oMathPara of its own
-  | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean }
+  | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean; highlight?: string }
   // href and link: as text's, of a w:hyperlink around the reference
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting; href?: string; link?: number }
   // otherLineEnds: its hidden runs held a line end that isn't a line break
@@ -2822,6 +2822,29 @@ function withCharactersAsText(runChildren: XmlNode[]): XmlNode[] {
       return character !== undefined ? { 'w:t': [{ '#text': character }] } : child;
     })
     : runChildren;
+}
+
+/** The highlight's color, by its Markdown name, as a run's (see
+ *  markdownHighlightColor), where every run of an equation, `oMath`, that
+ *  has text has one, of one color, as Word holds a highlight on an
+ *  equation, and export writes one on display math in {==...==} */
+function displayMathHighlight(oMath: XmlNode): { highlight?: string } {
+  const colors = new Set<string>();
+  const visit = (nodes: XmlNode[]): void => {
+    for (const node of nodes) for (const key of Object.keys(node)) {
+      if (key === ':@' || key === '#text') continue;
+      const children = asXmlNodes(node[key]);
+      if (key !== 'm:r') visit(children);
+      else if (children.some(child => child['m:t'] !== undefined)) {
+        const rPr = children.find(child => child['w:rPr'] !== undefined);
+        const highlight = rPr && asXmlNodes(rPr['w:rPr']).find(child => child['w:highlight'] !== undefined);
+        colors.add(highlight ? getAttr(highlight, 'val') : 'none');
+      }
+    }
+  };
+  visit(asXmlNodes(oMath['m:oMath']));
+  const [color] = colors;
+  return colors.size === 1 && color !== 'none' && color !== '' ? { highlight: resolveMarkdownColor(color) ?? 'yellow' } : {};
 }
 
 function getAttr(node: XmlNode | undefined, attr: string): string {
@@ -5938,7 +5961,7 @@ function parseNoteBody(
             try {
               const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
               if (latex) {
-                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
+                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...displayMathHighlight(oMathNode) });
               }
             } catch {
               target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
@@ -7974,7 +7997,7 @@ export async function extractDocumentContent(
             try {
               const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
               if (latex) {
-                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
+                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...displayMathHighlight(oMathNode) });
               }
             } catch {
               target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
@@ -8058,10 +8081,49 @@ function displayMathBlock(latex: string, inSpan = false): string {
   return MATH_FENCE + '\n' + (inSpan ? lines : keepLinesInEquation(lines)) + '\n' + MATH_FENCE;
 }
 
+/** `block`'s lines, each after `prefix`, its container's, as a list's
+ *  indent or a quote's >, the first after `first`; but a line in a
+ *  CriticMarkup span after the quote's > alone. Export keeps the indent of
+ *  a span's lines in its payload (see criticPayloadRanges), where a list's
+ *  would go into the equation, and in \text{} into its text, more on each
+ *  trip, but takes a quote's off (see stripQuoteContinuationPrefixes). */
+function linesInContainer(block: string, prefix: string, first = prefix): string {
+  const spans = criticPayloadRanges(block).sort(([a], [b]) => a - b);
+  const quote = /^.*>[ ]?/.exec(prefix)?.[0] ?? '';
+  // A line starts in a span where the furthest any span that starts before
+  // it reaches is the line's start or past it, in one pass over the spans
+  let at = 0, next = 0, reach = -Infinity;
+  return block.split('\n').map((line, k) => {
+    for (; next < spans.length && spans[next][0] < at; next++) reach = Math.max(reach, spans[next][1]);
+    const inSpan = k > 0 && at <= reach;
+    at += line.length + 1;
+    return (k === 0 ? first : inSpan ? quote : prefix) + line;
+  }).join('\n');
+}
+
+/** Whether `next`, after display math `item`, is display math in its
+ *  paragraph too */
+function equationFollows(item: ContentItem & { type: 'math' }, next: ContentItem | undefined): boolean {
+  return !!item.inParagraph && next?.type === 'math' && next.display && !!next.inParagraph;
+}
+
+/** Whether `next`, after display math, goes on in its paragraph, as text */
+function goesOnFromEquation(next: ContentItem | undefined): boolean {
+  return next !== undefined && (next.type === 'text' || next.type === 'citation'
+    || next.type === 'footnote_ref' || next.type === 'image' || (next.type === 'math' && !next.display));
+}
+
 /** Display math of `latex`, in a span of `rev` where it has one (see
  *  wrapWithRevision), its lines as written there (see displayMathBlock) */
-function revisedDisplayMathBlock(latex: string, rev?: RevisionInfo): string {
+function revisedDisplayMathBlock(latex: string, rev?: RevisionInfo, highlight?: string): string {
   const block = displayMathBlock(latex, true);
+  // A highlight, in a span whose lines export reads as one, as a revision's,
+  // and a color but the default after it, as {==...=={red}==}; but not with
+  // a revision, or around a span of the equation's own or a ==} that would
+  // end it, or of a color around an == that would end its ==...==
+  if (highlight && !rev && !block.includes('==}') && (highlight === 'yellow' || !block.includes('==')) && criticPayloadRanges(block).length === 0) {
+    return '{==' + (highlight === 'yellow' ? block : '==' + block + '=={' + highlight + '}') + '==}';
+  }
   const revised = wrapWithRevision(block, rev);
   return revised !== block ? revised : displayMathBlock(latex);
 }
@@ -14892,12 +14954,18 @@ function buildMarkdownOnce(
    *  it, which open before its fences, unless open from the text before,
    *  and close after them, unless the range goes on; and the bodies of
    *  those that close. */
-  function displayMathWithComments(block: string, item: ContentItem): { block: string; bodies: string[] } {
-    const over = [...('commentIds' in item ? item.commentIds ?? [] : [])];
+  function displayMathWithComments(item: ContentItem & { type: 'math' }, alone: boolean): { block: string; bodies: string[] } {
+    const over = [...(item.commentIds ?? [])];
     const open = renderOpts.openIdComments;
     // Those open from the text before in the order they opened, which those
     // that end together end in (see enterComments in renderInlineRangeWithIds)
     const ids = [...open].filter(id => over.includes(id)).concat(over.filter(id => !open.has(id)).sort());
+    // A highlight where no comment is over it, as export would put a
+    // comment's markers around a highlight in paragraphs of their own, and
+    // reads {==...==}{>>...<<} as a comment alone; and on an equation
+    // `alone` in its paragraph, as {==...==} would end one in a paragraph's
+    // text there
+    const block = revisedDisplayMathBlock(item.latex, item.revision, ids.length === 0 && alone ? item.highlight : undefined);
     const remap = (id: string) => commentIdRemap.get(id) ?? id;
     let before = '';
     let after = '';
@@ -16090,19 +16158,20 @@ function buildMarkdownOnce(
         // Ensure blank line before display math
         output.push('\n\n');
       }
-      const commented = displayMathWithComments(revisedDisplayMathBlock(item.latex, item.revision), item);
       // Text after the equation in its paragraph goes on from the closing
       // fence, so a body there would come before it
-      const next = mergedContent[i + 1];
-      const textFollows = next !== undefined && (next.type === 'text' || next.type === 'citation'
-        || next.type === 'footnote_ref' || next.type === 'image' || (next.type === 'math' && !next.display));
+      const textFollows = goesOnFromEquation(mergedContent[i + 1]);
+      // An equation right after it in its paragraph goes on in it too
+      const equationNext = equationFollows(item, mergedContent[i + 1]);
+      // Alone in its paragraph where nothing comes before or after it there
+      const commented = displayMathWithComments(item, !continued && !textFollows && !equationNext);
       if (textFollows) pushAll(pendingEquationBodies, commented.bodies);
       const revisedMathBlock = [commented.block, ...(textFollows ? [] : commented.bodies)].join('\n');
       if (displayMathContainer) {
-        output.push(revisedMathBlock.split('\n').map(line => displayMathContainer.prefix + line).join('\n'));
+        output.push(linesInContainer(revisedMathBlock, displayMathContainer.prefix));
         pendingDisplayMathContainer = undefined;
       } else if (continued) {
-        output.push(revisedMathBlock.split('\n').map((line, k) => (k === 0 ? '' : continued.prefix) + line).join('\n'));
+        output.push(linesInContainer(revisedMathBlock, continued.prefix, ''));
       } else {
         output.push(revisedMathBlock);
         // A top-level display math block breaks list flow. An indented list
@@ -16116,9 +16185,7 @@ function buildMarkdownOnce(
         lastBlockquoteAlertType = undefined;
         lastBlockquoteLevel = undefined;
       }
-      // An equation right after it in its paragraph goes on in it too
-      const following = mergedContent[i + 1];
-      if (item.inParagraph && following?.type === 'math' && following.display && following.inParagraph) {
+      if (equationNext) {
         mathInParagraph = continued
           ? { ...continued, sameLine: false }
           : { prefix: currentPara ? paragraphLinePrefix(currentPara) : '', sameLine: false, quoted: !!currentPara?.blockquoteLevel };
@@ -16743,7 +16810,9 @@ function buildMarkdownOnce(
             pushInline(inlinePart(part.text, !!item.inParagraph));
             pushAll(paragraphBodies, part.deferredComments);
           }
-          const commented = displayMathWithComments(revisedDisplayMathBlock(item.latex, item.revision), item);
+          // Alone in its paragraph where nothing comes before or after it
+          // there, another equation included
+          const commented = displayMathWithComments(item, !(item.inParagraph && (paragraphPart !== undefined || goesOnFromEquation(bodyMerged[bi + 1]) || equationFollows(item, bodyMerged[bi + 1]))));
           if (item.inParagraph && paragraphPart !== undefined) {
             // In place of the space export wrote for the line's end, or after
             // the line end of a line break that ends the text
