@@ -8137,7 +8137,7 @@ function noteRelsXml(
 /** The w:highlight property for a highlighted run, or nothing. */
 /** An equation's OMML with `highlight`, a w:highlight, in each of its runs'
  *  properties, where Word holds a highlight on an equation, which import
- *  reads on display math (see displayMathHighlight in converter.ts) */
+ *  reads (see mathHighlight in converter.ts) */
 function mathWithHighlight(omml: string, highlight: string): string {
   return omml.replace(/<m:r>((?:<m:rPr>(?:(?!<\/m:rPr>)[\s\S])*<\/m:rPr>)?)(?:<w:rPr>((?:(?!<\/w:rPr>)[\s\S])*)<\/w:rPr>)?/g,
     (_run, mathProps: string, props: string | undefined) => '<m:r>' + mathProps + '<w:rPr>' + orderRPr((props ?? '') + highlight) + '</w:rPr>');
@@ -8271,9 +8271,11 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       formatted.push(href ? { ...run, href } : run);
       continue;
     }
-    if (run.type === 'math' && run.display && (outer.highlight || forced.highlight)) {
-      // Display math takes a highlight around it, which Word holds in the
-      // equation's runs (see mathWithHighlight), as a citation does
+    if (run.type === 'math' && (run.display || !run.mathParts) && (outer.highlight || forced.highlight)) {
+      // Math takes a highlight around it, which Word holds in the
+      // equation's runs (see mathWithHighlight), as a citation does; but not
+      // an inline equation with a tracked change in it, as before (see
+      // generateRuns)
       formatted.push({ ...run, highlight: true, highlightColor: run.highlightColor || outer.highlightColor || forced.highlightColor });
       continue;
     }
@@ -8881,7 +8883,9 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const math = run.mathParts
         ? generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display)
         : generateMathXml(run.text, !!run.display, state.warnings);
-      xml += run.display && run.highlight ? mathWithHighlight(math, highlightRPr(run)) : math;
+      // Not inline math with a tracked change in it, or in one, whose
+      // highlight import doesn't read (see mathHighlight in converter.ts)
+      xml += (run.display || (!run.mathParts && !state.noteRevision)) && run.highlight ? mathWithHighlight(math, highlightRPr(run)) : math;
     } else if ((run.type === 'comment_range_start' || run.type === 'comment_range_end') && run.innerRangeMarker) {
       continue;
     } else if (run.type === 'comment_range_start') {
