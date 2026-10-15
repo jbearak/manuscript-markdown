@@ -6,7 +6,7 @@
 // Markdown each line it writes comes from, so that the scan can say where a
 // block it finds is.
 
-import { computeMarkdownRegions, isInsideCodeRegion, type MarkdownRegions } from './code-regions';
+import { computeMarkdownRegions, isInsideCodeRegion, keepsLazyLine, type MarkdownRegions } from './code-regions';
 import { preprocessGridTablesWithSourceMap } from './grid-table-preprocess';
 import { wrapBareLatexEnvironmentsWithLines } from './latex-env-preprocess';
 
@@ -37,7 +37,9 @@ const LAZY_LINE_RE = /^ {0,3}>[^\n]*\n(?! {0,3}>)[^\S\n]*\S/m;
  * Preserve explicit source semantics for blockquotes by disabling
  * markdown-it lazy continuation behavior (where a non-`>` line can be
  * absorbed into a preceding blockquote paragraph). For roundtrip fidelity
- * we treat a missing `>` as a hard blockquote boundary.
+ * we treat a missing `>` as a hard blockquote boundary, but after a quote's
+ * line that ends in a line break, where the line goes on after the break,
+ * which Word shows in the quote too (see keepsLazyLine).
  *
  * Invariant: de-lazification must not inject blank lines inside a code
  * block or an HTML block, or the block's text changes, and a blank line
@@ -67,6 +69,8 @@ function deLazifyBlockquotesWithLines(markdown: string): { output: string; lines
   // A line of the Markdown, or a blank line inserted before it, as from it
   const push = (line: string, from: number) => { out.push(line); sourceLines.push(from); };
   let inBlockquoteRun = false;
+  // Whether the line before is a lazy line kept on the quote's paragraph
+  let kept = false;
   let lineStart = 0;
 
   for (const [index, line] of lines.entries()) {
@@ -79,6 +83,8 @@ function deLazifyBlockquotesWithLines(markdown: string): { output: string; lines
       inside = isInsideCodeRegion(lineStart, written.codeRegions) || isInsideCodeRegion(lineStart, written.htmlRegions);
     }
     lineStart += line.length + 1;
+    const after = kept;
+    kept = false;
     if (inside) {
       // Nor is a line after one lazy, as it holds no paragraph a quote's
       // line could go on
@@ -102,6 +108,14 @@ function deLazifyBlockquotesWithLines(markdown: string): { output: string; lines
     }
 
     if (inBlockquoteRun) {
+      // But for one after a line break, which markdown-it and the preview
+      // read in the quote's paragraph, after it, which Word shows there too
+      // (see keepsLazyLine)
+      if (keepsLazyLine(lines, index, after)) {
+        kept = true;
+        push(line, index);
+        continue;
+      }
       // Insert a blank line to end the previous blockquote before this
       // non-blank, non-`>` line.
       push('', index);

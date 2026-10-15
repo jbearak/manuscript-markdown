@@ -99,6 +99,62 @@ exportBlockParser.block.ruler.at('blockquote', (state, startLine, endLine, silen
 /** A line that starts as a quote's does, at the top level or in a list item
  *  one level in, as deLazifyBlockquotesWithLines reads one */
 const QUOTE_LINE_RE = /^ {0,3}>/;
+/** A quote's markers at a line's start, as its quote levels' */
+const QUOTE_MARKERS_RE = /^(?: {0,3}> ?)+/;
+/** A line of plain text, which starts no block, as a list item, a heading,
+ *  a fence, a thematic break or HTML, nor a table's row, display math, a
+ *  CriticMarkup span or a definition, as a lazy line export keeps in a
+ *  quote must (see keepsLazyLine) */
+const PLAIN_LINE_RE = /^ {0,3}(?![-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|[#>`~<|{[$\\:=_!*-])\S/;
+/** Whether `text` ends in a line break: a \ that isn't escaped, an odd
+ *  number of them, or two spaces or more after text, but not after a \
+ *  that escapes the first */
+function endsInLineBreak(text: string): boolean {
+	let end = text.length;
+	while (end > 0 && text[end - 1] === ' ') end--;
+	const spaces = text.length - end;
+	let slashes = 0;
+	while (slashes < end && text[end - 1 - slashes] === '\\') slashes++;
+	if (spaces === 0) return slashes % 2 === 1;
+	return spaces >= 2 && end > 0 && /\S/.test(text[end - 1]) && slashes % 2 === 0;
+}
+
+/** What may open HTML, a code span, an equation or a link that goes on
+ *  past a line's end, where spaces at its end are its text, not a line
+ *  break, or split a table's row into cells, where a \ at its end is a
+ *  cell's text */
+const NO_LINE_BREAK_RE = /[<`$[\]|]/;
+
+/** Whether export keeps line `at` of `lines` on a quote's paragraph, where
+ *  markdown-it reads it lazily, and export would end the quote before it
+ *  (see deLazifyBlockquotesWithLines in block-preprocess.ts): a line of
+ *  plain text after a quote's line of plain text that ends in a line break,
+ *  as markdown-it reads it, or after a line export keeps so, `kept`. Only
+ *  where a blank line or the end follows the lines of plain text in a row
+ *  from it: any other line may go on the paragraph, or underline it as a
+ *  setext heading's text, which a lazy line can't be. Not where a line of
+ *  the quote's paragraph or of those may open HTML, a code span, an
+ *  equation or a link, which may go on past a line's end, or holds a |, as
+ *  a table's row does, so that the spaces or \ are no line break */
+export function keepsLazyLine(lines: readonly string[], at: number, kept: boolean): boolean {
+	if (!PLAIN_LINE_RE.test(lines[at])) return false;
+	if (kept) return true;
+	if (at === 0 || !QUOTE_LINE_RE.test(lines[at - 1])) return false;
+	const text = lines[at - 1].replace(QUOTE_MARKERS_RE, '');
+	if (!PLAIN_LINE_RE.test(text) || !endsInLineBreak(text)) return false;
+	// Nor where the quote's paragraph, from its first line, may hold one
+	for (let start = at - 1; start >= 0 && QUOTE_LINE_RE.test(lines[start]); start--) {
+		const own = lines[start].replace(QUOTE_MARKERS_RE, '');
+		if (own.trim() === '') break;
+		if (NO_LINE_BREAK_RE.test(own)) return false;
+	}
+	let end = at;
+	for (; end < lines.length && PLAIN_LINE_RE.test(lines[end]); end++) {
+		if (NO_LINE_BREAK_RE.test(lines[end])) return false;
+	}
+	return end === lines.length || lines[end].trim() === '';
+}
+
 const HTML_COMMENT_ONLY_RE = /^<!--[\s\S]*?-->\s*$/;
 const OPEN_CLOSE_TAG_AT = new RegExp(HTML_OPEN_CLOSE_TAG_RE.source.replace(/^\^/, ''), 'y');
 
@@ -232,11 +288,18 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	const normalizedBlockText = normalizeNewlines(text);
 	const env: { quoteEnds?: number[] } = {};
 	if (exportQuotes && normalizedBlockText.includes('>')) {
-		// Each line with text after a quote's line that doesn't start as one
+		// Each line with text after a quote's line, or a line export keeps on
+		// its paragraph, that doesn't start as one, but one export keeps on it
+		// (see keepsLazyLine)
 		const lines = normalizedBlockText.split('\n');
 		env.quoteEnds = [];
+		let kept = false;
 		for (let line = 1; line < lines.length; line++) {
-			if (QUOTE_LINE_RE.test(lines[line - 1]) && !QUOTE_LINE_RE.test(lines[line]) && lines[line].trim() !== '') env.quoteEnds.push(line);
+			const after = kept;
+			kept = false;
+			if (!(QUOTE_LINE_RE.test(lines[line - 1]) || after) || QUOTE_LINE_RE.test(lines[line]) || lines[line].trim() === '') continue;
+			if (keepsLazyLine(lines, line, after)) kept = true;
+			else env.quoteEnds.push(line);
 		}
 	}
 	parser.block.parse(normalizedBlockText, parser, env, blockTokens);
