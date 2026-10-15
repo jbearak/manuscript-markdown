@@ -81,10 +81,13 @@ An empty script or base, as in `x^{}` or `{}^{14}C`, is an empty part in Word, w
 \dfrac{a}{b}       % display-style fraction (all become \frac on re-import)
 \tfrac{a}{b}       % text-style fraction (all become \frac on re-import)
 \cfrac{a}{b}       % continued fraction (all become \frac on re-import)
+{a}/{b}            % linear fraction: a/b on one line
 \sqrt{x}           % square root
 \sqrt[3]{x}        % cube root
 \sqrt[n]{x}        % nth root
 ```
+
+`{a}/{b}` is Word's linear fraction where nothing stands between the braces and the `/`, and no script follows the `{b}`, which would take it alone. Word's skewed fraction comes back as a linear one.
 
 ## Greek Letters
 
@@ -258,7 +261,13 @@ Each takes plain letters or symbols. Scripts go outside: `\boldsymbol{\beta}_c`.
 \check{x}   % caron: x̌
 \widehat{x}   % same as \hat in Word; re-imports as \hat
 \widetilde{x} % same as \tilde in Word; re-imports as \tilde
+\cancel{x}    % struck from bottom left to top right
+\bcancel{x}   % struck from top left to bottom right
+\xcancel{x}   % struck both ways
+\sout{x}      % struck across
 ```
+
+Each strike is Word's border box with its sides hidden and that strike, and comes back as written. Any other border box from Word, as one with only some sides hidden, comes back as `\boxed{}`.
 
 ## Delimiters
 

@@ -527,7 +527,9 @@ function textModeLatex(text: string): string {
 
 /**
  * Translate an m:f (fraction) element to LaTeX.
- * Extracts m:num and m:den children, emits \frac{numerator}{denominator}.
+ * Extracts m:num and m:den children, emits \frac{numerator}{denominator},
+ * or {numerator}/{denominator} for Word's linear or skewed fraction, which
+ * export writes back as a linear one.
  * Falls back to placeholder if both are missing. An empty one, as Word keeps
  * for \frac{}{}, is {}.
  */
@@ -539,6 +541,8 @@ function translateFraction(children: XmlNode[]): string {
   }
   const numerator = ommlToLatex(num);
   const denominator = ommlToLatex(den);
+  const type = getOmmlAttr(findChildNode(findChild(children, 'm:fPr'), 'm:type'), 'val');
+  if (type === 'lin' || type === 'skw') return '{' + numerator + '}/{' + denominator + '}';
   return `\\frac{${numerator}}{${denominator}}`;
 }
 
@@ -722,6 +726,8 @@ function isOperand(nodes: XmlNode[], latex: string): boolean {
   const [piece] = pieces;
   if (piece['m:r'] !== undefined || piece['m:t'] !== undefined) return /^(?:[^\\{}]|\\[A-Za-z]+(?:\{[^{}]*\})?|\\[^A-Za-z])$/.test(latex);
   if (piece['m:d'] !== undefined) return latex.startsWith('\\');
+  // A linear fraction, {a}/{b}, is three pieces to export
+  if (piece['m:f'] !== undefined) return latex.startsWith('\\');
   // Export takes an insertion or deletion as the body where it would take its
   // content, which is the LaTeX in its markup. Translating the content again
   // would take time exponential in the depth of changes in n-ary bodies.
@@ -1142,13 +1148,25 @@ function isMathRun(node: XmlNode): boolean {
 }
 
 
+/** Word's cancels: a border box's strikes, with its sides hidden, and the
+ *  LaTeX command for each */
+const CANCELS: Map<string, string> = new Map([
+  ['m:strikeBLTR', '\\cancel'], ['m:strikeTLBR', '\\bcancel'],
+  ['m:strikeBLTR m:strikeTLBR', '\\xcancel'], ['m:strikeH', '\\sout'],
+]);
+
 /**
  * Translate an m:borderBox element to LaTeX.
- * Emits \boxed{content}.
+ * Emits \boxed{content}, or Word's cancel, its sides hidden and struck
+ * through (see CANCELS), as \cancel{content} and the like.
  */
 function translateBorderBox(children: XmlNode[]): string {
   const content = ommlToLatex(findChild(children, 'm:e'));
-  return `\\boxed{${content}}`;
+  const pr = findChild(children, 'm:borderBoxPr');
+  const on = (tag: string) => ommlOn(findChildNode(pr, tag));
+  const hidden = ['m:hideTop', 'm:hideBot', 'm:hideLeft', 'm:hideRight'].every(on);
+  const cancel = hidden ? CANCELS.get(['m:strikeH', 'm:strikeV', 'm:strikeBLTR', 'm:strikeTLBR'].filter(on).join(' ')) : undefined;
+  return (cancel ?? '\\boxed') + '{' + content + '}';
 }
 
 

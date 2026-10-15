@@ -717,6 +717,19 @@ class Parser {
         return '<m:bar><m:barPr><m:pos m:val="bot"/></m:barPr><m:e>' + ulContent + '</m:e></m:bar>';
       }
 
+      // Word's cancel: a border box with its sides hidden, struck through
+      // from bottom left to top right, the other way, both, or across
+      case '\\cancel':
+      case '\\bcancel':
+      case '\\xcancel':
+      case '\\sout': {
+        const strike = cmd === '\\cancel' ? '<m:strikeBLTR m:val="1"/>' : cmd === '\\bcancel' ? '<m:strikeTLBR m:val="1"/>'
+          : cmd === '\\xcancel' ? '<m:strikeBLTR m:val="1"/><m:strikeTLBR m:val="1"/>' : '<m:strikeH m:val="1"/>';
+        const cancelContent = this.parseGroup();
+        return '<m:borderBox><m:borderBoxPr><m:hideTop m:val="1"/><m:hideBot m:val="1"/><m:hideLeft m:val="1"/><m:hideRight m:val="1"/>' +
+          strike + '</m:borderBoxPr><m:e>' + cancelContent + '</m:e></m:borderBox>';
+      }
+
       // \overbrace{} and \underbrace{}
       // A directly following script (^ for overbrace, _ for underbrace) is the
       // brace label: emit m:limUpp/m:limLow so Word renders it above/below the
@@ -1047,7 +1060,19 @@ class Parser {
       } else if (token.type === 'lbrace') {
         // Parse {…} as a single atom so scripts (^ / _) bind to the group
         // content, not to an empty atom from the closing brace.
-        atoms.push(this.parseGroup());
+        // {a}/{b} is Word's linear fraction, as import writes it, in math,
+        // but where a script follows, which takes the {b} alone. In text or
+        // a style's group, as \mathrm{{m}/{s}}, it's the characters
+        const group = this.parseGroup();
+        const slash = this.peek();
+        if (this.mode === 'math' && slash?.type === 'text' && slash.value === '/' && this.tokens[this.pos + 1]?.type === 'lbrace') {
+          this.consume(); // consume '/'
+          const den = this.parseGroup();
+          if (this.scriptFollows()) atoms.push(group, makeRun('/'), den);
+          else atoms.push('<m:f><m:fPr><m:type m:val="lin"/></m:fPr><m:num>' + group + '</m:num><m:den>' + den + '</m:den></m:f>');
+        } else {
+          atoms.push(group);
+        }
       } else {
         const consumed = this.consume()!;
         if (consumed.type === 'text') {
@@ -1074,6 +1099,15 @@ class Parser {
       }
     }
     return atoms;
+  }
+
+  /** Whether a script operator comes next, after any whitespace, which TeX
+   *  ignores before one, and comments, which go on the atom before it */
+  private scriptFollows(): boolean {
+    let next = this.pos;
+    for (let token = this.tokens[next]; token && (token.type === 'comment' || token.type === 'line_continuation'
+      || (token.type === 'text' && token.value.trim() === '')); token = this.tokens[++next]);
+    return this.tokens[next]?.type === 'caret' || this.tokens[next]?.type === 'underscore';
   }
 
   private parseUntilRight(): string {
