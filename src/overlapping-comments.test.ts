@@ -809,6 +809,68 @@ describe('Overlapping comments: where the bodies go', () => {
   });
 });
 
+describe('Overlapping comments: a range in a note, its body in the text', () => {
+  const ENDNOTES = '---\nnotes: endnotes\n---\n\n';
+  const strip = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  /** Each comment reference's ID in the document and its notes, and each
+   *  comment's ID */
+  // The IDs of the comment markers of `kinds` in the text and notes, and of
+  // the comments written
+  async function referencesAndComments(docx: Uint8Array, kinds = 'Reference|RangeStart|RangeEnd'): Promise<[string[], string[]]> {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const text = async (part: string) => (await zip.file(part)?.async('string')) ?? '';
+    const parts = (await Promise.all(['word/document.xml', 'word/footnotes.xml', 'word/endnotes.xml'].map(text))).join('');
+    const ids = (xml: string, re: RegExp) => [...xml.matchAll(re)].map(match => match[1]);
+    return [ids(parts, new RegExp('<w:comment(?:' + kinds + ') w:id="(\\d+)"/>', 'g')), ids(await text('word/comments.xml'), /<w:comment w:id="(\d+)"/g)];
+  }
+
+  // Export wrote the body before the notes' ranges registered, so it found
+  // no range, and wrote the ranges and reference in the note with no comment
+  test.each([
+    ['a footnote, the body after its reference', 'a[^1]\n\n{#c1>>@A | body<<}\n\n[^1]: Note {#c1}x{/c1}.\n', 'a[^1]\n\n[^1]: Note {==x==}{>>@A | body<<}.\n', 1],
+    ['a footnote, the body before its reference', '{#c1>>@A | body<<}\n\na[^1]\n\n[^1]: Note {#c1}x{/c1}.\n', 'a[^1]\n\n[^1]: Note {==x==}{>>@A | body<<}.\n', 1],
+    ['an endnote, the body after its reference', ENDNOTES + 'a[^1]\n\n{#c1>>@A | body<<}\n\n[^1]: Note {#c1}x{/c1}.\n', 'a[^1]\n\n[^1]: Note {==x==}{>>@A | body<<}.\n', 1],
+    ['an endnote, the body before its reference', ENDNOTES + '{#c1>>@A | body<<}\n\na[^1]\n\n[^1]: Note {#c1}x{/c1}.\n', 'a[^1]\n\n[^1]: Note {==x==}{>>@A | body<<}.\n', 1],
+    ['a table\'s cell in a note', 'a[^1]\n\n{#c1>>@A | body<<}\n\n[^1]: Note.\n\n    | A | B |\n    | --- | --- |\n    | {#c1}x{/c1} | y |\n',
+      'a[^1]\n\n[^1]: Note.\n\n    | A | B |\n    | --- | --- |\n    | {==x==}{>>@A \\| body<<} | y |\n', 1],
+    ['a note, with a reply', 'a[^1]\n\n{#c1>>@A | body<<}{>>@B | reply<<}\n\n[^1]: Note {#c1}x{/c1}.\n', 'a[^1]\n\n[^1]: Note {==x==}{>>@A | body<<}{>>@B | reply<<}.\n', 2],
+    // Its ID in a range of each, as main writes one with its body in a note
+    ['two notes', 'a[^1] b[^2]\n\n{#c1>>@A | body<<}\n\n[^1]: Note {#c1}x{/c1}.\n\n[^2]: Other {#c1}y{/c1}.\n',
+      'a[^1] b[^2]\n\n[^1]: Note {==x==}{>>@A | body<<}.\n\n[^2]: Other {==y==}{>>@A | body<<}.\n', 1],
+    // Which worked
+    ['the text, with its body in a note', 'a {#c1}x{/c1} b[^1]\n\n[^1]: Note {#c1>>@A | body<<}\n', 'a {==x==}{>>@A | body<<} b[^1]\n\n[^1]: Note\n', 1],
+    ['a body table\'s cell, the body after the table', '| A | B |\n| --- | --- |\n| {#c1}x{/c1} | y |\n\n{#c1>>@A | body<<}\n', '| A | B |\n| --- | --- |\n| {==x==}{>>@A \\| body<<} | y |\n', 1],
+  ])('writes the comment of a range in %s', async (_name, md, back, comments) => {
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings.filter(warning => warning.includes('{#c1'))).toEqual([]);
+    const [references, written] = await referencesAndComments(docx);
+    expect(written).toHaveLength(comments);
+    expect(references.filter(id => !written.includes(id))).toEqual([]);
+    const once = (await convertDocx(docx)).markdown;
+    expect(strip(once)).toBe(back);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
+
+  // A range whose comment export writes no body of anywhere writes no
+  // reference, which Word would have with no comment, only the warning.
+  // Import drops its markers, as before
+  test.each([
+    ['in the text', 'a {#c1}x{/c1} b\n', 'a x b\n', 0],
+    ['in a note', 'a[^1]\n\n[^1]: Note {#c1}x{/c1}.\n', 'a[^1]\n\n[^1]: Note x.\n', 0],
+    ['beside a comment with one', 'a {#c1}x{/c1} {#c2}y{/c2} b\n{#c2>>@A | two<<}\n', 'a x {==y==}{>>@A | two<<} b\n', 1],
+  ])('writes no reference for a range with no body %s', async (_name, md, back, comments) => {
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toContain('Comment range markers {#c1}...{/c1} exist without corresponding body {#c1>>...<<}');
+    const [references, written] = await referencesAndComments(docx, 'Reference');
+    expect(written).toHaveLength(comments);
+    expect(references.filter(id => !written.includes(id))).toEqual([]);
+    const once = (await convertDocx(docx)).markdown;
+    expect(strip(once)).toBe(back);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
+});
+
 describe('Overlapping comments: CLI config', () => {
   test('parseArgs accepts --always-use-comment-ids flag', () => {
     const { parseArgs } = require('./cli');

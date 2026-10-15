@@ -5308,6 +5308,10 @@ export interface DocxGenState {
   commentId: number;
   comments: CommentEntry[];
   commentIdMap: Map<string, number>; // markdown ID -> OOXML numeric ID
+  // While the body is written: the comments' bodies whose ranges it holds
+  // none of, as a range in a note, whose ID registers after (see
+  // addIdCommentBody)
+  deferredCommentBodies?: MdRun[];
   relationships: Map<string, string>; // URL -> rId
   nextRId: number;
   rIdOffset: number; // reserved rIds for fixed relationships (styles, numbering, comments, theme, settings)
@@ -8844,43 +8848,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         xml += '<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"' + reply.replyId + '\"/></w:r>';
       }
     } else if (run.type === 'comment_body_with_id') {
-      const mdId = run.commentId || '';
-      const numericId = state.commentIdMap.get(mdId);
-      if (numericId === undefined) {
-        state.warnings.push(`Comment body {#${mdId}>>...<<} has no matching range markers {#${mdId}}...{/${mdId}}`);
-        continue;
-      }
-      // Only emit the comment entry once per ID (multi-paragraph comments
-      // may produce duplicate body markers in the markdown).
-      if (!hasCommentWithId(state.comments, numericId)) {
-        const author = run.author ?? '';
-        const date = normalizeToUtcIso(run.date || '', state.timezone);
-        const commentBody = run.commentText || '';
-        const parentParaId = generateParaId(state);
-        state.comments.push({ id: numericId, author, date, text: commentBody, paraId: parentParaId });
-        if (run.consecutiveReplies) state.consecutiveReplyParaIds.add(parentParaId);
-
-        // Generate reply comment entries (reply IDs may have been
-        // pre-allocated by the pre-scan in generateDocumentXml)
-        if (run.replies && run.replies.length > 0) {
-          const preAllocated = replyRangesOf(state.replyRanges, numericId);
-          const replyParaIds: string[] = [];
-          for (let i = 0; i < run.replies.length; i++) {
-            const reply = run.replies[i];
-            const replyId = i < preAllocated.length ? preAllocated[i].replyId : state.commentId++;
-            const replyParaId = generateParaId(state);
-            replyParaIds.push(replyParaId);
-            const replyAuthor = reply.author ?? '';
-            const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
-            state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId,
-              parentParaId: reply.parentReply !== undefined ? replyParaIds[reply.parentReply] : parentParaId });
-            if (i >= preAllocated.length) {
-              state.replyRanges.push({ replyId, parentId: numericId });
-            }
-          }
-        }
-      }
-      state.hasComments = true;
+      if (state.commentIdMap.get(run.commentId || '') === undefined && state.deferredCommentBodies) state.deferredCommentBodies.push(run);
+      else addIdCommentBody(run, state);
     } else if (run.type === 'html_comment') {
       xml += generateHiddenHtmlCommentRun(run.text);
     } else if (run.type === 'image') {
@@ -8888,6 +8857,59 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     }
   }
   return xml;
+}
+
+/** The comment a body by ID writes, `{#id>>...<<}`, with its replies, once
+ *  for its ID, where a range of its ID has one, or else a warning. A body
+ *  whose range is in a note, which the body is written before, waits for
+ *  the notes' ranges (see deferredCommentBodies). */
+function addIdCommentBody(run: MdRun, state: DocxGenState): void {
+  const mdId = run.commentId || '';
+  const numericId = state.commentIdMap.get(mdId);
+  if (numericId === undefined) {
+    state.warnings.push(`Comment body {#${mdId}>>...<<} has no matching range markers {#${mdId}}...{/${mdId}}`);
+    return;
+  }
+  // Only emit the comment entry once per ID (multi-paragraph comments
+  // may produce duplicate body markers in the markdown).
+  if (!hasCommentWithId(state.comments, numericId)) {
+    const author = run.author ?? '';
+    const date = normalizeToUtcIso(run.date || '', state.timezone);
+    const commentBody = run.commentText || '';
+    const parentParaId = generateParaId(state);
+    state.comments.push({ id: numericId, author, date, text: commentBody, paraId: parentParaId });
+    if (run.consecutiveReplies) state.consecutiveReplyParaIds.add(parentParaId);
+
+    // Generate reply comment entries (reply IDs may have been
+    // pre-allocated by the pre-scan in generateDocumentXml)
+    if (run.replies && run.replies.length > 0) {
+      const preAllocated = replyRangesOf(state.replyRanges, numericId);
+      const replyParaIds: string[] = [];
+      for (let i = 0; i < run.replies.length; i++) {
+        const reply = run.replies[i];
+        const replyId = i < preAllocated.length ? preAllocated[i].replyId : state.commentId++;
+        const replyParaId = generateParaId(state);
+        replyParaIds.push(replyParaId);
+        const replyAuthor = reply.author ?? '';
+        const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
+        state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId,
+          parentParaId: reply.parentReply !== undefined ? replyParaIds[reply.parentReply] : parentParaId });
+        if (i >= preAllocated.length) {
+          state.replyRanges.push({ replyId, parentId: numericId });
+        }
+      }
+    }
+  }
+  state.hasComments = true;
+}
+
+/** `xml` without the reference runs of the comments of `ids`, as
+ *  generateRuns writes them. Word ignores a range marker with no comment,
+ *  but a reference to none makes the document invalid */
+function withoutCommentReferences(xml: string, ids: ReadonlySet<number>): string {
+  if (ids.size === 0) return xml;
+  return xml.replace(/<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference w:id="(\d+)"\/><\/w:r>/g,
+    (reference: string, id: string) => ids.has(Number(id)) ? '' : reference);
 }
 
 /** An image's run: its drawing, or if export can't embed the image, its
@@ -11905,6 +11927,10 @@ export async function convertMdToDocx(
     moveHiddenAlertLeadComments(tokens);
   }
 
+  // A body whose range is in a note waits for the notes' ranges, which
+  // register after the body is written, so that the body's IDs, and the
+  // changes', stay as they are
+  state.deferredCommentBodies = [];
   const documentXml = generateDocumentXml(tokens, state, resolvedOptions, bibEntries, citeprocEngine, frontmatter);
 
   // Build footnote/endnote body OOXML from definitions.
@@ -11937,6 +11963,11 @@ export async function convertMdToDocx(
     }
   }
   for (const { tokens: noteBody } of parsedNotes.values()) prescanCommentIds(noteBody, state);
+  // The bodies the body holds of the notes' ranges, which the notes' range
+  // markers then write the replies' ranges beside
+  const deferredBodies = state.deferredCommentBodies;
+  state.deferredCommentBodies = undefined;
+  for (const run of deferredBodies) addIdCommentBody(run, state);
   const madeNotes = new Set<string>();
   // The notes without a bookmark, which a later note can cross-reference
   const unmarkedNotes: { label: string; noteId: number; entry: { id: number; bodyXml: string }; selfRefRun: string }[] = [];
@@ -12111,7 +12142,12 @@ export async function convertMdToDocx(
     (hasTheme ? 1 : 0) +
     3 /* settings + webSettings + fontTable */;
 
-  let finalDocumentXml = documentXml;
+  // A range whose comment no body writes writes no reference, which Word
+  // would hold with no comment, only the warning below
+  const commentsWritten = new Set(state.comments.map(comment => comment.id));
+  const unwritten = new Set([...state.commentIdMap.values()].filter(id => !commentsWritten.has(id)));
+  for (const entry of state.footnoteEntries) entry.bodyXml = withoutCommentReferences(entry.bodyXml, unwritten);
+  let finalDocumentXml = withoutCommentReferences(documentXml, unwritten);
   if (actualFixedCount < state.rIdOffset) {
     const shift = state.rIdOffset - actualFixedCount;
     // Remap dynamic rId references in XML attribute contexts only
