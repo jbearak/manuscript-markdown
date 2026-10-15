@@ -1842,3 +1842,44 @@ describe('a comment at the end of a braced part', () => {
     expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
   });
 });
+
+// A comment in \text{} was lost: export wrote the group's text as one run,
+// without the comment's hidden run. It now splits the group around the
+// comment, as a comment in \mathrm{}, \mathbf{} or another style's group does
+describe('a comment in a text or styled group', () => {
+  // Each with C where the comment goes, before its line end, and how import
+  // writes it
+  const groups: [string, string, string][] = [
+    ['\\text{} mid-group', '\\text{a bC\nc d}y', '\\text{a b}C\n\\text{c d}y'],
+    ['\\text{} at its end', '\\text{a bC\n}y', '\\text{a b}C\ny'],
+    ['\\text{} of a word each side, which comes back as \\mathrm{}, as \\text{ab} does', '\\text{aC\nb}y', '\\mathrm{a}C\n\\mathrm{b}y'],
+    ['\\mathrm{} mid-group', '\\mathrm{aC\nb}y', '\\mathrm{a}C\n\\mathrm{b}y'],
+    ['\\mathrm{} at its end', '\\mathrm{abC\n}y', '\\mathrm{ab}C\ny'],
+    ['\\mathbf{} mid-group', '\\mathbf{aC\nb}y', '\\mathbf{a}C\n\\mathbf{b}y'],
+    ['\\mathbf{} at its end', '\\mathbf{abC\n}y', '\\mathbf{ab}C\ny'],
+  ];
+  const inline = (latex: string) => 'A $' + latex + '$ B.\n';
+  const display = (latex: string) => '$$\n' + latex + '\n$$\n';
+  const rows = groups.flatMap(([name, latex, back]) => [['%', ''], [' % note', ' note']].flatMap(([comment, label]) =>
+    ([['inline', inline], ['in display math', display]] as const).map(([where, math]) =>
+      [name + ', with %' + label + ', ' + where, math(latex.replace(/C/g, comment)), math(back.replace(/C/g, comment))])));
+  test.each(rows)('in %s comes back, and again', async (_name, markdown, back) => {
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(back);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
+
+  test('Word gets \\text{}\'s comment as a hidden run between its text\'s runs', () => {
+    expect(latexToOmml('\\text{a b % note\nc d}')).toBe(latexToOmml('\\text{a b}') + latexToOmml(' % note\n') + latexToOmml('\\text{c d}'));
+    expect(latexToOmml('\\text{a b%\n}')).toBe(latexToOmml('\\text{a b}') + latexToOmml('%\n'));
+  });
+
+  // As on main
+  test.each([
+    ['\\text{}', '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t></m:t></m:r>'],
+    ['\\text{ }', '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t xml:space="preserve"> </m:t></m:r>'],
+    ['\\text{a b}', '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>a b</m:t></m:r>'],
+  ])('%s exports as before', (latex, omml) => {
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+});
