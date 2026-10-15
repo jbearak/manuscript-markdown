@@ -17365,6 +17365,72 @@ describe('Code block round-trip', () => {
     if (numbered) expect(await paragraphs(second)).toEqual(await paragraphs(first));
     expect(await paragraphs((await convertMdToDocx(twice, options)).docx)).toEqual(await paragraphs(second));
   });
+
+  // Each body paragraph's properties and text, an empty one written as
+  // <w:p/> too, and a table as one entry
+  const blocks = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.lastIndexOf('<w:sectPr'));
+    return [...body.matchAll(/<w:tbl>[\s\S]*?<\/w:tbl>|<w:p\b[^>]*\/>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g)].map(p => p[0].startsWith('<w:tbl>') ? 'table'
+      : (/<w:pPr>[\s\S]*?<\/w:pPr>/.exec(p[0])?.[0] ?? '') + [...p[0].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+  };
+  const htmlTable = (text: string) => '<table>\n  <tr>\n    <td>\n      <p>' + text + '</p>\n    </td>\n  </tr>\n</table>\n';
+
+  test.each([
+    ['two code blocks', '```\nc\n```\n\n```\nd\n```\n', ''],
+    ['two code blocks with no blank line between', '```\nc\n```\n```\nd\n```\n', '```\nc\n```\n\n```\nd\n```\n'],
+    ['two code blocks after a numbered list', '1. a\n\n```\nc\n```\n\n```\nd\n```\n', ''],
+    ['two code blocks after a bulleted list', '- a\n\n```\nc\n```\n\n```\nd\n```\n', ''],
+    ['two code blocks before a list', '```\nc\n```\n\n```\nd\n```\n\n1. a\n', ''],
+    ['three code blocks after a list', '1. a\n\n```\nc\n```\n\n```\nd\n```\n\n```\ne\n```\n', ''],
+    ['two code blocks with a style fence between, after a list', '1. a\n\n```\nc\n```\n<!-- style: X -->\n```\nd\n```\n<!-- /style -->\n', '1. a\n\n```\nc\n```\n\n```\nd\n```\n'],
+    ['two tables', '| x |\n| --- |\n| 1 |\n\n| y |\n| --- |\n| 2 |\n', ''],
+    ['two tables after a list', '1. a\n\n| x |\n| --- |\n| 1 |\n\n| y |\n| --- |\n| 2 |\n', ''],
+    ['two tables in one HTML block after a list', '1. a\n\n<table><tr><td>a</td></tr></table>\n<table><tr><td>b</td></tr></table>\n', '1. a\n\n' + htmlTable('a') + htmlTable('b')],
+    // Guards: what export already keeps apart with an empty paragraph of
+    // no numbering
+    ['a code block before a list, after a list', '1. a\n\n```\nc\n```\n\n- b\n', ''],
+    ['a code block before a table, after a list', '1. a\n\n```\nc\n```\n\n| x |\n| --- |\n| 1 |\n', ''],
+    ['a table before a code block, after a list', '1. a\n\n| x |\n| --- |\n| 1 |\n\n```\nc\n```\n', ''],
+  ])('gives Word the same paragraphs on each trip for %s, with and without a template that numbers paragraphs', async (_name, md, expected) => {
+    // The empty paragraph between two code blocks or two tables had no
+    // numbering of its own, where a template's default style numbers
+    // paragraphs, so Word numbered it in a document with a list, and
+    // import wrote an empty numbered item there
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    for (const numbered of [false, true]) {
+      const options = numbered ? { templateDocx: await numberedNormal() } : {};
+      const first = (await convertMdToDocx(md, options)).docx;
+      const once = (await convertDocx(first)).markdown;
+      expect(strip(once)).toBe(expected || md);
+      const second = (await convertMdToDocx(once, options)).docx;
+      expect(await blocks(second)).toEqual(await blocks(first));
+      expect((await convertDocx(second)).markdown).toBe(once);
+    }
+  });
+
+  const unnumbered = '<w:numPr><w:numId w:val="0"/></w:numPr>';
+  const noSpaceAfter = '<w:spacing w:after="0"/>';
+  test.each([
+    // A bare <w:p/> with Normal's space after, as main writes it
+    ['two code blocks', '```\nc\n```\n\n```\nd\n```\n', ''],
+    ['two code blocks with a style fence between', '```\nc\n```\n<!-- style: X -->\n```\nd\n```\n<!-- /style -->\n', ''],
+    ['two tables', '| x |\n| --- |\n| 1 |\n\n| y |\n| --- |\n| 2 |\n', ''],
+    // Guards: the empty paragraph after a code block, with no space after
+    ['a code block and a list', '```\nc\n```\n\n- b\n', noSpaceAfter],
+    ['a code block and a table', '```\nc\n```\n\n| x |\n| --- |\n| 1 |\n', noSpaceAfter],
+  ])('writes the empty paragraph between %s with no numbering where a template numbers paragraphs, as the others', async (_name, md, spacing) => {
+    // Under the same condition as the empty paragraph after a code block
+    // or a quote (see separatorParagraph), whether or not the document has
+    // a list, though Word numbers nothing in one without, and with what
+    // it has without a template besides
+    for (const numbered of [false, true]) {
+      const options = numbered ? { templateDocx: await numberedNormal() } : {};
+      const empty = (await blocks((await convertMdToDocx(md, options)).docx)).filter(p => !p.includes('<w:pStyle') && (p === '' || p.endsWith('</w:pPr>')));
+      const own = (numbered ? unnumbered : '') + spacing;
+      expect(empty).toEqual([own ? '<w:pPr>' + own + '</w:pPr>' : '']);
+    }
+  });
 });
 
 describe('Inline code import (CodeChar detection)', () => {

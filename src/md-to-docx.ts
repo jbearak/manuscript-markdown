@@ -10504,12 +10504,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     return tokens[next];
   };
   let body = '';
-  // The empty paragraph after a code block or a quote, with no numbering
-  // where a template's default paragraph style numbers its paragraphs, as
-  // Word would show it, and import read it, as an empty list item
-  const separatorParagraph = state.listByStyle?.(undefined)
-    ? '<w:p><w:pPr><w:numPr><w:numId w:val=\"0\"/></w:numPr><w:spacing w:after=\"0\"/></w:pPr></w:p>'
-    : '<w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:p>';
+  // The empty paragraphs export writes to keep blocks apart, with no
+  // numbering where a template's default paragraph style numbers its
+  // paragraphs, as Word would show it, and import read it, as an empty list
+  // item: after a code block or a quote, with no space after it, and
+  // between two code blocks or two tables (`plainSeparator`), with Normal's
+  const unnumbered = state.listByStyle?.(undefined) ? '<w:numPr><w:numId w:val="0"/></w:numPr>' : '';
+  const separatorParagraph = '<w:p><w:pPr>' + unnumbered + '<w:spacing w:after="0"/></w:pPr></w:p>';
+  const plainSeparator = unnumbered ? '<w:p><w:pPr>' + unnumbered + '</w:pPr></w:p>' : '<w:p/>';
 
   prescanCommentIds(tokens, state);
 
@@ -11153,7 +11155,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // don't merge into a single block on DOCX→MD round-trip, and between
     // two with only style fences between them
     if (token.type === 'code_block' && (prevToken?.type === 'code_block' || codeAcrossFence)) {
-      body += '<w:p/>';
+      body += plainSeparator;
     }
     // Code blocks have w:after="0", so insert a borderless separator when
     // they are followed by non-code content.  Two cases:
@@ -11251,7 +11253,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       const table = () => {
         const xml = generateTable(token, state, options, bibEntries, citeprocEngine);
         recordTableIdentity(token, xml, state, '');
-        return (body.endsWith('</w:tbl>') ? '<w:p/>' : '') + xml;
+        return (body.endsWith('</w:tbl>') ? plainSeparator : '') + xml;
       };
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape).
       // Its section is one as a fence's is, so a section that ends right
