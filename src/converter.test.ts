@@ -4646,6 +4646,58 @@ describe('HTML comment blank line round-trip', () => {
     expect(markdown.endsWith(after)).toBe(true);
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(markdown);
   });
+
+  test.each([
+    ['a comment of its own', '<!-- c -->\n$' + '$\nx\n$' + '$\n', '<!-- c -->\n$' + '$\nx\n$' + '$\n'],
+    ['a comment of its own right after a paragraph', 'a\n<!-- c -->\n$' + '$\nx\n$' + '$\n', 'a\n<!-- c -->\n$' + '$\nx\n$' + '$\n'],
+    ['a comment of its own right after a quote', '> a\n<!-- c -->\n$' + '$\nx\n$' + '$\n', '> a\n<!-- c -->\n$' + '$\nx\n$' + '$\n'],
+    ['two comments of their own', '<!-- c -->\n<!-- d -->\n$' + '$\nx\n$' + '$\n', '<!-- c -->\n<!-- d -->\n$' + '$\nx\n$' + '$\n'],
+    ['a style block\'s opening fence', '---\nstyles:\n  foo:\n    font-style: italic\n---\n\n<!-- style: foo -->\n$' + '$\nx\n$' + '$\n<!-- /style -->\n', '<!-- style: foo -->\n$' + '$\nx\n$' + '$\n<!-- /style -->\n'],
+    ['a landscape section\'s closing fence', '<!-- landscape -->\n\nb\n<!-- /landscape -->\n$' + '$\nx\n$' + '$\n', '<!-- landscape -->\n\nb\n<!-- /landscape -->\n$' + '$\nx\n$' + '$\n'],
+    ['the bibliography\'s place', '<!-- references -->\n$' + '$\nx\n$' + '$\n', '<!-- references -->\n$' + '$\nx\n$' + '$\n'],
+    // Guards: a blank line or two between, and a comment that isn't one of
+    // its own
+    ['a comment of its own a blank line before', '<!-- c -->\n\n$' + '$\nx\n$' + '$\n', '<!-- c -->\n\n$' + '$\nx\n$' + '$\n'],
+    ['a comment of its own two blank lines before', '<!-- c -->\n\n\n$' + '$\nx\n$' + '$\n', '<!-- c -->\n\n\n$' + '$\nx\n$' + '$\n'],
+    ['a comment in a paragraph\'s text', 'a <!-- c -->\n$' + '$\nx\n$' + '$\n', 'a <!-- c -->\n$' + '$\nx\n$' + '$\n'],
+    ['a comment of its own in a list item', '- a\n  <!-- c -->\n  $' + '$\n  x\n  $' + '$\n', '- a\n\n  <!-- c -->\n\n  $' + '$\n  x\n  $' + '$\n'],
+  ])('gives Word the same paragraphs and gaps on each trip for display math right after %s', async (_name, md, expected) => {
+    // Import wrote the blank lines export recorded after it, none, then a
+    // blank line before the display math, as after a paragraph's text, so
+    // the next export recorded two. Export reads a line of $ right after
+    // one as a paragraph of its own, as import writes it
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    // Each paragraph's properties and text, and the custom properties
+    const word = async (docx: Uint8Array) => {
+      const zip = await JSZip.loadAsync(docx);
+      const xml = (await zip.file('word/document.xml')!.async('string')).replace(/ w:rsid\w*="[^"]*"/g, '');
+      return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => (/<w:pPr>[\s\S]*?<\/w:pPr>/.exec(p[0])?.[0] ?? '')
+        + [...p[0].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''))
+        .concat(await zip.file('docProps/custom.xml')?.async('string') ?? '');
+    };
+    const first = (await convertMdToDocx(md)).docx;
+    const once = (await convertDocx(first)).markdown;
+    expect(strip(once)).toBe(expected);
+    const second = (await convertMdToDocx(once)).docx;
+    expect(await word(first)).toEqual(await word(second));
+    expect((await convertDocx(second)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['a heading right after a comment of its own', '<!-- c -->\n# $' + '$x$' + '$\n'],
+    ['a heading right after a quote', '> a\n# $' + '$x$' + '$\n'],
+    ['a list item right after a comment of its own', '<!-- c -->\n- $' + '$x$' + '$\n'],
+    ['a list item right after a quote', '> a\n- $' + '$x$' + '$\n'],
+  ])('keeps the equation that starts %s', async (_name, md) => {
+    // Display math right after the recorded blank lines takes no blank line
+    // before it, but not after a heading's marker, which would take its $
+    // as text, so the next export lost the equation
+    const hasEquation = async (docx: Uint8Array) => (await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).includes('<m:oMath');
+    const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    const second = (await convertMdToDocx(once)).docx;
+    expect(await hasEquation(second)).toBe(true);
+    expect((await convertDocx(second)).markdown).toBe(once);
+  });
 });
 
 describe('A Word comment on an HTML comment', () => {

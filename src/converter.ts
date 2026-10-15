@@ -15518,10 +15518,13 @@ function buildMarkdownOnce(
   };
   let lastBlockquoteGroupIndex: number | undefined;
   let pendingPostContentGroupIndex: number | undefined;
-  // The paragraph after a quote that the blank lines the source had there
-  // went before, which display math first in it needs no more of: export
-  // reads a line of $ after a quote's line as ending the quote
-  let afterQuoteGap: number | undefined;
+  // The paragraph that the blank lines the source had before it went
+  // before, after a quote, or after a comment of its own or a fence, as
+  // export recorded them, and where they end in output, which display math
+  // right there, first on its line, needs no more of: export reads a line
+  // of $ right after any of those as a paragraph of its own. Not after a
+  // heading's marker, which would take the $ as text
+  let recordedGap: { para: number; end: number } | undefined;
   // Real content outside a quote, a heading, a list, code or a table, ends
   // the quote group before it: the blank lines the source had after the
   // quote were those before it, which aren't the next paragraph's
@@ -15923,6 +15926,7 @@ function buildMarkdownOnce(
           }
         } else if (incomingSep !== null) {
           output.push(incomingSep);
+          if (incomingRecorded) recordedGap = { para: i, end: output.length };
         } else if (
           blockquoteGaps &&
           item.blockquoteLevel &&
@@ -16020,7 +16024,7 @@ function buildMarkdownOnce(
               // paragraph would go on, as a lazy line, where none were, as
               // where the item dropped a block between them
               output.push('\n' + '\n'.repeat(prevItemWasListQuote ? Math.max(1, blankCount) : blankCount));
-              afterQuoteGap = i;
+              recordedGap = { para: i, end: output.length };
             } else {
               output.push('\n\n');
             }
@@ -16500,7 +16504,7 @@ function buildMarkdownOnce(
             output.push('\n' + continued.prefix);
           }
         }
-      } else if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n') && afterQuoteGap !== i - 1) {
+      } else if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n') && !(recordedGap?.para === i - 1 && recordedGap.end === output.length)) {
         // Ensure blank line before display math
         output.push('\n\n');
       }
