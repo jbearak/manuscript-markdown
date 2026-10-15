@@ -1460,6 +1460,59 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     expect(await trip(back)).toBe(back);
   });
 
+  /** The paragraphs Word gets of `md` */
+  const paragraphs = async (md: string) => {
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(twoStyles + md)).docx)).file('word/document.xml')!.async('string');
+    return xml.match(/<w:p[ >/]/g)?.length ?? 0;
+  };
+  const code = '```js\nlet x = 1;\n```';
+  it.each([
+    // The empty paragraph after a code block, which export decided from the
+    // block after it, where the closing fence hid it
+    ['code last in a style block, before a paragraph', 'p\n\n<!-- style: box -->\n\n' + code + '\n\n<!-- /style -->\n\nq\n', 'p\n\n' + code + '\n\nq\n'],
+    ['code last in a style block, before a list', 'p\n\n<!-- style: box -->\n\n' + code + '\n\n<!-- /style -->\n\n- q\n', 'p\n\n' + code + '\n\n- q\n'],
+    ['code before a paragraph in a style block', 'p\n\n<!-- style: box -->\n\n' + code + '\n\nr\n\n<!-- /style -->\n\nq\n', 'p\n\n<!-- style: box -->\n\n' + code + '\n\nr\n\n<!-- /style -->\n\nq\n'],
+    // An empty paragraph after a quote last in the document, from the blank
+    // line before what Word gets none of after it
+    ['a quote, then a comment\'s body to the end', 'x {#c1}a{/c1}\n\n> q\n\n{#c1>>@A | body<<}\n', 'x {==a==}{>>@A | body<<}\n\n> q\n'],
+    ['a quote last in a style block at the end', '<!-- style: box -->\n\n> a\n\n<!-- /style -->\n', '> a\n'],
+    ['a quote, then a comment\'s body and a paragraph', 'x {#c1}a{/c1}\n\n> q\n\n{#c1>>@A | body<<}\n\nr\n', 'x {==a==}{>>@A | body<<}\n\n> q\n\nr\n'],
+  ])('gives Word the paragraphs of %s on the first trip as on the next', async (_name, md, expected) => {
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    expect(await paragraphs(md)).toBe(await paragraphs(back));
+    expect(await trip(back)).toBe(back);
+  });
+
+  // Code last in a block with a paragraph of its style, whose fences import
+  // writes, keeps the spacing it had, on each trip
+  it.each([
+    ['before a paragraph', 'p\n\n<!-- style: box -->\n\nr\n\n' + code + '\n\n<!-- /style -->\n\nq\n', 4],
+    ['before a block of another style, which closes it', '<!-- style: box -->\n\nr\n\n' + code + '\n<!-- style: note -->\n\nq\n\n<!-- /style -->\n', 3],
+    ['before a table', '<!-- style: box -->\n\nr\n\n' + code + '\n\n<!-- /style -->\n| a |\n|---|\n| b |\n', 4],
+    ['before an HTML table', '<!-- style: box -->\n\nr\n\n' + code + '\n\n<!-- /style -->\n<table><tr><td>a</td></tr></table>\n', 3],
+  ])('gives Word the paragraphs of code last in a style block with a paragraph of it %s, as before', async (_name, md, count) => {
+    expect(await paragraphs(md)).toBe(count);
+    const back = await trip(md);
+    expect(await paragraphs(back)).toBe(count);
+    expect(await trip(back)).toBe(back);
+  });
+
+  // Where import writes what follows otherwise than after a paragraph, or
+  // writes the block's fences, the spacing is as before
+  it.each([
+    // Import writes the comment right after the code
+    ['code alone in a style block, then a comment right after its closing fence', 'p\n\n<!-- style: box -->\n\n' + code + '\n\n<!-- /style -->\n<!-- c -->\n'],
+    // Import closes the block after the quote, as it has a paragraph of its
+    // style
+    ['a quote in a style block no fence closes, then a comment\'s body', '<!-- style: box -->\n\n{#1}a{/1}\n\n> q\n\n{#1>>@A | body<<}\n'],
+  ])('gives Word the paragraphs of %s as before', async (_name, md) => {
+    const back = await trip(md);
+    expect(await paragraphs(md)).toBe(await paragraphs(back));
+    expect(await trip(back)).toBe(back);
+  });
+
   it.each([
     ['a paragraph', '> a\n\n<!-- style: box -->\n> b\n<!-- style: box -->\np\n<!-- /style -->\n'],
     ['a block on one line', '> a\n\n<!-- style: box -->\n> b\n<!-- style: box -->p<!-- /style -->\n'],
