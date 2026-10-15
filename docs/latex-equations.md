@@ -510,6 +510,8 @@ Each is a phantom Word hides, and comes back as written. A phantom Word shows co
 
 Export writes `\overbrace` and `\underbrace` as Word's group character, a curly bracket over or under its content. Import reads a group character by its character: `⏞` comes back as `\overbrace`, `⏟` as `\underbrace`, and any other character, such as an arrow, as `\overset` or `\underset` of that character, by its position, as `\overset{\to}{x}`. A character math can't hold as it is, as `&`, `\` or `'`, which math reads as a prime, goes in as text, as `\overset{\text{\&}}{x}`, so Word gets the character back as it was. Where Word leaves out the character or the position, import uses ECMA-376's defaults, `⏟` at the bottom.
 
+A superscript right after `\overbrace{...}`, or a subscript right after `\underbrace{...}`, is the brace's label, which Word shows over or under the brace, as `\overbrace{a+b}^{n}`. A script Word has on a brace, which isn't a label, comes back with the brace in braces, as `{\overbrace{y}}^b`, so it stays a script.
+
 ## Spacing
 
 LaTeX adds its own spacing around operators, but you can adjust manually:
