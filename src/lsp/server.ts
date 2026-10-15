@@ -29,7 +29,7 @@ import {
 	TextDocuments,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { BibtexEntry, BibtexSourceRange, parseBibtexWithRaw } from '../bibtex-parser';
+import { BibtexEntry, BibtexSourceRange, bibtexFieldAsPlainText, parseBibtexWithRaw } from '../bibtex-parser';
 import { isCitableKey } from '../citation-syntax';
 
 // --- Implementation notes ---
@@ -1210,7 +1210,7 @@ function getLocationPathKey(uri: string): string {
 
 function getEntryDetail(entry: BibtexEntry): string | undefined {
 	const author = entry.fields.get('author');
-	const institution = entry.fields.get('institution');
+	const institution = bibtexFieldAsPlainText(entry, 'institution');
 	const year = entry.fields.get('year');
 	const formatted = author ? formatBibAuthorsPlain(author) : undefined;
 	const displayName = formatted || institution;
@@ -1227,13 +1227,12 @@ function getEntryDetail(entry: BibtexEntry): string | undefined {
 }
 
 function getEntryDocumentation(entry: BibtexEntry): string | undefined {
-	const title = entry.fields.get('title');
+	const title = bibtexFieldAsPlainText(entry, 'title');
 	if (!title) {
 		return undefined;
 	}
-	const stripped = title.replace(/[{}]/g, '');
-	const parts = [`\u201C${stripped}\u201D`];
-	const venue = entry.fields.get('journal') ?? entry.fields.get('booktitle');
+	const parts = [`\u201C${title}\u201D`];
+	const venue = bibtexFieldAsPlainText(entry, 'journal') ?? bibtexFieldAsPlainText(entry, 'booktitle');
 	if (venue) {
 		parts.push(venue);
 	}
@@ -1271,7 +1270,7 @@ function formatBibEntryHover(entry: BibtexEntry, bibPath?: string): string {
 	const lines: string[] = [];
 
 	const author = entry.fields.get('author');
-	const institution = entry.fields.get('institution');
+	const institution = bibtexFieldAsPlainText(entry, 'institution');
 	const year = entry.fields.get('year');
 	const formattedAuthors = author ? formatBibAuthors(author) : undefined;
 	const displayName = formattedAuthors || institution;
@@ -1283,13 +1282,12 @@ function formatBibEntryHover(entry: BibtexEntry, bibPath?: string): string {
 		lines.push(`(${year})`);
 	}
 
-	const title = entry.fields.get('title');
+	const title = bibtexFieldAsPlainText(entry, 'title');
 	if (title) {
-		const strippedTitle = title.replace(/[{}]/g, '');
-		lines.push(`**\u201C${strippedTitle}\u201D**`);
+		lines.push(`**\u201C${title}\u201D**`);
 	}
 
-	const venue = entry.fields.get('journal') ?? entry.fields.get('booktitle');
+	const venue = bibtexFieldAsPlainText(entry, 'journal') ?? bibtexFieldAsPlainText(entry, 'booktitle');
 	if (venue) {
 		lines.push(`*${venue}*`);
 	}

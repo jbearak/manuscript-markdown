@@ -2,6 +2,7 @@
 // - Verbatim fields bypass whitespace collapsing, brace stripping, TeX decoding, NFC normalization, and serialization escaping.
 // - TeX decoding reads standard text accents, the letters and symbols of text commands (\ss, \textregistered), ties, empty groups, dashes and quotes, and \url's argument, outside math, but only the accents in names (author, editor); unknown commands remain literal.
 // - Escaping writes an empty group between the hyphens and quotes TeX would join, as -{}-, but not in names, so a value reads back as it was.
+// - A decoded field but a name's is kept as TeX too (BibtexEntry.texFields), with \{ \} \\ \$ escaped, which the language server reads (bibtexFieldAsPlainText); `fields` holds its text (bibtexTexAsText).
 // - Non-command braces remain intact; braces owned by recognized accent expressions and text symbols are consumed.
 // - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly.
 // - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string).
@@ -9,7 +10,15 @@
 export interface BibtexEntry {
   type: string;
   key: string;
+  /** Each field's value as text, as citeproc and the rest read it */
   fields: Map<string, string>;
+  /** Each decoded field's value as the parser read it, as TeX: as its text
+   *  in `fields`, but with its escaped braces, backslashes and dollar signs,
+   *  as \{, kept escaped, so a group's braces, a command's backslash and
+   *  math's $ are told from the characters (see bibtexTexAsText). Not a
+   *  name's, which reads as text, nor a field read as written
+   *  (VERBATIM_BIBTEX_FIELDS). */
+  texFields?: Map<string, string>;
   zoteroKey?: string;
   zoteroUri?: string;
 }
@@ -203,6 +212,30 @@ const BIBTEX_SIMPLE_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
   '\\': '\\',
 });
 
+// The escapes a field's value as TeX keeps (see BibtexEntry.texFields)
+const BIBTEX_KEPT_ESCAPE = /^[{}\\$]$/;
+
+/** A field's value as plain text, as the language server shows it: its
+ *  groups' text without their braces, and its escaped braces, backslashes
+ *  and dollar signs as the characters, so {RNA} is RNA and \{RNA\} {RNA}.
+ *  A value with no TeX (see BibtexEntry.texFields), as a name's, or one
+ *  whose text has changed since it was read, without its braces, as the
+ *  language server showed a title. */
+export function bibtexFieldAsPlainText(entry: BibtexEntry, fieldName: string): string | undefined {
+  const value = entry.fields.get(fieldName);
+  if (value === undefined) return undefined;
+  const tex = entry.texFields?.get(fieldName);
+  if (tex === undefined || bibtexTexAsText(tex) !== value) return value.replace(/[{}]/g, '');
+  return tex.replace(/\\([{}\\$])|[{}]/g, (_brace, escaped: string | undefined) => escaped ?? '');
+}
+
+/** A field's value as TeX (see BibtexEntry.texFields) as text, as citeproc
+ *  reads it: its escaped braces, backslashes and dollar signs as the
+ *  characters */
+export function bibtexTexAsText(tex: string): string {
+  return tex.replace(/\\([{}\\$])/g, '$1');
+}
+
 function isAsciiLetter(char: string): boolean {
   return /^[A-Za-z]$/.test(char);
 }
@@ -377,9 +410,12 @@ const BIBTEX_LIGATURES: ReadonlyArray<readonly [string, string]> = [
 const URL_AT = /\\url(?![A-Za-z])[ \t]*\{/y;
 
 /** A \url's argument, a URL, as it prints, with the characters BibTeX's
- *  syntax has a \ escape, as \_ and \%, unescaped, as pandoc reads it */
+ *  syntax has a \ escape, as \_ and \%, unescaped, as pandoc reads it, as
+ *  TeX (see BibtexEntry.texFields): its braces, backslashes and dollar
+ *  signs, which are characters in a URL, escaped, as \{ */
 function urlAsPrinted(argument: string): string {
-  return argument.replace(/\\([&%$#_{}~^\\])/g, (_escape, char: string) => char);
+  return argument.replace(/\\([&%#_~^])|\\[{}\\$]|[\\{}$]/g, (match, char: string | undefined) =>
+    char ?? (match.length === 2 ? match : '\\' + match));
 }
 
 /** The end of the command this doesn't know at `slash`, as \foo or \-,
@@ -400,7 +436,7 @@ function unknownCommandEnd(input: string, slash: number): number {
  *  group, {}, nothing, and a ligature, as -- or ``, the dash or quotation
  *  mark LaTeX prints, but not in math or a \url's argument, which prints
  *  as written (see readUrlsAndMath), nor, for an empty group, where a
- *  command could take it as an argument (see couldBeArgumentAt), as in
+ *  command could take it as an argument (see ArgumentContext), as in
  *  \foo{} or \textcolor{red}{}. In a list of `names`, only the accents are
  *  read, as on main: BibTeX splits the names, splits a name's words at its
  *  ties, and reads each word's case, before TeX reads a command, so a name
@@ -409,6 +445,13 @@ function unknownCommandEnd(input: string, slash: number): number {
 function decodeBibtexText(input: string, names = false): string {
   let output = '';
   let index = 0;
+  // Whether a command could take a group next as its argument, kept as the
+  // value is read (see ArgumentContext)
+  const context = new ArgumentContext();
+  const emit = (text: string) => {
+    output += text;
+    if (!names) context.add(text);
+  };
   const { urls, spans } = names ? { urls: new Map<number, number>(), spans: [] } : readUrlsAndMath(input);
   // The span read as written at or after index
   let span = 0;
@@ -418,21 +461,25 @@ function decodeBibtexText(input: string, names = false): string {
     const asWritten = span < spans.length && spans[span][0] <= index;
 
     if (input[index] === '{') {
-      const grouped = tryDecodeAccentAt(input, index + 1);
+      // Whether a command could take the group as its argument, as read so
+      // far (see ArgumentContext), where an accent's or symbol's group keeps
+      // its braces, as in \textit{\b{x}}, \textit{x̱}, not \textitx̱
+      const argument = !names && context.open;
+      const grouped = argument ? undefined : tryDecodeAccentAt(input, index + 1);
       if (grouped && input[grouped.nextIndex] === '}') {
-        output += grouped.value;
+        emit(grouped.value);
         index = grouped.nextIndex + 1;
         continue;
       }
 
-      const symbol = names ? undefined : tryDecodeGroupedTextSymbolAt(input, index);
+      const symbol = names || argument ? undefined : tryDecodeGroupedTextSymbolAt(input, index);
       if (symbol) {
-        output += symbol.value;
+        emit(symbol.value);
         index = symbol.nextIndex;
         continue;
       }
 
-      if (!names && !asWritten && input[index + 1] === '}' && !couldBeArgumentAt(input, index)) {
+      if (!names && !asWritten && input[index + 1] === '}' && !argument) {
         index += 2;
         continue;
       }
@@ -441,28 +488,28 @@ function decodeBibtexText(input: string, names = false): string {
     if (input[index] === '\\') {
       const url = asWritten ? undefined : urls.get(index);
       if (url !== undefined) {
-        output += urlAsPrinted(input.slice(input.indexOf('{', index) + 1, url - 1));
+        emit(urlAsPrinted(input.slice(input.indexOf('{', index) + 1, url - 1)));
         index = url;
         continue;
       }
 
       const literal = tryDecodeLiteralCommandAt(input, index, names || asWritten);
       if (literal) {
-        output += literal.value;
+        emit(literal.value);
         index = literal.nextIndex;
         continue;
       }
 
       const accent = tryDecodeAccentAt(input, index);
       if (accent) {
-        output += accent.value;
+        emit(accent.value);
         index = accent.nextIndex;
         continue;
       }
 
       const symbol = names ? undefined : tryDecodeTextSymbolAt(input, index);
       if (symbol) {
-        output += symbol.value;
+        emit(symbol.value);
         index = symbol.nextIndex;
         continue;
       }
@@ -470,16 +517,18 @@ function decodeBibtexText(input: string, names = false): string {
       // Not a control space, \ , which stays as written, as on main: as a
       // space, it could complete a tag citeproc reads, as in
       // <span\ class="nocase">, as the brackets' commands could
+      // An escaped brace, backslash or dollar sign stays escaped, as TeX
+      // (see BibtexEntry.texFields), but not in names
       const escaped = BIBTEX_SIMPLE_ESCAPES[input[index + 1]];
       if (escaped !== undefined) {
-        output += escaped;
+        emit(names || !BIBTEX_KEPT_ESCAPE.test(escaped) ? escaped : '\\' + escaped);
         index += 2;
         continue;
       }
 
       if (!names) {
         const end = unknownCommandEnd(input, index);
-        output += input.slice(index, end);
+        emit(input.slice(index, end));
         index = end;
         continue;
       }
@@ -488,19 +537,19 @@ function decodeBibtexText(input: string, names = false): string {
     if (!names && !asWritten && (input[index] === '-' || input[index] === '`' || input[index] === "'")) {
       const ligature = BIBTEX_LIGATURES.find(([source]) => input.startsWith(source, index));
       if (ligature) {
-        output += ligature[1];
+        emit(ligature[1]);
         index += ligature[0].length;
         continue;
       }
     }
 
     if (!names && !asWritten && input[index] === '~') {
-      output += '\u00A0';
+      emit('\u00A0');
       index++;
       continue;
     }
 
-    output += input[index];
+    emit(input[index]);
     index++;
   }
 
@@ -509,13 +558,10 @@ function decodeBibtexText(input: string, names = false): string {
 
 /** A text symbol alone in a group at `open`, as {\ss} or {\o }, whose
  *  braces are its, as BibTeX writes a special character; but not with its
- *  empty group, as {\ss{}}, which is a group of ß, nor where a command
- *  could take the group as an argument, which keeps its braces: where the
- *  nearest character before it but spaces ends a command's name, as in
- *  \textsc{\O} or \textsc {\O}, or a group, any group, as in
- *  \textcolor{red} {\O} or \texorpdfstring{\ss}{\o}, so {\l}{\L} is ł{Ł} */
+ *  empty group, as {\ss{}}, which is a group of ß. Its caller leaves the
+ *  group where a command could take it as an argument (see
+ *  ArgumentContext), as in \textsc{\O}. */
 function tryDecodeGroupedTextSymbolAt(input: string, open: number): DecodedCommand | undefined {
-  if (couldBeArgumentAt(input, open)) return undefined;
   const symbol = tryDecodeTextSymbolAt(input, open + 1);
   if (!symbol || input[symbol.nextIndex] !== '}' || input[symbol.nextIndex - 1] === '}') return undefined;
   return { value: symbol.value, nextIndex: symbol.nextIndex + 1 };
@@ -542,26 +588,55 @@ function collapseBibtexWhitespace(fieldName: string, value: string): string {
   return value.replace(/[ \t\r\n\f]+/g, ' ').replace(/^ | $/g, '');
 }
 
-/** Whether a command could take the group at `open` as an argument: where
- *  the nearest character before it but spaces and tabs ends a command's
- *  name, as in \textsc{\O} or \foo {}, or a group, any group, as in
- *  \textcolor{red} {\O} or \textcolor{red}{}. Linear over a text, as it
- *  reads back over spaces and letters only, which stop at a brace. */
-function couldBeArgumentAt(input: string, open: number): boolean {
-  let before = open;
-  while (before > 0 && (input[before - 1] === ' ' || input[before - 1] === '\t')) before--;
-  if (input[before - 1] === '}' && !isEscapedAt(input, before - 1)) return true;
-  let name = before;
-  while (name > 0 && isAsciiLetter(input[name - 1])) name--;
-  return name < before && input[name - 1] === '\\' && !isEscapedAt(input, name - 1);
+/** Whether a command could take a group next in a value read so far as
+ *  its argument: where the nearest character before it but spaces and tabs
+ *  ends a command's name, as in \textsc{\O} or \foo {}, or a group, any
+ *  group, as in \textcolor{red} {\O} or \textcolor{red}{}. Read in the
+ *  value as read so far, not as written, so a letter's command read as its
+ *  letter takes none, as in \ss {}e, Straße, or {\l}{\L}, łŁ. Kept as each
+ *  piece of the value is read, so the value isn't read back for each group,
+ *  however long a command's name or a run of backslashes before it. */
+class ArgumentContext {
+  /** Whether a group next could be an argument */
+  open = false;
+  /** Whether the value ends in a backslash no other escapes */
+  private slash = false;
+  /** Whether the value ends in a command's name */
+  private name = false;
+
+  add(text: string): void {
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      if (char === ' ' || char === '\t') {
+        // Which a command's name or a group keeps, but not a control space
+        if (this.slash) this.open = false;
+        this.slash = false;
+        this.name = false;
+      } else if (isAsciiLetter(char)) {
+        this.name = this.slash || this.name;
+        this.open = this.name;
+        this.slash = false;
+      } else if (char === '\\') {
+        this.slash = !this.slash;
+        this.open = false;
+        this.name = false;
+      } else {
+        this.open = !this.slash && char === '}';
+        this.slash = false;
+        this.name = false;
+      }
+    }
+  }
 }
 
+/** A field's value as text, and, where it's decoded but not a name's, as
+ *  TeX (see BibtexEntry.texFields) */
 function decodeBibtexFieldValue(
   fieldName: string,
   value: string,
   braceDelimited: boolean,
-): string {
-  if (VERBATIM_BIBTEX_FIELDS.has(fieldName)) return value;
+): { text: string; tex?: string } {
+  if (VERBATIM_BIBTEX_FIELDS.has(fieldName)) return { text: value };
 
   // Before the braces around the value come off, and again after, as their
   // text has its own edges, as in {{ Title }}
@@ -569,11 +644,12 @@ function decodeBibtexFieldValue(
   const semanticValue = braceDelimited && !AUTHOR_FIELDS.has(fieldName)
     ? collapseBibtexWhitespace(fieldName, stripOuterBraces(collapsed))
     : collapsed;
-  if (AUTHOR_FIELDS.has(fieldName)) return decodeBibtexText(semanticValue, true);
+  if (AUTHOR_FIELDS.has(fieldName)) return { text: decodeBibtexText(semanticValue, true) };
   // And again after it's decoded, as an empty group read as nothing can
   // leave two spaces, as in a {} b, or one at an edge, which the .bib file
   // written back wouldn't hold
-  return collapseBibtexWhitespace(fieldName, decodeBibtexText(semanticValue));
+  const tex = collapseBibtexWhitespace(fieldName, decodeBibtexText(semanticValue));
+  return { text: bibtexTexAsText(tex), tex };
 }
 
 /** Undo the punctuation escapes BibTeX requires — `\&`, `\%`, `\$`, `\#`,
@@ -1421,6 +1497,7 @@ function scanBibtex(input: string): ScannedBibtex {
     try {
       const fieldsStr = input.slice(startPos, endPos);
       const fields = new Map<string, string>();
+      const texFields = new Map<string, string>();
       const repeated = new Set<string>();
 
       for (const field of readBibtexFields(fieldsStr)) {
@@ -1428,7 +1505,10 @@ function scanBibtex(input: string): ScannedBibtex {
         // The last value of a field given more than once is the one read (see
         // BibtexSourceRange.repeatedFields)
         if (fields.has(lowerField)) repeated.add(lowerField);
-        fields.set(lowerField, decodeBibtexFieldValue(lowerField, field.value, field.braced));
+        const { text, tex } = decodeBibtexFieldValue(lowerField, field.value, field.braced);
+        fields.set(lowerField, text);
+        if (tex === undefined) texFields.delete(lowerField);
+        else texFields.set(lowerField, tex);
       }
       if (repeated.size > 0) range.repeatedFields = Array.from(repeated);
 
@@ -1436,6 +1516,7 @@ function scanBibtex(input: string): ScannedBibtex {
         type: type.toLowerCase(),
         key,
         fields,
+        texFields,
         zoteroKey: fields.get('zotero-key'),
         zoteroUri: fields.get('zotero-uri'),
       });

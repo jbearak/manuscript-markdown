@@ -1071,6 +1071,23 @@ describe('BibTeX dashes and quotes in citeproc\'s data', () => {
   });
 });
 
+describe('BibTeX values as TeX in citeproc\'s data', () => {
+  // Guard: the parser keeps a value's escaped braces, backslashes and
+  // dollar signs escaped as TeX, which citeproc reads as text, as before
+  it('shows escaped braces, backslashes and dollar signs, and groups, in a bibliography as before', () => {
+    const bib = String.raw`@book{b,
+  author = {Doe, Ann},
+  title = {A \{x\} {y} a\\b \$5 \textsc{z}},
+  publisher = {{P} \& \{Q\}},
+  year = {2019}
+}
+`;
+    const engine = createCiteprocEngine(parseBibtex(bib), 'apa')!;
+    engine.updateItems(['b']);
+    expect(renderBibliography(engine)!.entries[0]).toContain(String.raw`<i>A {x} {y} a\b $5 \textsc{z}</i>. {P} &#38; {Q}.`);
+  });
+});
+
 describe('orderRPr', () => {
   it('puts run properties in schema order', () => {
     expect(orderRPr('<w:i/><w:b/><w:vertAlign w:val="superscript"/><w:smallCaps/><w:highlight w:val="red"/><w:sz w:val="18"/>'))
