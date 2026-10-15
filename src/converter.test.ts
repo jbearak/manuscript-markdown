@@ -23600,3 +23600,50 @@ describe('Documents of many styles', () => {
     expect(await timed(md, 4000, styles, edit) / small).toBeLessThan(8);
   }, 30000);
 });
+
+// A deleted citation, which export writes as its text, kept a highlight
+// alone of its own formatting, so one in emphasis, which import writes
+// inside the deletion, lost it on the next trip; and one right after an ID
+// comment's opener got a space before it, as the opener's } read as text
+describe('a citation in a deletion\'s formatting or after an ID comment\'s marker', () => {
+  const bibtex = '@book{doe2020, author = {Doe, Jane}, title = {T}, year = {2020}}\n@book{x, author = {X, Y}, title = {U}, year = {2021}}\n';
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const documentXml = async (md: string) => (await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx)).file('word/document.xml')!.async('string');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md, { bibtex })).docx)).markdown);
+
+  test.each([
+    ['italic', '*', '*', '<w:i/>'],
+    ['bold', '**', '**', '<w:b/>'],
+    ['underlined', '<u>', '</u>', '<w:u w:val="single"/>'],
+    ['struck', '~~', '~~', '<w:strike/>'],
+    ['superscript', '<sup>', '</sup>', '<w:vertAlign w:val="superscript"/>'],
+    ['subscript', '<sub>', '</sub>', '<w:vertAlign w:val="subscript"/>'],
+  ])('keeps a deleted citation %s on each trip', async (_name, open, close, property) => {
+    const back = await roundTrip('a ' + open + '{--[@doe2020]--}' + close + ' b\n');
+    expect(back).toBe('a {--' + open + '[@doe2020]' + close + '--} b\n');
+    expect(await roundTrip(back)).toBe(back);
+    expect(/<w:del [^>]*><w:r><w:rPr>(.*?)<\/w:rPr>/.exec(await documentXml(back))?.[1]).toContain(property);
+  });
+
+  // A live citation takes none of the formatting around it, as its field's
+  // text is the style's
+  test('writes an inserted citation in emphasis without it, as before', async () => {
+    const back = await roundTrip('a *{++[@doe2020]++}* b\n');
+    expect(back).toBe('a {++[@doe2020]++} b\n');
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  test.each([
+    ['in a paragraph\'s text', 'x {#c1}[@doe2020] a\n\nb{/c1}\n{#c1>>@A | b<<}\n', 'x (Doe, 2020) a'],
+    ['at a paragraph\'s start', '{#c1}[@doe2020] a\n\nb{/c1}\n{#c1>>@A | b<<}\n', '(Doe, 2020) a'],
+  ])('writes a citation right after an ID comment\'s opener %s with no space before it', async (_name, md, text) => {
+    expect(await roundTrip(md)).toBe(md);
+    const xml = await documentXml(await roundTrip(md));
+    expect([...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('')).toStartWith(text + 'b');
+  });
+
+  test('keeps the space after an ID comment\'s closer before a citation, as before', async () => {
+    const md = '{#c1}a\n\nb{/c1} [@x]\n{#c1>>@A | b<<}\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+});
