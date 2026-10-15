@@ -1294,6 +1294,27 @@ function trimPart(latex: string): string {
   return (before ? before + ' ' : '') + body + (after && comment ? '\n' : '') + after;
 }
 
+/** An inline equation's `latex` with the spaces after a number at its
+ *  start that export writes for spacing commands written as those
+ *  commands, as 2\quad x: export's math rule reads $, a number and a space
+ *  as currency (see findDollarMathAt in math-delimiters.ts), so the
+ *  equation with the space's character there was no equation on the next
+ *  export. Display math has no currency, and elsewhere import writes the
+ *  character. Only where each space is one of those or one LaTeX ignores,
+ *  so none is lost, as an en space would be; otherwise as before. */
+export function apartFromCurrency(latex: string): string {
+  const [, number, spaces] = /^(\d[\d,.]*)(\s+)/.exec(latex) ?? [];
+  if (!spaces || ![...spaces].every(ch => SPACE_COMMANDS.has(ch) || /[ \t\r\n]/.test(ch))) return latex;
+  const commands = spaceCommands(spaces);
+  if (!commands) return latex;
+  const rest = latex.slice(number.length + spaces.length);
+  // A space LaTeX ignores is kept as one, and a command named with letters
+  // ends before whatever follows, as a CriticMarkup span whose text would
+  // run into it once accepted, as \quad{++x++} would, as \quadx
+  const gap = rest && (/[ \t\r\n]/.test(spaces) || /[A-Za-z]$/.test(commands)) ? ' ' : '';
+  return number + commands + gap + rest;
+}
+
 /** The spaces export writes for \quad, \;, \: and \, (see latex-to-omml.ts) */
 const SPACE_COMMANDS: ReadonlyMap<string, string> = new Map([
   ['\u2003', '\\quad'], ['\u2004', '\\;'], ['\u205F', '\\:'], ['\u2009', '\\,'],
