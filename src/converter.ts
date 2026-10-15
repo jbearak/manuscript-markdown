@@ -13,7 +13,7 @@ import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
 import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { criticPayloadRanges } from './critic-markup';
-import { findDollarMathAt } from './math-delimiters';
+import { findDollarMathAt, isEscapedAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { readCitationItems } from './citation-syntax';
@@ -8288,6 +8288,16 @@ function revisionsEqual(a: RevisionInfo | undefined, b: RevisionInfo | undefined
 // Avoid literal '$$' — tool text-replacement corrupts '$' in replacement
 // strings. See CLAUDE.md "Template literal corruption" rule.
 const MATH_FENCE = '$'.repeat(2);
+/** An inline equation's Markdown: its LaTeX between dollar signs, with a
+ *  space between one and a dollar sign the LaTeX starts or ends with, which
+ *  would make one run of them with it, as export reads display math's. Its
+ *  LaTeX $$, as of $ $$ $, as $$$$ was an empty display equation, which
+ *  export dropped. Export reads the space as the equation's, which import
+ *  leaves out, so it comes back the same */
+function inlineMathMarkdown(latex: string): string {
+  const after = latex.endsWith('$') && !isEscapedAt(latex, latex.length - 1) ? ' ' : '';
+  return '$' + (latex.startsWith('$') ? ' ' : '') + latex + after + '$';
+}
 /** Display math of `latex` between its fences, as its own lines, those
  *  that would end its paragraph indented (see keepLinesInEquation), but in
  *  a CriticMarkup span (`inSpan`), whose lines export reads as one (see
@@ -9269,7 +9279,7 @@ function renderHighlightGroup(
     } else if (item.type === 'footnote_ref') {
       inner += footnoteRefText(item, noteLabels);
     } else if (item.type === 'math') {
-      inner += '$' + item.latex + '$';
+      inner += inlineMathMarkdown(item.latex);
       mathEnd = inner.length;
     } else if (item.type === 'citation') {
       if (g === start) lead = citationSeparator(precedingMarkdown, item, last);
@@ -9339,7 +9349,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   // In the substitution's span
   return item.display
     ? displayMathBlock(item.latex, true)
-    : '$' + item.latex + '$';
+    : inlineMathMarkdown(item.latex);
 }
 
 /** A substitution's side, `markdown`, resolved apart (see resolveEmphasis),
@@ -10150,7 +10160,7 @@ function emphasisGroup(
   for (let g = start; g < groupEnd; g++) {
     const item = segment[g];
     if (item.type === 'math') {
-      text += '$' + item.latex + '$';
+      text += inlineMathMarkdown(item.latex);
       mathEnd = text.length;
     } else if (item.type === 'text') {
       // Inner formatting per item, all but the bold or italic around the group
@@ -10486,7 +10496,7 @@ function renderInlineRange(
       // Check if this inline math is between bold/italic text items that share
       // formatting. If so, the caller (text rendering below) already handled it
       // as part of a formatting group. If not, emit standalone.
-      const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
+      const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
       if (item.display) out += wrapWithRevision(mathText, item.revision);
       else {
         [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
@@ -10618,7 +10628,7 @@ function renderInlineRange(
           continue;
         }
         if (seg.type === 'math') {
-          [anchorText, anchorSpan] = appendRevised(anchorText, '$' + seg.latex + '$', seg, anchorSpan);
+          [anchorText, anchorSpan] = appendRevised(anchorText, inlineMathMarkdown(seg.latex), seg, anchorSpan);
           if (!seg.revision) anchorMathEnd = anchorText.length;
           j++;
           continue;
@@ -10876,7 +10886,7 @@ function renderInlineRangeWithIds(
       const currentIds = item.commentIds;
       enterComments(currentIds);
 
-      const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
+      const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
       if (item.display) out += wrapWithRevision(mathText, item.revision);
       else {
         [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
@@ -11201,7 +11211,7 @@ function htmlLineCharacters(line: string, endsParagraph = false): string[] {
  *  there would read as a space, and a blank line would end the table */
 function mathCellRun(item: ContentItem): ContentItem {
   if (item.type !== 'math') return item;
-  const markdown = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
+  const markdown = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
   return {
     type: 'text',
     text: markdown.replace(/\r\n?|\n/g, '\\\n'),
