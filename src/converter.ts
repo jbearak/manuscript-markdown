@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { apartFromCurrency, asXmlNodes, endsInLatexComment, ommlToLatex, type XmlNode } from './omml';
+import { apartFromCurrency, asXmlNodes, endsInLatexComment, ommlToLatex, symbolFontCharacter, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
 import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
@@ -2777,34 +2777,11 @@ function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50
   return results;
 }
 
-// The Symbol font's characters as Unicode, from its code 0x20 on, after
-// Adobe's mapping, \0 where it has none
-const SYMBOL_FONT = (
-  ' !∀#∃%&∋()∗+,−./' +
-  '0123456789:;<=>?' +
-  '≅ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟ' +
-  'ΠΘΡΣΤΥςΩΞΨΖ[∴]⊥_' +
-  '‾αβχδεφγηιϕκλμνο' +
-  'πθρστυϖωξψζ{|}∼\0' +
-  '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' +
-  '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' +
-  '€ϒ′≤⁄∞ƒ♣♦♥♠↔←↑→↓' +
-  '°±″≥×∝∂•÷≠≡≈…⏐⎯↵' +
-  'ℵℑℜ℘⊗⊕∅∩∪⊃⊇⊄⊂⊆∈∉' +
-  '∠∇®©™∏√⋅¬∧∨⇔⇐⇑⇒⇓' +
-  '◊⟨®©™∑⎛⎜⎝⎡⎢⎣⎧⎨⎩⎪' +
-  '\0⟩∫⌠⎮⌡⎞⎟⎠⎤⎥⎦⎫⎬⎭\0'
-);
-
 /** The character a w:sym shows, which Word writes for one picked from the
- *  Symbol font, as Unicode, or undefined for another font's, as Wingdings,
- *  which Unicode doesn't hold */
+ *  Symbol font, as Unicode, or undefined for another font's (see
+ *  symbolFontCharacter) */
 function symbolCharacter(node: XmlNode): string | undefined {
-  if (getAttr(node, 'font').toLowerCase() !== 'symbol') return undefined;
-  // In the font's private-use range, at 0xF020, or as the code alone
-  const code = parseInt(getAttr(node, 'char'), 16) & 0xFF;
-  const character = SYMBOL_FONT[code - 0x20];
-  return character && character !== '\0' ? character : undefined;
+  return symbolFontCharacter(getAttr(node, 'font'), getAttr(node, 'char'));
 }
 
 // A run's elements that are characters, which export writes back as them

@@ -1883,3 +1883,125 @@ describe('a comment in a text or styled group', () => {
     expect(latexToOmml(latex)).toBe(omml);
   });
 });
+
+// Word writes a character from an old document's Symbol font as a w:sym in a
+// math run, with the font's own code for it, and import read no text from
+// it, which left an equation of that character alone empty, and dropped. A
+// zero-width space in a math run, which import kept, export writes in a run
+// of its own, or in a style's group drops, as text that starts with one marks
+// a hidden comment; import then read that run as a comment and dropped it
+describe('Word\'s symbol characters and zero-width spaces in an equation', () => {
+  const sym = (char: string, font = 'Symbol', rPr = '') => '<m:r>' + rPr + '<w:rPr><w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '"/></w:rPr><w:sym w:font="' + font + '" w:char="' + char + '"/></m:r>';
+  const hiddenRun = (text: string) => '<m:r><m:rPr><m:nor/></m:rPr><w:rPr><w:vanish/></w:rPr><m:t xml:space="preserve">\u200B' + text + '</m:t></m:r>';
+
+  /** A document from Word with an equation of `omml`, inline or on its own line */
+  async function wordDocx(omml: string, display: boolean): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(display ? '$$\nx\n$$\n' : 'A $x$ B.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** `markdown` comes back as it is from Word, and again */
+  async function expectStable(markdown: string): Promise<void> {
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(markdown);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(markdown);
+  }
+
+  test.each([
+    ['a Greek letter, α', run('a') + sym('F061') + run('b'), false, 'a\\alpha b'],
+    ['a Greek letter alone', sym('F061'), false, '\\alpha'],
+    ['an operator, ×', run('a') + sym('F0B4') + run('b'), true, 'a\\times b'],
+    ['a code without its F0', sym('70', 'symbol'), false, '\\pi'],
+    ['an upright one', sym('F070', 'Symbol', '<m:rPr><m:sty m:val="p"/></m:rPr>'), false, '\\mathrm{\\pi}'],
+    ['a code the Symbol font has no character for, as it is', run('a') + sym('F080') + run('b'), false, 'a\uF080b'],
+    ['another font\'s, as it is', run('a') + sym('F04A', 'Wingdings') + run('b'), true, 'a\uF04Ab'],
+    ['one with no code, which leaves the rest', run('a') + '<m:r><w:sym w:font="Symbol"/></m:r>' + run('b'), false, 'ab'],
+    ['a zero-width space', run('a\u200Bb'), false, 'a\u200Bb'],
+    ['a zero-width space first', run('\u200Ba'), false, '\u200Ba'],
+    ['a zero-width space alone', run('\u200B'), false, '\u200B'],
+    ['an upright zero-width space', styled('a\u200Bb'), true, '\\mathrm{a\u200Bb}'],
+  ])('%s from Word comes back, and again', async (_name, omml, display, latex) => {
+    const markdown = display ? '$$\n' + latex + '\n$$\n' : 'A $' + latex + '$ B.\n';
+    expect((await convertDocx(await wordDocx(omml, display))).markdown).toBe(markdown);
+    await expectStable(markdown);
+  });
+
+  // A character LaTeX reserves, as the Symbol font's % or _, is text, as one
+  // typed in an upright run is, not a comment or a script, and Word gets it
+  // as text it shows
+  test.each([
+    ['F025', 'Symbol', '\\text{\\%}', '%'],
+    ['F05F', 'Symbol', '\\text{\\_}', '_'],
+    ['F026', 'Symbol', '\\text{\\&}', '&amp;'],
+    ['F023', 'Symbol', '\\text{\\#}', '#'],
+    ['F07B', 'Symbol', '\\text{\\{}', '{'],
+    ['F07D', 'Symbol', '\\text{\\}}', '}'],
+    ['5C', 'Wingdings', '\\text{\\textbackslash{}}', '\\'],
+  ].flatMap(([char, font, latex, shown]) => ['inline', 'in display math'].map(where => [char, font, where, latex, shown])))('%s of %s, %s, comes back as text, and again, and Word shows it', async (char, font, where, latex, shown) => {
+    const display = where !== 'inline';
+    const markdown = display ? '$$\na' + latex + 'b\n$$\n' : 'A $a' + latex + 'b$ B.\n';
+    expect((await convertDocx(await wordDocx(run('a') + sym(char, font) + run('b'), display))).markdown).toBe(markdown);
+    const docx = (await convertMdToDocx(markdown)).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain(run('a') + styled(shown) + run('b'));
+    expect(xml).not.toContain('\u200B');
+    await expectStable(markdown);
+  });
+
+  test('a reserved character in a style\'s run, or among a run\'s text, is text, and a # or & is never an equation number or alignment', () => {
+    expect(importOmml('<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>a</m:t><w:sym w:font="Symbol" w:char="F025"/></m:r>')).toBe('\\mathbf{a\\%}');
+    expect(importOmml('<m:r><m:t>a</m:t><w:sym w:font="Symbol" w:char="F025"/><m:t>b</m:t></m:r>')).toBe('a\\text{\\%}b');
+    expect(importOmml('<m:r><m:rPr><m:sty m:val="x"/><m:scr m:val="x"/></m:rPr><w:sym w:font="Symbol" w:char="F025"/></m:r>')).toBe('\\text{\\%}');
+    expect(importOmml('<m:eqArr><m:e>' + run('a') + sym('F023') + run('(1)') + '</m:e></m:eqArr>')).toBe('\\begin{gathered} a\\text{\\#}(1) \\end{gathered}');
+    expect(importOmml('<m:eqArr><m:e>' + run('a') + sym('F026') + run('b') + '</m:e><m:e>' + run('c') + '</m:e></m:eqArr>')).toBe('\\begin{gathered} a\\text{\\&}b \\\\ c \\end{gathered}');
+  });
+
+  // In a run with Word's equation number, a w:sym keeps its place among the
+  // run's text, before the #, or in the number after it
+  const alpha = '<w:sym w:font="Symbol" w:char="F061"/>';
+  test.each([
+    ['before the text', alpha + '<m:t>2+#(1)</m:t>', '\\alpha2+ \\tag{1}'],
+    ['between the text', '<m:t>2</m:t>' + alpha + '<m:t>+x#(1)</m:t>', '2\\alpha+x \\tag{1}'],
+    ['after the text, before the #', '<m:t>2+</m:t>' + alpha + '<m:t>#(1)</m:t>', '2+\\alpha \\tag{1}'],
+    ['before text that shares its m:t with the #', '<m:t>2+</m:t>' + alpha + '<m:t>x#(1)</m:t>', '2+\\alpha x \\tag{1}'],
+    ['alone before the #', alpha + '<m:t>#(1)</m:t>', '\\alpha \\tag{1}'],
+    ['in the number', '<m:t>2+#(1</m:t>' + alpha + '<m:t>)</m:t>', '2+ \\tag{1α}'],
+  ].flatMap(([name, children, latex]) => [
+    [name, 'in a display equation', '<m:eqArr><m:e><m:r>' + children + '</m:r></m:e></m:eqArr>', '$$\n' + latex + '\n$$\n'],
+    [name, 'in a row of two', '<m:eqArr><m:e><m:r>' + children + '</m:r></m:e><m:e>' + run('c') + '</m:e></m:eqArr>', '$$\n\\begin{gather*}\n' + latex + ' \\\\\nc\n\\end{gather*}\n$$\n'],
+  ]))('a w:sym %s in a numbered run, %s, keeps its place, and again', async (_name, _where, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, true))).markdown).toBe(markdown);
+    await expectStable(markdown);
+  });
+
+  // A zero-width space before a \%, in one run in a style's group, is text
+  test.each([
+    'A $a\u200Bb$ B.\n',
+    '$$\n\\text{a\u200Bb c} + \\mathbf{d\u200Be}\n$$\n',
+    'A $\u200B\\%$ B.\n',
+    'A $\\mathbf{\u200B\\%}$ B.\n',
+    'A $\\text{\u200B\\% c}$ B.\n',
+  ])('%j keeps its zero-width spaces, and again', expectStable);
+
+  // Guards: the comments in an equation stay comments, hidden in Word
+  test.each([
+    '$$\na % note\nb\n$$\n',
+    '$$\na%\nb\n$$\n',
+    '$$\n\\mathrm{a} % note\n\\mathrm{b}\n$$\n',
+    '$$\na\u200B % note\n\u200Bb\n$$\n',
+  ])('the comment in %j stays one, and again', async markdown => {
+    await expectStable(markdown);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:vanish\/><\/w:rPr><m:t xml:space="preserve">\u200B ?%/);
+  });
+
+  test('a hidden run is a comment, or nothing, as a shown Normal Text one with a % is, as older exports wrote it, and an upright one is text', () => {
+    expect(importOmml(run('a') + hiddenRun(' % note\n') + run('b'))).toBe('a % note\nb');
+    expect(importOmml(run('a') + '<m:r><m:rPr><m:nor/></m:rPr><m:t xml:space="preserve">\u200B % note\n</m:t></m:r>' + run('b'))).toBe('a % note\nb');
+    expect(importOmml(run('a') + hiddenRun('hidden') + run('b'))).toBe('ab');
+    expect(importOmml(run('a') + styled('\u200B%') + run('b'))).toBe('a\\text{\u200B\\%}b');
+    expect(importOmml(run('a') + '<m:r><w:rPr><w:vanish w:val="1"/></w:rPr><m:t>\u200B</m:t></m:r>' + run('b'))).toBe('ab');
+  });
+});

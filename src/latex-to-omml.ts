@@ -202,7 +202,7 @@ function restyleAroundRevisions(omml: string, restyle: (omml: string) => string)
  * source's spaces, which a math style ignores, and Word drops, as they are.
  */
 function styledText(omml: string, text: string): { text: string; preserve: boolean } {
-  const runs = [...omml.matchAll(/<m:t( xml:space="preserve")?>(?!\u200B)([^<]*)<\/m:t>/g)].map(m => ({ kept: m[1] !== undefined, text: unescapeXmlChars(m[2]) }));
+  const runs = [...omml.matchAll(/<m:t( xml:space="preserve")?>([^<]*)<\/m:t>/g)].map(m => ({ kept: m[1] !== undefined, text: unescapeXmlChars(m[2]) }));
   for (const [list, edge] of [[runs, /^[ \t\r\n]+/], [[...runs].reverse(), /[ \t\r\n]+$/]] as const) {
     // Up to the first text, past a kept space too
     for (const run of list) {
@@ -1471,9 +1471,9 @@ class Parser {
 
   private extractText(omml: string): string {
     // Simple extraction - just get text between <m:t> tags, skipping hidden
-    // comment runs (which start with \u200B).
+    // comment runs, though not a shown run of a zero-width space.
     // NOTE: <m:t> content has already been escaped via escapeXmlChars().
-    const matches = [...omml.matchAll(/<m:t(?: xml:space="preserve")?>(?!\u200B)([^<]*)<\/m:t>/g)];
+    const matches = [...omml.split(HIDDEN_RUN_RE).filter((_part, i) => i % 2 === 0).join('').matchAll(/<m:t(?: xml:space="preserve")?>([^<]*)<\/m:t>/g)];
     return unescapeXmlChars(matches.map(m => m[1]).join(''));
   }
 
