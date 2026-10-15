@@ -1301,18 +1301,48 @@ function trimPart(latex: string): string {
  *  equation with the space's character there was no equation on the next
  *  export. Display math has no currency, and elsewhere import writes the
  *  character. Only where each space is one of those or one LaTeX ignores,
- *  so none is lost, as an en space would be; otherwise as before. */
-export function apartFromCurrency(latex: string): string {
+ *  so none is lost, as an en space would be; otherwise as before.
+ *
+ *  A space right after the number that is the whole text of one of the
+ *  equation's runs, `children`, is written as \ , which export writes so,
+ *  as in 2\ x. Export writes a space LaTeX ignores so too, but in Markdown
+ *  one follows a number there only after what exports as nothing, as in
+ *  2{} x, since $2 and a space read as currency; \ keeps it an equation. */
+export function apartFromCurrency(latex: string, children: XmlNode[]): string {
   const [, number, spaces] = /^(\d[\d,.]*)(\s+)/.exec(latex) ?? [];
-  if (!spaces || ![...spaces].every(ch => SPACE_COMMANDS.has(ch) || /[ \t\r\n]/.test(ch))) return latex;
-  const commands = spaceCommands(spaces);
-  if (!commands) return latex;
+  if (!spaces) return latex;
+  const shown = Math.min(spacesInRunsAfter(number, children), /^ */.exec(spaces)![0].length);
+  const head = number + '\\ '.repeat(shown);
+  const after = spaces.slice(shown);
   const rest = latex.slice(number.length + spaces.length);
+  const commands = [...after].every(ch => SPACE_COMMANDS.has(ch) || /[ \t\r\n]/.test(ch)) ? spaceCommands(after) : '';
+  if (!commands) return head + after + rest;
   // A space LaTeX ignores is kept as one, and a command named with letters
   // ends before whatever follows, as a CriticMarkup span whose text would
   // run into it once accepted, as \quad{++x++} would, as \quadx
-  const gap = rest && (/[ \t\r\n]/.test(spaces) || /[A-Za-z]$/.test(commands)) ? ' ' : '';
-  return number + commands + gap + rest;
+  const gap = rest && (/[ \t\r\n]/.test(after) || /[A-Za-z]$/.test(commands)) ? ' ' : '';
+  return head + commands + gap + rest;
+}
+
+/** How many ASCII spaces follow `number` at the start of an equation in
+ *  runs of their own, of spaces alone, after runs of the number alone, as
+ *  export writes 2\ x. Runs of whitespace before the number, which
+ *  ommlToLatex trims, are skipped. */
+function spacesInRunsAfter(number: string, children: XmlNode[]): number {
+  let text = '';
+  let spaces = 0;
+  for (const child of children) {
+    if (!('m:r' in child)) break;
+    const latex = translateNode(child);
+    if (!text && !latex.trim()) continue;
+    if (text.length < number.length) {
+      text += latex;
+      continue;
+    }
+    if (!/^ +$/.test(latex)) break;
+    spaces += latex.length;
+  }
+  return text === number ? spaces : 0;
 }
 
 /** The spaces export writes for \quad, \;, \: and \, (see latex-to-omml.ts) */
