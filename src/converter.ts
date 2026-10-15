@@ -929,18 +929,21 @@ function anyBetween(sorted: number[], from: number, to: number): boolean {
 export class RunsAfter {
   /** `prefix` comes before the runs, as a link's text has its ](url), and
    *  `link` says the text is a link's. `runs` are the items the text is
-   *  of, where they're known, as they're not for a link's text. */
+   *  of, where they're known, as they're not for a link's text.
+   *  `equationFirst`: an inline equation comes first, as the next of a
+   *  link's runs (see mathFirst). */
   constructor(private readonly index: TextIndex, private readonly from: number, private readonly prefix = '', readonly link = false,
-    private readonly runs?: IndexedRuns) {}
+    private readonly runs?: IndexedRuns, private readonly equationFirst = false) {}
 
   /** The runs after as text alone, where it's all there is */
   static of(text: string): RunsAfter {
     return new RunsAfter(indexText(text), 0);
   }
 
-  /** These after a link's ](url), for its text */
-  linkTo(href: string): RunsAfter {
-    return new RunsAfter(this.index, this.from, '](' + formatHrefForMarkdown(href) + ')' + this.prefix, true);
+  /** These after a link's ](url), for its text, which an equation in the
+   *  link's text comes first in (`equationFirst`), as the run after */
+  linkTo(href: string, equationFirst = false): RunsAfter {
+    return new RunsAfter(this.index, this.from, '](' + formatHrefForMarkdown(href) + ')' + this.prefix, true, undefined, equationFirst);
   }
 
   /** The first character, '' for none */
@@ -952,6 +955,7 @@ export class RunsAfter {
    *  a letter or digit at the end of the run before goes as a reference
    *  (see textNextToMath) */
   get mathFirst(): boolean {
+    if (this.equationFirst) return true;
     if (this.prefix || !this.runs) return false;
     const { items } = this.runs;
     let k = this.runs.at;
@@ -1626,8 +1630,9 @@ export type ContentItem =
       breakRevision?: RevisionInfo; // w:ins/w:del on the previous paragraph's mark, which is the break before this one
     }
   // inParagraph: display math in a w:p, which goes on in its text, not a
-  // body's m:oMathPara of its own
-  | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean; highlight?: string }
+  // body's m:oMathPara of its own. href and link: as text's, of a
+  // w:hyperlink around an inline equation
+  | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean; highlight?: string; href?: string; link?: number }
   // href and link: as text's, of a w:hyperlink around the reference
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting; href?: string; link?: number }
   // otherLineEnds: its hidden runs held a line end that isn't a line break
@@ -4077,15 +4082,20 @@ const TAG_LEFT_OPEN_AT = new RegExp('<[A-Za-z][A-Za-z0-9-]*(?:\\s+' + TAG_ATTRIB
  *  its end, as bold <span a=" before a link of "> to one place, which would
  *  take the ](url) after it, and what follows to a >, as its attribute's.
  *  From the left, as Markdown reads tags, each whole one taking the < in
- *  it, but none in code or after a backslash. */
+ *  it, but none in code, in an inline equation, as of a link's text that
+ *  holds one (see linkGroup), whose LaTeX export reads as it is, or after
+ *  a backslash. */
 function escapeTagLeftOpen(text: string, url: string): string {
   let code: ReturnType<typeof computeCodeRegions> | undefined;
+  let equations: Array<[number, number]> | undefined;
   for (let i = text.indexOf('<'); i !== -1; i = text.indexOf('<', i + 1)) {
     let slashes = 0;
     while (text[i - 1 - slashes] === '\\') slashes++;
     if (slashes % 2 === 1) continue;
     code ??= computeCodeRegions('[' + text + '](' + url + ')');
     if (isInsideCodeRegion(1 + i, code)) continue;
+    equations ??= inlineEquations(text, code);
+    if (equations.some(([start, end]) => start < i && i < end)) continue;
     HTML_TAG_AT.lastIndex = i;
     if (HTML_TAG_AT.test(text)) {
       i = HTML_TAG_AT.lastIndex - 1;
@@ -4095,6 +4105,19 @@ function escapeTagLeftOpen(text: string, url: string): string {
     if (TAG_LEFT_OPEN_AT.test(text)) return text.slice(0, i) + '\\' + text.slice(i);
   }
   return text;
+}
+
+/** Where each inline equation of a link's `text` starts and ends, from a
+ *  $ that isn't in its `code` (offset by the link's [), as export reads
+ *  one (see findDollarMathAt) */
+function inlineEquations(text: string, code: ReturnType<typeof computeCodeRegions>): Array<[number, number]> {
+  const equations: Array<[number, number]> = [];
+  for (let j = text.indexOf('$'); j !== -1;) {
+    const math = isInsideCodeRegion(1 + j, code) ? undefined : findDollarMathAt(text, j, { displayRun: 'at-least' });
+    if (math?.kind === 'math') equations.push([math.start, math.end]);
+    j = text.indexOf('$', math?.kind === 'math' ? math.end : j + 1);
+  }
+  return equations;
 }
 
 // Comment extraction
@@ -6162,7 +6185,8 @@ function parseNoteBody(
           try {
             const latex = apartFromCurrency(ommlToLatex(mathChildren), mathChildren);
             if (latex) {
-              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : mathHighlight(node)) });
+              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : mathHighlight(node)),
+                ...(currentHref ? { href: currentHref, link: currentLink } : {}) });
             }
           } catch {
             target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
@@ -8243,7 +8267,8 @@ export async function extractDocumentContent(
           try {
             const latex = apartFromCurrency(ommlToLatex(mathChildren), mathChildren);
             if (latex) {
-              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : mathHighlight(node)) });
+              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : mathHighlight(node)),
+                ...(currentHref ? { href: currentHref, link: currentLink } : {}) });
             }
           } catch {
             target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
@@ -8681,8 +8706,8 @@ function bareLinkReadsBack(before: string, address: string, closer: string, foll
 }
 
 /** `markdown`, the Markdown of the text at `index`, with a ! at its end
- *  escaped where a link, or a picture or a note's [^1] that starts one,
- *  comes next in its comments, which the ! would make an image of, as in
+ *  escaped where a link, or a picture, a note's [^1] or an inline equation
+ *  that starts one, comes next in its comments, which the ! would make an image of, as in
  *  ![text](url), and where a note's [^1] does that a ( comes right after,
  *  in the link the note is in or outside one, as in ![^1](x), as a
  *  citation's [@key] in the text is escaped after one (see
@@ -8708,7 +8733,7 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   };
   const k = nonEmpty(index + 1);
   const next = segment[k];
-  if (k >= end || next.type !== 'text' && next.type !== 'image' && next.type !== 'footnote_ref') return markdown;
+  if (k >= end || next.type !== 'text' && next.type !== 'image' && next.type !== 'footnote_ref' && !(next.type === 'math' && !next.display)) return markdown;
   // A link that starts there, not the one the text is in
   const startsLink = next.href !== undefined && (next.href !== item.href || next.link !== item.link);
   const at = nonEmpty(k + 1);
@@ -8783,12 +8808,16 @@ function characterReference(c: string): string {
  * delimiters keep them apart but in a span of items (`span`), as a
  * comment's do, and so does an emphasis or highlight the Markdown starts
  * or ends with. Where the text goes is read by position, not from the
- * Markdown before it, which reading would copy.
+ * Markdown before it, which reading would copy. A link's text is kept apart
+ * only from an equation in the link's text (`inLink`, see linkGroup), as
+ * its brackets keep it from one outside, and there where both are of one
+ * revision, or none, which one span holds, as `afterMath` says of the
+ * equation before.
  */
-function textNextToMath(markdown: string, segment: ContentItem[], index: number, end: number, afterMath: boolean, span = false, before = ''): string {
+function textNextToMath(markdown: string, segment: ContentItem[], index: number, end: number, afterMath: boolean, span = false, before = '', inLink = false): string {
   const item = segment[index];
-  if (item.type !== 'text' || item.href || markdown === '') return markdown;
-  if (afterMath && (span || !item.revision)) {
+  if (item.type !== 'text' || item.href && !inLink || markdown === '') return markdown;
+  if (afterMath && (span || inLink || !item.revision)) {
     if (markdown[0] === '$') markdown = '\\' + markdown;
     // A $ after the letter or digit, which kept it from opening math, does
     // after the reference's ;
@@ -8798,7 +8827,7 @@ function textNextToMath(markdown: string, segment: ContentItem[], index: number,
   while (k < end && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k++;
   const next = k < end ? segment[k] : undefined;
   if (next?.type !== 'math' || next.display || !commentSetsEqual(item.commentIds, next.commentIds ?? NO_COMMENTS)
-      || (!span && (item.revision || next.revision))) return markdown;
+      || (inLink ? !revisionsEqual(item.revision, next.revision) : !span && (item.revision || next.revision))) return markdown;
   const last = markdown[markdown.length - 1];
   if (last !== '$' && !WORD_NEXT_TO_MATH.test(last)) return markdown;
   let slashes = 0;
@@ -9183,7 +9212,7 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
   const joins = (item: ContentItem) =>
     (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || (item.type === 'math' && !item.display))
     && revisionsEqual(item.revision, first.revision) && commentSetsEqual(item.commentIds, commentIds)
-    && !((item.type === 'text' || item.type === 'footnote_ref') && item.href) && !groupItemSource(item).includes('==');
+    && !((item.type === 'text' || item.type === 'footnote_ref' || item.type === 'math') && item.href) && !groupItemSource(item).includes('==');
   if (!joins(first)) return start;
   const groupless = grouplessRuns.get(segment);
   if (groupless && groupless.from < start && start < groupless.to) return start;
@@ -9361,9 +9390,9 @@ function combinedSpanJoin(items: InlineRevisionItem[], afterItem?: (k: number) =
  *  neighbours' (`joinsHighlight`, see joinHighlights), at the start of a
  *  line where an item of the side before it ends one (`lineStart`). */
 function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter, joinsHighlight = false, lineStart = false): string {
-  // A note reference in a link, in the link, around its highlight, as
-  // linkGroup writes one
-  if (item.type === 'footnote_ref' && item.href) {
+  // A note reference or an equation in a link, in the link, around its
+  // highlight, as linkGroup writes one
+  if ((item.type === 'footnote_ref' || item.type === 'math') && item.href) {
     return markdownLink(substitutionItemText({ ...item, href: undefined, link: undefined }, precedingText, noteLabels, after), item.href);
   }
   const color = highlightColorOf(item);
@@ -9548,7 +9577,7 @@ function renderSubstitutionRun(
       const item = segment[j] as SubstitutionItem;
       starts[j - from] = text.length;
       // A link of several runs stays one link, as outside a substitution
-      const link = item.type === 'text' || item.type === 'footnote_ref' ? linkGroup(segment, j, to, item.commentIds, undefined, noteLabels) : undefined;
+      const link = item.type === 'text' || item.type === 'footnote_ref' || item.type === 'math' ? linkGroup(segment, j, to, item.commentIds, undefined, noteLabels) : undefined;
       if (link) {
         text += link.text;
         j = link.end;
@@ -10016,8 +10045,9 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
       offsets.push(text.length);
       const item = segment[k];
       if (item.type === 'footnote_ref' || item.type === 'citation') bracketed.push(text.length);
-      // After its $ or $$, and the == of a highlight (see indexedText)
-      if (item.type === 'math') readMath(item.latex, text.length + (item.display ? 2 : highlightColorOf(item) ? 3 : 1), !!item.display);
+      // After its $ or $$, and the == of a highlight and the [ of a link
+      // (see indexedText)
+      if (item.type === 'math') readMath(item.latex, text.length + (item.display ? 2 : (item.href ? 1 : 0) + (highlightColorOf(item) ? 3 : 1)), !!item.display);
       text += indexedText(item);
       if (item.type === 'html_comment') comments.push(offsets[offsets.length - 1], text.length);
     }
@@ -10048,8 +10078,10 @@ function indexedText(item: ContentItem): string {
       : '\uFFFC'.repeat(Math.max(1, item.latex.length));
     if (item.display) return '$' + '$' + latex + '$' + '$';
     // A highlighted equation's == around it (see renderHighlightGroup),
-    // which runsTextIndexes counts before the source
-    return highlightColorOf(item) ? '==$' + latex + '$==' : '$' + latex + '$';
+    // which runsTextIndexes counts before the source, and a linked one's
+    // link, as a link's text's below
+    const own = highlightColorOf(item) ? '==$' + latex + '$==' : '$' + latex + '$';
+    return item.href ? '[' + own + '](' + formatHrefForMarkdown(item.href) + ')' : own;
   }
   // An HTML comment's text, which export reads math, a highlight, code and
   // a citation's key across, as in $<!-- x$ -->, though not emphasis, nor
@@ -10201,7 +10233,7 @@ function emphasisGroup(
   for (; groupEnd < end; groupEnd++) {
     const next = segment[groupEnd];
     const joins = next.type === 'math'
-      ? !next.display && !next.revision && !highlightColorOf(next) && commentSetsEqual(next.commentIds ?? NO_COMMENTS, commentIds)
+      ? !next.display && !next.revision && !next.href && !highlightColorOf(next) && commentSetsEqual(next.commentIds ?? NO_COMMENTS, commentIds)
       : next.type === 'text' && !next.revision && !next.href && commentSetsEqual(next.commentIds, commentIds)
         && next.formatting.bold === first.formatting.bold && next.formatting.italic === first.formatting.italic
         && next.text !== '\\\n';
@@ -10257,32 +10289,33 @@ const startsBlock = (item: ContentItem | undefined): boolean =>
   item?.type === 'text' && startsBlockLine(wrapWithFormatting(item.text, item.formatting));
 
 /** A run a link's text holds (see linkGroup) */
-type LinkItem = Extract<ContentItem, { type: 'text' | 'image' | 'footnote_ref' }>;
+type LinkItem = Extract<ContentItem, { type: 'text' | 'image' | 'footnote_ref' | 'math' }>;
 
 /**
- * A Word hyperlink's runs from `start`, its text, line breaks, pictures and
- * note references, all in the comments `commentIds`, as one Markdown link
- * around them, but not the next hyperlink's, though it goes to the same
- * place, so [a **b** c](u), a link with a line break in it,
- * [a ![b](b.png) c](u) and [a[^1] b](u) stay one link. A revision of the whole
+ * A Word hyperlink's runs from `start`, its text, line breaks, pictures,
+ * note references and inline equations, all in the comments `commentIds`,
+ * as one Markdown link around them, but not the next hyperlink's, though it
+ * goes to the same place, so [a **b** c](u), a link with a line break in it,
+ * [a ![b](b.png) c](u), [a[^1] b](u) and [a $x$ b](u) stay one link. A revision of the whole
  * link goes around it, from `item`'s, and one of part of it inside it, as
  * a deletion at its end does where its insertion comes after the link,
  * which Word keeps out of the hyperlink, and each run's of one of all of it
  * where no span around it holds its text.
  * Its emphasis is left marked, for the range's resolveEmphasis, which reads
  * the runs around the link too. Undefined where the link is one run, but
- * for a note reference alone, which writes no link of its own.
+ * for a note reference or an equation alone, which writes no link of its own.
  */
 function linkGroup(
   segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>, imageFormatMapping?: Map<string, string>,
   noteLabels?: Map<string, string>,
 ): { text: string; end: number; item: InlineRevisionItem; join: { join: SpanJoin; literal: Set<string> } } | undefined {
   const first = segment[start];
-  if ((first.type !== 'text' && first.type !== 'image' && first.type !== 'footnote_ref') || !first.href
-    || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
+  const linkItem = (item: ContentItem): item is LinkItem =>
+    item.type === 'text' || item.type === 'image' || item.type === 'footnote_ref' || item.type === 'math' && !item.display;
+  if (!linkItem(first) || !first.href || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
   const inLink = (i: number): LinkItem | undefined => {
     const item = segment[i];
-    return i < end && (item.type === 'text' || item.type === 'image' || item.type === 'footnote_ref') && item.href === first.href && item.link === first.link
+    return i < end && linkItem(item) && item.href === first.href && item.link === first.link
       && commentSetsEqual(item.commentIds, commentIds) ? item : undefined;
   };
   const items: LinkItem[] = [];
@@ -10296,7 +10329,8 @@ function linkGroup(
       let line = '';
       for (let i = start + items.length, item = inLink(i); item && !(item.type === 'text' && item.text === '\\\n'); item = inLink(++i)) {
         line += item.type === 'image' ? pictureMarkdown(item, imageFormatMapping)
-          : item.type === 'footnote_ref' ? footnoteRefText(item, noteLabels) : wrapWithFormatting(item.text, item.formatting);
+          : item.type === 'footnote_ref' ? footnoteRefText(item, noteLabels)
+          : item.type === 'math' ? inlineMathMarkdown(item.latex) : wrapWithFormatting(item.text, item.formatting);
       }
       if (startsBlockLine(line)) break;
     }
@@ -10307,7 +10341,7 @@ function linkGroup(
     // (see spanJoin), come between them
     if (OPEN_TAG_AT_END_RE.test(next.text)) break;
   }
-  if (items.length < 2 && first.type !== 'footnote_ref') return undefined;
+  if (items.length < 2 && first.type !== 'footnote_ref' && first.type !== 'math') return undefined;
   const href = first.href;
   // The item at k as Markdown in the link's text, which reads the runs
   // `after` it as the rest of the text before the link's ](url), as a link
@@ -10315,17 +10349,33 @@ function linkGroup(
   // (see showsOnBreak), as outside a link, and so does the escape of a {
   // after a picture with no size (see escapeBraceAfterImage).
   const afterItem = (k: number): RunsAfter => runsAfter(segment, start + k + 1, end);
+  // A note reference or an equation in its highlight, which Word shows on it
+  const highlightedText = (item: LinkItem & { type: 'footnote_ref' | 'math' }): string => {
+    const color = highlightColorOf(item);
+    const own = item.type === 'math' ? inlineMathMarkdown(item.latex) : footnoteRefText(item, noteLabels);
+    return color ? wrapHighlight(own, color) : own;
+  };
   const itemText = (k: number, after: RunsAfter): string => {
     const item = items[k];
     if (item.type === 'image') return pictureMarkdown(item, imageFormatMapping, after.linkTo(href));
-    if (item.type === 'footnote_ref') {
-      // In its highlight, which Word shows on it
-      const color = highlightColorOf(item);
-      return color ? wrapHighlight(footnoteRefText(item, noteLabels), color) : footnoteRefText(item, noteLabels);
-    }
+    if (item.type === 'footnote_ref' || item.type === 'math') return highlightedText(item);
+    // Kept apart from an equation next to it in the link's text, which no
+    // delimiters of a revision keep apart where it's of the same one, and
+    // from the closing == of a highlighted one or note reference, as
+    // escapeAfterHighlight keeps text after one outside a link
+    const before = k > 0 ? items[k - 1] : undefined;
+    const joined = !!before && revisionsEqual(before.revision, item.revision);
+    const afterHighlight = joined && (before.type === 'math' || before.type === 'footnote_ref') && !!highlightColorOf(before);
+    // An equation next in the link's text, of the same revision, which a
+    // letter or digit at the text's end goes before as a reference, whose
+    // ; a $ in the text could close math at (see textNextToMath)
+    let n = k + 1;
+    while (n < items.length && items[n].type === 'text' && (items[n] as ContentItem & { type: 'text' }).text === '') n++;
+    const mathNext = n < items.length && items[n].type === 'math' && revisionsEqual(items[n].revision, item.revision);
+    const text = markedFormatting(item.text, item.formatting, false, after.linkTo(href, mathNext));
     return item.text === '\\\n' && !showsOnBreak(item.formatting) ? lineBreakText()
-      : escapeBangBeforeLink(escapeBraceAfterImage(markedFormatting(item.text, item.formatting, false, after.linkTo(href)), segment, start + k),
-        segment, start + k, start + items.length, true);
+      : escapeBangBeforeLink(escapeBraceAfterImage(textNextToMath(afterHighlight ? escapeAfterHighlight(text, highlightedText(before)) : text,
+        segment, start + k, start + items.length, joined && before.type === 'math', false, '', true), segment, start + k), segment, start + k, start + items.length, true);
   };
   // A revision of the whole link goes around it, but where its span would
   // end at its closer in the link's code, and a substitution with nothing
@@ -10558,6 +10608,13 @@ function renderInlineRange(
 
     // Inline math in a comment's range goes in its anchor, below
     if (item.type === 'math' && (item.display || !item.commentIds?.size)) {
+      // With the rest of its link, as the link's text goes
+      const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS, renderOpts?.imageFormatMapping, renderOpts?.noteLabels);
+      if (link) {
+        [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
+        i = link.end;
+        continue;
+      }
       // Check if this inline math is between bold/italic text items that share
       // formatting. If so, the caller (text rendering below) already handled it
       // as part of a formatting group. If not, emit standalone.
@@ -10693,6 +10750,12 @@ function renderInlineRange(
           continue;
         }
         if (seg.type === 'math') {
+          const link = linkGroup(segment, j, segmentEnd, commentSet, renderOpts?.imageFormatMapping, renderOpts?.noteLabels);
+          if (link) {
+            [anchorText, anchorSpan] = appendRevised(anchorText, link.text, link.item, anchorSpan, link.join);
+            j = link.end;
+            continue;
+          }
           [anchorText, anchorSpan] = appendRevised(anchorText, inlineMathMarkdown(seg.latex), seg, anchorSpan);
           if (!seg.revision) anchorMathEnd = anchorText.length;
           j++;
@@ -10950,6 +11013,13 @@ function renderInlineRangeWithIds(
     if (item.type === 'math') {
       const currentIds = item.commentIds;
       enterComments(currentIds);
+      // With the rest of its link, as the link's text goes
+      const link = linkGroup(segment, i, segmentEnd, currentIds, imageFormatMapping, noteLabels);
+      if (link) {
+        [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
+        i = link.end;
+        continue;
+      }
 
       const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
       if (item.display) out += wrapWithRevision(mathText, item.revision);
@@ -11273,7 +11343,8 @@ function htmlLineCharacters(line: string, endsParagraph = false): string[] {
 
 /** An equation in an HTML table's cell as a run of its Markdown, which the
  *  cell exports as text, with its line ends as line breaks, as a newline
- *  there would read as a space, and a blank line would end the table */
+ *  there would read as a space, and a blank line would end the table, in
+ *  the link it's in, if any */
 function mathCellRun(item: ContentItem): ContentItem {
   if (item.type !== 'math') return item;
   const markdown = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
@@ -11283,6 +11354,7 @@ function mathCellRun(item: ContentItem): ContentItem {
     commentIds: item.commentIds ?? new Set(),
     formatting: DEFAULT_FORMATTING,
     ...(item.revision ? { revision: item.revision } : {}),
+    ...(item.href !== undefined ? { href: item.href, link: item.link } : {}),
   };
 }
 

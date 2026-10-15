@@ -758,6 +758,8 @@ Manuscript Markdown supports LaTeX math notation, which is converted to and from
 
 Bare environments are recognized for all supported amsmath display-math environments (`equation`, `align`, `gather`, `cases`, matrices, etc.). On round-trip through DOCX, bare environments are converted to the `$$`-wrapped form.
 
+Inline math can be in a link's text, as in `[the case $n = 1$](https://example.com)`. Export writes the equation inside the link's `<w:hyperlink>`, and import writes the hyperlink back as one link around it. Display math in a link's text stays out of the hyperlink. The link's text before it, if any, is one hyperlink, and its text after it, if any, is another, so a link whose whole text is display math exports with no hyperlink. The equation comes back on lines of its own, between those links.
+
 Supported LaTeX elements include fractions, roots, Greek letters, operators, matrices, accents, subscripts, superscripts, delimiters, and amsmath environments. See [LaTeX Equations](latex-equations.md) for the full syntax reference and [DOCX Converter](converter.md#latex-equations) for converter details.
 
 ## Images
