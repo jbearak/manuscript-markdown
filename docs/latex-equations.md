@@ -19,6 +19,8 @@ Display math is part of a paragraph, so a line in it that would start a Markdown
 \end{align}
 ```
 
+A heading can't go past its line, so display math that's all of a heading goes on that line, as in `# $$y = x$$`. Word gets the equation in the heading's paragraph. Import writes it back on the heading's line, as `$$...$$`, where its LaTeX holds no line end, no `$` and no `%` comment, and the equation as a whole isn't highlighted, commented or in a tracked change. A tracked change inside its LaTeX is fine. Any other display equation in a heading, as one with text beside it, as in `# Model: $$y = x$$`, comes back after the heading, on lines of its own, and the next export gives it a paragraph of its own.
+
 ### Tracked changes inside inline equations
 
 CriticMarkup can wrap a changed fragment inside an inline equation. Keep each

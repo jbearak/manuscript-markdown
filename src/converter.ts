@@ -13,7 +13,7 @@ import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
 import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { criticPayloadRanges } from './critic-markup';
-import { findDollarMathAt, isEscapedAt } from './math-delimiters';
+import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { readCitationItems } from './citation-syntax';
@@ -8350,6 +8350,38 @@ function displayMathBlock(latex: string, inSpan = false): string {
   return MATH_FENCE + '\n' + (inSpan ? lines : keepLinesInEquation(lines)) + '\n' + MATH_FENCE;
 }
 
+/** A display equation that's all of a heading, which a line end would end,
+ *  on the heading's line: its LaTeX as import reads it, between fences,
+ *  which export reads as the heading's display math, as Word has it.
+ *  Undefined for one that goes after the heading, as before: one whose
+ *  LaTeX holds a line end, which would end the heading; a $, beside which a
+ *  preview may read no fence; whitespace at its edge, or a comment, which
+ *  would take in the closing fence; LaTeX the fences don't hold as it is; a
+ *  revision, which export gives a paragraph of its own (see
+ *  splitCriticDisplayMathParagraphs in md-to-docx.ts); a comment's range
+ *  over it, whose markers go around it as a block; or a highlight. */
+function headingEquationMarkdown(item: ContentItem): string | undefined {
+  if (item.type !== 'math' || !item.display || item.revision || item.commentIds?.size || item.highlight) return undefined;
+  const latex = item.latex;
+  if (!latex || latex !== latex.trim() || /[\r\n$]/.test(latex) || /(?:^|[^\\])(?:\\\\)*%/.test(latex)) return undefined;
+  const markdown = MATH_FENCE + latex + MATH_FENCE;
+  const match = findDollarMathAt(markdown, 0, DOCX_DOLLAR_MATH_OPTIONS);
+  return match?.kind === 'math' && match.end === markdown.length && markdown.slice(match.contentStart, match.contentEnd) === latex ? markdown : undefined;
+}
+
+/** The display equation at `k` on its heading's line (see
+ *  headingEquationMarkdown), where it's all of the heading: in the
+ *  heading's paragraph, not one Word has after it, with nothing before or
+ *  after it there. Beside text, its fences can run into what the text ends
+ *  or starts with, as a $, a \ or an HTML tag's start, which export would
+ *  read otherwise. */
+function headingEquationAt(segment: ContentItem[], k: number): string | undefined {
+  const item = segment[k];
+  const edge = (other: ContentItem | undefined) => other === undefined || endsInlineRange(other);
+  if (item.type !== 'math' || !item.inParagraph || !edge(segment[k - 1]) || !edge(segment[k + 1])) return undefined;
+  return headingEquationMarkdown(item);
+}
+
 /** `block`'s lines, each after `prefix`, its container's, as a list's
  *  indent or a quote's >, the first after `first`; but a line in a
  *  CriticMarkup span after the quote's > alone. Export keeps the indent of
@@ -10200,7 +10232,8 @@ function computeSegmentEnd(
   while (idx < segment.length) {
     const item = segment[idx];
     if (endsInlineRange(item)) break;
-    if (opts?.stopBeforeDisplayMath && item.type === 'math' && item.display) break;
+    // But in a heading, where it goes on the heading's line
+    if (opts?.stopBeforeDisplayMath && item.type === 'math' && item.display && !(opts.heading && headingEquationAt(segment, idx))) break;
     idx++;
   }
   return idx;
@@ -10623,7 +10656,7 @@ function renderInlineRange(
       // Check if this inline math is between bold/italic text items that share
       // formatting. If so, the caller (text rendering below) already handled it
       // as part of a formatting group. If not, emit standalone.
-      const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
+      const mathText = item.display ? (opts?.heading && headingEquationAt(segment, i)) || MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
       if (item.display) out += wrapWithRevision(mathText, item.revision);
       else {
         [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
@@ -11026,7 +11059,7 @@ function renderInlineRangeWithIds(
         continue;
       }
 
-      const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
+      const mathText = item.display ? (opts?.heading && headingEquationAt(segment, i)) || MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : inlineMathMarkdown(item.latex);
       if (item.display) out += wrapWithRevision(mathText, item.revision);
       else {
         [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
@@ -16576,7 +16609,8 @@ function buildMarkdownOnce(
       continue;
     }
 
-    if (item.type === 'math' && item.display) {
+    // One in a heading goes on its line where it can (see headingEquationAt)
+    if (item.type === 'math' && item.display && !(paragraphHeading && headingEquationAt(mergedContent, i))) {
       const displayMathContainer = pendingDisplayMathContainer;
       const continued = mathInParagraph;
       mathInParagraph = undefined;
