@@ -20558,6 +20558,40 @@ describe('Markdown across Word runs', () => {
     expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
   });
 
+  // An equation's source, which export reads as written, ] and all, as a
+  // citation's text past a [ before it. Import left the [ as it was where
+  // the ] was in the equation, so the next export read a citation
+  const bibtex = '@article{key,\n  author = {Smith, Jane},\n  title = {T},\n  journal = {J},\n  year = {2020},\n}';
+  test.each([
+    ['with a key before the ]', '\\[see $x @key] y $ z.', '\\[see $x @key] y$ z.'],
+    ['with a key right after it', '\\[@key $x] y$ z.', '\\[@key $x] y$ z.'],
+    // An @ in a word, which starts no key, after a $ that opens no equation
+    // An @ the equation starts with, after its $, which starts no key
+    ['with an @ the equation starts with', 'p \\[x $@k] y$ z.', 'p [x $@k] y$ z.'],
+    ['with an @ in a word and no equation', '\\[a $x@k] b', '[a $x@k] b'],
+    // Which worked
+    ['with no equation', '\\[see] y.', '[see] y.'],
+    ['with an equation and no ]', '\\[a $b] c.', '[a $b] c.'],
+    ['with a key and no equation', '\\[@key] y.', '\\[@key] y.'],
+  ])('keeps a [ %s as text where an equation\'s source can hold its ]', async (_name, md, back) => {
+    const first = await convertMdToDocx(md + '\n');
+    expect(first.warnings).toEqual([]);
+    const once = (await convertDocx(first.docx)).markdown;
+    expect(once).toBe(back + '\n');
+    const second = await convertMdToDocx(once);
+    expect(second.warnings).toEqual([]);
+    expect((await convertDocx(second.docx)).markdown).toBe(once);
+  });
+
+  test('keeps a citation after an equation', async () => {
+    const md = '$x$ [@key] y.\n';
+    const first = await convertMdToDocx(md, { bibtex });
+    expect(first.warnings).toEqual([]);
+    const once = (await convertDocx(first.docx)).markdown;
+    expect(once).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(once, { bibtex })).docx)).markdown).toBe(md);
+  });
+
   test.each([
     ['at its end', run('a ', '<w:strike/>') + run('b'), '<s>a </s>b'],
     ['at its start', run('a') + run(' b', '<w:strike/>'), 'a<s> b</s>'],
