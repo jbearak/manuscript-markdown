@@ -1131,6 +1131,173 @@ describe('an empty script, base, or fraction part', () => {
   });
 });
 
+// Import wrote Word's pre-scripts, boxes and phantoms as [UNSUPPORTED: …]
+// text, which Word then showed
+describe('Word\'s pre-scripts, boxes and phantoms', () => {
+  const sPre = (sub: string, sup: string, base: string) =>
+    '<m:sPre><m:sPrePr>' + '</m:sPrePr><m:sub>' + sub + '</m:sub><m:sup>' + sup + '</m:sup><m:e>' + base + '</m:e></m:sPre>';
+  const box = (boxPr: string, content: string) => '<m:box><m:boxPr>' + boxPr + '</m:boxPr><m:e>' + content + '</m:e></m:box>';
+  const phant = (phantPr: string, content: string) => '<m:phant><m:phantPr>' + phantPr + '</m:phantPr><m:e>' + content + '</m:e></m:phant>';
+  const hidden = '<m:show m:val="0"/>';
+  const nary = (body: string) => '<m:nary><m:naryPr><m:chr m:val="∫"/><m:subHide m:val="1"/><m:supHide m:val="1"/></m:naryPr><m:sub/><m:sup/><m:e>' + body + '</m:e></m:nary>';
+
+  test.each([
+    ['pre-scripts', sPre(run('a'), run('b'), run('X')), '{}_a^bX'],
+    ['pre-scripts of more than one character', sPre(run('6'), run('14'), run('C')), '{}_6^{14}C'],
+    ['pre-scripts, a command before a letter', sPre(run('a'), run('α'), run('X')), '{}_a^\\alpha X'],
+    ['an empty pre-script', sPre('', run('b'), run('X')), '{}_{}^bX'],
+    ['an operator emulator\'s box', run('a') + box('<m:opEmu m:val="1"/>', run('≝')) + run('b'), 'a≝b'],
+    ['a differential\'s box', run('f') + box('<m:diff m:val="1"/>', run('d') + run('x')), 'fdx'],
+    ['a box after a command', run('α') + box('', run('x')), '\\alpha x'],
+    ['a box as an n-ary body', nary(box('<m:diff m:val="1"/>', run('d') + run('x'))), '\\int{dx}'],
+    ['a phantom', run('a') + phant(hidden, run('x')) + run('b'), 'a\\phantom{x}b'],
+    ['a phantom of no height', phant(hidden + '<m:zeroAsc m:val="1"/><m:zeroDesc m:val="1"/>', run('x')), '\\hphantom{x}'],
+    ['a phantom of no width', phant(hidden + '<m:zeroWid m:val="1"/>', run('x')), '\\vphantom{x}'],
+    ['a phantom Word shows', run('a') + phant('', run('x')) + run('b'), 'axb'],
+    ['a phantom Word shows, after a command', run('α') + phant('<m:show m:val="1"/>', run('x')), '\\alpha x'],
+  ])('from Word, %s, is its LaTeX', (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+    expect(roundTrip(latex)).toBe(latex);
+  });
+
+  test.each([
+    ['\\phantom{x}', ''],
+    ['\\hphantom{x}', '<m:zeroAsc m:val="1"/><m:zeroDesc m:val="1"/>'],
+    ['\\vphantom{x}', '<m:zeroWid m:val="1"/>'],
+  ])('%s exports as a phantom Word hides', (latex, flags) => {
+    const seen: string[] = [];
+    expect(latexToOmml('a' + latex + 'b', cmd => seen.push(cmd))).toBe(run('a') + phant(hidden + flags, run('x')) + run('b'));
+    expect(seen).toEqual([]);
+  });
+
+  /** A document from Word with an inline equation of `omml` */
+  async function wordDocx(omml: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A $x$ B.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  test.each([
+    ['pre-scripts', sPre(run('a'), run('b'), run('X')), '{}_a^bX', '<m:sSubSup><m:e></m:e><m:sub>' + run('a') + '</m:sub><m:sup>' + run('b') + '</m:sup></m:sSubSup>' + run('X')],
+    ['a box', box('<m:diff m:val="1"/>', run('d') + run('x')), 'dx', run('d') + run('x')],
+    ['a phantom', run('a') + phant(hidden, run('x')) + run('b'), 'a\\phantom{x}b', run('a') + phant(hidden, run('x')) + run('b')],
+  ])('%s from Word comes back, and again, with no label in Word', async (_name, omml, latex, exported) => {
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    expect(markdown).toBe('A $' + latex + '$ B.\n');
+    const docx = (await convertMdToDocx(markdown)).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(/<m:oMath>([\s\S]*?)<\/m:oMath>/.exec(xml)![1]).toBe(exported);
+    expect((await convertDocx(docx)).markdown).toBe(markdown);
+  });
+
+  // The line end of a comment at the end of a phantom's content, which
+  // the brace after it, and what follows, went into
+  test('a phantom whose content ends in a comment comes back, and again', async () => {
+    const latex = '\\phantom{x% note\n}y';
+    expect(roundTrip(latex)).toBe(latex);
+    const markdown = '$$\n' + latex + '\n$$\n';
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(markdown);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
+
+  test('a pre-script that ends in a comment keeps the base out of it', () => {
+    expect(importOmml(sPre(latexToOmml('a% c\n'), run('b'), run('X')) + run('y'))).toBe('{}_{a% c\n}^bXy');
+  });
+
+  // Word keeps the spaces at the edges of a box's content, beside what
+  // follows it, and import trimmed them
+  const preserved = (t: string) => '<m:r><m:t xml:space="preserve">' + t + '</m:t></m:r>';
+  test.each([
+    ['a box', box('<m:diff m:val="1"/>', preserved('dx ')) + run('g'), 'dx g'],
+    ['a phantom Word shows', run('a') + phant('', preserved(' x ')) + run('g'), 'a x g'],
+    ['pre-scripts\' base', sPre(run('a'), run('b'), preserved('X ')) + run('g'), '{}_a^bX g'],
+  ])('%s keeps the spaces at its content\'s edges, and again', async (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+    expect(roundTrip(latex)).toBe(latex);
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    expect(markdown).toBe('A $' + latex + '$ B.\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // Word shows nothing a phantom it hides holds, so a row whose other text
+  // is all inserted is a row Word inserts, which rejecting removes
+  test('a hidden phantom outside a row\'s insertion leaves it a row Word inserts, and again', async () => {
+    const rowChanges = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .matchAll(/<w:tr>([\s\S]*?)<\/w:tr>/g)].map(([, tr]) => /^<w:trPr>(?:(?!<\/w:trPr>)[\s\S])*?<w:(ins|del) /.exec(tr)?.[1] ?? '');
+    const docx = (await convertMdToDocx('| a | b |\n|---|---|\n| {++c++} $\\phantom{x}$ | {++d++} |\n')).docx;
+    expect(await rowChanges(docx)).toEqual(['', 'ins']);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe('| a | b |\n| --- | --- |\n| {++c $\\phantom{x}$++} | {++d++} |\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await rowChanges(again)).toEqual(['', 'ins']);
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // A space after a number that starts an inline equation, in a box, made
+  // $2 dx$, which the next export read as currency
+  test.each([
+    ['in a box after it', run('2') + box('<m:diff m:val="1"/>', preserved(' dx'))],
+    ['in a box with it', box('', preserved('2 ')) + run('x')],
+    ['in a phantom Word shows', run('2') + phant('', preserved(' x'))],
+  ])('a space after a number that starts an equation, %s, keeps it an equation, and again', async (_name, omml) => {
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    expect(markdown).toMatch(/^A \$2\\ /);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // Spacing a phantom holds alone was trimmed away
+  test.each([
+    ['\\hphantom{\\qquad}'],
+    ['\\phantom{\\quad}'],
+    ['\\vphantom{\\,}'],
+  ])('a%s comes back as written, and again', async latex => {
+    expect(roundTrip('a' + latex + 'b')).toBe('a' + latex + 'b');
+    const markdown = 'A $a' + latex + 'b$ B.\n';
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(markdown);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
+
+  // A tracked change's command at the end of a box's content ended before a
+  // letter after the box only in Word, so accepting it in Markdown gave \alphax
+  test.each([
+    ['an insertion', (omml: string) => '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:ins>', '{++\\alpha++}{}x'],
+    ['a deletion', (omml: string) => '<w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:del>', '{--\\alpha--}{}x'],
+  ])('%s of a command at the end of a box ends before a letter after it, and again', async (_name, change, latex) => {
+    expect(importOmml(box('', change(run('α'))) + run('x'))).toBe(latex);
+    const markdown = (await convertDocx(await wordDocx(box('', change(run('α'))) + run('x')))).markdown;
+    expect(markdown).toBe('A $' + latex + '$ B.\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  test('an insertion of a command at the end of pre-scripts\' base ends before a letter after it, and again', async () => {
+    const omml = sPre(run('a'), run('b'), '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + run('α') + '</w:ins>') + run('x');
+    expect(importOmml(omml)).toBe('{}_a^b{++\\alpha++}{}x');
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    expect(markdown).toBe('A ${}_a^b{++\\alpha++}{}x$ B.\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // No brace is beside a box's content, so it needs no break in ++
+  test('a box in an insertion comes back as its content would, and again', async () => {
+    const ins = (omml: string) => '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:ins>';
+    const markdown = (await convertDocx(await wordDocx(ins(box('', run('a++'))) + run('y')))).markdown;
+    expect(markdown).toBe((await convertDocx(await wordDocx(ins(run('a++')) + run('y')))).markdown);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // As on main
+  test.each([
+    ['scripts on an empty base', '<m:sSubSup><m:e/><m:sub>' + run('a') + '</m:sub><m:sup>' + run('b') + '</m:sup></m:sSubSup>' + run('X'), '{}_a^bX'],
+    ['a border box', '<m:borderBox><m:e>' + run('x') + '</m:e></m:borderBox>', '\\boxed{x}'],
+    ['an element import doesn\'t know', '<m:foo><m:e>' + run('x') + '</m:e></m:foo>', '\\text{[UNSUPPORTED: foo] x}'],
+  ])('%s is as before', (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+  });
+});
+
 describe('Word math text that reads as CriticMarkup beside braces', () => {
   const sSub = (base: string, sub: string) => '<m:sSub><m:e>' + base + '</m:e><m:sub>' + sub + '</m:sub></m:sSub>';
   const sSup = (base: string, sup: string) => '<m:sSup><m:e>' + base + '</m:e><m:sup>' + sup + '</m:sup></m:sSup>';
@@ -1262,8 +1429,8 @@ describe('Word math text that reads as CriticMarkup beside braces', () => {
 
   // An element import doesn't read comes back as text, whose end is a group's
   test('an unsupported element ending in ++ in an insertion comes back as it was', async () => {
-    const markdown = (await convertDocx(await wordDocx(ins('<m:box><m:e>' + run('a++') + '</m:e></m:box>') + run('y')))).markdown;
-    expect(markdown).toBe('${++\\text{[UNSUPPORTED: box] a+{}+}++}y$\n');
+    const markdown = (await convertDocx(await wordDocx(ins('<m:sSup><m:e>' + run('a++') + '</m:e></m:sSup>') + run('y')))).markdown;
+    expect(markdown).toBe('${++\\text{[UNSUPPORTED: sSup] a+{}+}++}y$\n');
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 

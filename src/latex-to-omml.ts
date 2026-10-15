@@ -692,6 +692,16 @@ class Parser {
         return '<m:borderBox><m:e>' + boxContent + '</m:e></m:borderBox>';
       }
 
+      // \phantom{}, as Word's phantom it hides, of no height for \hphantom{}
+      // and no width for \vphantom{}
+      case '\\phantom':
+      case '\\hphantom':
+      case '\\vphantom': {
+        const zero = cmd === '\\hphantom' ? '<m:zeroAsc m:val="1"/><m:zeroDesc m:val="1"/>' : cmd === '\\vphantom' ? '<m:zeroWid m:val="1"/>' : '';
+        const phantomContent = this.parseGroup();
+        return '<m:phant><m:phantPr><m:show m:val="0"/>' + zero + '</m:phantPr><m:e>' + phantomContent + '</m:e></m:phant>';
+      }
+
       // \overset{top}{base}
       case '\\overset': {
         const overTop = this.parseGroup();

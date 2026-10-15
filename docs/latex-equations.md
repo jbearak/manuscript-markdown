@@ -74,6 +74,8 @@ a^{n+1}      % multi-character superscript (use braces)
 
 An empty script or base, as in `x^{}` or `{}^{14}C`, is an empty part in Word, which Word shows as a dotted box, and comes back as `{}`. So is an empty numerator or denominator, as in `\frac{}{}`.
 
+Word's scripts before a base, as on an isotope, come back as scripts on an empty base before it, as in `{}_6^{14}C`, which export writes that way.
+
 ## Fractions and Roots
 
 ```latex
@@ -477,6 +479,18 @@ When a LaTeX equation containing `%` comments is exported to Word `.docx`, the c
 ```latex
 \boxed{E = mc^2}
 ```
+
+A box Word puts around an operator, as `≝`, or a differential, as `dx`, without a border, comes back as its content.
+
+## Phantoms
+
+```latex
+\phantom{x}    % the space x takes, with nothing shown
+\hphantom{x}   % its width alone
+\vphantom{x}   % its height alone
+```
+
+Each is a phantom Word hides, and comes back as written. A phantom Word shows comes back as its content.
 
 ## Over/Under Annotations
 

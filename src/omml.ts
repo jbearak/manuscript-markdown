@@ -724,6 +724,11 @@ function isOperand(nodes: XmlNode[], latex: string): boolean {
         : key === 'm:t' || key.startsWith('m:') && !SKIP_TAGS.has(key)));
   if (pieces.length !== 1) return false;
   const [piece] = pieces;
+  // Export reads {}_a^bX as the scripts and then X, and a box's content as
+  // that content
+  if (piece['m:sPre'] !== undefined) return false;
+  const shown = shownContent(piece);
+  if (shown) return isOperand(shown, latex);
   if (piece['m:r'] !== undefined || piece['m:t'] !== undefined) return /^(?:[^\\{}]|\\[A-Za-z]+(?:\{[^{}]*\})?|\\[^A-Za-z])$/.test(latex);
   if (piece['m:d'] !== undefined) return latex.startsWith('\\');
   // A linear fraction, {a}/{b}, is three pieces to export
@@ -1169,6 +1174,75 @@ function translateBorderBox(children: XmlNode[]): string {
   return (cancel ?? '\\boxed') + '{' + content + '}';
 }
 
+/**
+ * Translate an m:sPre (scripts before a base) element to LaTeX, as the
+ * scripts on an empty base and then the base, {}_a^bX, which export reads
+ * back as the same scripts before X. No brace is beside the base, which
+ * goes on beside what follows, untrimmed, as a box's content does.
+ */
+function translatePreScripts(children: XmlNode[]): string {
+  const sub = closableLatex(scriptToLatex(findChild(children, 'm:sub')));
+  const sup = closableLatex(scriptToLatex(findChild(children, 'm:sup')));
+  return appendLatex('{}_' + scriptArg(sub) + '^' + scriptArg(sup), ommlChildrenToLatex(findChild(children, 'm:e')));
+}
+
+/** `latex` with a line end after it where it ends in a comment, which would
+ *  hold the brace that closes its group, and what follows */
+function closableLatex(latex: string): string {
+  return endsInLatexComment(latex) ? latex + '\n' : latex;
+}
+
+/**
+ * The content of an m:box, which Word puts around an operator emulator,
+ * as ≝, or a differential, as dx, or of an m:phant Word shows, which LaTeX
+ * sets the same without it, with no brace beside it, or undefined for any
+ * other node. Import writes it as it writes a tracked change's content,
+ * with the spaces at its edges, which Word keeps beside what follows.
+ */
+function shownContent(node: XmlNode): XmlNode[] | undefined {
+  if (node['m:box'] !== undefined) return findChild(asXmlNodes(node['m:box']), 'm:e');
+  if (node['m:phant'] === undefined) return undefined;
+  const children = asXmlNodes(node['m:phant']);
+  const show = findChildNode(findChild(children, 'm:phantPr'), 'm:show');
+  return !show || ommlOn(show) ? findChild(children, 'm:e') : undefined;
+}
+
+/** `children` with each box or phantom Word shows (see shownContent) as
+ *  its content in its place, and pre-scripts as the scripts alone and then
+ *  their base (see translatePreScripts), so that what reads its parts in
+ *  turn, as a number's spaces or a tracked change's command before a
+ *  letter, reads them across its edges */
+function unwrapped(children: XmlNode[]): XmlNode[] {
+  if (!children.some(child => shownContent(child) !== undefined || child['m:sPre'] !== undefined)) return children;
+  const nodes: XmlNode[] = [];
+  for (const child of children) {
+    const shown = shownContent(child);
+    if (shown !== undefined) {
+      for (const node of unwrapped(shown)) nodes.push(node);
+    } else if (child['m:sPre'] !== undefined) {
+      const parts = asXmlNodes(child['m:sPre']);
+      nodes.push({ 'm:sPre': parts.filter(part => part['m:e'] === undefined) });
+      for (const node of unwrapped(findChild(parts, 'm:e'))) nodes.push(node);
+    } else {
+      nodes.push(child);
+    }
+  }
+  return nodes;
+}
+
+/**
+ * Translate an m:phant Word hides to LaTeX: \hphantom{} where it has no
+ * height, \vphantom{} where it has no width, and \phantom{} otherwise.
+ */
+function translatePhantom(children: XmlNode[]): string {
+  const pr = findChild(children, 'm:phantPr');
+  const zero = (tag: string) => ommlOn(findChildNode(pr, tag));
+  const command = zero('m:zeroWid') ? '\\vphantom' : zero('m:zeroAsc') && zero('m:zeroDesc') ? '\\hphantom' : '\\phantom';
+  // Spacing alone, which a part's trim drops, is its commands, as \qquad
+  const content = ommlToLatex(findChild(children, 'm:e')) || spaceCommands(ommlChildrenToLatex(findChild(children, 'm:e')));
+  return command + '{' + closableLatex(content) + '}';
+}
+
 
 /**
  * If the element children consist solely of an m:groupChr with the given
@@ -1303,6 +1377,13 @@ function translateNode(node: XmlNode): string {
       case 'm:limUpp':    result += translateLimUpp(children); break;
       case 'm:bar':       result += translateBar(children); break;
       case 'm:groupChr':  result += translateGroupChr(children); break;
+      case 'm:sPre':      result += translatePreScripts(children); break;
+      case 'm:box':
+      case 'm:phant': {
+        const shown = shownContent(node);
+        result = appendLatex(result, shown ? ommlChildrenToLatex(shown) : translatePhantom(children));
+        break;
+      }
       case 'm:r':         result = appendLatex(result, translateRun(children)); break;
       case 'm:t':         result = appendLatex(result, extractText(children)); break;
       default:
@@ -1448,11 +1529,11 @@ export function apartFromCurrency(latex: string, children: XmlNode[]): string {
 
 /** How many spaces and tabs follow `number` at the start of an equation in
  *  the text of the runs it starts with, in the number's run or in their
- *  own, as 2 x and 2\ x. Runs of whitespace before the number, which
- *  ommlToLatex trims, are skipped. */
+ *  own, as 2 x and 2\ x, a box's or a phantom's Word shows too. Runs of
+ *  whitespace before the number, which ommlToLatex trims, are skipped. */
 function spacesInRunsAfter(number: string, children: XmlNode[]): number {
   let text = '';
-  for (const child of children) {
+  for (const child of unwrapped(children)) {
     if (!('m:r' in child)) break;
     const latex = translateNode(child);
     if (!text && !latex.trim()) continue;
@@ -1513,8 +1594,9 @@ function latexEnvironment(name: string, rows: string[]): string {
 
 /** ommlToLatex without the trim, for the content of a tracked change, which
  *  may be only a space such as \quad's em space. */
-function ommlChildrenToLatex(children: XmlNode[]): string {
-  if (!Array.isArray(children)) return '';
+function ommlChildrenToLatex(nodes: XmlNode[]): string {
+  if (!Array.isArray(nodes)) return '';
+  const children = unwrapped(nodes);
   let result = '';
   // Whether the last markup's content ends with a command
   let markupEndsInCommand = false;
