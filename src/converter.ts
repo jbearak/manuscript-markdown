@@ -9965,27 +9965,33 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
     const comments: number[] = [];
     // Where each ], @ and [ of an equation's source is
     const math: Partial<Record<']' | '@' | '[', number[]>> = {};
+    // An equation's LaTeX from `source`: an @ only where it starts a key,
+    // after whitespace, as export reads one, which the start of a line is,
+    // as display math's source starts, but not the $ before an inline one's
+    const readMath = (latex: string, source: number, lineStart: boolean) => {
+      const spaceAt = (j: number) => j < 0 ? lineStart : /\s/.test(latex[j]);
+      for (let j = 0; j < latex.length; j++) {
+        const c = latex[j];
+        if (c === ']' || c === '[') (math[c] ??= []).push(source + j);
+        else if (c === '@' && /[\p{L}\p{N}_]/u.test(latex[j + 1] ?? '')
+          && (spaceAt(j - 1) || latex[j - 1] === '-' && spaceAt(j - 2))) (math['@'] ??= []).push(source + j);
+      }
+    };
     let text = '';
     for (let k = first; k < end; k++) {
       offsets.push(text.length);
       const item = segment[k];
       if (item.type === 'footnote_ref' || item.type === 'citation') bracketed.push(text.length);
-      if (item.type === 'math') {
-        const source = text.length + (item.display ? 2 : 1);
-        // An @ only where it starts a key, after whitespace, as export reads
-        // one, not after the $ before the source
-        const { latex } = item;
-        for (let j = 0; j < latex.length; j++) {
-          const c = latex[j];
-          if (c === ']' || c === '[') (math[c] ??= []).push(source + j);
-          else if (c === '@' && /[\p{L}\p{N}_]/u.test(latex[j + 1] ?? '')
-            && (/\s/.test(latex[j - 1] ?? '') && j > 0 || latex[j - 1] === '-' && j > 1 && /\s/.test(latex[j - 2]))) (math['@'] ??= []).push(source + j);
-        }
-      }
+      if (item.type === 'math') readMath(item.latex, text.length + (item.display ? 2 : 1), !!item.display);
       text += indexedText(item);
       if (item.type === 'html_comment') comments.push(offsets[offsets.length - 1], text.length);
     }
     offsets.push(text.length);
+    // And a display equation the paragraph goes on in, which ends the runs,
+    // but whose source export reads after them, on lines of its own (see
+    // displayMathBlock), where a citation from a [ in them ends at a ] in it
+    const display = segment[end];
+    if (display?.type === 'math' && isInParagraphMath(display)) readMath(display.latex, text.length + 4, true);
     const marks = laterEqualsAfter.get(segment);
     let laterEquals = -1;
     for (let k = first; k < end; k++) if (marks?.has(k)) laterEquals = offsets[k + 1 - first];

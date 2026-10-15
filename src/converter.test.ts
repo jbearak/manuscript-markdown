@@ -21042,6 +21042,10 @@ describe('Markdown across Word runs', () => {
   test.each([
     ['with a key before the ]', '\\[see $x @key] y $ z.', '\\[see $x @key] y$ z.'],
     ['with a key right after it', '\\[@key $x] y$ z.', '\\[@key $x] y$ z.'],
+    // In a display equation the paragraph goes on in, which import writes
+    // on lines of its own after the [
+    ['with a key before the ] of a display equation', 'a \\[see $' + '$x @key] y$' + '$ z.', 'a \\[see\n$' + '$\nx @key] y\n$' + '$&#32;z.'],
+    ['with a key a display equation starts with', 'a \\[x $' + '$@key] y$' + '$ z.', 'a \\[x\n$' + '$\n@key] y\n$' + '$&#32;z.'],
     // An @ in a word, which starts no key, after a $ that opens no equation
     // An @ the equation starts with, after its $, which starts no key
     ['with an @ the equation starts with', 'p \\[x $@k] y$ z.', 'p [x $@k] y$ z.'],
@@ -21050,6 +21054,8 @@ describe('Markdown across Word runs', () => {
     ['with no equation', '\\[see] y.', '[see] y.'],
     ['with an equation and no ]', '\\[a $b] c.', '[a $b] c.'],
     ['with a key and no equation', '\\[@key] y.', '\\[@key] y.'],
+    ['with a display equation and no key', 'a [x $' + '$y] z$' + '$ w.', 'a [x\n$' + '$\ny] z\n$' + '$&#32;w.'],
+    ['with none, before a display equation', 'a $' + '$x$' + '$ b.', 'a\n$' + '$\nx\n$' + '$&#32;b.'],
   ])('keeps a [ %s as text where an equation\'s source can hold its ]', async (_name, md, back) => {
     const first = await convertMdToDocx(md + '\n');
     expect(first.warnings).toEqual([]);
