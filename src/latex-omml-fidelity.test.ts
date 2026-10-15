@@ -8,7 +8,7 @@ import * as fc from 'fast-check';
 import { xmlParser } from './xml-parser';
 import JSZip from 'jszip';
 import { latexToOmml, trackedLatexToOmml, CRITIC_INSERTION_COMMAND, CRITIC_DELETION_COMMAND } from './latex-to-omml';
-import { ommlToLatex } from './omml';
+import { ommlToLatex, unicodeToLatex } from './omml';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
 import { parserOptions, roundTrip } from './test-omml-helpers';
@@ -1795,6 +1795,112 @@ describe('Word\'s cancel and linear fractions', () => {
     const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
     expect(/<m:oMath>([\s\S]*?)<\/m:oMath>/.exec(xml)![1]).toBe(exported);
     expect((await convertDocx(docx)).markdown).toBe(markdown);
+  });
+});
+
+// Word's group character, where it leaves out its character or position,
+// is ECMA-376's U+23DF (⏟) at the bottom, which came back as \overbrace, and
+// an arrow came back as a brace
+describe('Word\'s group characters', () => {
+  const groupChr = (pr: string) => '<m:groupChr>' + (pr ? '<m:groupChrPr>' + pr + '</m:groupChrPr>' : '') + '<m:e>' + run('x') + '</m:e></m:groupChr>';
+  const chr = (c: string) => '<m:chr m:val="' + c + '"/>';
+  const pos = (p: string) => '<m:pos m:val="' + p + '"/>';
+  const limit = (kind: string, base: string) => '<m:' + kind + '><m:e>' + base + '</m:e><m:lim>' + run('n') + '</m:lim></m:' + kind + '>';
+
+  /** A document from Word with an inline equation of `omml` */
+  async function wordDocx(omml: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A $x$ B.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  test.each([
+    ['with no character or position', groupChr('<m:vertJc m:val="bot"/>'), '\\underbrace{x}'],
+    ['with no properties', groupChr(''), '\\underbrace{x}'],
+    ['with a position alone, at the top', groupChr(pos('top')), '\\underbrace{x}'],
+    ['with a position alone, at the bottom', groupChr(pos('bot')), '\\underbrace{x}'],
+    ['of ⏞ at the top', groupChr(chr('⏞') + pos('top')), '\\overbrace{x}'],
+    ['of ⏟ at the bottom', groupChr(chr('⏟') + pos('bot')), '\\underbrace{x}'],
+    ['of → at the top', groupChr(chr('→') + pos('top')), '\\overset{\\to}{x}'],
+    ['of → at the bottom', groupChr(chr('→') + pos('bot')), '\\underset{\\to}{x}'],
+    ['of ← at the top', groupChr(chr('←') + pos('top')), '\\overset{\\leftarrow}{x}'],
+    ['of ← at the bottom', groupChr(chr('←') + pos('bot')), '\\underset{\\leftarrow}{x}'],
+    ['of → with no position', groupChr(chr('→')), '\\underset{\\to}{x}'],
+    ['with no character or position, in a lower limit\'s base', limit('limLow', groupChr('')), '\\underbrace{x}_{n}'],
+    ['with no character or position, in an upper limit\'s base', limit('limUpp', groupChr('')), '\\overset{n}{\\underbrace{x}}'],
+    ['of ⏞ at the top, in an upper limit\'s base', limit('limUpp', groupChr(chr('⏞') + pos('top'))), '\\overbrace{x}^{n}'],
+    ['of → with no position, in a lower limit\'s base', limit('limLow', groupChr(chr('→'))), '\\underset{n}{\\underset{\\to}{x}}'],
+  ])('from Word, one %s comes back as its LaTeX, and again', async (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    expect(markdown).toBe('A $' + latex + '$ B.\n');
+    const again = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(again).toBe(markdown);
+    expect((await convertDocx((await convertMdToDocx(again)).docx)).markdown).toBe(markdown);
+  });
+
+  // As before
+  test('export writes each brace\'s character and position', () => {
+    expect(latexToOmml('\\overbrace{x}')).toBe(groupChr(chr('⏞') + pos('top')));
+    expect(latexToOmml('\\underbrace{x}')).toBe(groupChr(chr('⏟') + pos('bot')));
+  });
+
+  // A character LaTeX reserves went in with a backslash before it, or none,
+  // so \ escaped the brace that closes it, which took the base into the
+  // annotation, and & kept its backslash in Word. It goes as text, as an
+  // upright run's does
+  const reserved: [string, string][] = [
+    ['\\', '\\textbackslash{}'], ['&', '\\&'], ['%', '\\%'], ['#', '\\#'], ['_', '\\_'],
+    ['{', '\\{'], ['}', '\\}'], ['~', '\\textasciitilde{}'], ['^', '\\textasciicircum{}'], ['$', '\\$'],
+  ];
+  test.each(reserved.flatMap(([character, text]) => [
+    [character, 'top', '\\overset', 'm:limUpp', text],
+    [character, 'bot', '\\underset', 'm:limLow', text],
+  ]))('from Word, one of %s at the %s comes back as %s of it as text, and again', async (character, position, command, limit, text) => {
+    const omml = '<m:groupChr><m:groupChrPr>' + chr(character.replace(/&/g, '&amp;')) + pos(position) + '</m:groupChrPr><m:e>' + run('x') + '</m:e></m:groupChr>' + run('+y');
+    const latex = command + '{\\text{' + text + '}}{x}+y';
+    expect(importOmml(omml)).toBe(latex);
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    expect(markdown).toBe('A $' + latex + '$ B.\n');
+    // Word gets the character alone over or under the base, and +y after it
+    const exported = async (md: string) => /<m:oMath>([\s\S]*?)<\/m:oMath>/.exec(await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string'))![1];
+    const once = await exported(markdown);
+    expect(once).toStartWith('<' + limit + '><m:e>' + run('x') + '</m:e><m:lim>');
+    expect([...once.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1].replace(/&amp;/g, '&')).join('')).toBe('x' + character + '+y');
+    const again = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(again).toBe(markdown);
+    expect(await exported(again)).toBe(once);
+    expect((await convertDocx((await convertMdToDocx(again)).docx)).markdown).toBe(markdown);
+  });
+
+  // Any character Word's group character may be: each printable ASCII one,
+  // each one import writes as a command (see unicodeToLatex), primes,
+  // arrows, the braces, accents' characters and a private-use one. An
+  // apostrophe went in as math, which export reads as a prime, and a prime
+  // as ', which LaTeX raises as a superscript's
+  const symbols = Array.from({ length: 0x20000 - 0xA0 }, (_, k) => String.fromCodePoint(0xA0 + k))
+    .filter(character => !/^[\uD800-\uDFFF]$/.test(character) && unicodeToLatex(character) !== character);
+  const characters = [...new Set([
+    ...Array.from({ length: 0x7E - 0x20 }, (_, k) => String.fromCharCode(0x21 + k)),
+    ...symbols, '′', '″', '‴', '⁗', '‵',
+    '→', '←', '↔', '⇒', '⏞', '⏟', '¯', '˜', '^', '\uE000',
+  ])];
+  const xmlText = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const plainText = (xml: string) => [...xml.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1]).join('')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  test.each(characters.flatMap(character => [[character, 'top'], [character, 'bot']]))('from Word, one of %s at the %s keeps its character over its base', async (character, position) => {
+    const omml = '<m:groupChr><m:groupChrPr>' + chr(xmlText(character)) + pos(position) + '</m:groupChrPr><m:e>' + run('x') + '</m:e></m:groupChr>' + run('+y');
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    const xml = /<m:oMath>([\s\S]*?)<\/m:oMath>/.exec(await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string'))![1];
+    // A group character of it, or a limit whose text is it, over or under x
+    const group = /^<m:groupChr><m:groupChrPr><m:chr m:val="([^"]*)"\/>(?:<m:pos m:val="\w+"\/>)?<\/m:groupChrPr><m:e>(.*?)<\/m:e><\/m:groupChr>(.*)$/.exec(xml);
+    const limit = /^<m:lim(?:Upp|Low)><m:e>(.*?)<\/m:e><m:lim>(.*?)<\/m:lim><\/m:lim(?:Upp|Low)>(.*)$/.exec(xml);
+    const [shown, base, after] = group ? [plainText('<m:t>' + group[1] + '</m:t>'), group[2], group[3]] : limit ? [plainText(limit[2]), limit[1], limit[3]] : [];
+    expect(shown).toBe(character);
+    expect(base === undefined ? undefined : plainText(base)).toBe('x');
+    expect(after === undefined ? undefined : plainText(after)).toBe('+y');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 });
 
