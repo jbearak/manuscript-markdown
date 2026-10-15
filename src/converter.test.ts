@@ -15736,6 +15736,61 @@ describe('Blockquote round-trip', () => {
     expect(await paragraphs(first)).toEqual(await paragraphs(second));
     expect((await convertDocx(second)).markdown).toBe(once);
   });
+
+  test.each([
+    ['a paragraph right after a quote in a list item', '- y\n  > a\nb\n', '- y\n  > a\n\nb\n'],
+    ['a rule right after a quote in a list item', '- y\n  > a\n***\n', '- y\n  > a\n\n---\n'],
+    ['HTML right after a quote in a list item', '- y\n  > a\n<div>d</div>\n', '- y\n  > a\n\n<div>d</div>\n'],
+    ['display math right after a quote in a list item', '- y\n  > a\n$' + '$\nx\n$' + '$\n', '- y\n  > a\n\n$' + '$\nx\n$' + '$\n'],
+    ['a paragraph right after an alert in a list item', '- y\n  > [!NOTE]\n  > a\nb\n', '- y\n  > [!NOTE]\n  > a\n\nb\n'],
+    ['a paragraph right after a nested quote in a list item', '- y\n  > > a\nb\n', '- y\n  > > a\n\nb\n'],
+    ['a paragraph right after a quote in a numbered item', '1. y\n   > a\nb\n', '1. y\n   > a\n\nb\n'],
+    ['a paragraph after an ID comment\'s body right after a quote in a list item', '- y\n  > {#a}a{/a}\n{#a>>c<<}\nb\n', '- y\n  > {==a==}{>>c<<}\n\nb\n'],
+    // In the item, where Word's paragraphs were the same already, as export
+    // writes no empty paragraph in a list
+    ['a paragraph in the item right after a quote in it', '- y\n  > a\n  b\n', '- y\n  > a\n\n  b\n'],
+    ['HTML in the item right after a quote in it', '- y\n  > a\n  <div>d</div>\n', '- y\n  > a\n\n  <div>d</div>\n'],
+    ['a rule in the item right after a quote in it, which export drops', '- y\n  > a\n  ***\n', '- y\n  > a\n'],
+    // Guards: a blank line between, and a comment or a fence, which import
+    // writes on the next line
+    ['a paragraph a blank line after a quote in a list item', '- y\n  > a\n\nb\n', '- y\n  > a\n\nb\n'],
+    ['a paragraph in the item a blank line after a quote in it', '- y\n  > a\n\n  b\n', '- y\n  > a\n\n  b\n'],
+    ['a comment right after a quote in a list item', '- y\n  > a\n<!-- c -->\nb\n', '- y\n  > a\n<!-- c -->\nb\n'],
+    ['a style block\'s fence right after a quote in a list item', '---\nstyles:\n  foo:\n    font-style: italic\n---\n\n- y\n  > a\n<!-- style: foo -->\nb\n<!-- /style -->\n', '- y\n  > a\n<!-- style: foo -->\nb\n<!-- /style -->\n'],
+    ['a landscape section\'s fence right after a quote in a list item', '- y\n  > a\n<!-- landscape -->\n\nb\n\n<!-- /landscape -->\n', '- y\n  > a\n<!-- landscape -->\n\nb\n\n<!-- /landscape -->\n'],
+    ['a paragraph right after a quote', '> a\nb\n', '> a\nb\n'],
+  ])('gives Word the same paragraphs on each trip for %s', async (_name, md, expected) => {
+    // Import writes at least one blank line after a quote in a list item,
+    // where export wrote no empty paragraph for none, so the next trip added
+    // one. Export writes one for a block right after the quote, out of the
+    // list, as for one a blank line after it
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    // Each paragraph's properties and text, but a section's IDs
+    const paragraphs = async (docx: Uint8Array) => {
+      const xml = (await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).replace(/ w:rsid\w*="[^"]*"/g, '');
+      return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => (/<w:pPr>[\s\S]*?<\/w:pPr>/.exec(p[0])?.[0] ?? '')
+        + [...p[0].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+    };
+    const first = (await convertMdToDocx(md)).docx;
+    const once = (await convertDocx(first)).markdown;
+    expect(strip(once)).toBe(expected);
+    const second = (await convertMdToDocx(once)).docx;
+    expect(await paragraphs(first)).toEqual(await paragraphs(second));
+    expect((await convertDocx(second)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['more of the list', '- y\n  > {#a}a{/a}\n{#a>>c<<}\n- b\n', '- y\n  > {==a==}{>>c<<}\n- b\n'],
+    ['a list of the other kind', '- y\n  > {#a}a{/a}\n{#a>>c<<}\n1. b\n', '- y\n  > {==a==}{>>c<<}\n\n1. b\n'],
+    ['more of the list after a quote in a sublist', '- y\n  - z\n    > {#a}a{/a}\n{#a>>c<<}\n- b\n', '- y\n  - z\n    > {==a==}{>>c<<}\n- b\n'],
+  ])('writes %s after an ID comment\'s body right after a quote in a list item as before', async (_name, md, expected) => {
+    // The body's paragraph, which ends the list there (see
+    // commentBodiesOmitted), took an empty paragraph before it, as text
+    // would, and import a blank line before the item after it
+    const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
 });
 
 describe('A quote after a deeper one', () => {

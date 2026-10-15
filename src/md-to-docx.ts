@@ -11350,10 +11350,18 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       // Post-blockquote blank lines before non-blockquote content. One
       // before a list, a heading, code or a table right after the quote,
       // which import writes after a blank line, so that Word gets what
-      // the source with one gives, and the next trip the same
+      // the source with one gives, and the next trip the same. So for a
+      // paragraph Word shows, a rule or HTML right after a quote in a list
+      // item, which import writes at least one blank line before (see
+      // blankLinesAfterListQuote), but for a comment or a fence, which it
+      // writes as they were, or the empty paragraph of comment bodies that
+      // ends the list before another (see commentBodiesOmitted)
       let blankCount = state.blockquotePostContentBlankLines.get(token.blockquoteGroupIndex) ?? 0;
       if (blankCount === 0 && state.blockquotePostContentBlankLines.has(token.blockquoteGroupIndex)
-        && ['list_item', 'heading', 'code_block', 'table'].includes(nextToken?.type ?? '')) {
+        && (['list_item', 'heading', 'code_block', 'table'].includes(nextToken?.type ?? '')
+          || !!token.listContinuation && (nextToken?.type === 'hr'
+            || nextToken?.type === 'paragraph' && !isHiddenParagraph(nextToken) && !isCommentBodyParagraph(nextToken) && !isStyleDirective(nextToken)
+              && !marksSectionOrBibliography(nextToken)))) {
         blankCount = 1;
         state.blockquotePostContentBlankLines.set(token.blockquoteGroupIndex, 1);
       }
