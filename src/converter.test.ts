@@ -16337,6 +16337,63 @@ describe('Display math\'s rows and the spaces at their edges', () => {
     expect(await equations(back)).toEqual(await equations(md));
     expect(await roundTrip(back)).toBe(back);
   });
+
+  // Word's equations in the document and its notes, with every run
+  const allEquations = async (md: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const parts = await Promise.all(['word/document.xml', 'word/footnotes.xml'].map(async name => await zip.file(name)?.async('string') ?? ''));
+    return parts.flatMap(xml => xml.match(/<m:oMath>[\s\S]*?<\/m:oMath>/g) ?? []);
+  };
+
+  // Export writes \ as a space in a run of its own, which came back as the
+  // space, so after a number at the start of an inline equation $2 and the
+  // space read as currency, and the next export wrote no equation
+  test.each([
+    ['a \\ after a number', 'A $2\\ x$ C.', 'A $2\\ x$ C.'],
+    ['a \\ after 2.5', 'A $2.5\\ x$ C.', 'A $2.5\\ x$ C.'],
+    ['two \\ after a number', 'A $2\\ \\ x$ C.', 'A $2\\ \\ x$ C.'],
+    ['a \\ and a \\quad after a number', 'A $2\\ \\quad x$ C.', 'A $2\\ \\quad x$ C.'],
+    ['a \\ after a number, before an insertion', 'A $2\\ {++x++}$ C.', 'A $2\\ {++x++}$ C.'],
+    ['a \\ after a number in an inserted equation', 'A {++$2\\ x$++} C.', 'A {++$2\\ x$++} C.'],
+    ['a \\ after a number in a note', 'A[^1].\n\n[^1]: B $2\\ x$ C.', 'A[^1].\n\n[^1]: B $2\\ x$ C.'],
+    // Export writes a space LaTeX ignores as it writes \ , so it comes back
+    // as \ , which keeps the equation
+    ['a space after 2{}', 'A $2{} x$ C.', 'A $2\\ x$ C.'],
+  ])('keeps %s as an equation', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await allEquations(back)).toEqual(await allEquations(md));
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // An inline equation in Word, between A and C.
+  const word = (runs: string[]) => buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">A </w:t></w:r><m:oMath>'
+    + runs.map(text => '<m:r><m:t xml:space="preserve">' + text + '</m:t></m:r>').join('') + '</m:oMath><w:r><w:t xml:space="preserve"> C.</w:t></w:r></w:p>'));
+  test.each([
+    ['a space in a run of its own after a number', ['2', ' ', 'x'], 'A $2\\ x$ C.', 1],
+    ['a space in a run of its own after a number, with one before it', [' ', '2', ' ', 'x'], 'A $2\\ x$ C.', 1],
+    // As before, though $2 and the space read as currency, so the next
+    // export writes no equation
+    ['a space in a run with the number', ['2 ', 'x'], 'A $2 x$ C.', 0],
+    ['a space in a run with the number and more', ['2 x'], 'A $2 x$ C.', 0],
+  ])('writes %s at the start of an inline equation', async (_name, runs, expected, count) => {
+    const back = strip((await convertDocx(await word(runs))).markdown);
+    expect(back).toBe(expected);
+    expect(await allEquations(back)).toHaveLength(count);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Away from a number at the start, and in display math, which has no
+  // currency, as before
+  test.each([
+    ['a \\ after a letter in an inline equation', 'A $x\\ y$ C.', 'A $x y$ C.'],
+    ['a \\ after a number in display math', fence + '\n2\\ x\n' + fence, fence + '\n2 x\n' + fence],
+  ])('writes %s as a space, as before', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await allEquations(back)).toEqual(await allEquations(md));
+    expect(await roundTrip(back)).toBe(back);
+  });
 });
 
 describe('parseCodeBlockStyle', () => {

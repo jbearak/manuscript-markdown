@@ -6142,7 +6142,7 @@ function parseNoteBody(
         } else if (key === 'm:oMath' && context) {
           const mathChildren = asXmlNodes(node[key]);
           try {
-            const latex = apartFromCurrency(ommlToLatex(mathChildren));
+            const latex = apartFromCurrency(ommlToLatex(mathChildren), mathChildren);
             if (latex) {
               target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
             }
@@ -8223,7 +8223,7 @@ export async function extractDocumentContent(
           // Inline equation
           const mathChildren = asXmlNodes(node[key]);
           try {
-            const latex = apartFromCurrency(ommlToLatex(mathChildren));
+            const latex = apartFromCurrency(ommlToLatex(mathChildren), mathChildren);
             if (latex) {
               target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
             }
