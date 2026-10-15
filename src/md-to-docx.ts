@@ -10479,7 +10479,12 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     return tokens[next];
   };
   let body = '';
-  const separatorParagraph = '<w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:p>';
+  // The empty paragraph after a code block or a quote, with no numbering
+  // where a template's default paragraph style numbers its paragraphs, as
+  // Word would show it, and import read it, as an empty list item
+  const separatorParagraph = state.listByStyle?.(undefined)
+    ? '<w:p><w:pPr><w:numPr><w:numId w:val=\"0\"/></w:numPr><w:spacing w:after=\"0\"/></w:pPr></w:p>'
+    : '<w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:p>';
 
   prescanCommentIds(tokens, state);
 
@@ -11318,8 +11323,16 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
           body += separatorParagraph;
         }
       }
-      // Post-blockquote blank lines before non-blockquote content
-      const blankCount = state.blockquotePostContentBlankLines.get(token.blockquoteGroupIndex) ?? 0;
+      // Post-blockquote blank lines before non-blockquote content. One
+      // before a list, a heading, code or a table right after the quote,
+      // which import writes after a blank line, so that Word gets what
+      // the source with one gives, and the next trip the same
+      let blankCount = state.blockquotePostContentBlankLines.get(token.blockquoteGroupIndex) ?? 0;
+      if (blankCount === 0 && state.blockquotePostContentBlankLines.has(token.blockquoteGroupIndex)
+        && ['list_item', 'heading', 'code_block', 'table'].includes(nextToken?.type ?? '')) {
+        blankCount = 1;
+        state.blockquotePostContentBlankLines.set(token.blockquoteGroupIndex, 1);
+      }
       for (let bi = 0; bi < blankCount; bi++) {
         body += separatorParagraph;
       }
