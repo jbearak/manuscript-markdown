@@ -251,6 +251,69 @@ function extractText(children: XmlNode[]): string {
 }
 
 /**
+ * The text of a math run's children, with each w:sym's character (see
+ * symText), in pieces: the run's own text, and each such character that's
+ * reserved in LaTeX, as the Symbol font's % or _, which is a character,
+ * not LaTeX syntax. Only translateRun reads a w:sym, so a # or & one
+ * shows is never Word's equation number or alignment, as one typed is.
+ */
+function runPieces(children: XmlNode[]): { text: string; reserved: boolean }[] {
+  const pieces: { text: string; reserved: boolean }[] = [];
+  for (const child of children) {
+    const sym = child['w:sym'] !== undefined;
+    const text = sym ? symText(child) : extractText([child]);
+    if (!text) continue;
+    const reserved = sym && escapeLatex(text) !== text;
+    const last = pieces[pieces.length - 1];
+    if (last && !last.reserved && !reserved) last.text += text;
+    else pieces.push({ text, reserved });
+  }
+  return pieces;
+}
+
+// The Symbol font's characters as Unicode, from its code 0x20 on, after
+// Adobe's mapping, \0 where it has none
+const SYMBOL_FONT = (
+  ' !∀#∃%&∋()∗+,−./' +
+  '0123456789:;<=>?' +
+  '≅ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟ' +
+  'ΠΘΡΣΤΥςΩΞΨΖ[∴]⊥_' +
+  '‾αβχδεφγηιϕκλμνο' +
+  'πθρστυϖωξψζ{|}∼\0' +
+  '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' +
+  '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' +
+  '€ϒ′≤⁄∞ƒ♣♦♥♠↔←↑→↓' +
+  '°±″≥×∝∂•÷≠≡≈…⏐⎯↵' +
+  'ℵℑℜ℘⊗⊕∅∩∪⊃⊇⊄⊂⊆∈∉' +
+  '∠∇®©™∏√⋅¬∧∨⇔⇐⇑⇒⇓' +
+  '◊⟨®©™∑⎛⎜⎝⎡⎢⎣⎧⎨⎩⎪' +
+  '\0⟩∫⌠⎮⌡⎞⎟⎠⎤⎥⎦⎫⎬⎭\0'
+);
+
+/** The character a w:sym shows, which Word writes for one picked from the
+ *  Symbol font, as Unicode, from the font's code, `char`, or undefined for
+ *  another font's, as Wingdings, which Unicode doesn't hold */
+export function symbolFontCharacter(font: string, char: string): string | undefined {
+  if (font.toLowerCase() !== 'symbol') return undefined;
+  // In the font's private-use range, at 0xF020, or as the code alone
+  const code = parseInt(char, 16) & 0xFF;
+  const character = SYMBOL_FONT[code - 0x20];
+  return character && character !== '\0' ? character : undefined;
+}
+
+/** A w:sym's character in a math run: the Symbol font's as Unicode, or
+ *  another's code as it is, which keeps its place in the equation, or
+ *  nothing for a code that isn't a character XML can hold */
+function symText(node: XmlNode): string {
+  const attribute = (name: string) => String(node[':@']?.['@_w:' + name] ?? '');
+  const known = symbolFontCharacter(attribute('font'), attribute('char'));
+  if (known !== undefined) return known;
+  const code = parseInt(attribute('char'), 16);
+  const character = code >= 0x20 && code <= 0x10FFFF ? String.fromCodePoint(code) : '';
+  return /^(?:[\x20-\uD7FF\uE000-\uFFFD]|[\u{10000}-\u{10FFFF}])$/u.test(character) ? character : '';
+}
+
+/**
  * Recursively extract all text content from an OMML subtree.
  * Used by fallbackPlaceholder to provide context in error output.
  */
@@ -419,13 +482,24 @@ function translateRun(children: XmlNode[]): string {
     }
   }
 
-  // Extract text from m:t nodes
-  const text = extractText(children);
+  // Extract text from m:t nodes, and w:sym's characters
+  const pieces = runPieces(children);
+  const text = pieces.map(piece => piece.text).join('');
   if (!text) return '';
+  if (isCommentRun(children, text)) return hiddenCommentLatex(text);
   const preserved = children.some(child => child['m:t'] !== undefined && (child[':@'] as Record<string, string> | undefined)?.['@_xml:space'] === 'preserve');
   // Normal Text is text, as an upright run's is, but in the style or
   // alphabet a run gives with it, as before
-  return runTextLatex(text, normal && !style && !script ? 'p' : style, script, 'math', preserved);
+  const runStyle = normal && !style && !script ? 'p' : style;
+  // A reserved character a w:sym shows goes in \text{}, as one typed in an
+  // upright run does, where a bare run, of no style or alphabet that
+  // runTextLatex writes a group for, would write it as LaTeX syntax. A
+  // group escapes it already
+  const bare = runStyle !== 'p' && !SCRIPT_ALPHABETS.has(script) && !STYLE_ALPHABETS.has(runStyle);
+  if (bare && pieces.some(piece => piece.reserved)) {
+    return pieces.map(piece => runTextLatex(piece.text, piece.reserved ? 'p' : runStyle, script, 'math', preserved)).join('');
+  }
+  return runTextLatex(text, runStyle, script, 'math', preserved);
 }
 
 /** Where a run's text goes: into the equation, or into an \operatorname name. */
@@ -436,7 +510,6 @@ type RunContext = 'math' | 'name';
  * and primes for every kind of run are decided here, and latex-to-omml.ts
  * reads each form back in the matching parse mode:
  *
- * - A hidden comment run comes back as its % comment.
  * - A function name is text with its symbols inline, as \operatorname{} allows.
  * - A bare run is math: symbols become commands, and ′ is ' at the base level
  *   and \prime in a script or limit (a raw ′ breaks pdflatex). Reserved
@@ -454,7 +527,6 @@ type RunContext = 'math' | 'name';
  * would export as a space; bare math keeps the readable space.
  */
 function runTextLatex(text: string, style: string, script: string, context: RunContext = 'math', preserved = false): string {
-  if (text.charAt(0) === '\u200B') return hiddenCommentLatex(text);
   if (context === 'name') return unicodeToLatex(escapeLatex(text), false, '{}');
 
   const mathLatex = (source: string, separator: string) =>
@@ -1004,7 +1076,7 @@ function runsText(nodes: XmlNode[]): string | undefined {
     if (Object.keys(node).some(key => SKIP_TAGS.has(key))) continue;
     if (node['m:r'] === undefined) return undefined;
     const runText = extractText(asXmlNodes(node['m:r']));
-    if (runText.charAt(0) !== '\u200B') text += runText;
+    if (!isCommentRun(asXmlNodes(node['m:r']), runText)) text += runText;
   }
   return text;
 }
@@ -1104,17 +1176,21 @@ function rowNumber(row: XmlNode[]): { equation: XmlNode[]; tag: string } | undef
     const text = extractText(asXmlNodes(content[i]['m:r']));
     const at = text.lastIndexOf('#');
     if (at === -1) continue;
+    // The run's children before the #, in their order, and its text after
+    // it, each with the characters its w:syms show
+    const split = splitRun(asXmlNodes(content[i]['m:r']), at);
+    const before = shownText(split.before);
     // The text before the #, from the runs of math before it where it
     // starts its run, as Word may write x\#(1) with the \ in one run and
     // #(1) in the next, which import joins as \#
-    let preceding = text.slice(0, at);
-    for (let j = i - 1; preceding === '' && j >= 0 && isMathRun(content[j]); j--) preceding = extractText(asXmlNodes(content[j]['m:r']));
+    let preceding = before;
+    for (let j = i - 1; preceding === '' && j >= 0 && isMathRun(content[j]); j--) preceding = shownText(asXmlNodes(content[j]['m:r']));
     if (!isMathRun(content[i]) || preceding.endsWith('\\')) return undefined;
     const after = content.slice(i + 1);
     let number: string | undefined;
     if (after.every(isMathRun)) {
-      number = text.slice(at + 1) + after.map(node => extractText(asXmlNodes(node['m:r']))).join('');
-    } else if (after.length === 1 && at === text.length - 1) {
+      number = split.after + after.map(node => shownText(asXmlNodes(node['m:r']))).join('');
+    } else if (after.length === 1 && !split.after) {
       number = parenthesizedText(after[0]);
     }
     if (number === undefined) return undefined;
@@ -1124,14 +1200,51 @@ function rowNumber(row: XmlNode[]): { equation: XmlNode[]; tag: string } | undef
     // apartFromMarkup)
     const tagText = (text: string) => apartFromMarkup(escapeLatex(text.trim()), true);
     const tag = parenthesized ? '\\tag{' + tagText(parenthesized[1]) + '}' : '\\tag*{' + tagText(number) + '}';
-    const before = text.slice(0, at);
     const equation = content.slice(0, i);
     // Something to number: text, or a structure, as \sum or a delimiter
-    if (!before.trim() && !equation.some(node => node['m:r'] === undefined || extractText(asXmlNodes(node['m:r'])).trim())) return undefined;
-    if (before) equation.push({ 'm:r': asXmlNodes(content[i]['m:r']).filter(part => part['m:t'] === undefined).concat({ 'm:t': [{ '#text': before }] }) });
+    if (!before.trim() && !equation.some(node => node['m:r'] === undefined || shownText(asXmlNodes(node['m:r'])).trim())) return undefined;
+    if (before) equation.push({ 'm:r': split.before });
     return { equation, tag };
   }
   return undefined;
+}
+
+/** The text a math run's children, `run`, show: its own, and each w:sym's
+ *  character (see symText), in their order */
+function shownText(run: XmlNode[]): string {
+  return runPieces(run).map(piece => piece.text).join('');
+}
+
+/**
+ * A math run's children, `run`, split at the character at `at` in its own
+ * text (see extractText), in their order: the children before it, with the
+ * m:t it's in cut there, and its properties, and the text after it, with
+ * each w:sym's character (see shownText)
+ */
+function splitRun(run: XmlNode[], at: number): { before: XmlNode[]; after: string } {
+  const before: XmlNode[] = [];
+  let after = '';
+  let offset = 0;
+  for (const child of run) {
+    const shows = child['m:t'] !== undefined || child['#text'] !== undefined || child['w:sym'] !== undefined;
+    if (!shows) {
+      before.push(child);
+    } else if (offset > at) {
+      after += shownText([child]);
+    } else if (child['w:sym'] !== undefined) {
+      before.push(child);
+    } else {
+      const text = extractText([child]);
+      if (offset + text.length > at) {
+        if (at > offset) before.push({ 'm:t': [{ '#text': text.slice(0, at - offset) }] });
+        after += text.slice(at - offset + 1);
+      } else {
+        before.push(child);
+      }
+      offset += text.length;
+    }
+  }
+  return { before, after };
 }
 
 /** The text of a delimiter of ( and ) around runs alone, as (x), or undefined. */
@@ -1146,7 +1259,7 @@ function parenthesizedText(node: XmlNode): string | undefined {
   if (elements.length !== 1) return undefined;
   const runs = elements[0].filter(part => !Object.keys(part).every(key => key === ':@' || SKIP_TAGS.has(key)));
   if (!runs.every(isMathRun)) return undefined;
-  return '(' + runs.map(run => extractText(asXmlNodes(run['m:r']))).join('') + ')';
+  return '(' + runs.map(run => shownText(asXmlNodes(run['m:r']))).join('') + ')';
 }
 
 /** Whether `node` is a run of math, as Word's # and number are: not normal text, upright, another alphabet or hidden, with an on/off property only where it's on. */
@@ -1155,9 +1268,26 @@ function isMathRun(node: XmlNode): boolean {
   const run = asXmlNodes(node['m:r']);
   const props = findChild(run, 'm:rPr');
   if (['m:sty', 'm:scr'].some(tag => findChildNode(props, tag)) || ['m:nor', 'm:lit'].some(tag => ommlOn(findChildNode(props, tag)))) return false;
+  return !isHiddenRun(run);
+}
+
+/**
+ * Whether the children of an m:r, `run`, of text `text`, are a hidden
+ * comment's run. Export writes one hidden, with a zero-width space first,
+ * and older exports wrote it shown, as Normal Text with its %. Any other
+ * shown run, as export writes for a zero-width space in the equation, or
+ * one before a \% in a style's group, is text.
+ */
+function isCommentRun(run: XmlNode[], text: string): boolean {
+  return text.charAt(0) === '\u200B'
+    && (isHiddenRun(run) || ommlOn(findChildNode(findChild(run, 'm:rPr'), 'm:nor')) && text.includes('%'));
+}
+
+/** Whether the children of an m:r, `run`, are hidden, with a w:vanish that's on */
+function isHiddenRun(run: XmlNode[]): boolean {
   const vanish = findChildNode(findChild(run, 'w:rPr'), 'w:vanish');
   const hidden = vanish?.[':@']?.['@_w:val'];
-  return !vanish || (hidden !== undefined && !xmlOn(String(hidden)));
+  return vanish !== undefined && (hidden === undefined || xmlOn(String(hidden)));
 }
 
 
