@@ -10690,19 +10690,19 @@ describe('Word text that reads as Markdown', () => {
   const fence = '$' + '$';
   test.each([
     ['an inline equation', 'XX $x==y$', 'a\\==b $x==y$', ['a==b x==y']],
-    ['a display equation its paragraph goes on in', 'XX\n' + fence + '\nx==y\n' + fence, 'a\\==b\n' + fence + '\nx==y\n' + fence, ['a==b \nx==y\n']],
+    ['a display equation its paragraph goes on in', 'XX\n' + fence + '\nx==y\n' + fence, 'a\\==b\n' + fence + '\nx==y\n' + fence, ['a==b x==y']],
     ['the text after a display equation its paragraph goes on in', 'XX\n' + fence + '\nx\n' + fence + ' c==d',
-      'a\\==b\n' + fence + '\nx\n' + fence + '&#32;c==d', ['a==b \nx\n c==d']],
+      'a\\==b\n' + fence + '\nx\n' + fence + '&#32;c==d', ['a==b x c==d']],
     ['the body of a comment on a display equation its paragraph goes on in', 'XX\n{#1}' + fence + '\nx\n' + fence + '{/1}\n{#1>>x==y<<}',
-      'a\\==b\n{#1}' + fence + '\nx\n' + fence + '{/1}\n{#1>>x==y<<}', ['a==b \nx\n']],
+      'a\\==b\n{#1}' + fence + '\nx\n' + fence + '{/1}\n{#1>>x==y<<}', ['a==b x']],
     ['an inline equation in a comment\'s range', '{==XX $x==y$==}{>>c<<}', '{==a\\==b $x==y$==}{>>c<<}', ['a==b x==y']],
     ['a display equation in a comment\'s range', '{#1}XX\n' + fence + '\nx==y\n' + fence + '{/1}\n{#1>>c<<}',
-      '{#1}a\\==b\n' + fence + '\nx==y\n' + fence + '{/1}\n{#1>>c<<}', ['a==b \nx==y\n']],
+      '{#1}a\\==b\n' + fence + '\nx==y\n' + fence + '{/1}\n{#1>>c<<}', ['a==b x==y']],
     ['an inline equation in a pipe table\'s cell', '| h |\n| --- |\n| XX $x==y$ |', '| h |\n| --- |\n| a\\==b $x==y$ |', ['h', 'a==b x==y']],
     ['an inline equation in a grid table\'s cell', '+-------------+-----+\n| h           | x   |\n+=============+=====+\n| XX $x==y$   | b   |\n+-------------+-----+',
       '+--------------+-----+\n| h            | x   |\n+==============+=====+\n| a\\==b $x==y$ | b   |\n+--------------+-----+', ['h', 'x', 'a==b x==y', 'b']],
     ['a display equation in a grid table\'s cell', '+----------+\n| h        |\n+==========+\n| XX ' + fence + '    |\n| x==y     |\n| ' + fence + '       |\n+----------+',
-      '+----------+\n| h        |\n+==========+\n| a\\==b ' + fence + ' |\n| x==y     |\n| ' + fence + '       |\n+----------+', ['h', 'a==b \nx==y\n']],
+      '+----------+\n| h        |\n+==========+\n| a\\==b ' + fence + ' |\n| x==y     |\n| ' + fence + '       |\n+----------+', ['h', 'a==b x==y']],
   ])('keeps text\'s == as text before an == in %s', async (_name, md, expected, text) => {
     // Export read a highlight from the text's == to the next, in an
     // equation's LaTeX, which Markdown has as it is, or past a display
@@ -10720,7 +10720,7 @@ describe('Word text that reads as Markdown', () => {
   test.each([
     ['an inline equation', 'XX $x==y$', ' a\\==b $x==y$', 'a==b x==y'],
     ['a display equation its paragraph goes on in', 'XX\n    ' + fence + '\n    x==y\n    ' + fence,
-      '\n\n    a\\==b\n    ' + fence + '\n    x==y\n    ' + fence, 'a==b \nx==y\n'],
+      '\n\n    a\\==b\n    ' + fence + '\n    x==y\n    ' + fence, 'a==b x==y'],
   ])('keeps a note\'s text\'s == as text before an == in %s', async (_name, md, expected, text) => {
     // As in the document's text
     const markdown = await importText('T.[^1]\n\n[^1]: ' + md, 'a==b', 'word/footnotes.xml');

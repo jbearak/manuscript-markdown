@@ -1686,7 +1686,7 @@ describe('equation numbers', () => {
     ['an equation of a \\tag alone', fence + '\n\\tag{1}\n' + fence, ''],
     // Its number, a # and its text, would hold another #
     ['a \\tag* with a # in it', fence + '\nx \\tag*{A\\#B}\n' + fence, fence + '\nx\n' + fence],
-    ['a \\tag with an insertion in it', fence + '\nx \\tag{++A++}\n' + fence, fence + '\n{~~\nx ~>\nx A\n~~}\n' + fence],
+    ['a \\tag with an insertion in it', fence + '\nx \\tag{++A++}\n' + fence, fence + '\n{~~x ~>x A~~}\n' + fence],
   ])('drops %s, as before', async (_name, md, expected) => {
     expect((await equations(md)).join('')).not.toContain('#');
     const back = await trip(md);

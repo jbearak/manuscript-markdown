@@ -1379,6 +1379,9 @@ function tracksInPlace(latex: string, parts: CriticMathPart[], numbered: boolean
  * leaves.
  */
 export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings?: string[], display = false): string {
+  if (display) {
+    parts = parts.map((part, k) => part.type === 'math' ? { ...part, content: withinFences(part.content, k === 0, k === parts.length - 1) } : part);
+  }
   const equation = (omml: string) => display ? '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>' : '<m:oMath>' + omml + '</m:oMath>';
   // A \tag in CriticMarkup, or with CriticMarkup in it, is dropped, as
   // before: Word's number is the end of a row, which an edit in it can't
@@ -1397,9 +1400,26 @@ export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChan
   return equation(view(false) + view(true));
 }
 
+/**
+ * A display equation's LaTeX without the line ends its fences give it on
+ * lines of their own: the one after the opening fence and the one before
+ * the closing fence. Export would write each as a run of a line feed alone
+ * at the equation's edge, which Word never writes, and import writes the
+ * fences on lines of their own again. A comment on the last line keeps its
+ * line end, which its hidden run holds wherever it is. Line ends between
+ * rows are the source's and stay. `first` and `last` say which fences a
+ * part of a tracked equation (see generateTrackedMathXml) is next to.
+ */
+function withinFences(latex: string, first = true, last = true): string {
+  const inner = first ? latex.replace(/^[ \t]*\n/, '') : latex;
+  if (!last) return inner;
+  const trimmed = inner.replace(/\n[ \t]*$/, '');
+  return endsInComment(trimmed) ? trimmed + '\n' : trimmed;
+}
+
 /** Generate an equation, warning as equationOmml does. */
 export function generateMathXml(latex: string, display: boolean, warnings?: string[]): string {
-  const omml = equationOmml(latex, warnings, display);
+  const omml = equationOmml(display ? withinFences(latex) : latex, warnings, display);
 
   if (display) {
     return '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>';
