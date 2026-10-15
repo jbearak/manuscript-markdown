@@ -114,12 +114,15 @@ Word's scripts before a base, as on an isotope, come back as scripts on an empty
 \tfrac{a}{b}       % text-style fraction (all become \frac on re-import)
 \cfrac{a}{b}       % continued fraction (all become \frac on re-import)
 {a}/{b}            % linear fraction: a/b on one line
+\genfrac{}{}{0pt}{}{a}{b}  % fraction without a bar
 \sqrt{x}           % square root
 \sqrt[3]{x}        % cube root
 \sqrt[n]{x}        % nth root
 ```
 
 `{a}/{b}` is Word's linear fraction where nothing stands between the braces and the `/`, and no script follows the `{b}`, which would take it alone. Word's skewed fraction comes back as a linear one.
+
+`\genfrac{}{}{0pt}{}{a}{b}` is Word's fraction without a bar, and import writes Word's that way, except in parentheses alone, where it's `\binom{a}{b}`. A `\genfrac` with delimiters, another rule thickness or a style exports as an unknown command.
 
 ## Greek Letters
 
