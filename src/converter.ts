@@ -6149,7 +6149,7 @@ function parseNoteBody(
           const oMathNodes = mathParaChildren.filter((c) => c['m:oMath'] !== undefined);
           for (const oMathNode of oMathNodes) {
             try {
-              const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
+              const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']), true);
               if (latex) {
                 target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...mathHighlight(oMathNode) });
               }
@@ -8229,7 +8229,7 @@ export async function extractDocumentContent(
           const oMathNodes = mathParaChildren.filter((c) => c['m:oMath'] !== undefined);
           for (const oMathNode of oMathNodes) {
             try {
-              const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
+              const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']), true);
               if (latex) {
                 target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...mathHighlight(oMathNode) });
               }
@@ -8419,7 +8419,7 @@ function canonicalizeDisplayMathLatex(latex: string): string {
   const envMatch = trimmed.match(/^\\begin\{([a-zA-Z*]+)\}\s*([\s\S]*?)\s*\\end\{\1\}$/);
   if (!envMatch) return trimmed;
   const envName = envMatch[1];
-  const multilineEnvs = new Set(['aligned', 'align', 'align*', 'gathered', 'cases']);
+  const multilineEnvs = new Set(['aligned', 'align', 'align*', 'gathered', 'gather*', 'cases']);
   if (!multilineEnvs.has(envName)) return trimmed;
   const rows = latexRows(envMatch[2]).map(row => row.trim());
   const lines: string[] = [];

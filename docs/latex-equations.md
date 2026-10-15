@@ -326,11 +326,33 @@ The converter supports standard amsmath environments for multi-line equations:
 | `alignat`, `alignat*` | Aligned with explicit column count |
 | `subequations` | Wrapper (content passed through) |
 
-These environments are converted to OMML equation arrays on export. On re-import, the original environment name is not preserved: arrays with `&` markers become `aligned`, those without become `gathered`. Every row comes back, an empty one too, so the next export has the same rows. A row that ends in a `%` comment has its `\\` on the next line, out of the comment.
+These environments are converted to OMML equation arrays on export. On re-import, the original environment name is not preserved: arrays with `&` markers become `aligned`, those without become `gathered`, or `align*` and `gather*` when a row has a number (see [Equation numbers](#equation-numbers)). Every row comes back, an empty one too, so the next export has the same rows. A row that ends in a `%` comment has its `\\` on the next line, out of the comment.
 
-Within these environments, `\tag{...}`, `\tag*{...}`, `\label{...}`, `\notag`, and `\nonumber` are consumed silently (OMML has no equivalent). `\intertext{...}` and `\shortintertext{...}` are emitted as plain text. `\shoveleft{...}` and `\shoveright{...}` emit their inner content.
+Within these environments, `\label{...}`, `\notag`, and `\nonumber` are consumed silently (OMML has no equivalent). `\tag{...}` becomes Word's equation number (see [Equation numbers](#equation-numbers)). `\intertext{...}` and `\shortintertext{...}` are emitted as plain text. `\shoveleft{...}` and `\shoveright{...}` emit their inner content.
 
 An environment not in this table or under Matrices, such as `array`, `eqnarray`, `dcases`, `rcases`, `subarray`, `alignedat` or `CD`, has no OMML form. Export shows its `\begin{...}` with any argument (an `array`'s column spec) and its `\end{...}` as text, with the body between them as math, and warns once. Import reads it back as written. One with no `\end{...}` of its own shows only its `\begin{...}` as text, and the rest as math.
+
+### Equation numbers
+
+Word numbers an equation with a `#` at the end of a row of an equation array, followed by the number, as in `E=mc^2#(1)`, and shows the number at the right margin. In display math, export writes `\tag{1}` that way:
+
+- A `\tag` in `align`, `align*`, `gather`, `gather*`, `multline`, `flalign` or `alignat` numbers its own row.
+- Anywhere else, as in an equation without an environment, `equation`, `aligned` or `cases`, it numbers the whole equation. Export makes the equation one row of an equation array, as Word does.
+- `\tag*{A}`, which LaTeX shows without parentheses, is written as `#A`.
+
+Import reads Word's numbers in display math back as `\tag{...}`, or as `\tag*{...}` where the number has no parentheses:
+
+- A numbered equation of one row comes back as the row and its tag, as in `E=mc^2 \tag{1}`.
+- An equation array with more rows comes back as `align*` (with `&`) or `gather*`, with each number on its row.
+
+In inline math, which can't hold a `\tag`, a number stays as Word wrote it.
+
+Some tags are dropped, as before:
+
+- a `\tag` in inline math;
+- a `\tag` inside CriticMarkup, or with CriticMarkup inside it.
+
+A number from Word that holds one of LaTeX's special characters, such as `{` or `\`, stays as Word wrote it.
 
 ### Bare Environments
 

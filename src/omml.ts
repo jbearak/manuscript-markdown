@@ -1043,16 +1043,102 @@ function splitFunctionName(fName: XmlNode[]): { nameNodes: XmlNode[]; scripts: s
  */
 function translateEqArray(children: XmlNode[]): string {
   const rows = findAllChildren(children, 'm:e');
+  // Word's equation numbers, in an array that is the equation, not a part
+  // of it, in display math
+  const numbers = rows.map(row => partDepth === 1 && displayEquation ? rowNumber(row) : undefined);
   const rowStrings: string[] = [];
   let hasAlignment = false;
 
-  for (const rowChildren of rows) {
-    const rowLatex = unbracedToLatex(rowChildren);
+  rows.forEach((rowChildren, k) => {
+    const number = numbers[k];
+    let rowLatex = unbracedToLatex(number ? number.equation : rowChildren);
+    if (number) rowLatex = rowLatex ? rowLatex + (endsInLatexComment(rowLatex) ? '\n' : ' ') + number.tag : number.tag;
     rowStrings.push(rowLatex);
     if (/(?<!\\)&/.test(rowLatex)) hasAlignment = true;
-  }
+  });
+  if (!numbers.some(Boolean)) return latexEnvironment(hasAlignment ? 'aligned' : 'gathered', rowStrings);
 
-  return latexEnvironment(hasAlignment ? 'aligned' : 'gathered', rowStrings);
+  // A numbered equation is its row and \tag, as LaTeX writes one; numbered
+  // rows need an environment that numbers rows, as aligned and gathered
+  // don't. Only the array's own &, unescaped in its rows' runs of math,
+  // aligns them; one in a structure, as in cases, is that structure's, and
+  // one in text, as \text{A\&B} writes, is text.
+  const aligned = rows.some(row => row.some(node => isMathRun(node) && /(?<!\\)&/.test(extractText(asXmlNodes(node['m:r'])))));
+  if (rowStrings.length === 1 && !aligned) return rowStrings[0];
+  return latexEnvironment(aligned ? 'align*' : 'gather*', rowStrings);
+}
+
+/** What a \tag can hold as Word's number: text without TeX's special characters */
+const TAG_TEXT_RE = /^[^{}\\%#$&^_~]*$/;
+
+/**
+ * Word's equation number at the end of a row of an equation array: a # in
+ * a run of math, then (x), as Word builds it up into a delimiter or as
+ * characters, which is \tag{x}, or any other text, which is \tag*{x}, as
+ * LaTeX shows it without parentheses (see equationNumberOmml in
+ * latex-to-omml.ts). The row's children before the #, or undefined where
+ * the row has no number. A # in text, as \text{} writes, or escaped, as
+ * export writes \#, is none, and so is one with nothing before it to number.
+ */
+function rowNumber(row: XmlNode[]): { equation: XmlNode[]; tag: string } | undefined {
+  const content = row.filter(node => !Object.keys(node).every(key => key === ':@' || SKIP_TAGS.has(key)));
+  for (let i = content.length - 1; i >= 0; i--) {
+    if (content[i]['m:r'] === undefined) continue;
+    const text = extractText(asXmlNodes(content[i]['m:r']));
+    const at = text.lastIndexOf('#');
+    if (at === -1) continue;
+    // The text before the #, from the runs of math before it where it
+    // starts its run, as Word may write x\#(1) with the \ in one run and
+    // #(1) in the next, which import joins as \#
+    let preceding = text.slice(0, at);
+    for (let j = i - 1; preceding === '' && j >= 0 && isMathRun(content[j]); j--) preceding = extractText(asXmlNodes(content[j]['m:r']));
+    if (!isMathRun(content[i]) || preceding.endsWith('\\')) return undefined;
+    const after = content.slice(i + 1);
+    let number: string | undefined;
+    if (after.every(isMathRun)) {
+      number = text.slice(at + 1) + after.map(node => extractText(asXmlNodes(node['m:r']))).join('');
+    } else if (after.length === 1 && at === text.length - 1) {
+      number = parenthesizedText(after[0]);
+    }
+    if (number === undefined || !TAG_TEXT_RE.test(number)) return undefined;
+    const parenthesized = /^\s*\((.*)\)\s*$/.exec(number);
+    // The tag's text is apart from its braces, as text is, so that a
+    // number of ++A++ makes no {++ or ++} (see apartFromMarkup)
+    const tag = parenthesized ? '\\tag{' + apartFromMarkup(parenthesized[1].trim(), true) + '}' : '\\tag*{' + apartFromMarkup(number.trim(), true) + '}';
+    const before = text.slice(0, at);
+    const equation = content.slice(0, i);
+    // Something to number: text, or a structure, as \sum or a delimiter
+    if (!before.trim() && !equation.some(node => node['m:r'] === undefined || extractText(asXmlNodes(node['m:r'])).trim())) return undefined;
+    if (before) equation.push({ 'm:r': asXmlNodes(content[i]['m:r']).filter(part => part['m:t'] === undefined).concat({ 'm:t': [{ '#text': before }] }) });
+    return { equation, tag };
+  }
+  return undefined;
+}
+
+/** The text of a delimiter of ( and ) around runs alone, as (x), or undefined. */
+function parenthesizedText(node: XmlNode): string | undefined {
+  if (node['m:d'] === undefined) return undefined;
+  const children = asXmlNodes(node['m:d']);
+  const pr = findChild(children, 'm:dPr');
+  const begChr = findChildNode(pr, 'm:begChr');
+  const endChr = findChildNode(pr, 'm:endChr');
+  if ((begChr ? getOmmlAttr(begChr, 'val') : '(') !== '(' || (endChr ? getOmmlAttr(endChr, 'val') : ')') !== ')') return undefined;
+  const elements = findAllChildren(children, 'm:e');
+  if (elements.length !== 1) return undefined;
+  const runs = elements[0].filter(part => !Object.keys(part).every(key => key === ':@' || SKIP_TAGS.has(key)));
+  if (!runs.every(isMathRun)) return undefined;
+  return '(' + runs.map(run => extractText(asXmlNodes(run['m:r']))).join('') + ')';
+}
+
+/** Whether `node` is a run of math, as Word's # and number are: not normal text, upright, another alphabet or hidden, with an on/off property only where it's on. */
+function isMathRun(node: XmlNode): boolean {
+  if (node['m:r'] === undefined) return false;
+  const run = asXmlNodes(node['m:r']);
+  const props = findChild(run, 'm:rPr');
+  if (['m:sty', 'm:scr'].some(tag => findChildNode(props, tag)) || ['m:nor', 'm:lit'].some(tag => ommlOn(findChildNode(props, tag)))) return false;
+  const vanish = findChildNode(findChild(run, 'w:rPr'), 'w:vanish');
+  const hidden = vanish?.[':@']?.['@_w:val'];
+  return !vanish || (hidden !== undefined && !xmlOn(String(hidden)));
 }
 
 
@@ -1222,6 +1308,10 @@ function translateNode(node: XmlNode): string {
  *  of a structure in it, such as a script or a fraction's numerator. */
 let partDepth = 0;
 
+/** Whether the equation being read is display math, whose equation array
+ *  can hold Word's equation numbers (see translateEqArray) */
+let displayEquation = false;
+
 /**
  * Convert an OMML element's children to a LaTeX string.
  * This is the main entry point called from converter.ts.
@@ -1231,15 +1321,21 @@ let partDepth = 0;
  * nothing, and nor does a part beside no brace (see unbracedToLatex).
  *
  * @param children - The child nodes of an m:oMath or m:oMathPara element
+ * @param display - Whether the equation is display math, as in an
+ *   m:oMathPara, where Word's equation numbers are read as \tag; an inline
+ *   equation's \tag would be dropped on export
  * @returns LaTeX string (without delimiters)
  */
-export function ommlToLatex(children: XmlNode[]): string {
+export function ommlToLatex(children: XmlNode[], display = false): string {
+  const outerDisplay = displayEquation;
+  if (partDepth === 0) displayEquation = display;
   partDepth++;
   try {
     const latex = trimPart(ommlChildrenToLatex(children));
     return partDepth > 1 ? apartFromMarkup(latex) : latex;
   } finally {
     partDepth--;
+    displayEquation = outerDisplay;
   }
 }
 

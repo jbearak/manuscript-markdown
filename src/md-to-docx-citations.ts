@@ -1245,9 +1245,10 @@ export function generateBibliographyXml(
 /**
  * The OMML for an equation. Each LaTeX command or environment with no OMML
  * form adds a warning to `warnings`; the converter drops duplicate warnings.
+ * In `display` math a \tag is Word's equation number.
  */
-function equationOmml(latex: string, warnings?: string[]): string {
-  return latexToOmml(latex, unknownCommandWarning(warnings));
+function equationOmml(latex: string, warnings?: string[], display = false): string {
+  return latexToOmml(latex, unknownCommandWarning(warnings), display);
 }
 
 function unknownCommandWarning(warnings?: string[]): ((command: string) => void) | undefined {
@@ -1334,8 +1335,8 @@ function equationViewLatex(parts: CriticMathPart[], accepted: boolean): string {
  *  only whitespace, as {++ ++} accepted is, is a run of it, where equationOmml
  *  gives nothing, as for an empty equation. Word keeps it with
  *  xml:space="preserve", which a space such as an em space doesn't need. */
-function equationViewOmml(latex: string, warnings?: string[]): string {
-  if (!latex || latex.trim()) return equationOmml(latex, warnings);
+function equationViewOmml(latex: string, warnings?: string[], numbered = false): string {
+  if (!latex || latex.trim()) return equationOmml(latex, warnings, numbered);
   return '<m:r>' + (/^[ \t\r\n]+$/.test(latex) ? '<m:t xml:space="preserve">' : '<m:t>') + latex + '</m:t></m:r>';
 }
 
@@ -1359,13 +1360,13 @@ function joinedRuns(omml: string): string {
  * rather than math doesn't, as in a{++&++}b in a matrix, x{++^2++},
  * \sum{++\limits++} or {++\frac++}{1}{2}.
  */
-function tracksInPlace(latex: string, parts: CriticMathPart[]): boolean {
-  const omml = trackedLatexToOmml(latex, (element, content) => '<' + element + '>' + content + '</' + element + '>');
+function tracksInPlace(latex: string, parts: CriticMathPart[], numbered: boolean): boolean {
+  const omml = trackedLatexToOmml(latex, (element, content) => '<' + element + '>' + content + '</' + element + '>', undefined, numbered);
   const view = (accepted: boolean) => {
     const [keep, drop] = accepted ? ['w:ins', 'w:del'] : ['w:del', 'w:ins'];
     return omml.replace(new RegExp('<' + drop + '>[\\s\\S]*?</' + drop + '>', 'g'), '').replace(new RegExp('</?' + keep + '>', 'g'), '');
   };
-  return [true, false].every(accepted => joinedRuns(view(accepted)) === joinedRuns(equationViewOmml(equationViewLatex(parts, accepted))));
+  return [true, false].every(accepted => joinedRuns(view(accepted)) === joinedRuns(equationViewOmml(equationViewLatex(parts, accepted), undefined, numbered)));
 }
 
 /**
@@ -1379,12 +1380,18 @@ function tracksInPlace(latex: string, parts: CriticMathPart[]): boolean {
  */
 export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings?: string[], display = false): string {
   const equation = (omml: string) => display ? '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>' : '<m:oMath>' + omml + '</m:oMath>';
+  // A \tag in CriticMarkup, or with CriticMarkup in it, is dropped, as
+  // before: Word's number is the end of a row, which an edit in it can't
+  // add or remove
+  const tags = (accepted: boolean) => (equationViewLatex(parts, accepted).match(/\\tag(?![A-Za-z])\*?\s*\{[^{}]*\}/g) ?? []).join();
+  const numbered = display && tags(true) === tags(false) &&
+    !parts.some(part => part.type !== 'math' && /\\tag(?![A-Za-z])/.test(part.type === 'substitution' ? part.oldContent + part.newContent : part.content));
   const latex = trackedEquationLatex(parts);
-  if (latex !== undefined && tracksInPlace(latex, parts)) {
-    return equation(trackedLatexToOmml(latex, track, unknownCommandWarning(warnings)));
+  if (latex !== undefined && tracksInPlace(latex, parts, numbered)) {
+    return equation(trackedLatexToOmml(latex, track, unknownCommandWarning(warnings), numbered));
   }
   const view = (accepted: boolean) => {
-    const omml = equationViewOmml(equationViewLatex(parts, accepted), warnings);
+    const omml = equationViewOmml(equationViewLatex(parts, accepted), warnings, numbered);
     return omml ? track(accepted ? 'w:ins' : 'w:del', omml) : '';
   };
   return equation(view(false) + view(true));
@@ -1392,7 +1399,7 @@ export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChan
 
 /** Generate an equation, warning as equationOmml does. */
 export function generateMathXml(latex: string, display: boolean, warnings?: string[]): string {
-  const omml = equationOmml(latex, warnings);
+  const omml = equationOmml(latex, warnings, display);
 
   if (display) {
     return '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>';
