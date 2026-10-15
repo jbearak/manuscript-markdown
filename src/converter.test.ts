@@ -7311,6 +7311,30 @@ describe('Feature: docx-equation-conversion, Property 1: Delimiter selection mat
       { numRuns: 30 },
     );
   });
+
+  // An inline equation whose LaTeX starts or ends with dollar signs, as
+  // export reads $ $$ $, went with them in one run, $$$$, an empty display
+  // equation, which the next export dropped, and its text. A space keeps
+  // them apart, which export reads as the equation's, as the first time.
+  // An escaped one at its end, and dollar signs of text, come back as before
+  test.each([
+    ['a $ $' + '$ $ b.', 'a $ $' + '$ $ b.'],
+    ['p ;y $ $' + '$ $@k\\] z.', 'p ;y $ $' + '$ $@k] z.'],
+    ['a $ $' + '$' + '$ $ b.', 'a $ $' + '$' + '$ $ b.'],
+    ['a $' + '$ b.', 'a \\$\\$ b.'],
+    ['a $x$ b.', 'a $x$ b.'],
+    ['a $x\\$' + '$ b.', 'a $x\\$' + '$ b.'],
+  ])('writes the inline equation of %s so export reads it back', async (md, back) => {
+    /** The text of each equation of the document */
+    const equations = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .matchAll(/<m:oMath>[\s\S]*?<\/m:oMath>/g)].map(m => [...m[0].matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(t => t[1]).join(''));
+    const first = (await convertMdToDocx(md + '\n')).docx;
+    const once = (await convertDocx(first)).markdown;
+    expect(once).toBe(back + '\n');
+    const second = (await convertMdToDocx(once)).docx;
+    expect(await equations(second)).toEqual(await equations(first));
+    expect((await convertDocx(second)).markdown).toBe(once);
+  });
 });
 
 // ---------------------------------------------------------------------------
