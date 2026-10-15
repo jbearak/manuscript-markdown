@@ -6706,7 +6706,12 @@ function customStyleDisplayName(name: string): string {
  * Generate OOXML for a custom paragraph style definition, based on Normal.
  * Its font style, where it has one, is the whole of it: `normalTurnsOn` says
  * what a template's Normal turns on, which the style turns off where its font
- * style leaves it out.
+ * style leaves it out. `szPairFn` writes its size: without a template,
+ * nothing where export's Normal gives the same, which is redundant and Word
+ * strips (dirty-flag invariant #5); with one, the size as it's given, as
+ * the template's Normal may take its size from where import, without the
+ * custom properties, doesn't read it. Import reads the size back from the
+ * custom properties.
  */
 function customStyleXml(
   name: string,
@@ -7074,7 +7079,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
               seenIds.add(sid);
               return true;
             })
-            .map(([name, def]) => customStyleXml(name, def, bodyFontStr, szPair))
+            .map(([name, def]) => customStyleXml(name, def, bodyFontStr, sizeOverNormal))
             .join('');
         })()
       : '') +

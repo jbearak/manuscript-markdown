@@ -1926,3 +1926,149 @@ describe('Custom Styles — Template replacement', () => {
     }
   });
 });
+
+// ============================================================
+// A size Normal gives
+// ============================================================
+describe('Custom Styles — A size Normal gives', () => {
+  const box = (size: number, bodySize?: number) => '---\n' + (bodySize === undefined ? '' : 'font-size: ' + bodySize + '\n') +
+    'styles:\n  box:\n    font-size: ' + size + '\n---\n\n<!-- style: box -->\nHello.\n\n<!-- /style -->\n';
+  /** A custom style of `properties`, each a line of the frontmatter */
+  const boxOf = (...properties: string[]) => '---\nstyles:\n  box:\n' + properties.map(property => '    ' + property + '\n').join('') +
+    '---\n\n<!-- style: box -->\nHello.\n\n<!-- /style -->\n';
+  const styleOf = async (docx: Uint8Array) => {
+    const JSZip = (await import('jszip')).default;
+    return extractStyleBlock(await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string'), 'MsCustomBox');
+  };
+  const style = (between: string) => '<w:style w:type="paragraph" w:customStyle="1" w:styleId="MsCustomBox">\n' +
+    '<w:name w:val="Custom: box"/>\n<w:basedOn w:val="Normal"/>\n' + between + '</w:style>';
+  const sized = (hp: number) => '<w:rPr><w:sz w:val="' + hp + '"/><w:szCs w:val="' + hp + '"/></w:rPr>\n';
+
+  // Which is redundant, and Word strips it (dirty-flag invariant #5)
+  it.each([
+    ['of 11pt, as Normal is', box(11), ''],
+    ['of 12pt', box(12), sized(24)],
+    ['of 12pt, as a 12pt Normal is', box(12, 12), ''],
+    ['of 11pt, with a 12pt Normal', box(11, 12), sized(22)],
+    ['of 11pt, as Normal is, centered', boxOf('font-size: 11', 'font-style: center'), '<w:pPr><w:jc w:val="center"/></w:pPr>\n'],
+    // Whose only property is Normal's, which leaves out spacing before of 0
+    ['with no spacing before', boxOf('spacing-before: 0'), ''],
+  ])('a custom style %s is written without what Normal gives', async (_name, md, between) => {
+    expect(await styleOf((await convertMdToDocx(md)).docx)).toBe(style(between));
+  });
+
+  // With a template, whose Normal can take its size from where import,
+  // without the custom properties, doesn't read it, the size is written as
+  // it's given, as on main
+  it.each([
+    [12, sized(24)],
+    [11, sized(22)],
+  ])('with a template whose Normal is 12pt, a custom style of %ipt is written with its size', async (size, between) => {
+    const templateDocx = (await convertMdToDocx('---\nfont-size: 12\n---\n\nTemplate.\n')).docx;
+    expect(await styleOf((await convertMdToDocx(box(size), { templateDocx })).docx)).toBe(style(between));
+  });
+
+  /** The Markdown import gives `docx`, with or without its custom properties */
+  const imported = async (docx: Uint8Array, properties: boolean) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    if (!properties) zip.remove('docProps/custom.xml');
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+  const twice = async (md: string, properties: boolean) => {
+    const once = await imported((await convertMdToDocx(md)).docx, properties);
+    return [once, await imported((await convertMdToDocx(once)).docx, properties)];
+  };
+
+  // The custom properties hold the size the frontmatter gave, which import
+  // gives back
+  it.each([
+    ['of 11pt, as Normal is', box(11)],
+    ['of 12pt', box(12)],
+    ['of 12pt, as a 12pt Normal is', box(12, 12)],
+    ['of 11pt, with a 12pt Normal', box(11, 12)],
+    ['of 11pt, as Normal is, centered', boxOf('font-size: 11', 'font-style: center')],
+    ['with no spacing before', boxOf('spacing-before: 0')],
+  ])('a custom style %s comes back as it was, twice', async (_name, md) => {
+    expect(await twice(md, true)).toEqual([md, md]);
+  });
+
+  // Without them, the style's size is all import reads, and a size Normal
+  // gives is the style's nowhere. It comes back without, which shows the
+  // same, as main gave it after Word left it out
+  it.each([
+    ['of 12pt', box(12), box(12)],
+    ['of 11pt, with a 12pt Normal', box(11, 12), box(11, 12)],
+    ['of 11pt, as Normal is', box(11), boxOf()],
+    // Centered by its pPr, which import reads without an rPr too
+    ['of 11pt, as Normal is, centered', boxOf('font-size: 11', 'font-style: center'), boxOf('font-style: center')],
+    ['of 12pt, centered', boxOf('font-size: 12', 'font-style: center'), boxOf('font-size: 12', 'font-style: center')],
+    // Which has no rPr on main too
+    ['centered', boxOf('font-style: center'), boxOf('font-style: center')],
+    ['with no spacing before', boxOf('spacing-before: 0'), boxOf()],
+  ])('without custom properties, a custom style %s comes back as it shows, twice', async (_name, md, back) => {
+    expect(await twice(md, false)).toEqual([back, back]);
+  });
+});
+
+describe('Custom Styles — What a style takes from a template\'s Normal', () => {
+  const box = (property: string) => '---\nstyles:\n  box:\n    ' + property + '\n---\n\n<!-- style: box -->\nHello.\n\n<!-- /style -->\n';
+  /** `docx` with its Normal style's rPr changed by `edit` */
+  const withNormal = async (docx: Uint8Array, edit: (rPr: string) => string, properties = true) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/styles.xml')!.async('string');
+    zip.file('word/styles.xml', xml.replace(/(<w:style\b[^>]*w:styleId="Normal"[\s\S]*?<w:rPr>)([\s\S]*?)(<\/w:rPr>)/, (_, open, rPr, close) => open + edit(rPr) + close));
+    if (!properties) zip.remove('docProps/custom.xml');
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  // A template whose Normal has no size of its own, and shows the document
+  // defaults' 12pt: a custom style of 12pt keeps its size, as on main, so
+  // that import, without the custom properties, reads it back
+  it('with a template whose Normal takes 12pt from the document defaults, a custom style of 12pt keeps its size', async () => {
+    const JSZip = (await import('jszip')).default;
+    const template = await JSZip.loadAsync((await convertMdToDocx('Template.\n')).docx);
+    const templateStyles = (await template.file('word/styles.xml')!.async('string'))
+      .replace(/(<w:style\b[^>]*w:styleId="Normal"[\s\S]*?)<w:rPr>[\s\S]*?<\/w:rPr>/, (_, before) => before);
+    expect(templateStyles).toContain('<w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:eastAsiaTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:cstheme="minorBidi"/><w:kern w:val="2"/><w:sz w:val="24"/>');
+    template.file('word/styles.xml', templateStyles);
+    const templateDocx = await template.generateAsync({ type: 'uint8array' });
+    const docx = (await convertMdToDocx(box('font-size: 12'), { templateDocx })).docx;
+    const block = extractStyleBlock(await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string'), 'MsCustomBox');
+    expect(block).toContain('<w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>');
+    const zip = await JSZip.loadAsync(docx);
+    zip.remove('docProps/custom.xml');
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(parseFrontmatter(markdown).metadata.styles).toEqual({ box: { fontSize: 12 } });
+  });
+
+  // Export writes a font style as the whole of the style's, so import reads
+  // a centered style's font style without its rPr only where it takes no
+  // toggle. Under a bold or italic Normal, it reads none, as on main
+  it.each([
+    ['bold', '<w:b/>', {}],
+    ['italic', '<w:i/>', {}],
+    ['neither', '', { fontStyle: 'center' }],
+  ])('without custom properties, a centered custom style without an rPr whose Normal is %s comes back as it shows', async (_name, toggle, shown) => {
+    const docx = await withNormal((await convertMdToDocx(box('font-style: center'))).docx, rPr => toggle + rPr, false);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(parseFrontmatter(markdown).metadata.styles).toEqual({ box: shown });
+  });
+
+  // Word ignores a NoList style's properties and its base, as a paragraph
+  // style too (MS-OI29500, Part 1 17.7.4.17), so a style based on one takes
+  // no toggle from it, and shows its own centering
+  it('without custom properties, a centered custom style without an rPr based on a bold paragraph style NoList comes back centered', async () => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(box('font-style: center'))).docx);
+    const styles = (await zip.file('word/styles.xml')!.async('string'))
+      .replace(/<w:style\b[^>]*w:styleId="NoList"[^>]*>[\s\S]*?<\/w:style>/, () => '<w:style w:type="paragraph" w:styleId="NoList"><w:name w:val="No List"/><w:rPr><w:b/></w:rPr></w:style>')
+      .replace(/(w:styleId="MsCustomBox">[\s\S]*?<w:basedOn w:val=")Normal"/, (_, before) => before + 'NoList"');
+    expect(styles).toContain('<w:basedOn w:val="NoList"/>');
+    zip.file('word/styles.xml', styles);
+    zip.remove('docProps/custom.xml');
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(parseFrontmatter(markdown).metadata.styles).toEqual({ box: { fontStyle: 'center' } });
+  });
+});
