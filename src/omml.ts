@@ -396,9 +396,10 @@ function fallbackPlaceholder(tag: string, children: XmlNode[]): string {
 function translateRun(children: XmlNode[]): string {
   if (!Array.isArray(children)) return '';
 
-  // Check m:rPr for m:sty style and m:scr script
+  // Check m:rPr for m:sty style, m:scr script and m:nor, Word's Normal Text
   let style = '';
   let script = '';
+  let normal = false;
   for (const child of children) {
     if (child['m:rPr']) {
       const rPr = child['m:rPr'];
@@ -410,6 +411,9 @@ function translateRun(children: XmlNode[]): string {
           if (prop['m:scr']) {
             script = getOmmlAttr(prop, 'val');
           }
+          if (prop['m:nor']) {
+            normal = ommlOn(prop);
+          }
         }
       }
     }
@@ -419,7 +423,9 @@ function translateRun(children: XmlNode[]): string {
   const text = extractText(children);
   if (!text) return '';
   const preserved = children.some(child => child['m:t'] !== undefined && (child[':@'] as Record<string, string> | undefined)?.['@_xml:space'] === 'preserve');
-  return runTextLatex(text, style, script, 'math', preserved);
+  // Normal Text is text, as an upright run's is, but in the style or
+  // alphabet a run gives with it, as before
+  return runTextLatex(text, normal && !style && !script ? 'p' : style, script, 'math', preserved);
 }
 
 /** Where a run's text goes: into the equation, or into an \operatorname name. */

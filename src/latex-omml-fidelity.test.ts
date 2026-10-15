@@ -192,6 +192,62 @@ describe('normal-text runs on import', () => {
   });
 });
 
+// Word's Normal Text, a run with m:nor, is text, as one with m:sty p is.
+// Import read it as math, so its words came back as variables
+describe('Word\'s Normal Text on import', () => {
+  const normal = (t: string, rPr = '<m:nor/>') => '<m:r><m:rPr>' + rPr + '</m:rPr><m:t xml:space="preserve">' + t + '</m:t></m:r>';
+
+  test.each([
+    ['with spaces at its edges', run('x') + normal(' for all ') + run('y'), 'x\\text{ for all }y'],
+    ['with a symbol', normal('a × b'), '\\text{a }\\mathrm{\\times}\\text{ b}'],
+    ['of one word', run('x') + normal('if') + run('y'), 'x\\mathrm{if}y'],
+    ['with a %', normal('50% of x'), '\\text{50\\% of x}'],
+    ['that\'s on', run('x') + normal(' if ', '<m:nor m:val="1"/>') + run('y'), 'x\\text{ if }y'],
+  ])('is text, as m:sty p\'s is, %s', (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+    expect(importOmml(omml.replace(/<m:nor[^>]*>/, '<m:sty m:val="p"/>'))).toBe(latex);
+    expectStableExport(latex);
+  });
+
+  test.each([
+    ['that\'s off', run('x') + normal('ab', '<m:nor m:val="0"/>') + run('y'), 'xaby'],
+    ['in bold', run('x') + normal(' for all ', '<m:nor/><m:sty m:val="b"/>') + run('y'), 'x\\mathbf{\\text{ }for all\\text{ }}y'],
+    ['in bold italic', run('x') + normal(' for all ', '<m:nor/><m:sty m:val="bi"/>') + run('y'), 'x\\boldsymbol{\\text{ }for all\\text{ }}y'],
+    ['without it, upright', run('x') + normal(' for all ', '<m:sty m:val="p"/>') + run('y'), 'x\\text{ for all }y'],
+  ])('a run %s is as before', (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+  });
+
+  /** A document from Word of `md`, with its one equation's runs `omml` */
+  async function wordDocx(md: string, omml: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md + '\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** Each run of the equation in `docx`, as its text, after p: where
+   *  upright, but for the whitespace export writes between math, which Word
+   *  drops */
+  async function mathRuns(docx: Uint8Array): Promise<string[]> {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<m:r>([\s\S]*?)<\/m:r>/g)].map(r =>
+      (r[1].includes('<m:sty m:val="p"/>') ? 'p:' : '') + [...r[1].matchAll(/<m:t\b[^>]*>([^<]*)<\/m:t>/g)].map(t => t[1]).join(''))
+      .filter(text => text.trim() !== '');
+  }
+
+  test.each([
+    ['inline', 'A $x$ B.', run('x') + normal(' for all ') + run('y'), 'A $x\\text{ for all }y$ B.', ['x', 'p: for all ', 'y']],
+    ['display', '$$\nx\n$$', run('f(x)=0') + normal(' otherwise'), '$$\nf(x)=0\\text{ otherwise}\n$$', ['f', '(', 'x', ')', '=', '0', 'p: otherwise']],
+  ])('in %s math comes back as \\text{}, which Word gets as upright text', async (_name, md, omml, back, runs) => {
+    const markdown = (await convertDocx(await wordDocx(md, omml))).markdown;
+    expect(markdown).toBe(back + '\n');
+    const exported = (await convertMdToDocx(markdown)).docx;
+    expect(await mathRuns(exported)).toEqual(runs);
+    expect((await convertDocx(exported)).markdown).toBe(markdown);
+  });
+});
+
 describe('Word-authored n-ary bodies', () => {
   const nary = (body: string) =>
     '<m:nary><m:naryPr><m:chr m:val="∏"/><m:subHide m:val="1"/><m:supHide m:val="1"/></m:naryPr>' +
