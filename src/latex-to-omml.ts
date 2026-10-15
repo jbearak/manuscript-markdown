@@ -432,9 +432,21 @@ class Parser {
     }
   }
 
-  /** Parse a group whose content is text, as `style` writes that text, keeping tracked changes in it. */
+  /**
+   * Parse a group whose content is text, as `style` writes that text, keeping
+   * tracked changes in it. Its comments stay as hidden runs between the
+   * styled runs, as styleGroup keeps them.
+   */
   private parseTextGroup(style: (text: string) => string): string {
-    return restyleAroundRevisions(this.parseGroupIn('text'), omml => style(this.extractText(omml)));
+    return restyleAroundRevisions(this.parseGroupIn('text'), omml => {
+      const parts = omml.split(HIDDEN_RUN_RE);
+      if (parts.length === 1) return style(this.extractText(omml));
+      return parts.map((part, i) => {
+        if (i % 2 === 1) return part;
+        const text = this.extractText(part);
+        return text ? style(text) : '';
+      }).join('');
+    });
   }
 
   private peek(): Token | undefined {
