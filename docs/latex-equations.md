@@ -10,6 +10,15 @@ Wrap equations in dollar signs:
 - **Display**: `$$E = mc^2$$` — renders as a centered block equation
 - **Bare environments**: `\begin{align}...\end{align}` — treated as `$$\begin{align}...\end{align}$$`
 
+Display math is part of a paragraph, so a line in it that would start a Markdown block ends the paragraph and the equation, as in CommonMark. Such a line starts with a code fence (```` ``` ```` or `~~~`), a list marker (`-`, `+` or `*`, or `1.`, and a space and text), a `#` heading, a `>` quote, a rule such as `---`, an HTML block's tag such as `<div>`, or a table's header row, such as `|b|`, right before its delimiter row, such as `|-|`. A line of `~~~` nonbreaking spaces, or an aligned row such as `~~~ &= 2`, opens a code block that runs to the end of the document. Indent such a line by four spaces or more: it then continues the paragraph, and LaTeX ignores the indentation. Import indents such a line of an equation from Word by four spaces, so it stays one equation on the next export. A line that starts no block there, as a row of bars before no delimiter row, `2. b` or a line of one tag such as `<x>`, stays as it is. So does each line of an equation in a tracked change, whose span export reads as one line. Pandoc's Markdown differs: it needs a blank line before a fenced code block, a heading, a quote or a list, so there such a line stays in the equation. The indented line reads the same in both.
+
+```latex
+\begin{align}
+  x &= 1 \\
+    ~~~ &= 2
+\end{align}
+```
+
 ### Tracked changes inside inline equations
 
 CriticMarkup can wrap a changed fragment inside an inline equation. Keep each
