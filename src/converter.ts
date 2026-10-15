@@ -3001,10 +3001,10 @@ function endedRange(id: string, target: ContentItem[], start: { target: ContentI
  * across runs too, or with raw HTML's runs (see RAW_HTML_TEXT), where a line
  * break could be the HTML's line end, or end or break up an HTML block,
  * whose lines import reads from all the paragraph's text, carriage returns
- * too (see readParagraphLineFeeds). And any with `all`, for a paragraph
- * import writes in the frontmatter, the title's, which keeps a line break
- * only as a title line of its own (see extractTitleLines). Import wrote
- * nothing for them before it wrote the others.
+ * too (see readParagraphLineFeeds). In the title, import writes the line
+ * after one in a title line of its own, as after a line break (see
+ * extractTitleLines). Import wrote nothing for them before it wrote the
+ * others.
  * One a comment's range holds alone leaves the empty item endComment pushes
  * for an empty range, where the range ended, in `ended`, with its start in
  * `target`, as endComment found it. The item is the one endComment pushes
@@ -3019,12 +3019,12 @@ function endedRange(id: string, target: ContentItem[], start: { target: ContentI
  * other places in it after them.
  */
 function dropUnshownPageBreaks(target: ContentItem[], from: number, starts: Map<string, { target: ContentItem[]; index: number }>,
-  ended: ReadonlyMap<string, EndedRange>, all = false): number[] {
+  ended: ReadonlyMap<string, EndedRange>): number[] {
   const items = target.slice(from);
   const dropped: number[] = [];
   if (!items.some(item => PAGE_BREAKS.has(item))) return dropped;
   const text = items.map(item => item.type === 'text' && !PAGE_BREAKS.has(item) ? item.text : '').join('');
-  const dropAll = all || /<[A-Za-z/!?]/.test(text) || items.some(item => item.type === 'text' && RAW_HTML_TEXT.has(item));
+  const dropAll = /<[A-Za-z/!?]/.test(text) || items.some(item => item.type === 'text' && RAW_HTML_TEXT.has(item));
   let first = -1;
   let last = -1;
   items.forEach((item, k) => {
@@ -8086,7 +8086,7 @@ export async function extractDocumentContent(
           walking = { target, scanned: targetLenBeforePara + (needsPara ? 1 : 0), shows: false };
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
           walking = outerWalking;
-          dropUnshownPageBreaks(target, targetLenBeforePara + (needsPara ? 1 : 0), commentStartTargetIndex, endedRanges, isTitle);
+          dropUnshownPageBreaks(target, targetLenBeforePara + (needsPara ? 1 : 0), commentStartTargetIndex, endedRanges);
           readParagraphLineFeeds(target, targetLenBeforePara + (needsPara ? 1 : 0), !inTableCell && !headingLevel && !isTitle && !isCodeBlock, !!headingLevel || isTitle);
           const hasText = target.length > targetLenBeforePara + (needsPara ? 1 : 0);
           if (hasText && !inTableCell && !isCodeBlock && !inBibliographyField) {

@@ -8551,11 +8551,12 @@ describe('A page or column break Word puts in a paragraph', () => {
   });
 
   // The title's paragraph, which import writes in the frontmatter, where a
-  // line break isn't kept. An earlier draft wrote one there, and export
-  // dropped the line after it
-  test('writes nothing for one in the title', async () => {
+  // line break is a title line of its own, as a line break is there (see
+  // 'A line break Word puts in the title'). An earlier draft wrote one in
+  // the title as \, and export dropped the line after it
+  test('writes a title line for the line after one in the title', async () => {
     const markdown = await imported('---\ntitle: one two\n---\n\nnext\n', '<w:t>one two</w:t>', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>');
-    expect(markdown).toContain('\ntitle: onetwo\n');
+    expect(markdown).toContain('\ntitle: one\ntitle: two\n');
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 });
@@ -8577,6 +8578,7 @@ describe('A line break Word puts in the title', () => {
   };
   const md = '---\ntitle: one two\n---\n\nnext\n';
   const BR = '<w:br/>';
+  const PAGE = '<w:br w:type="page"/>';
 
   // Its lines go in title lines of their own, as export writes each in a
   // Title paragraph. Import wrote the break in the title as \, and export
@@ -8586,6 +8588,13 @@ describe('A line break Word puts in the title', () => {
     ['between its words, with spaces beside it', '<w:t xml:space="preserve">one </w:t>' + BR + '<w:t xml:space="preserve"> two</w:t>', 'title: one\ntitle: two\n', ['one', 'two']],
     ['at its start', BR + '<w:t>one two</w:t>', 'title: one two\n', ['one two']],
     ['at its end', '<w:t>one two</w:t>' + BR, 'title: one two\n', ['one two']],
+    // A page or column break between them shows a line's end too, which
+    // import read as nothing, and joined the words
+    ['between its words, as a page break', '<w:t>one</w:t>' + PAGE + '<w:t>two</w:t>', 'title: one\ntitle: two\n', ['one', 'two']],
+    ['between its words, as a column break', '<w:t>one</w:t><w:br w:type="column"/><w:t>two</w:t>', 'title: one\ntitle: two\n', ['one', 'two']],
+    // Where it shows none, as in a paragraph's text
+    ['at its start, as a page break', PAGE + '<w:t>one two</w:t>', 'title: one two\n', ['one two']],
+    ['at its end, as a page break', '<w:t>one two</w:t>' + PAGE, 'title: one two\n', ['one two']],
   ])('keeps the words %s', async (_name, to, frontmatter, lines) => {
     const markdown = await imported(md, '<w:t>one two</w:t>', to);
     expect(markdown).toContain('\n' + frontmatter + '---\n');
@@ -8601,9 +8610,10 @@ describe('A line break Word puts in the title', () => {
     expect(await titles(markdown)).toEqual(['one', 'two']);
   });
 
-  // #630's: a page break there, which shows a page's end, import drops
-  test('writes nothing for a page break in it, as before', async () => {
-    const markdown = await imported(md, '<w:t>one two</w:t>', '<w:t>one</w:t><w:br w:type="page"/><w:t>two</w:t>');
+  // In hidden text, which shows nothing, a page break shows no line, and
+  // import drops it, as in a paragraph's text
+  test('writes nothing for a page break in hidden text in it, as before', async () => {
+    const markdown = await imported(md, '<w:t>one two</w:t>', '<w:t>one</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr>' + PAGE + '</w:r><w:r><w:t>two</w:t>');
     expect(markdown).toContain('\ntitle: onetwo\n');
   });
 });
