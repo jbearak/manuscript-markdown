@@ -17872,10 +17872,20 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptio
     if (csRpr) {
       const s = extractSizeHp(csRpr);
       if (s !== undefined) def.fontSize = s / 2;
-      const st = extractStyle(csRpr, getStylePPr(csStyleId, true));
+    }
+    // Its font style, which export writes as the whole of it: from its rPr
+    // and its pPr's centering. A paragraph style without an rPr, as where
+    // export leaves out a size Normal gives (see customStyleXml), has its
+    // centering read too, but only where nothing it shows turns a toggle on
+    // or off: no style along its w:basedOn, as Word reads it (see
+    // styleChain), and not the document defaults. Elsewhere its font style
+    // would need the toggles it takes, so it isn't read
+    const csPpr = getStylePPr(csStyleId, true);
+    const togglesShown = () => [...styleChain(csStyleId, true).map(blockRPr), defaultRPr].some(rPr => FONT_STYLE_TOGGLES.some(tag => xmlStartTag(rPr, tag) !== undefined));
+    if (csRpr || styleBlock(csStyleId) !== null && !togglesShown()) {
+      const st = extractStyle(csRpr ?? '', csPpr);
       if (st !== 'normal') def.fontStyle = st;
     }
-    const csPpr = getStylePPr(csStyleId, true);
     if (csPpr) {
       const before = xmlTwips(xmlElementAttribute(csPpr, 'w:spacing', 'w:before'));
       if (before !== undefined) def.spacingBefore = before / 20;
