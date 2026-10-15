@@ -105,6 +105,16 @@ const TEXT_ESCAPES: Map<string, string> = new Map([
   ['\\textbackslash', '\\'], ['\\textasciitilde', '~'], ['\\textasciicircum', '^'],
 ]);
 
+/** The environments parseEnvironment gives an OMML form; keep in step with its cases. */
+const SUPPORTED_ENVIRONMENTS: ReadonlySet<string> = new Set([
+  'matrix', 'smallmatrix', 'pmatrix', 'bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix', 'cases',
+  'align', 'align*', 'aligned', 'gather', 'gather*', 'gathered', 'split', 'multline', 'multline*',
+  'flalign', 'flalign*', 'alignat', 'alignat*', 'equation', 'equation*', 'subequations',
+]);
+
+/** Environments without an OMML form whose first group is an argument, as array's column spec is, kept as text with the \begin. */
+const ENVIRONMENT_ARGUMENTS: ReadonlySet<string> = new Set(['array', 'darray', 'subarray', 'alignedat']);
+
 /** Function names that LaTeX sets with a space. */
 const FUNCTION_NAMES: Map<string, string> = new Map([['liminf', 'lim inf'], ['limsup', 'lim sup']]);
 
@@ -595,11 +605,16 @@ class Parser {
       case '\\begin':
         return this.parseEnvironment();
 
-      // An \end with no \begin, as when only the \begin is tracked: nothing,
-      // as a \begin with no \end shows only its environment
-      case '\\end':
-        this.parseGroup();
+      // An \end with no \begin, as when only the \begin is tracked: nothing
+      // for an environment with an OMML form, as a \begin with no \end shows
+      // only its environment, and its source for one parseEnvironment shows
+      // as text, as it shows that \end, where sourceGroup can keep it
+      case '\\end': {
+        const source = this.sourceGroup();
+        if (source !== undefined && !SUPPORTED_ENVIRONMENTS.has(source.trim().slice(1, -1).trim())) return makeRun('\\end' + source);
+        if (source === undefined) this.parseGroup();
         return '';
+      }
 
       case '\\mathrm':
         return this.styleGroup(text => makeStyledRun(text));
@@ -1102,10 +1117,90 @@ class Parser {
         return content;
       }
 
-      default:
+      default: {
+        // An environment with no OMML form, such as array or dcases, is
+        // shown as written: its \begin and argument and its \end as text,
+        // and its body as math, so all of it reads back. Its own \end is
+        // taken here, or one in a known environment would end that. An
+        // argument or \end sourceGroup can't keep is read as before: the
+        // argument as math, and the \end as nothing. With no \end of its
+        // own (see hasOwnEnd), all of it is read as before, so that it takes
+        // no row or \end of an environment around it.
         this.onUnknownCommand?.('\\begin{' + envName + '}');
-        return makeRun('\\begin{' + envName + '}');
+        if (!this.hasOwnEnd(envName)) return makeRun('\\begin{' + envName + '}');
+        const begin = '\\begin{' + envName + '}' + (ENVIRONMENT_ARGUMENTS.has(envName) ? this.sourceGroup() ?? '' : '');
+        const body = this.parseAtoms(
+          (t) => t.type === 'rbrace' || (t.type === 'command' && t.value === '\\end'),
+          (token, atoms) => {
+            if (token.type !== 'command' || token.value !== '\\\\') return false;
+            this.consume();
+            atoms.push(makeRun('\\\\'));
+            return true;
+          },
+        ).join('');
+        if (this.peek()?.type !== 'command' || this.peek()?.value !== '\\end') return makeRun(begin) + body;
+        this.consume();
+        const end = this.sourceGroup();
+        if (end === undefined) this.parseGroup();
+        return makeRun(begin) + body + (end === undefined ? '' : makeRun('\\end' + end));
+      }
     }
+  }
+
+  /**
+   * Whether the environment `name`, begun just before here, has its \end in
+   * the same group: \end{name} before the group closes, past environments
+   * begun and ended in it, each name for name. Any other \end, as of an
+   * environment around it, or a group's close comes first otherwise.
+   */
+  private hasOwnEnd(name: string): boolean {
+    const open: string[] = [];
+    let depth = 0;
+    for (let k = this.pos; k < this.tokens.length; k++) {
+      const token = this.tokens[k];
+      if (token.type === 'lbrace') depth++;
+      else if (token.type === 'rbrace' && --depth < 0) return false;
+      else if (depth === 0 && token.type === 'command' && token.value === '\\begin') open.push(this.environmentNameAt(k + 1));
+      else if (depth === 0 && token.type === 'command' && token.value === '\\end') {
+        const ended = this.environmentNameAt(k + 1);
+        if (!open.length) return ended === name;
+        if (open.pop() !== ended) return false;
+      }
+    }
+    return false;
+  }
+
+  /** The environment name in the group at token `k`, past spaces, or '' where there's none. */
+  private environmentNameAt(k: number): string {
+    while (this.tokens[k]?.type === 'text' && /^[ \t\r\n]*$/.test(this.tokens[k].value)) k++;
+    if (this.tokens[k]?.type !== 'lbrace') return '';
+    let name = '';
+    for (k++; this.tokens[k] && this.tokens[k].type !== 'rbrace'; k++) name += this.tokens[k].value;
+    return name.trim();
+  }
+
+  /**
+   * The source of the brace group next, with any spaces before it, where
+   * its tokens give that source exactly: text and braces alone, each token
+   * starting where the last ended, so that tokenize dropped nothing, as it
+   * drops the \relax of +\relax+, with no comment, which would show, and
+   * no line end, which a run doesn't keep. Otherwise undefined, with
+   * nothing taken, as where no group is next.
+   */
+  private sourceGroup(): string | undefined {
+    let end = this.pos;
+    while (this.tokens[end]?.type === 'text' && /^[ \t]*$/.test(this.tokens[end].value)) end++;
+    if (this.tokens[end]?.type !== 'lbrace') return undefined;
+    for (let depth = 0; ; end++) {
+      const token = this.tokens[end];
+      if (!token || (token.type !== 'lbrace' && token.type !== 'rbrace' && (token.type !== 'text' || /[\r\n]/.test(token.value)))) return undefined;
+      if (token.type === 'lbrace') depth++;
+      else if (token.type === 'rbrace' && --depth === 0) break;
+    }
+    const tokens = this.tokens.slice(this.pos, end + 1);
+    if (tokens.some((token, k) => k > 0 && tokens[k - 1].pos + tokens[k - 1].value.length !== token.pos)) return undefined;
+    this.pos = end + 1;
+    return tokens.map(token => token.value).join('');
   }
 
   private parseDelimitedMatrix(envName: string, begChr: string, endChr: string): string {

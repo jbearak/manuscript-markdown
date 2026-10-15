@@ -330,6 +330,8 @@ These environments are converted to OMML equation arrays on export. On re-import
 
 Within these environments, `\tag{...}`, `\tag*{...}`, `\label{...}`, `\notag`, and `\nonumber` are consumed silently (OMML has no equivalent). `\intertext{...}` and `\shortintertext{...}` are emitted as plain text. `\shoveleft{...}` and `\shoveright{...}` emit their inner content.
 
+An environment not in this table or under Matrices, such as `array`, `eqnarray`, `dcases`, `rcases`, `subarray`, `alignedat` or `CD`, has no OMML form. Export shows its `\begin{...}` with any argument (an `array`'s column spec) and its `\end{...}` as text, with the body between them as math, and warns once. Import reads it back as written. One with no `\end{...}` of its own shows only its `\begin{...}` as text, and the rest as math.
+
 ### Bare Environments
 
 You can write display-math environments without `$$` wrappers:
@@ -403,10 +405,10 @@ x + y%       % line continuation (suppresses newline whitespace)
 + z
 ```
 
-Escaped `\%` produces a literal percent sign and is not treated as a comment:
+Escaped `\%` is not treated as a comment. LaTeX shows it as a percent sign. Word shows it as written, backslash included, as with the other escaped characters outside `\text{}`:
 
 ```latex
-50\% discount   % renders: 50% discount
+50\% discount   % LaTeX shows 50% discount, Word 50\% discount
 ```
 
 ### Line continuation

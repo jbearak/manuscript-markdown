@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import JSZip from 'jszip';
 import { join } from 'node:path';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
@@ -188,5 +189,101 @@ describe('counterfactuals fixture round-trip', () => {
     expect(displayMathBodies(stripFrontmatter(rt2.markdown))).toEqual(
       displayMathBodies(stripFrontmatter(rt1.markdown))
     );
+  });
+});
+
+// An environment with no OMML form showed its \begin as text and lost its
+// \end, and its argument's braces, so it came back as LaTeX that doesn't parse
+describe('environments with no OMML form', () => {
+  const fence = '$'.repeat(2);
+  const roundTrip = async (md: string) => stripFrontmatter((await convertDocx((await convertMdToDocx(md)).docx)).markdown).trim();
+  const equations = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return xml.match(/<m:oMath>[\s\S]*?<\/m:oMath>/g) ?? [];
+  };
+  const wordText = (omml: string[]) => omml.map(math => [...math.matchAll(/<m:t[^>]*>([^<]*)<\/m:t>/g)].map(m => m[1]).join('')).join('');
+
+  it.each([
+    ['array', fence + '\n\\begin{array}{c|c} a & b \\\\ c & d \\end{array}\n' + fence],
+    ['eqnarray', fence + '\n\\begin{eqnarray} a &=& b \\end{eqnarray}\n' + fence],
+    ['dcases', fence + '\nf(x) = \\begin{dcases} 1 & x > 0 \\\\ 0 & x \\leq 0 \\end{dcases}\n' + fence],
+    ['rcases', fence + '\n\\begin{rcases} a & b \\end{rcases}\n' + fence],
+    ['subarray', 'A $\\sum_{\\begin{subarray}{c} i \\\\ j \\end{subarray}}x$ C.'],
+    ['alignedat', fence + '\n\\begin{alignedat}{2} a &= b \\end{alignedat}\n' + fence],
+    ['CD', fence + '\n\\begin{CD} A @>>> B \\end{CD}\n' + fence],
+    ['array in an inline equation', 'A $\\begin{array}{c} a \\end{array} + 1$ C.'],
+    ['array in a row of aligned', fence + '\n\\begin{aligned}\nx &= \\begin{array}{c} a \\end{array} \\\\\ny &= c\n\\end{aligned}\n' + fence],
+    ['array with its argument after a space', 'A $\\begin{array} {c} a \\end{array}$ C.'],
+    ['array in a deletion', 'A ${--\\begin{array}{c} a \\end{array}--} + 1$ C.'],
+    ['an \\end{array} alone', 'A $a \\end{array} + 1$ C.'],
+  ])('keeps %s as written', async (_name, md) => {
+    const omml = await equations(md);
+    for (const end of md.match(/\\end\{(?!aligned)[^}]*\}/g) ?? []) expect(wordText(omml)).toContain(end);
+    const back = await roundTrip(md);
+    expect(back).toBe(md);
+    expect(await equations(back)).toEqual(omml);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // An argument whose tokens aren't its source reads as before, as math, so
+  // a comment in it stays hidden and a \relax between + and + keeps them
+  // apart, with the \end kept
+  it.each([
+    ['a comment', fence + '\n\\begin{array}{c%\n} a \\end{array}\n' + fence, fence + '\n\\begin{array}c%\n a \\end{array}\n' + fence],
+    ['a comment with text', fence + '\n\\begin{array}{c% cols\n} a \\end{array}\n' + fence, fence + '\n\\begin{array}c% cols\n a \\end{array}\n' + fence],
+    ['+\\relax+', 'A $\\begin{array}{@{+\\relax+}c@{+\\relax+}} a \\end{array}$ C.', 'A $\\begin{array}@++c@++ a \\end{array}$ C.'],
+    ['a \\relax at its end', 'A $\\begin{array}{c\\relax} a \\end{array}$ C.', 'A $\\begin{array}c a \\end{array}$ C.'],
+  ])('reads an argument with %s as before, keeping the \\end', async (_name, md, expected) => {
+    const omml = await equations(md);
+    expect(wordText(omml)).toContain('\\end{array}');
+    expect(wordText(omml)).not.toContain('\\begin{array}{');
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await equations(back)).toEqual(omml);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // With no \end of its own, an environment is read as before, as its
+  // \begin and then math, so it takes no row or \end of one around it,
+  // which a known environment's rows came back with
+  it.each([
+    ['in an inline equation', 'A $\\begin{array}{c} a$ C.', 'A $\\begin{array}c a$ C.'],
+    ['in a row of aligned', fence + '\n\\begin{aligned}\nx &= \\begin{array}{c} a \\\\\ny &= c\n\\end{aligned}\n' + fence, fence + '\n\\begin{aligned}\nx &= \\begin{array}c a \\\\\ny &= c\n\\end{aligned}\n' + fence],
+  ])('reads an environment with no \\end %s as before', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await equations(back)).toEqual(await equations(md));
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Rejecting the insertion leaves the array with no \end, so that view is
+  // read as before, and aligned keeps its rows and its one \end in both. It
+  // comes back as a substitution of the whole equation, as on main, whose
+  // blank lines grow on each trip, as on main
+  it('keeps the rows of aligned around an array whose \\end is inserted', async () => {
+    const md = fence + '\n\\begin{aligned}\nx &= \\begin{array}{c} a {++\\end{array}++} \\\\\ny &= c\n\\end{aligned}\n' + fence;
+    for (const back of [await roundTrip(md), await roundTrip(await roundTrip(md))]) {
+      expect(back.match(/\\end\{aligned\}/g)).toHaveLength(2);
+      expect(back).toContain('\\begin{aligned} x &= \\begin{array}{c} a \\end{array} \\\\ y &= c \\end{aligned}');
+      expect(back).toContain('\\begin{aligned} x &= \\begin{array}c a \\\\ y &= c \\end{aligned}');
+    }
+  });
+
+  it('warns once, for the environment, not for its \\\\', async () => {
+    const { warnings } = await convertMdToDocx(fence + '\n\\begin{array}{c|c} a & b \\\\ c & d \\end{array}\n' + fence);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('\\begin{array}');
+  });
+
+  // As before
+  it.each([
+    ['cases', fence + '\n\\begin{cases}\na & b \\\\\nc & d\n\\end{cases}\n' + fence, fence + '\n\\begin{cases}\na & b \\\\\nc & d\n\\end{cases}\n' + fence],
+    ['pmatrix', fence + '\n\\begin{pmatrix} a & b \\end{pmatrix}\n' + fence, fence + '\n\\begin{pmatrix} a & b \\end{pmatrix}\n' + fence],
+    ['an \\end{pmatrix} alone, which shows nothing', 'A $a \\end{pmatrix} + 1$ C.', 'A $a  + 1$ C.'],
+  ])('writes %s as before', async (_name, md, expected) => {
+    expect(wordText(await equations(md))).not.toContain('\\');
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
   });
 });
