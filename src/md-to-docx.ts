@@ -376,7 +376,7 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
   caution: '⛒',
 };
 
-import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, criticCloserSearch, criticCloserSearchOf, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml } from './critic-markup';
+import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, criticCloserSearch, criticCloserSearchOf, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml, criticBreaksLeftOver } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt } from './math-delimiters';
 import { citationEnd, citationPrefixText, readCitationItems } from './citation-syntax';
@@ -1343,6 +1343,7 @@ function createMarkdownIt(): MarkdownIt {
     }
   });
 
+  md.use(criticBreaksLeftOver);
   return md;
 }
 

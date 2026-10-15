@@ -45,6 +45,11 @@ export interface MarkdownRegions {
 	 *  that markdown-it reads there whatever comes before it, sorted (see
 	 *  pushInlineHtml) */
 	inlineHtmlRegions: CodeRegion[];
+	/** With `inlineBlocks`, the lines of each paragraph's, heading's and
+	 *  table row's text, which markdown-it's inline parse reads on its own,
+	 *  from the start of the first to the start of the line after the last,
+	 *  sorted */
+	inlineBlocks: CodeRegion[];
 }
 
 export interface MarkdownRegionOptions {
@@ -59,6 +64,8 @@ export interface MarkdownRegionOptions {
 	includeTables?: boolean;
 	/** With `html`, inlineHtmlRegions */
 	inlineHtml?: boolean;
+	/** With it, inlineBlocks */
+	inlineBlocks?: boolean;
 	/** With `html`, read a quote as ending before a line with text that
 	 *  doesn't start as a quote's line does, as export does, which puts a
 	 *  blank line before each (see deLazifyBlockquotesWithLines in
@@ -209,6 +216,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	const listRegions: CodeRegion[] = [];
 	const tableRegions: CodeRegion[] = [];
 	const inlineHtmlRegions: CodeRegion[] = [];
+	const inlineBlocks: CodeRegion[] = [];
 	const outerItemRegions: CodeRegion[] = [];
 	const itemClosedStarts: number[] = [];
 	// The list items and quotes each token is in, innermost last
@@ -254,6 +262,9 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			} else if (containers[containers.length - 1] === 'item' && token.map && closedByItem(token, blockLines, textEnd)) itemClosedStarts.push(lineStarts[token.map[0]]);
 		}
 		if (!token.map) continue;
+		if (options?.inlineBlocks && token.type === 'inline' && lineStarts[token.map[0]] !== inlineBlocks[inlineBlocks.length - 1]?.start) {
+			inlineBlocks.push({ start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length });
+		}
 		const isCode = includeCode && (token.type === 'fence' || token.type === 'code_block');
 		if (options?.html && token.type === 'html_block') {
 			const region = { start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length };
@@ -299,6 +310,8 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		// In the order of the tokens, which is the text's
 		tableRegions,
 		inlineHtmlRegions,
+		// In the order of the tokens, which is the text's
+		inlineBlocks,
 	};
 }
 
