@@ -744,15 +744,18 @@ describe('CriticMarkup\'s openers in an equation, and the breaks no rule reads',
 
   it('reads a span after an escaped [ before a dollar sign as before', async () => {
     // Where the scan read [see $x @key] as a citation, its y $ opened an
-    // equation with the span's first dollar sign. Import writes the [
-    // without its backslash, as on main, so the next trip reads a citation
+    // equation with the span's first dollar sign. Import keeps the ['s
+    // backslash, since the citation from it would end at the ] in the
+    // equation's source, so the next trip reads no citation
     const md = '\\[see $x @key] y $ {++one $\\alpha$\n\ntwo++}';
     const once = await exported(md);
     expect(once.paragraphs).toHaveLength(2);
     expect(once.equations).toBe(2);
     expect(once.revisions).toBe(3);
     expect(once.placeholder).toBe(false);
-    expect(once.markdown).toBe('[see $x @key] y$ {++one $\\alpha$\n\ntwo++}');
+    const expected = '\\[see $x @key] y$ {++one $\\alpha$\n\ntwo++}';
+    expect(once.markdown).toBe(expected);
+    expect((await exported(expected)).markdown).toBe(expected);
     expect(renderWithPlugin(md)).toContain('<ins class="manuscript-markdown-addition">');
   });
 

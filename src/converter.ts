@@ -829,6 +829,11 @@ interface TextIndex {
   bracketed: number[];
   /** Where each > is, which can end a tag a run before leaves open */
   tagEnds: number[];
+  /** Where each ] and [ of an equation's source is, and each @ that starts
+   *  a key, which export's citation reads as it's written, though the index
+   *  has the source as no syntax (see indexedText and
+   *  RunsAfter.citationEndsInMath) */
+  math?: { closers: number[]; ats: number[]; openers: number[] };
 }
 
 /** `text`'s index, where a run of dollar signs ends at each of `bounds`,
@@ -1044,6 +1049,27 @@ export class RunsAfter {
     if (!isBareRun(self) || !isBareRun(closing) || !revisionsEqual(self.revision, closing.revision)
       || !commentSetsEqual(self.commentIds, closing.commentIds)) return true;
     return anyBetween(semicolons, this.from, offsets[last]);
+  }
+
+  /** Whether the citation export would read from a [ in the run before
+   *  these, which no ] after it there closes, ends at a ] in the source of
+   *  an equation in these, as export reads the citation in the Markdown as
+   *  written, before it reads math, as in [see $x @a] y$. That's where no
+   *  ] in the text comes first, as citationTakesDelimiters reads it, and
+   *  the [ starts a citation as there: the key after the [ (`direct`), or
+   *  first (`keyFirst`), or an @ for one in the text or the source before
+   *  the ], and no [ */
+  citationEndsInMath(keyFirst: boolean, direct: boolean): boolean {
+    const { math, closers, ats, openers, bracketed } = this.index;
+    if (!math || !this.runs || this.prefix) return false;
+    const m = lowerBound(math.closers, this.from);
+    if (m >= math.closers.length) return false;
+    const close = math.closers[m];
+    if (anyBetween(closers, this.from, close)) return false;
+    if (anyBetween(bracketed, this.from, close)) return direct;
+    if (keyFirst) return true;
+    return (anyBetween(ats, this.from, close) || anyBetween(math.ats, this.from, close))
+      && !anyBetween(openers, this.from, close) && !anyBetween(math.openers, this.from, close);
   }
 
   /** The Markdown the run before these and these write after its text, as
@@ -1353,7 +1379,8 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
       if (!opens && !closerAfter) {
         const direct = /^-?@/.test(text.slice(i + 1, i + 3));
         const keyFirst = direct || nextKey !== -1 && (nextSemicolon === -1 || nextKey < nextSemicolon);
-        opens = (direct || inner === -1 && (keyFirst || nextSemicolon === -1)) && after.citationTakesDelimiters(keyFirst, direct);
+        opens = (direct || inner === -1 && (keyFirst || nextSemicolon === -1))
+          && (after.citationTakesDelimiters(keyFirst, direct) || after.citationEndsInMath(keyFirst, direct));
       }
     }
     if (opens) escaped.add(i);
@@ -9912,11 +9939,25 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
     const bracketed: number[] = [];
     // Where each comment's text starts and ends
     const comments: number[] = [];
+    // Where each ], @ and [ of an equation's source is
+    const math: Partial<Record<']' | '@' | '[', number[]>> = {};
     let text = '';
     for (let k = first; k < end; k++) {
       offsets.push(text.length);
       const item = segment[k];
       if (item.type === 'footnote_ref' || item.type === 'citation') bracketed.push(text.length);
+      if (item.type === 'math') {
+        const source = text.length + (item.display ? 2 : 1);
+        // An @ only where it starts a key, after whitespace, as export reads
+        // one, not after the $ before the source
+        const { latex } = item;
+        for (let j = 0; j < latex.length; j++) {
+          const c = latex[j];
+          if (c === ']' || c === '[') (math[c] ??= []).push(source + j);
+          else if (c === '@' && /[\p{L}\p{N}_]/u.test(latex[j + 1] ?? '')
+            && (/\s/.test(latex[j - 1] ?? '') && j > 0 || latex[j - 1] === '-' && j > 1 && /\s/.test(latex[j - 2]))) (math['@'] ??= []).push(source + j);
+        }
+      }
       text += indexedText(item);
       if (item.type === 'html_comment') comments.push(offsets[offsets.length - 1], text.length);
     }
@@ -9924,7 +9965,9 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
     const marks = laterEqualsAfter.get(segment);
     let laterEquals = -1;
     for (let k = first; k < end; k++) if (marks?.has(k)) laterEquals = offsets[k + 1 - first];
-    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets), bracketed, laterEquals, comments), items: segment.slice(first, end) });
+    const index = indexText(text, new Set(offsets), bracketed, laterEquals, comments);
+    if (math[']']) index.math = { closers: math[']'], ats: math['@'] ?? [], openers: math['['] ?? [] };
+    byEnd.set(end, cached = { length: segment.length, first, offsets, index, items: segment.slice(first, end) });
   }
   return new RunsAfter(cached.index, cached.offsets[start - cached.first], '', false,
     { offsets: cached.offsets, items: cached.items, at: start - cached.first });
@@ -9934,8 +9977,10 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
 function indexedText(item: ContentItem): string {
   if (item.type === 'math') {
     // An == in its LaTeX, which Markdown has as it is, and which an ==
-    // before the equation pairs with, as export reads a highlight past math
-    const latex = item.latex.includes('==') ? '==' : '\uFFFC';
+    // before the equation pairs with, as export reads a highlight past math.
+    // As long as the LaTeX, for where its ], @ and [ are (see TextIndex.math)
+    const latex = item.latex.includes('==') ? '==' + '\uFFFC'.repeat(Math.max(0, item.latex.length - 2))
+      : '\uFFFC'.repeat(Math.max(1, item.latex.length));
     return item.display ? '$' + '$' + latex + '$' + '$' : '$' + latex + '$';
   }
   // An HTML comment's text, which export reads math, a highlight, code and
