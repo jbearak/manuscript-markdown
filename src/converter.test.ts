@@ -4384,6 +4384,51 @@ describe('HTML comment blank line round-trip', () => {
     expect(result.markdown).toContain('<!--\nLine one\n-->');
   });
 
+  // A ZWSP and <! Word split off at a paragraph's end, which the next hidden
+  // run in its place goes on with. In a note's first paragraph, import took
+  // out the space after the mark, and the next paragraph's items made up the
+  // count of its place again: the next hidden comment went on from it, and
+  // was lost. It's kept, as in the body. A comment split in one paragraph,
+  // and one whole, come back as before
+  const hiddenRun = (text: string) => '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  const textRun = (text: string) => '<w:r><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  const START = hiddenRun('\u200B&lt;!');
+  const COMMENT = hiddenRun('\u200B&lt;!-- c --&gt;');
+  // The Markdown of the paragraphs in the body, or in a note, each checked
+  // to come back the same after a second trip
+  const importedParagraphs = async (paragraphs: string[], inNote: boolean) => {
+    const part = inNote ? 'word/footnotes.xml' : 'word/document.xml';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(inNote ? 'a[^1]\n\n[^1]: NTX\n' : 'NTX\n')).docx);
+    const xml = await zip.file(part)!.async('string');
+    expect(xml).toContain('<w:r><w:t>NTX</w:t></w:r>');
+    const paragraph = inNote ? '<w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>' : '<w:p>';
+    zip.file(part, xml.replace('<w:r><w:t>NTX</w:t></w:r>', () => paragraphs.join('</w:p>' + paragraph)));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+    return markdown;
+  };
+  test.each([
+    ['that starts the paragraph after one with a start Word split at its end', [textRun('one') + START, COMMENT + textRun(' two')], 'one\n\n<!-- c --> two'],
+    ['after text, where the paragraph before holds a start Word split alone', [START, textRun('two') + COMMENT], 'two<!-- c -->'],
+    ['Word split, that starts the paragraph after one with a start Word split at its end', [textRun('one') + START, hiddenRun('\u200B&lt;!-- a') + hiddenRun(' b --&gt;') + textRun(' two')], 'one\n\n<!-- a b --> two'],
+    ['Word split in its <!--', [textRun('one') + START + hiddenRun('-- a b --&gt;') + textRun(' two')], 'one<!-- a b --> two'],
+    ['whole', [textRun('one') + COMMENT + textRun(' two')], 'one<!-- c --> two'],
+  ])('reads a hidden comment %s, in a note as in the body', async (_name, paragraphs, body) => {
+    expect(await importedParagraphs(paragraphs, false)).toBe(body + '\n');
+    expect(await importedParagraphs(paragraphs, true)).toBe('a[^1]\n\n[^1]: ' + body.replace(/\n\n/g, '\n\n    ') + '\n');
+  });
+
+  // Where the next paragraph starts with another such start before a
+  // comment, the two spoil each other, and the comment after them is kept,
+  // as before. An earlier draft left the first out there, and then the
+  // second spoiled the comment
+  test.each([
+    ['whole', COMMENT, '<!-- c -->'],
+    ['Word split', hiddenRun('\u200B&lt;!-- a') + hiddenRun(' b --&gt;'), '<!-- a b -->'],
+  ])('keeps a hidden comment %s in a note after a start Word split at the end of the paragraph before and another before it', async (_name, comment, md) => {
+    expect(await importedParagraphs([textRun('one') + START, START + comment + textRun(' two')], true)).toBe('a[^1]\n\n[^1]: one\n\n    ' + md + ' two\n');
+  });
+
   test.each([
     ['a quote', '> a\n>\n> <!-- c -->\n>\n> b'],
     ['a quote alone', '> <!-- c -->'],

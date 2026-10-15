@@ -5564,10 +5564,19 @@ function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[
  * can split one between runs, or join several in one.
  */
 function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, link?: { href: string; link: number }, otherLineEnds = false): void {
-  // The start of one Word split off before it showed which it is
+  // The start of one Word split off before it showed which it is. But not
+  // where `target` ends with another item than it did then, where import
+  // took out an item before it at a paragraph's end, as the space after a
+  // note's mark, and the items after it made up the count, with a run that
+  // starts a payload of its own, a ZWSP and more than a start, which the
+  // start would spoil (see readsHiddenText). A run that goes on with it
+  // still does, as before, and so does a start, which spoils both
   const pending = pendingHiddenText.get(target);
   pendingHiddenText.delete(target);
-  if (pending && pending.at === target.length) runText = pending.text + runText;
+  if (pending && pending.at === target.length && (pending.last === target[target.length - 1]
+      || !runText.startsWith('\u200B') || LONE_HIDDEN_START.test(runText))) {
+    runText = pending.text + runText;
+  }
   /** Where the hidden text after the comment whose <!-- ends at `from`
    *  starts, if anything does: after its first end, if a ZWSP follows it,
    *  its first -->, or the > or -> of an empty one, <!--> or <!--->. Not a
@@ -5598,7 +5607,7 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const newPayload = rest.startsWith('\u200B') || lastItem?.type === 'html_comment' && lastItem.text.endsWith('\u200B');
   if (lastItem?.type === 'html_comment'
       && (continues ? !(/^\u200B*\s*<!--/.test(rest) && newPayload) : !newPayload)
-      && !/^\u200B+(?:!|<|<!|<!-|<i|<im)?$/i.test(rest) && !hiddenCommentClosed(lastItem.text)) {
+      && !LONE_HIDDEN_START.test(rest) && !hiddenCommentClosed(lastItem.text)) {
     for (const id of activeComments) lastItem.commentIds.add(id);
     // With a ZWSP it starts with, which is the comment's own, before which
     // Word split its run
@@ -5638,6 +5647,11 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
 /** The start of hidden text whose run Word split before it showed what it
  *  is, as a ZWSP and !, which the next hidden run in the same place goes on */
 const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number; last: ContentItem | undefined }>();
+
+/** A run of hidden text that is a ZWSP and the start of <!--, ![ or <img
+ *  alone, or a ZWSP alone, which readHiddenText holds for the next hidden
+ *  run (see pendingHiddenText) */
+const LONE_HIDDEN_START = /^\u200B+(?:!|<|<!|<!-|<i|<im)?$/i;
 
 /** Whether a comment's text has its end: a --> after its last <!--, or
  *  the > or -> of an empty one that is all of it, <!--> or <!--->, but not
