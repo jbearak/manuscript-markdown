@@ -634,9 +634,13 @@ function scriptBase(latex: string): string {
   if (/^\\[a-zA-Z]+$/.test(latex)) return latex;
   // Single LaTeX command with one braced argument like \mathcal{A}. A function
   // such as \sin{x} takes no argument, so it needs the braces: {\sin{x}}^2,
-  // and so does an n-ary operator's body: {\prod{ab}}^2.
+  // and so does an n-ary operator's body: {\prod{ab}}^2. So does a brace,
+  // as LaTeX reads a script on one as a limit, and export reads a
+  // superscript on \overbrace, or a subscript on \underbrace, as its label:
+  // {\overbrace{y}}^b is a superscript on the brace
   const command = /^\\([a-zA-Z]+)\{[^{}]*\}$/.exec(latex);
-  if (command && !KNOWN_FUNCTIONS.has(command[1]) && !NARY_COMMANDS.has('\\' + command[1])) return latex;
+  if (command && !KNOWN_FUNCTIONS.has(command[1]) && !NARY_COMMANDS.has('\\' + command[1])
+    && command[1] !== 'overbrace' && command[1] !== 'underbrace') return latex;
   return '{' + latex + '}';
 }
 

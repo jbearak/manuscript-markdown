@@ -1904,6 +1904,75 @@ describe('Word\'s group characters', () => {
   });
 });
 
+// A script on Word's brace, as a superscript on an overbrace, came back as
+// \overbrace{y}^b, whose script LaTeX reads as a limit and export as the
+// brace's label, so Word got it over the brace, not as a script. The brace
+// goes in braces, as a script's base
+describe('a script on Word\'s brace', () => {
+  const brace = (character: string, position: string) => '<m:groupChr><m:groupChrPr><m:chr m:val="' + character + '"/><m:pos m:val="' + position + '"/></m:groupChrPr><m:e>' + run('y') + '</m:e></m:groupChr>';
+  const over = brace('⏞', 'top');
+  const under = brace('⏟', 'bot');
+  const sup = (base: string) => '<m:sSup><m:e>' + base + '</m:e><m:sup>' + run('b') + '</m:sup></m:sSup>';
+  const sub = (base: string) => '<m:sSub><m:e>' + base + '</m:e><m:sub>' + run('a') + '</m:sub></m:sSub>';
+  const subSup = (base: string) => '<m:sSubSup><m:e>' + base + '</m:e><m:sub>' + run('a') + '</m:sub><m:sup>' + run('b') + '</m:sup></m:sSubSup>';
+  const limit = (kind: string, base: string, label: string) => '<m:' + kind + '><m:e>' + base + '</m:e><m:lim>' + run(label) + '</m:lim></m:' + kind + '>';
+  // An arrow over or under y, which comes back as \overset or \underset of
+  // it, and which export writes as a limit
+  const arrowOver = brace('→', 'top');
+  const arrowUnder = brace('→', 'bot');
+  const overLimit = limit('limUpp', run('y'), '→');
+  const underLimit = limit('limLow', run('y'), '→');
+
+  /** A document from Word with an inline equation of `omml` */
+  async function wordDocx(omml: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A $x$ B.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+  /** The OMML of the equation export writes for `markdown` */
+  const exported = async (markdown: string) =>
+    /<m:oMath>([\s\S]*?)<\/m:oMath>/.exec(await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string'))![1];
+  /** `omml` from Word comes back as `latex`, which export writes as `word`, over two trips */
+  const comesBack = async (omml: string, latex: string, word: string) => {
+    expect(importOmml(omml)).toBe(latex);
+    const markdown = (await convertDocx(await wordDocx(omml))).markdown;
+    expect(markdown).toBe('A $' + latex + '$ B.\n');
+    expect(await exported(markdown)).toBe(word);
+    const again = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(again).toBe(markdown);
+    expect(await exported(again)).toBe(word);
+    expect((await convertDocx((await convertMdToDocx(again)).docx)).markdown).toBe(markdown);
+  };
+
+  test.each([
+    ['an overbrace with a superscript', sup(over), '{\\overbrace{y}}^b'],
+    ['an overbrace with a subscript', sub(over), '{\\overbrace{y}}_a'],
+    ['an overbrace with both scripts', subSup(over), '{\\overbrace{y}}_a^b'],
+    ['an underbrace with a superscript', sup(under), '{\\underbrace{y}}^b'],
+    ['an underbrace with a subscript', sub(under), '{\\underbrace{y}}_a'],
+    ['an underbrace with both scripts', subSup(under), '{\\underbrace{y}}_a^b'],
+  ])('from Word, %s comes back with the brace as the base of its scripts, and Word gets it as it was', async (_name, omml, latex) => {
+    await comesBack(omml, latex, omml);
+  });
+
+  // As before: a brace's label, as Word writes one, and a script on an
+  // arrow over or under its base, whose \overset or \underset a script's
+  // base already braced
+  test.each([
+    ['an overbrace with a label', limit('limUpp', over, 'b'), '\\overbrace{y}^{b}', limit('limUpp', over, 'b')],
+    ['an underbrace with a label', limit('limLow', under, 'a'), '\\underbrace{y}_{a}', limit('limLow', under, 'a')],
+    ['an arrow over its base with a superscript', sup(arrowOver), '{\\overset{\\to}{y}}^b', sup(overLimit)],
+    ['an arrow over its base with a subscript', sub(arrowOver), '{\\overset{\\to}{y}}_a', sub(overLimit)],
+    ['an arrow over its base with both scripts', subSup(arrowOver), '{\\overset{\\to}{y}}_a^b', subSup(overLimit)],
+    ['an arrow under its base with a superscript', sup(arrowUnder), '{\\underset{\\to}{y}}^b', sup(underLimit)],
+    ['an arrow under its base with a subscript', sub(arrowUnder), '{\\underset{\\to}{y}}_a', sub(underLimit)],
+    ['an arrow under its base with both scripts', subSup(arrowUnder), '{\\underset{\\to}{y}}_a^b', subSup(underLimit)],
+  ])('from Word, %s comes back as before', async (_name, omml, latex, word) => {
+    await comesBack(omml, latex, word);
+  });
+});
+
 // A comment at the end of a braced part of an equation lost its line end on
 // import, so the brace that closes the part, and what follows, went into the
 // comment, which the next export hid
