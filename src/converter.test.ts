@@ -10284,7 +10284,8 @@ describe('Word text that reads as Markdown', () => {
     ['before it', 'cm', [], false, 'q &#49;$z$ w'],
     ['after it in a comment\'s range', 'mc', ['c1'], false, 'q {==$z$&#49;==}{>>@R | note<<} w'],
     ['before it in a comment\'s range in ID syntax', 'cm', ['c1'], true, 'q {#1}&#49;$z${/1} w\n{#1>>@R | note<<}'],
-    ['after it in a highlight', 'hmc', [], false, 'q ==&#97;$z$&#49;== w'],
+    // The equation, without a highlight, ends it, as Word has it
+    ['after it in a highlight', 'hmc', [], false, 'q ==a==$z$==1== w'],
     ['after it on a substitution\'s side', 'dmc', [], false, 'q {~~old~>$z$&#49;~~} w'],
   ])('keeps inline math next to a citation without keys whose text is a digit, %s, as math', async (_name, kinds, ids, alwaysUseCommentIds, expected) => {
     // The citation's text went as it was, as a digit by which the $ next to
@@ -16420,6 +16421,175 @@ describe('Display math\'s rows and the spaces at their edges', () => {
   });
 });
 
+describe('A highlight on inline math', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  // The highlight colors of each equation's runs in Word, none for a run
+  // without one
+  const mathHighlights = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<m:oMath>[\s\S]*?<\/m:oMath>/g) ?? []).map(math => [...new Set((math.match(/<m:r>[\s\S]*?<\/m:r>/g) ?? [])
+      .map(run => /<w:highlight w:val="([^"]+)"\/>/.exec(run)?.[1] ?? 'none'))].join());
+  };
+
+  // Export wrote no highlight on an inline equation, so it came back
+  // without one, or outside the highlight that ended with it
+  test.each([
+    ['with text on both sides', 'A {==$x$==} B.', 'A ==$x$== B.', ['yellow']],
+    ['in its Markdown form', 'A ==$x$== B.', 'A ==$x$== B.', ['yellow']],
+    ['with text in it', 'A {==a $x$ b==} B.', 'A ==a $x$ b== B.', ['yellow']],
+    ['that ends with it', 'A ==a $x$== B.', 'A ==a $x$== B.', ['yellow']],
+    ['over two equations', 'A {==$x$ $y$==} B.', 'A ==$x$ $y$== B.', ['yellow', 'yellow']],
+    ['of a color but the default', 'A ==$x$=={red} B.', 'A ==$x$=={red} B.', ['red']],
+    ['of a color, in CriticMarkup', 'A {====$x$=={red}==} B.', 'A ==$x$=={red} B.', ['red']],
+    ['beside one of another color', '==a====$x$=={red}', '==a=={yellow}==$x$=={red}', ['red']],
+    ['in a heading', '# A ==$x$== B', '# A ==$x$== B', ['yellow']],
+    ['in a table\'s cell', '| h |\n| --- |\n| ==$x$== |', '| h |\n| --- |\n| ==$x$== |', ['yellow']],
+    ['with a comment after it', 'A ==$x$=={>>c<<} B.', 'A ==$x$=={>>c<<} B.', ['yellow']],
+    ['in a comment\'s range', '{#1}A ==$x$== B{/1}{#1>>c<<}', '{==A ==$x$== B==}{>>c<<}', ['yellow']],
+    // An equation takes no bold or italic, so they go on the text beside it
+    // rather than around it, which would write it without the highlight
+    ['in bold', 'A **a ==$x$== b** B.', 'A **a** ==$x$== **b** B.', ['yellow']],
+    ['in italics', 'A *a ==$x$== b* B.', 'A *a* ==$x$== *b* B.', ['yellow']],
+    // The bold after it starts with a space, which it puts outside it, and
+    // so does the next export (see the next test)
+    ['in bold, before an equation without one', 'A **a ==$x$== $y$ b** B.', 'A **a** ==$x$== $y$ **b** B.', ['yellow', 'none']],
+    // The == before it is escaped, which would pair with the one that opens
+    // the equation's highlight
+    ['after an escaped ==', 'A \\== b ==$x$== B.', 'A \\== b ==$x$== B.', ['yellow']],
+    ['of a color but the default, after an escaped ==', 'A \\== b ==$x$=={red} B.', 'A \\== b ==$x$=={red} B.', ['red']],
+  ])('comes back on it: %s', async (_name, md, expected, colors) => {
+    expect(await mathHighlights(md)).toEqual(colors);
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await mathHighlights(back)).toEqual(colors);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Text that ends with an = in a highlight with an equation or a note
+  // reference after it lost the reference its = goes as in a highlight of
+  // its own, so the editor and navigation, which read no = in a highlight,
+  // paired the highlight's closing == with the next one's opener
+  test.each([
+    ['an equation', 'A ==a&#61;$x$== ==b== B.', ['yellow'], ['==a&#61;$x$==', '==b==']],
+    ['an equation, of a color but the default', 'A ==a&#61;$x$=={red} ==b== B.', ['red'], ['==a&#61;$x$=={red}', '==b==']],
+    ['a note reference', 'A ==a&#61;[^1]== ==b== B.\n\n[^1]: n', [], ['==a&#61;[^1]==', '==b==']],
+  ])('keeps the = before %s in a highlight a reference', async (_name, md, colors, highlights) => {
+    expect(await mathHighlights(md)).toEqual(colors);
+    const back = await roundTrip(md);
+    expect(back).toBe(md);
+    const ranges = extractAllDecorationRanges(back, 'yellow');
+    expect([...ranges.highlights.values()].flat().map(range => back.slice(range.start, range.end)).sort()).toEqual(highlights.sort());
+    expect(await mathHighlights(back)).toEqual(colors);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Navigation, the grammar and the editor's decorations read no = or } in
+  // ==...==, so a highlighted equation with one in it hid its highlight and
+  // the next one from them. It comes back without its highlight, as before
+  test.each([
+    ['an = in it', 'A ==$x = y$== ==b== B.', 'A $x = y$ ==b== B.', ['==b==']],
+    ['an = in it, of a color but the default', 'A ==$x = y$=={red} ==b== B.', 'A $x = y$ ==b== B.', ['==b==']],
+    ['a } in it', 'A ==$\\frac{a}{b}$== B.', 'A $\\frac{a}{b}$ B.', []],
+    // The highlight of the text around it ends at it, as at one without a
+    // highlight, where the editor read none
+    ['an = in it, in highlighted text', 'A ==a $x = y$ b== B.', 'A ==a ==$x = y$== b== B.', ['==a ==', '== b==']],
+  ])('writes a highlighted equation with %s without the highlight', async (_name, md, expected, highlights) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    const ranges = extractAllDecorationRanges(back, 'yellow');
+    expect([...ranges.highlights.values()].flat().map(range => back.slice(range.start, range.end)).sort()).toEqual(highlights.sort());
+    expect(await mathHighlights(back)).toEqual(['none']);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Bold from a space before an equation went around the equation, the
+  // space outside it, as ** $y$ b**, so the next export didn't make the
+  // space bold, and the bold came back after the equation
+  test.each([
+    ['a note reference', 'A **a[^1] $y$ b** B.\n\n[^1]: n', 'A **a**[^1] $y$ **b** B.\n\n[^1]: n'],
+    ['a link', 'A **a [c](https://e.com) $y$ b** B.', 'A **a** [**c**](https://e.com) $y$ **b** B.'],
+  ])('writes bold that %s ends before an equation as the next export reads it', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  test.each([
+    ['an equation without one', 'A $x$ B.', 'A $x$ B.'],
+    ['an equation without one in bold', 'A **a $x$ b** B.', 'A **a $x$ b** B.'],
+    ['one beside an equation', 'A {==a==} $x$ B.', 'A ==a== $x$ B.'],
+    ['one ending with an = beside an equation', 'A ==a&#61;==$x$ B.', 'A ==a&#61;==$x$ B.'],
+    ['a comment on an equation', 'A $x${>>c<<} B.', 'A $x${>>c<<} B.'],
+    // Which export reads as the comment's range, as before
+    ['one with a comment on an equation', 'A {==$x$==}{>>c<<} B.', 'A {==$x$==}{>>c<<} B.'],
+    // An == in the equation would end the highlight
+    ['one on an equation with an == in it', 'A {==$a==b$==} B.', 'A $a==b$ B.'],
+    // An equation with a tracked change in it, and one in a tracked change
+    ['one on an equation with a tracked change in it', 'A {==$a{++b++}$==} B.', 'A $a{++b++}$ B.'],
+    ['one on an equation in a tracked change', 'A {++==$x$==++} B.', 'A {++$x$++} B.'],
+  ])('writes %s as before', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await mathHighlights(back)).toEqual((await mathHighlights(back)).map(() => 'none'));
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Word with a highlight on the text around an equation but not on the
+  // equation, as export wrote ==a $x$ b== before. Import joined the equation
+  // into the highlight, which the next export now writes on it
+  test.each([
+    ['the text beside it', 'A ==a $x$ b== B.', 'A ==a ==$x$== b== B.'],
+    ['the text apart from it', 'A ==a== $x$ ==b== B.', 'A ==a== $x$ ==b== B.'],
+    // A revision's equation is read without its highlight, as before
+    ['the text beside it, in an insertion', 'A {++==a $x$ b==++} B.', 'A {++==a $x$ b==++} B.'],
+  ])('keeps an equation without a highlight between highlights of %s without one', async (_name, md, expected) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    // Word's equation without its highlight, the text keeping its own
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, math => math.replace(/<w:highlight w:val="[^"]+"\/>/g, '')));
+    const back = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(back).toBe(expected);
+    expect(await mathHighlights(back)).toEqual(['none']);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  test('writes a highlight of many runs of text before an equation without one in time linear in their number', () => {
+    // The equation ends the highlight, which kept its runs from being marked
+    // as holding no group, so the highlight was read again from each of them
+    const time = (n: number) => {
+      const items: ContentItem[] = [
+        ...Array.from({ length: n }, (_, k): ContentItem => ({ type: 'text', text: 'a', commentIds: new Set(),
+          formatting: { ...DEFAULT_FORMATTING, highlight: true, ...(k % 2 ? { bold: true } : { italic: true }) } })),
+        { type: 'math', latex: 'x', display: false, commentIds: new Set() },
+      ];
+      return fastestRun(() => buildMarkdown(items, new Map()));
+    };
+    const small = time(4000);
+    expect(time(16000) / small).toBeLessThan(8);
+  }, 30000);
+
+  test.each([
+    ['text', 'a', { highlight: 'yellow' }],
+    ['spaces', ' ', {}],
+  ])('writes many runs of bold %s before an equation that ends the bold in time linear in their number', (_name, text, math) => {
+    // The bold's runs, apart in their underline, made no group of emphasis
+    // around the equation, which a highlight or the spaces before it keep
+    // out, and the run of them was read again from each of them
+    const time = (n: number) => {
+      const items: ContentItem[] = [
+        ...Array.from({ length: n }, (_, k): ContentItem => ({ type: 'text', text, commentIds: new Set(),
+          formatting: { ...DEFAULT_FORMATTING, bold: true, ...(k % 2 ? { underline: 'single' } : {}) } })),
+        { type: 'math', latex: 'x', display: false, commentIds: new Set(), ...math },
+        { type: 'text', text: 'b', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: true } },
+      ];
+      return fastestRun(() => buildMarkdown(items, new Map()));
+    };
+    const small = time(4000);
+    expect(time(16000) / small).toBeLessThan(8);
+  }, 30000);
+});
+
 describe('parseCodeBlockStyle', () => {
   test('returns true for CodeBlock style', () => {
     const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'CodeBlock' } }];
@@ -21687,7 +21857,9 @@ describe('Highlights across runs', () => {
     ['an = alone', highlightedNote + highlighted('='), '==[^1]&#61;=='],
     ['text with a backslash', highlightedNote + highlighted('a\\='), '==[^1]a\\\\&#61;=='],
     ['text of another color', highlightedNote.replace('yellow', 'red') + highlighted('a=', '', 'red'), '==[^1]a&#61;=={red}'],
-    ['text after an equation', highlighted('b') + '<m:oMath><m:r><m:t>q</m:t></m:r></m:oMath>' + highlighted('a=') + plain(' ') + highlightedNote, '==&#98;$q$&#97;&#61;== ==[^1]=='],
+    // An equation without a highlight between them ends the highlight, as
+    // Word has it, so the next export doesn't highlight it
+    ['text after an equation', highlighted('b') + '<m:oMath><m:r><m:t>q</m:t></m:r></m:oMath>' + highlighted('a=') + plain(' ') + highlightedNote, '==b==$q$==a&#61;== ==[^1]=='],
     ['text before an equation', highlightedNote + highlighted('a=') + '<m:oMath><m:r><m:t>q</m:t></m:r></m:oMath>', '==[^1]a&#61;==$q$'],
     ['text in an insertion', tracked('ins', highlightedNote + highlighted('a=')), '{++==[^1]a&#61;==++}'],
     ['text before =b', highlightedNote + highlighted('a=') + plain('=b'), '==[^1]a&#61;==\\=b'],
@@ -21723,13 +21895,13 @@ describe('Highlights across runs', () => {
     expect(time(800) / small).toBeLessThan(3);
   });
 
-  test('writes the = that ends a highlight after a note reference and many backslashes in linear time', () => {
+  test.each([[' after a note reference', true], ['', false]])('writes the = that ends a highlight%s and many backslashes in linear time', (_name, withNote) => {
     // A regex found the backslashes before the = from each of them in turn,
     // and past some thousands of them gave up, which left the = as it was
     const highlight = { ...DEFAULT_FORMATTING, highlight: true };
     const time = (n: number) => {
       const items = Array.from({ length: 5 }, (_, k) => [{ type: 'para' },
-        { type: 'footnote_ref', noteId: String(k + 1), noteKind: 'footnote', commentIds: new Set(), formatting: highlight },
+        ...withNote ? [{ type: 'footnote_ref', noteId: String(k + 1), noteKind: 'footnote', commentIds: new Set(), formatting: highlight }] : [],
         { type: 'text', text: '\\'.repeat(n) + 'a=', commentIds: new Set(), formatting: highlight }]).flat();
       let fastest = Infinity;
       for (let run = 0; run < 3; run++) {

@@ -2854,8 +2854,10 @@ function withCharactersAsText(runChildren: XmlNode[]): XmlNode[] {
 /** The highlight's color, by its Markdown name, as a run's (see
  *  markdownHighlightColor), where every run of an equation, `oMath`, that
  *  has text has one, of one color, as Word holds a highlight on an
- *  equation, and export writes one on display math in {==...==} */
-function displayMathHighlight(oMath: XmlNode): { highlight?: string } {
+ *  equation, and export writes one on display math in {==...==}, and on
+ *  inline math in ==...== (see highlightGroupEnd), but not in a revision,
+ *  as before */
+function mathHighlight(oMath: XmlNode): { highlight?: string } {
   const colors = new Set<string>();
   const visit = (nodes: XmlNode[]): void => {
     for (const node of nodes) for (const key of Object.keys(node)) {
@@ -3555,10 +3557,29 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart =
   return resolveEmphasis(markedFormatting(text, fmt, lineStart, after, blockStart));
 }
 
+/** `markdown` with each = as a reference, without the backslash of an
+ *  escaped =, not one of an escaped backslash's. The backslashes before an
+ *  = are counted back to the last =, so each is read once, where a regex
+ *  read a run of them from each of them in turn. */
+function equalsAsReferences(markdown: string): string {
+  let out = '';
+  let from = 0;
+  for (let k = markdown.indexOf('='); k !== -1; k = markdown.indexOf('=', k + 1)) {
+    let slashes = 0;
+    while (k - 1 - slashes >= from && markdown.charCodeAt(k - 1 - slashes) === 92) slashes++;
+    out += markdown.slice(from, k - slashes % 2) + '&#61;';
+    from = k + 1;
+  }
+  return out + markdown.slice(from);
+}
+
 /** A run's Markdown, as wrapWithFormatting writes it, with its outermost
  *  bold, italic or strikethrough marked for resolveEmphasis, and its
- *  highlight around the rest where `highlightOuter` (see joinsHighlight). */
-function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart, highlightOuter = false): string {
+ *  highlight around the rest where `highlightOuter` (see joinsHighlight).
+ *  `references` says its = go as references, as in a highlight (below),
+ *  which renderHighlightGroup writes around text it writes without one. */
+function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart, highlightOuter = false,
+  references = fmt.highlight && /==|=\s*$/.test(text)): string {
   if (!readsMarkdown) return htmlCellRun(text, fmt, highlightOuter);
   let result = text;
 
@@ -3628,8 +3649,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // Not a tag in a citation's keys, which export reads as they are
   const keys = new Set<number>();
   // An = that could join a highlight's closing ==, which no backslash
-  // keeps from it, goes as a reference (below)
-  const references = fmt.highlight && /==|=\s*$/.test(text);
+  // keeps from it, goes as a reference (`references`, below)
   let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys, !delimited && !!after?.mathFirst, references), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
   // reads ~~~a~~ as ~ and struck a, where nothing comes between them, as a
@@ -3647,9 +3667,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // it's all of its paragraph and export reads that as written, after its
   // line's prefix, as its text (see checkedHtmlBlock)
   const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && after?.first === '' && isHtmlBlock(withRawLineEnds(result).replace(/^ {1,3}(?=<)/, ''));
-  // An = as a reference, without the backslash of an escaped =, not one of
-  // an escaped backslash's
-  const written = (text: string) => wrapFormatting(references ? text.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;') : text, fmt, highlightOuter);
+  const written = (text: string) => wrapFormatting(references ? equalsAsReferences(text) : text, fmt, highlightOuter);
   if (!htmlBlock) return written(escaped);
   // Escaped, its line ends, which are its text's own, as Word's line breaks
   // aren't in a block (above), are references, which keep them in Word,
@@ -6133,7 +6151,7 @@ function parseNoteBody(
             try {
               const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
               if (latex) {
-                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...displayMathHighlight(oMathNode) });
+                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...mathHighlight(oMathNode) });
               }
             } catch {
               target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
@@ -6144,7 +6162,7 @@ function parseNoteBody(
           try {
             const latex = apartFromCurrency(ommlToLatex(mathChildren), mathChildren);
             if (latex) {
-              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
+              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : mathHighlight(node)) });
             }
           } catch {
             target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
@@ -8213,7 +8231,7 @@ export async function extractDocumentContent(
             try {
               const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
               if (latex) {
-                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...displayMathHighlight(oMathNode) });
+                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...mathHighlight(oMathNode) });
               }
             } catch {
               target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
@@ -8225,7 +8243,7 @@ export async function extractDocumentContent(
           try {
             const latex = apartFromCurrency(ommlToLatex(mathChildren), mathChildren);
             if (latex) {
-              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
+              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : mathHighlight(node)) });
             }
           } catch {
             target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
@@ -9134,8 +9152,13 @@ function highlightOnly(formatting: RunFormatting | undefined): { formatting?: Ru
   return formatting?.highlight ? { formatting } : {};
 }
 
-/** The color an item's highlight reads back as, if it has one. */
+/** The color an item's highlight reads back as, if it has one. Not an
+ *  equation's with an = or a } in it, as $x = y$ or $\frac{a}{b}$, which
+ *  navigation, the grammar and the editor's decorations read in no ==...==
+ *  (see changes.ts), so they would pair its highlight's closer with the
+ *  next one's opener. It comes back without one, as before. */
 function highlightColorOf(item: ContentItem): string | undefined {
+  if (item.type === 'math') return item.display || /[=}]/.test(item.latex) ? undefined : item.highlight;
   const formatting = item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' ? item.formatting : undefined;
   if (!formatting?.highlight) return undefined;
   return markdownHighlightColor(formatting) ?? 'yellow';
@@ -9144,9 +9167,10 @@ function highlightColorOf(item: ContentItem): string | undefined {
 /**
  * Where a highlight group that starts at `start` ends, or `start` when none
  * does. A group runs over items of one revision, or none, in the comments
- * `commentIds`: text without a link, note references and citations that
- * share a highlight color, and the inline equations between them, which
- * export doesn't highlight. It needs a reference, citation or equation:
+ * `commentIds`: text without a link, note references, citations and inline
+ * equations that share a highlight color, and in a revision the inline
+ * equations between them, which have none there. It needs a reference,
+ * citation or equation:
  * highlighted text alone keeps its own markers. renderHighlightGroup writes
  * it in one highlight, ==a[^1] b==, rather than one per item, ==a==[^1]== b==.
  * It ends where the span of its revision holds it (see heldGroupEnd).
@@ -9154,7 +9178,7 @@ function highlightColorOf(item: ContentItem): string | undefined {
 function highlightGroupEnd(segment: ContentItem[], start: number, end: number, commentIds: Set<string>): number {
   const first = segment[start];
   const color = highlightColorOf(first);
-  if (!color || first.type === 'math' || !isSubstitutionItem(first)) return start;
+  if (!color || !isSubstitutionItem(first)) return start;
   // An == in an item would close the highlight, even in code or an equation
   const joins = (item: ContentItem) =>
     (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || (item.type === 'math' && !item.display))
@@ -9166,10 +9190,15 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
   const kept = heldGroups.get(segment);
   const held = kept?.length === segment.length ? kept.byEnd.get(end)?.get(start) : undefined;
   if (held !== undefined) return held;
+  // In a revision, where import reads no equation's highlight and export
+  // writes none on inline math, an equation goes on it between the items
+  // around it, as before. Elsewhere one without a highlight ends it, as
+  // Word has it, so the next export doesn't highlight it
+  const passes = (item: ContentItem) => item.type === 'math' && !highlightColorOf(item) && !!first.revision;
   let groupEnd = start + 1;
   let j = start + 1;
   for (; j < end && joins(segment[j]); j++) {
-    if (segment[j].type === 'math') continue;
+    if (passes(segment[j])) continue;
     // Nor pieces of code whose backticks would run together in one span
     if (highlightColorOf(segment[j]) !== color || codeSpansMeet(segment[j - 1], segment[j])) break;
     groupEnd = j + 1;
@@ -9180,7 +9209,7 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
   // The run ends at j, unless `end` cut it short, as it does before a piece
   // of code that meets the one before it
   const next = segment[j];
-  if (!next || !joins(next) || (next.type !== 'math' && highlightColorOf(next) !== color) || codeSpansMeet(segment[j - 1], next)) {
+  if (!next || !joins(next) || (!passes(next) && highlightColorOf(next) !== color) || codeSpansMeet(segment[j - 1], next)) {
     grouplessRuns.set(segment, { from: start, to: j });
   }
   return start;
@@ -9274,7 +9303,12 @@ function renderHighlightGroup(
   for (let g = start; g < end; g++) {
     const item = segment[g];
     if (item.type === 'text') {
-      inner += textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd)), segment, g, end, true),
+      // Its = go as references where they would in a highlight of its own,
+      // as they do with a note reference after it, ==a&#61;[^1]==, and
+      // with an equation, ==a&#61;$x$==, which keeps the == around it the
+      // only ones that navigation and the grammar read in it
+      const references = !!item.formatting.highlight && /==|=\s*$/.test(item.text);
+      inner += textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd), false, false, references), segment, g, end, true),
         segment, g, end, inner.length === mathEnd, true, inner);
     } else if (item.type === 'footnote_ref') {
       inner += footnoteRefText(item, noteLabels);
@@ -9982,7 +10016,8 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
       offsets.push(text.length);
       const item = segment[k];
       if (item.type === 'footnote_ref' || item.type === 'citation') bracketed.push(text.length);
-      if (item.type === 'math') readMath(item.latex, text.length + (item.display ? 2 : 1), !!item.display);
+      // After its $ or $$, and the == of a highlight (see indexedText)
+      if (item.type === 'math') readMath(item.latex, text.length + (item.display ? 2 : highlightColorOf(item) ? 3 : 1), !!item.display);
       text += indexedText(item);
       if (item.type === 'html_comment') comments.push(offsets[offsets.length - 1], text.length);
     }
@@ -10011,7 +10046,10 @@ function indexedText(item: ContentItem): string {
     // As long as the LaTeX, for where its ], @ and [ are (see TextIndex.math)
     const latex = item.latex.includes('==') ? '==' + '\uFFFC'.repeat(Math.max(0, item.latex.length - 2))
       : '\uFFFC'.repeat(Math.max(1, item.latex.length));
-    return item.display ? '$' + '$' + latex + '$' + '$' : '$' + latex + '$';
+    if (item.display) return '$' + '$' + latex + '$' + '$';
+    // A highlighted equation's == around it (see renderHighlightGroup),
+    // which runsTextIndexes counts before the source
+    return highlightColorOf(item) ? '==$' + latex + '$==' : '$' + latex + '$';
   }
   // An HTML comment's text, which export reads math, a highlight, code and
   // a citation's key across, as in $<!-- x$ -->, though not emphasis, nor
@@ -10142,7 +10180,8 @@ const NO_COMMENTS: ReadonlySet<string> = new Set();
  * Bold or italic text from `start` with inline equations in it, all in the
  * comments `commentIds`, as one run of emphasis around the lot, so that
  * **Ex. 1: $y = Y$ and $k = 1$** stays one bold run. Undefined where the run
- * has no equation.
+ * has no equation. Not a highlighted equation, which would go in it without
+ * its highlight: the bold goes on the text beside it, **a** ==$x$== **b**.
  */
 function emphasisGroup(
   segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>,
@@ -10150,17 +10189,31 @@ function emphasisGroup(
   const first = segment[start];
   if (first.type !== 'text' || !(first.formatting.bold || first.formatting.italic) || first.revision || first.href
       || first.text === '\\\n' || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
+  const none = emphasislessRuns.get(segment);
+  if (none && none.from < start && start < none.to && none.end === end && commentSetsEqual(none.commentIds, commentIds)) return undefined;
+  // From here to `to` none starts either, as each run in it shares this
+  // one's emphasis and ends its scan where this one's ends
+  const noGroup = (to: number) => {
+    emphasislessRuns.set(segment, { from: start, to, end, commentIds });
+    return undefined;
+  };
   let groupEnd = start + 1;
   for (; groupEnd < end; groupEnd++) {
     const next = segment[groupEnd];
     const joins = next.type === 'math'
-      ? !next.display && !next.revision && commentSetsEqual(next.commentIds ?? NO_COMMENTS, commentIds)
+      ? !next.display && !next.revision && !highlightColorOf(next) && commentSetsEqual(next.commentIds ?? NO_COMMENTS, commentIds)
       : next.type === 'text' && !next.revision && !next.href && commentSetsEqual(next.commentIds, commentIds)
         && next.formatting.bold === first.formatting.bold && next.formatting.italic === first.formatting.italic
         && next.text !== '\\\n';
     if (!joins) break;
   }
-  if (!segment.slice(start, groupEnd).some(item => item.type === 'math')) return undefined;
+  if (!segment.slice(start, groupEnd).some(item => item.type === 'math')) return noGroup(groupEnd);
+  // Nor from whitespace alone before an equation, which the emphasis puts
+  // outside it, so that the next export starts it at the equation, where
+  // none starts, as after a note reference or a highlighted equation
+  let lead = start;
+  while (segment[lead].type === 'text' && !(segment[lead] as ContentItem & { type: 'text' }).text.trim()) lead++;
+  if (segment[lead].type === 'math') return noGroup(lead);
   let text = '';
   let mathEnd = -1;
   for (let g = start; g < groupEnd; g++) {
@@ -10177,6 +10230,12 @@ function emphasisGroup(
   if (first.formatting.bold) text = wrapEmphasis(text, '**');
   return { text, end: groupEnd };
 }
+
+/** Per segment, a run of items from which emphasisGroup found no group, to
+ *  the `end` and in the comments it was given, so that none starts later
+ *  in it either, which keeps import linear in a long run of emphasis that
+ *  ends at a highlighted equation */
+const emphasislessRuns = new WeakMap<ContentItem[], { from: number; to: number; end: number; commentIds: ReadonlySet<string> }>();
 
 /** The start of a line that would start a block within a paragraph: a
  *  heading, list item, quote, code fence, HTML, display math or a table's
