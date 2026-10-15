@@ -21854,6 +21854,35 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    ['a color after a highlight at its start', 'See [==a==\\{red} b](https://e.org) c.\n'],
+    ['the default color after a highlight', 'See [==a==\\{yellow} b](https://e.org) c.\n'],
+    ['a } after a highlight', 'See [==a==\\} b](https://e.org) c.\n'],
+    ['an = after a highlight', 'See [==a==\\= b](https://e.org) c.\n'],
+    ['a color after a highlight in its middle', 'See [a ==b==\\{red} c](https://e.org) d.\n'],
+    ['a color after a highlight at its end', 'See [a ==b==\\{red}](https://e.org) c.\n'],
+    ['a color after a highlight in a color', 'See [==a=={red}\\{red} b](https://e.org) c.\n'],
+    ['a color after a highlight, in an insertion', 'See {++[==a==\\{red} b](https://e.org)++} c.\n'],
+    ['a color after a highlight inserted in it', 'See [a {++==b==\\{red}++} c](https://e.org) d.\n'],
+  ])('keeps the escape in a link of %s', async (_name, md) => {
+    // The link's text went without it, so the next export read the color
+    // as the highlight's, which lost the text, and ==} as CriticMarkup's
+    const once = await roundTrip(md);
+    expect(once).toBe(md);
+    expect(await roundTrip(once)).toBe(once);
+  });
+
+  test.each([
+    ['a highlight in a color', 'See [==a=={red} b](https://e.org) c.\n'],
+    ['a color after a space', 'See [==a== {red} b](https://e.org) c.\n'],
+    ['a color after bold around a highlight', 'See [**==a==**{red} b](https://e.org) c.\n'],
+    ['a color after a highlight that ends the link', 'See [a ==b==](https://e.org){red} c.\n'],
+  ])('keeps %s in a link as it is', async (_name, md) => {
+    const once = await roundTrip(md);
+    expect(once).toBe(md);
+    expect(await roundTrip(once)).toBe(once);
+  });
+
   const exported = '<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>}x</w:t></w:r>';
 
   test.each([

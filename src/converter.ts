@@ -10361,11 +10361,11 @@ function linkGroup(
     if (item.type === 'footnote_ref' || item.type === 'math') return highlightedText(item);
     // Kept apart from an equation next to it in the link's text, which no
     // delimiters of a revision keep apart where it's of the same one, and
-    // from the closing == of a highlighted one or note reference, as
+    // from the closing == of a highlighted one, note reference or text, as
     // escapeAfterHighlight keeps text after one outside a link
     const before = k > 0 ? items[k - 1] : undefined;
     const joined = !!before && revisionsEqual(before.revision, item.revision);
-    const afterHighlight = joined && (before.type === 'math' || before.type === 'footnote_ref') && !!highlightColorOf(before);
+    const afterHighlight = joined && before.type !== 'image' && !!highlightColorOf(before);
     // An equation next in the link's text, of the same revision, which a
     // letter or digit at the text's end goes before as a reference, whose
     // ; a $ in the text could close math at (see textNextToMath)
@@ -10373,8 +10373,13 @@ function linkGroup(
     while (n < items.length && items[n].type === 'text' && (items[n] as ContentItem & { type: 'text' }).text === '') n++;
     const mathNext = n < items.length && items[n].type === 'math' && revisionsEqual(items[n].revision, item.revision);
     const text = markedFormatting(item.text, item.formatting, false, after.linkTo(href, mathNext));
+    // The Markdown before it, where it could take what text starts with as
+    // the highlight's: highlighted text's as it's written, which ends with
+    // its == only where no other formatting or whitespace goes outside it
+    const highlighted = (run: LinkItem) => run.type === 'text'
+      ? markedFormatting(run.text, run.formatting, false, afterItem(k - 1).linkTo(href)) : run.type === 'image' ? '' : highlightedText(run);
     return item.text === '\\\n' && !showsOnBreak(item.formatting) ? lineBreakText()
-      : escapeBangBeforeLink(escapeBraceAfterImage(textNextToMath(afterHighlight ? escapeAfterHighlight(text, highlightedText(before)) : text,
+      : escapeBangBeforeLink(escapeBraceAfterImage(textNextToMath(afterHighlight && /^[{}=]/.test(text) ? escapeAfterHighlight(text, highlighted(before)) : text,
         segment, start + k, start + items.length, joined && before.type === 'math', false, '', true), segment, start + k), segment, start + k, start + items.length, true);
   };
   // A revision of the whole link goes around it, but where its span would
