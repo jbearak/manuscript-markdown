@@ -3860,6 +3860,81 @@ describe('List blockquote round-trip', () => {
     expect(await roundTripBody(lazy)).toBe(lazy);
   });
 
+  // A line break ends a quote's line, and the lazy line after it goes on
+  // the quote's paragraph, as markdown-it and the preview read it. Export
+  // ended the quote before the line, so Word got the quote with a \ as its
+  // text, or nothing, and the line outside it
+  it.each([
+    ['a backslash', '> b gamma\\\nc d', '> b gamma\\\n> c d'],
+    ['two spaces', '> b gamma  \nc d', '> b gamma\\\n> c d'],
+    ['a backslash, in a list item', '- a\n\n  > b gamma\\\nc d', '- a\n\n  > b gamma\\\n  > c d'],
+    ['a backslash, in a nested quote', '> > b gamma\\\nc d', '> > b gamma\\\n> > c d'],
+  ])('keeps a lazy line after a line break, after %s, in the quote', async (_name, md, back) => {
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    const quotes = xml.match(/<w:p\b(?:(?!<\/w:p>).)*?<w:pStyle w:val="GitHubBlockquote"\/>.*?<\/w:p>/gs) ?? [];
+    expect(quotes.map(p => p.replace(/<w:br\/>/g, '|').replace(/<[^>]+>/g, '')).filter(text => text.trim())).toEqual(['b gamma|c d']);
+    expect(await roundTripBody(md)).toBe(back);
+    expect(await roundTripBody(back)).toBe(back);
+  });
+
+  it.each([
+    ['after a quote\'s line with no line break', '> b gamma\nc d', '> b gamma\nc d'],
+    ['a quote\'s line, after a line break', '> b gamma\\\n> c d', '> b gamma\\\n> c d'],
+  ])('keeps a line %s as before', async (_name, md, back) => {
+    expect(await roundTripBody(md)).toBe(back);
+    expect(await roundTripBody(back)).toBe(back);
+  });
+
+  // Spaces or a \\ at the end of a quote's line in a comment or a code
+  // span, which goes on past it, are its text, not a line break: as before
+  it.each([
+    ['a comment', '> Quote <!-- note  \nvisible prose -->', '> Quote \\<!-- note\nvisible prose -->'],
+    ['a code span', '> Quote `x  \ny` z', '> Quote \\`x\ny\\` z'],
+    ['a comment, on a lazy line after a line break', '> Quote\\\nb <!-- c\nd -->', '> Quote\\\\\nb <!-- c\nd -->'],
+    ['a comment opened on the quote\'s line before', '> Quote <!-- note\n> still comment  \nvisible prose\n> -->', '> Quote \\<!-- note still comment\nvisible prose\n> -->'],
+    ['a link\'s title opened on the quote\'s line before', '> see [a](u "one\n> two  \nthree")', '> see \\[a](u "one two\nthree")'],
+    // A \ escapes the space after it, so the spaces after are no line break
+    ['two spaces after a \\', '> a\\  \nb', '> a\\\\\nb'],
+    // A table's row, whose \\ is the cell's text, a | as a table's row has,
+    // and a line after the lazy line that goes on its paragraph, not a block
+    // of its own. Export drops a table in a quote
+    ['a table\'s row, then an indented line', '> a | b\n> --- | ---\n> c | d\\\ne\n    f', 'e f'],
+    ['a line with a |', '> c | d\\\ne', '> c | d\\\\\ne'],
+    ['an indented line after the lazy line', '> a\\\ne\n    f', '> a\\\\\ne f'],
+    ['emphasis on a line after the lazy line', '> a\\\ne\n*f*', '> a\\\\\ne *f*'],
+  ])('keeps a line after a quote\'s line in %s as before', async (_name, md, back) => {
+    expect(await roundTripBody(md)).toBe(back);
+    expect(await roundTripBody(back)).toBe(back);
+  });
+
+  // Reading the line after the lines a quote's line break keeps took time
+  // in the square of its length
+  it('reads a long line after lazy lines a quote\'s line break keeps in linear time', async () => {
+    const { preprocessBlocks } = await import('./block-preprocess');
+    const time = (n: number) => {
+      const md = ('> a\\\nb\n' + '-'.repeat(n) + 'x\n\n').repeat(2000);
+      return fastestRun(() => preprocessBlocks(md));
+    };
+    const small = time(500);
+    expect(time(2000) / small).toBeLessThan(8);
+  }, 120_000);
+
+  // A line markdown-it reads as a table's header row or a setext heading's
+  // text, which a lazy line can't be, after a line break: as before
+  it.each([
+    ['a table', '> b gamma\\\na | b\n--- | ---\nc | d', /<w:tbl>/],
+    ['a setext heading, with =', '> b gamma\\\nc d\n===', /<w:pStyle w:val="Heading1"\/>/],
+    ['a setext heading, with -', '> b gamma\\\nc d\n---', /<w:pStyle w:val="Heading2"\/>/],
+    ['a setext heading, after a lazy line', '> b gamma\\\nc d\ne f\n===', /<w:pStyle w:val="Heading1"\/>/],
+  ])('keeps %s after a quote\'s line break as before', async (_name, md, block) => {
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(block);
+    const back = await roundTripBody(md);
+    expect(await roundTripBody(back)).toBe(back);
+  });
+
   it.each([
     // A lazy line indented as code, which export ends the quote before, so
     // it's a code block
