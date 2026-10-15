@@ -470,7 +470,7 @@ a \quad b  % em space
 a \qquad b % double em space
 ```
 
-At the start or end of an equation, a row, a cell or a group, re-import writes the spaces that `\quad`, `\qquad`, `\;`, `\:` and `\,` export as those commands. Elsewhere it writes the space itself, as U+2003 for `\quad`.
+At the start or end of an equation, a row, a cell or a group, re-import writes the spaces that `\quad`, `\qquad`, `\;`, `\:` and `\,` export as those commands. So it does after a number that starts an inline equation, as in `$2\quad x$`, since `$2` followed by a space reads as a dollar amount, not math. Elsewhere it writes the space itself, as U+2003 for `\quad`.
 
 ## Text Inside Equations
 

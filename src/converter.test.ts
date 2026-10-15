@@ -16225,6 +16225,41 @@ describe('Display math\'s rows and the spaces at their edges', () => {
     expect(await roundTrip(back)).toBe(back);
   });
 
+  // After a number at the start of an inline equation, the space's
+  // character read as currency too, and the Markdown as no equation
+  test.each([
+    ['a \\quad after a number', 'A $2\\quad x$ C.', 'A $2\\quad x$ C.'],
+    ['a \\, after a number', 'A $2\\,x$ C.', 'A $2\\,x$ C.'],
+    ['a \\; after a number', 'A $2\\;x$ C.', 'A $2\\;x$ C.'],
+    ['a \\: after a number', 'A $2\\:x$ C.', 'A $2\\:x$ C.'],
+    ['a \\qquad after a number', 'A $2\\qquad x$ C.', 'A $2\\qquad x$ C.'],
+    ['a \\quad after 2.5,', 'A $2.5,\\quad x$ C.', 'A $2.5,\\quad x$ C.'],
+    // A space ends the command, which the change's text would run into once
+    // accepted, as \quadx
+    ['a \\quad after a number, before an insertion', 'A $2\\quad{++x++}$ C.', 'A $2\\quad {++x++}$ C.'],
+    ['a \\quad after a number, before a deletion', 'A $2\\quad{--x--}$ C.', 'A $2\\quad {--x--}$ C.'],
+  ])('keeps %s at the start of an inline equation', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await equations(back)).toEqual(await equations(md));
+    expect(await roundTrip(back)).toBe(back);
+    // With its changes accepted, the command still ends before the text
+    expect(back.replace(/\{\+\+([\s\S]*?)\+\+\}|\{--[\s\S]*?--\}/g, (_span, added?: string) => added ?? '')).not.toMatch(/\\quad[A-Za-z]/);
+  });
+
+  // Display math has no currency, so a space after a number there is its
+  // character, as before, and one with no command, as an en space, is kept
+  test.each([
+    ['a \\quad after a number', fence + '\n2\\quad x\n' + fence, fence + '\n2' + em + ' x\n' + fence],
+    ['an en space and a \\quad after a number', fence + '\n2 \\quad x\n' + fence, fence + '\n2 ' + em + ' x\n' + fence],
+    ['a \\quad after a number, before an insertion', fence + '\n2\\quad{++x++}\n' + fence, fence + '\n2' + em + '{++x++}\n' + fence],
+  ])('writes %s in display math as before', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await equations(back)).toEqual(await equations(md));
+    expect(await roundTrip(back)).toBe(back);
+  });
+
   // Within an equation the space stays its character, and an equation of
   // spaces alone is none
   test.each([
@@ -16233,6 +16268,18 @@ describe('Display math\'s rows and the spaces at their edges', () => {
   ])('writes %s as before', async (_name, md, expected) => {
     const back = await roundTrip(md);
     expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // Away from a number at the start, as before
+  test.each([
+    ['after a letter in an inline equation', 'A $x\\quad y$ C.', 'A $x' + em + ' y$ C.'],
+    ['within display math', fence + '\na \\quad b\n' + fence, fence + '\na ' + em + ' b\n' + fence],
+    ['within a row', fence + '\n\\begin{aligned}\na &= 1 \\quad b \\\\\nc &= 2\n\\end{aligned}\n' + fence, fence + '\n\\begin{aligned}\na &= 1 ' + em + ' b \\\\\nc &= 2\n\\end{aligned}\n' + fence],
+  ])('writes a \\quad %s as its character, as before', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await equations(back)).toEqual(await equations(md));
     expect(await roundTrip(back)).toBe(back);
   });
 });

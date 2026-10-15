@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { asXmlNodes, endsInLatexComment, ommlToLatex, type XmlNode } from './omml';
+import { apartFromCurrency, asXmlNodes, endsInLatexComment, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
 import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
@@ -6128,7 +6128,7 @@ function parseNoteBody(
         } else if (key === 'm:oMath' && context) {
           const mathChildren = asXmlNodes(node[key]);
           try {
-            const latex = ommlToLatex(mathChildren);
+            const latex = apartFromCurrency(ommlToLatex(mathChildren));
             if (latex) {
               target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
             }
@@ -8209,7 +8209,7 @@ export async function extractDocumentContent(
           // Inline equation
           const mathChildren = asXmlNodes(node[key]);
           try {
-            const latex = ommlToLatex(mathChildren);
+            const latex = apartFromCurrency(ommlToLatex(mathChildren));
             if (latex) {
               target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
             }
