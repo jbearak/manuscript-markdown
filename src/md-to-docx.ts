@@ -9139,18 +9139,21 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
  * equation's structure draws: a fraction's bar, a radical, a bar, a box,
  * an accent's, an operator's or a group's character, or a delimiter, but
  * not an empty one, as `\left.\right.`'s. Not a hidden run's text, as of
- * an image export can't embed, which it hides in the text, nor a paragraph
- * mark's change or a comment's range.
+ * an image export can't embed, which it hides in the text, nor what a
+ * phantom Word hides holds, as `\phantom{x}`'s, nor a paragraph mark's
+ * change or a comment's range.
  */
 function shownChanges(xml: string): { kind: string; attrs: string }[] {
   const shown: { kind: string; attrs: string }[] = [];
   const open: string[] = [];
   const changes: { kind: string; attrs: string }[] = [];
   const runs: { hidden: boolean }[] = [];
+  // Whether each phantom open is one Word hides, as its m:show says
+  const phantoms: boolean[] = [];
   // Equations' structures whose characters are in their properties
   const structures: { tag: string; change: { kind: string; attrs: string }; chars: Map<string, string> }[] = [];
   const none = { kind: '', attrs: '' };
-  const show = () => { if (!runs[runs.length - 1]?.hidden) shown.push(changes[changes.length - 1] ?? none); };
+  const show = () => { if (!runs[runs.length - 1]?.hidden && !phantoms.includes(true)) shown.push(changes[changes.length - 1] ?? none); };
   const val = (attrs: string) => /\s[wm]:val="([^"]*)"/.exec(attrs)?.[1];
   for (const match of xml.matchAll(/<(\/?)([\w:]+)([^>]*?)(\/?)>|([^<]+)/g)) {
     const [, closing, tag, attrs, selfClosing, text] = match;
@@ -9163,12 +9166,13 @@ function shownChanges(xml: string): { kind: string; attrs: string }[] {
       open.pop();
       if (tag === 'w:ins' || tag === 'w:del') changes.pop();
       else if (tag === 'w:r' || tag === 'm:r') runs.pop();
+      else if (tag === 'm:phant') phantoms.pop();
       else if (structures[structures.length - 1]?.tag === tag) {
         const { change, chars } = structures.pop()!;
         const draws = tag === 'm:f' ? chars.get('m:type') !== 'noBar'
           : tag === 'm:d' ? (chars.get('m:begChr') ?? '(') !== '' || (chars.get('m:endChr') ?? ')') !== ''
             : chars.get('m:chr') !== '';
-        if (draws) shown.push(change);
+        if (draws && !phantoms.includes(true)) shown.push(change);
       }
       continue;
     }
@@ -9179,11 +9183,14 @@ function shownChanges(xml: string): { kind: string; attrs: string }[] {
       show();
     } else if (['m:type', 'm:chr', 'm:begChr', 'm:endChr'].includes(tag) && structures.length > 0) {
       structures[structures.length - 1].chars.set(tag, val(attrs) ?? '');
+    } else if (tag === 'm:show' && open[open.length - 1] === 'm:phantPr' && phantoms.length > 0) {
+      phantoms[phantoms.length - 1] = ['0', 'false', 'off'].includes(val(attrs) ?? '');
     }
     if (selfClosing) continue;
     open.push(tag);
     if (tag === 'w:ins' || tag === 'w:del') changes.push({ kind: tag.slice(2), attrs });
     else if (tag === 'w:r' || tag === 'm:r') runs.push({ hidden: false });
+    else if (tag === 'm:phant') phantoms.push(false);
     else if (['m:f', 'm:d', 'm:acc', 'm:nary', 'm:groupChr'].includes(tag)) {
       structures.push({ tag, change: changes[changes.length - 1] ?? none, chars: new Map() });
     }
