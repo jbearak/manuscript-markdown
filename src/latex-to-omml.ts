@@ -183,10 +183,10 @@ let backslashesAsCharacters = false;
 
 /**
  * `write()`, with each \backslash in math written as Word's \ wherever it
- * is, and the spaces after it kept. tracksInPlace in md-to-docx-citations.ts
- * compares the runs of a tracked equation with those of its views, where
- * different things may follow a \backslash: in the accepted view, an
- * insertion's content follows it, and in the equation, the insertion does.
+ * is. tracksInPlace in md-to-docx-citations.ts compares the runs of a
+ * tracked equation with those of its views, where different things may
+ * follow a \backslash: in the accepted view, an insertion's content follows
+ * it, and in the equation, the insertion does.
  */
 export function withWordBackslashes<T>(write: () => T): T {
   const outer = backslashesAsCharacters;
@@ -208,60 +208,58 @@ export function withWordBackslashes<T>(write: () => T): T {
  * Before a run whose text import writes as it is, LaTeX would read on from
  * Word's \, so \backslash is text there, as before. Word's \ before b came
  * back as \b, and before a \tag's # or a row's &, as \# or \&, which lost
- * the number or the alignment point.
- *
- * TeX skips the spaces after \backslash, and Word drops their runs (see
- * skippedSpaces), so what follows them decides. Where that's Word's \, the
- * spaces go, since import would read the \ and a space as LaTeX's space.
+ * the number or the alignment point. So is a space before anything but the
+ * part's end, which import writes as it is, so Word's \ before it would come
+ * back as \ and a space, LaTeX's space. That's the source's spaces, which
+ * TeX skips, and a control space, as \ , alike: export writes each as a run
+ * of a space, and import reads each back as the source's, as before. Spaces
+ * at the part's end, as import writes before a matrix's & or a row's \\,
+ * import trims, and writes Word's \ before them as \backslash.
  */
 function literalBackslashes(omml: string): string {
   const pieces = omml.split(MARKED_BACKSLASH);
   if (pieces.length === 1) return omml;
   const written = [pieces[0]];
   for (let k = 1; k < pieces.length; k++) {
-    const after = pieces[k];
     const run = pieces[k - 1].endsWith(MATH_HIGHLIGHT_RPR) ? '<m:r>' + MATH_HIGHLIGHT_RPR : '<m:r>';
-    const spaces = backslashesAsCharacters ? 0 : skippedSpaces(after, run);
-    if (!backslashesAsCharacters && readsOn(after, spaces, run, k < pieces.length - 1)) {
-      written.push('<m:t>\\backslash</m:t></m:r>', after);
-    } else {
-      written.push('<m:t>\\</m:t></m:r>', spaces ? after.slice(spaces) : after);
-    }
+    const readOn = !backslashesAsCharacters && readsOn(pieces[k], run, k < pieces.length - 1);
+    written.push(readOn ? '<m:t>\\backslash</m:t></m:r>' : '<m:t>\\</m:t></m:r>', pieces[k]);
   }
   return written.join('');
 }
 
-/** The text of a run that Word drops, only spaces or line ends, or
- *  nothing, without xml:space="preserve", and the run's end */
-const SKIPPED_TEXT_RE = /<m:t>[ \t\r\n]*<\/m:t><\/m:r>/y;
-
-/** Where the runs at the start of `after` that open as `run` does and hold
- *  only text Word drops (see SKIPPED_TEXT_RE) end */
-function skippedSpaces(after: string, run: string): number {
-  let end = 0;
-  while (after.startsWith(run, end)) {
-    SKIPPED_TEXT_RE.lastIndex = end + run.length;
-    if (!SKIPPED_TEXT_RE.test(after)) break;
-    end = SKIPPED_TEXT_RE.lastIndex;
-  }
-  return end;
-}
+/** The end of a part of a structure, at which import trims the part and
+ *  writes a \ of Word's as \backslash (see trimPart in omml.ts) */
+const PART_END_RE = /<\/m:(?:e|num|den|sub|sup|deg|lim|fName)>/y;
 
 /**
- * Whether import reads on from Word's \ into the run at `at` in `after`,
- * the OMML after the \'s run (see literalBackslashes). It does where that
- * run opens as the \'s does, `run`, with no properties or a highlight's
- * alone, and its first character is one import writes as it is, not as a
- * command. Where `marked`, `after` ends with the start of the next
- * \backslash's run, which is such a run. Anything else, as a structure, a
- * tracked change or a highlight's edge, import writes as its own LaTeX.
+ * Whether import reads on from Word's \ into Word's text in `after`, the
+ * OMML after the \'s run (see literalBackslashes). It does where, past
+ * empty runs, which Word shows as nothing, a run opens as the \'s does,
+ * `run`, with no properties or a highlight's alone, and its first character
+ * is one import writes as it is, not as a command, or is a space before
+ * anything but the part's end. Where `marked`, `after` ends with the start
+ * of the next \backslash's run, which is such a run. Anything else, as a
+ * structure, a tracked change or a highlight's edge, import writes as its
+ * own LaTeX.
  */
-function readsOn(after: string, at: number, run: string, marked: boolean): boolean {
-  if (!after.startsWith(run, at)) return false;
-  const text = at + run.length;
-  if (marked && text === after.length) return true;
-  const open = ['<m:t>', '<m:t xml:space="preserve">'].find(start => after.startsWith(start, text));
-  return open !== undefined && !COMMAND_CHARACTERS.has(after.charAt(text + open.length));
+function readsOn(after: string, run: string, marked: boolean): boolean {
+  let spaced = false;
+  for (let at = 0; ;) {
+    const text = at + run.length;
+    const open = after.startsWith(run, at) ? ['<m:t>', '<m:t xml:space="preserve">'].find(start => after.startsWith(start, text)) : undefined;
+    if (open === undefined) {
+      if (marked && text === after.length && after.startsWith(run, at)) return true;
+      PART_END_RE.lastIndex = at;
+      return spaced && at < after.length && !PART_END_RE.test(after);
+    }
+    const first = text + open.length;
+    const close = after.indexOf('</m:t></m:r>', first);
+    const content = after.slice(first, close);
+    if (content.trim()) return spaced || !COMMAND_CHARACTERS.has(content.charAt(0));
+    spaced ||= content !== '';
+    at = close + '</m:t></m:r>'.length;
+  }
 }
 
 /** The environments parseEnvironment gives an OMML form; keep in step with its cases. */

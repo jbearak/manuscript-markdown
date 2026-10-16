@@ -1077,8 +1077,11 @@ function leftRightGroupEnd(latex: string): number | undefined {
  * Translate an m:d (delimiter) element to LaTeX.
  * Reads m:dPr for m:begChr (default '('), m:endChr (default ')'),
  * m:sepChr (default '|'). Collects all m:e children and joins with separator.
+ * Where `sized`, brackets of one part that LaTeX can size get \left and
+ * \right, as they do for a \ of Word's at the end (see delimitedLatex),
+ * which a \ of Word's before them needs too (see ommlChildrenToLatex).
  */
-function translateDelimiter(children: XmlNode[]): string {
+function translateDelimiter(children: XmlNode[], sized = false): string {
   const pr = findChild(children, 'm:dPr');
 
   const begChrNode = findChildNode(pr, 'm:begChr');
@@ -1121,16 +1124,15 @@ function translateDelimiter(children: XmlNode[]): string {
         return `\\binom{${ommlToLatex(num)}}{${ommlToLatex(den)}}`;
       }
 
-      // Pmod: parens wrapping \mathrm{mod} + space + argument. A lone \ at
-      // the end stays as it is until delimitedLatex reads it
-      const innerLatex = unbracedToLatex(eChildren, false);
-      const pmodMatch = /^\\mathrm\{mod\}\s*(.+)$/.exec(innerLatex);
+      // Pmod: parens wrapping \mathrm{mod} + space + argument
+      const inner = unbracedPart(eChildren);
+      const pmodMatch = /^\\mathrm\{mod\}\s*(.+)$/.exec(inner.literal);
       if (pmodMatch) {
-        return `\\pmod{${beforeCloser(apartFromMarkup(literalBackslashAtEnd(pmodMatch[1].trim())))}}`;
+        return `\\pmod{${beforeCloser(apartFromMarkup(pmodMatch[1].trim()))}}`;
       }
 
-      // Reuse already-computed innerLatex for default path
-      return delimitedLatex(begChr, beforeCloser(bareBracketPart(innerLatex)), endChr);
+      // Reuse already-computed inner for default path
+      return delimitedLatex(begChr, mapPart(inner, latex => beforeCloser(bareBracketPart(latex))), endChr, sized);
     }
   }
 
@@ -1145,16 +1147,24 @@ function translateDelimiter(children: XmlNode[]): string {
   // A lone \ of Word's at the end of a part stays as it is but before
   // \middle or \right (see delimitedLatex): export writes a separator or a
   // bracket between bare parts as text, which Word's text goes on with
-  const parts = elements.map(e => beforeCloser(unbracedToLatex(e, false)));
+  const parts = elements.map(e => mapPart(unbracedPart(e), beforeCloser));
   const left = sizedDelimiter(begChr);
   const middle = sizedDelimiter(sepChr);
   const right = sizedDelimiter(endChr);
   if (parts.length > 1 && (begChr || endChr) && left && middle && right) {
-    const inner = parts.map(literalBackslashAtEnd).reduce((latex, part) => appendLatex(appendLatex(latex, '\\middle' + middle), part));
+    const inner = parts.map(part => part.literal).reduce((latex, part) => appendLatex(appendLatex(latex, '\\middle' + middle), part));
     return appendLatex('\\left' + left, inner) + '\\right' + right;
   }
   const bare = !delimiterCommand(begChr) && !delimiterCommand(endChr);
-  return delimitedLatex(begChr, (bare ? parts.map(bareBracketPart) : parts).join(sepChr), endChr);
+  const shown = bare ? parts.map(part => mapPart(part, bareBracketPart)) : parts;
+  // Only the last part's \ is before the closing bracket
+  const last = shown[shown.length - 1] ?? NO_PART;
+  const inner = {
+    latex: shown.map(part => part.latex).join(sepChr),
+    literal: shown.slice(0, -1).map(part => part.latex).concat(last.literal).join(sepChr),
+    lone: last.lone,
+  };
+  return delimitedLatex(begChr, inner, endChr, sized && parts.length === 1);
 }
 
 /** A part of brackets that import writes bare, as (x), with spacing alone,
@@ -1199,16 +1209,16 @@ function delimiterCommand(chr: string): string | undefined {
  * for it too, as \left(x\backslash\right), which export writes as Word's
  * delimiter: bare, export writes them as text, which the \ would join, as
  * (x\) came back with \) as text, a command export doesn't know. With
- * brackets LaTeX can't size, it stays as it is, as before.
+ * brackets LaTeX can't size, it stays as it is, as before. Where `sized`,
+ * they get \left and \right whether or not `inner` ends in a \.
  */
-function delimitedLatex(begChr: string, inner: string, endChr: string): string {
-  const literal = literalBackslashAtEnd(inner);
-  const sized = literal !== inner && sizedDelimiter(begChr) && sizedDelimiter(endChr);
-  if (!delimiterCommand(begChr) && !delimiterCommand(endChr) && !sized) {
-    return begChr + inner + endChr;
+function delimitedLatex(begChr: string, inner: PartLatex, endChr: string, sized = false): string {
+  const sizes = (sized || inner.lone) && sizedDelimiter(begChr) !== undefined && sizedDelimiter(endChr) !== undefined;
+  if (!delimiterCommand(begChr) && !delimiterCommand(endChr) && !sizes) {
+    return begChr + inner.latex + endChr;
   }
   const side = (chr: string) => delimiterCommand(chr) ?? (chr || '.');
-  return appendLatex('\\left' + side(begChr), literal) + '\\right' + side(endChr);
+  return appendLatex('\\left' + side(begChr), inner.literal) + '\\right' + side(endChr);
 }
 
 
@@ -1836,13 +1846,18 @@ function escapeDollars(latex: string): string {
  * of cases or an equation array, between spaces and & or \\, a delimiter's
  * content, a root's degree, in [ ], or an n-ary operator's body of one
  * operand. It needs no break, and keeps Word's text as it is, as a row that
- * starts with ~~~, three nonbreaking spaces, does. Without `literal`, a lone
- * \ of Word's at its end stays as it is (see trimPart).
+ * starts with ~~~, three nonbreaking spaces, does.
  */
-function unbracedToLatex(children: XmlNode[], literal = true): string {
+function unbracedToLatex(children: XmlNode[]): string {
+  return unbracedPart(children).literal;
+}
+
+/** unbracedToLatex's part, with a lone \ of Word's at its end as it is too
+ *  (see PartLatex), for brackets around it */
+function unbracedPart(children: XmlNode[]): PartLatex {
   partDepth++;
   try {
-    return trimPart(ommlChildrenToLatex(children), literal);
+    return trimmedPart(ommlChildrenToLatex(children));
   } finally {
     partDepth--;
   }
@@ -1880,19 +1895,48 @@ function apartFromMarkup(latex: string, text = false): string {
  *  script of an em space, which Word shows, and which came back as nothing:
  *  no equation, an empty row or x^{}. Nothing for other spaces alone, as
  *  before, which export reads as no equation. A lone \ of Word's at the end
- *  is \backslash where `literal` (see literalBackslashAtEnd), as is one the
- *  trim leaves there, as of x\ and a space, which LaTeX reads as a space. */
-function trimPart(latex: string, literal = true): string {
+ *  is \backslash (see literalBackslashAtEnd), as is one the trim leaves
+ *  there, as of x\ and a space, which LaTeX reads as a space. */
+function trimPart(latex: string): string {
+  return trimmedPart(latex).literal;
+}
+
+/**
+ * A part's LaTeX as trimPart writes it, `literal`, where a lone \ of Word's
+ * at the end of its text is \backslash, and, as `latex`, with that \ as it
+ * is, which brackets around the part write where they stay bare (see
+ * delimitedLatex). `lone` says whether it has one.
+ */
+interface PartLatex { latex: string; literal: string; lone: boolean }
+
+/** A part of nothing, as of brackets with no part */
+const NO_PART: PartLatex = { latex: '', literal: '', lone: false };
+
+/** `part` with `write` applied to its LaTeX both ways */
+function mapPart(part: PartLatex, write: (latex: string) => string): PartLatex {
+  return { latex: write(part.latex), literal: write(part.literal), lone: part.lone };
+}
+
+/** trimPart's part both ways (see PartLatex). Before the commands of the
+ *  spaces at the end, a lone \ as it is starts the first, as Word's x\ and
+ *  an em space came back as x\\quad, a line break, as they still do in
+ *  brackets LaTeX can't size. */
+function trimmedPart(latex: string): PartLatex {
   const trimmed = latex.trim();
-  if (!trimmed) return spaceCommands(latex);
-  const body = literal ? literalBackslashAtEnd(trimmed) : trimmed;
+  if (!trimmed) {
+    const spaces = spaceCommands(latex);
+    return { latex: spaces, literal: spaces, lone: false };
+  }
   const before = spaceCommands(latex.slice(0, latex.length - latex.trimStart().length));
   let trailing = latex.slice(latex.trimEnd().length);
   // A comment's spaces, to its line end, are its text, trimmed as before
-  const comment = endsInLatexComment(body);
+  const comment = endsInLatexComment(trimmed);
   if (comment) trailing = trailing.slice(trailing.indexOf('\n') + 1 || trailing.length);
   const after = spaceCommands(trailing);
-  return (before ? before + ' ' : '') + body + (after && comment ? '\n' : '') + after;
+  const write = (body: string) => (before ? before + ' ' : '') + body + (after && comment ? '\n' : '') + after;
+  const body = literalBackslashAtEnd(trimmed);
+  const literal = write(body);
+  return { latex: write(trimmed), literal, lone: body !== trimmed };
 }
 
 /** An inline equation's `latex` with the spaces after a number at its
@@ -2058,12 +2102,22 @@ function ommlChildrenToLatex(nodes: XmlNode[]): string {
     if (!change) {
       const node = children[i];
       const shown = wordText(node);
-      let latex = shown === undefined ? translateNode(node) : translateRun(asXmlNodes(node['m:r']), text);
+      // Brackets after a held \ are sized where LaTeX can size them, as
+      // \backslash\left(y\right): bare, export writes them as text, before
+      // which it writes \backslash as text too (see literalBackslashes in
+      // latex-to-omml.ts)
+      const bracketed = node['m:d'] !== undefined;
+      let latex = shown !== undefined ? translateRun(asXmlNodes(node['m:r']), text)
+        : text.lone && bracketed ? translateDelimiter(asXmlNodes(node['m:d']), true) : translateNode(node);
       if (!latex) continue;
       // LaTeX reads on from a held \ into Word's text that import writes as
-      // it is, not as a command, as α as \alpha
-      const goesOn = shown !== undefined && latex.charAt(0) === shown.charAt(0);
-      if (text.lone) result += goesOn ? '\\' : heldBackslash();
+      // it is, not as a command, as α as \alpha, and into brackets that stay
+      // bare, as «y» or (a,b), as before
+      const goesOn = shown !== undefined ? latex.charAt(0) === shown.charAt(0) : bracketed && !latex.startsWith('\\');
+      // A letter after \backslash takes {}, not the space appendLatex
+      // writes, which export writes as a run of a space that LaTeX would read
+      // on into, before which it writes \backslash as text, as before b^2
+      if (text.lone) result += goesOn ? '\\' : heldBackslash() + (/^[A-Za-z]/.test(latex) ? '{}' : '');
       if (markupEndsInCommand && /^[A-Za-z]/.test(latex)) latex = '{}' + latex;
       markupEndsInCommand = false;
       if (shown === undefined) {

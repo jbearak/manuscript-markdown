@@ -3211,6 +3211,8 @@ describe('a lone backslash in an equation', () => {
   const matrix = (...cells: string[]) => '<m:m><m:mr>' + cells.map(cell => '<m:e>' + cell + '</m:e>').join('') + '</m:mr></m:m>';
   const array = (...rows: string[]) => '<m:eqArr>' + rows.map(row => '<m:e>' + row + '</m:e>').join('') + '</m:eqArr>';
   const parens = (omml: string) => '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>' + omml + '</m:e></m:d>';
+  const brackets = (begin: string, end: string, separator: string, ...parts: string[]) => '<m:d><m:dPr><m:begChr m:val="' + begin + '"/>' +
+    (separator ? '<m:sepChr m:val="' + separator + '"/>' : '') + '<m:endChr m:val="' + end + '"/></m:dPr>' + parts.map(part => '<m:e>' + part + '</m:e>').join('') + '</m:d>';
   const fraction = (num: string, den: string) => '<m:f><m:num>' + num + '</m:num><m:den>' + den + '</m:den></m:f>';
   const ins = (omml: string) => '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:ins>';
   const del = (omml: string) => '<w:del w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:del>';
@@ -3255,12 +3257,16 @@ describe('a lone backslash in an equation', () => {
     ['before a prime', run('x\\') + run('′'), inline('y'), inline("x\\backslash'"), 'x\\′'],
     ['at the end of a subscript', '<m:sSub><m:e>' + run('x') + '</m:e><m:sub>' + run('a\\') + '</m:sub></m:sSub>', inline('y'), inline('x_{a\\backslash}'), 'xa\\'],
     ['before a fraction', run('x\\') + fraction(run('a'), run('b')), inline('y'), inline('x\\backslash\\frac{a}{b}'), 'x\\ab'],
-    ['before a superscript', run('x\\') + '<m:sSup><m:e>' + run('b') + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup>', inline('y'), inline('x\\backslash b^2'), 'x\\b2'],
+    ['before a superscript', run('x\\') + '<m:sSup><m:e>' + run('b') + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup>', inline('y'), inline('x\\backslash{}b^2'), 'x\\b2'],
     ['in parentheses', parens(run('x\\')), inline('y'), inline('\\left(x\\backslash\\right)'), 'x\\'],
-    ['at the end of a matrix\'s cell', matrix(run('a\\'), run('b')), inline('y'), inline('\\begin{matrix} a\\backslash & b \\end{matrix}'), ' a\\ b '],
-    ['at the end of a row', array(run('x\\'), run('y')), inline('y'), inline('\\begin{gathered} x\\backslash \\\\ y \\end{gathered}'), ' x\\ y '],
+    ['at the end of a matrix\'s cell', matrix(run('a\\'), run('b')), inline('y'), inline('\\begin{matrix} a\\backslash & b \\end{matrix}'), ' a\\  b '],
+    ['at the end of a row', array(run('x\\'), run('y')), inline('y'), inline('\\begin{gathered} x\\backslash \\\\ y \\end{gathered}'), ' x\\  y '],
     ['before a highlight', run('a\\') + marked('b'), inline('y'), inline('a\\backslash{==b==}'), 'a\\b'],
     ['before a comment', run('a\\') + hidden(' % c\n') + run('b'), inline('y'), inline('a\\backslash % c\nb'), 'a\\\u200B % c\nb'],
+    // Import writes the em space at a part's end as \quad, which the \ ran
+    // into, as x\\quad, a line break
+    ['before an em space at the end', run('x\\') + run('\u2003'), inline('y'), inline('x\\backslash\\quad'), 'x\\\u2003'],
+    ['before an em space at the end of parentheses', parens(run('x\\') + run('\u2003')), inline('y'), inline('\\left(x\\backslash\\quad\\right)'), 'x\\\u2003'],
   ])('%s, from Word, is \\backslash, which export writes as Word\'s \\, and again', async (_name, omml, template, markdown, text) => {
     expect((await convertDocx(await wordDocx(omml, template))).markdown).toBe(markdown);
     await expectTrips(markdown, text);
@@ -3316,12 +3322,34 @@ describe('a lone backslash in an equation', () => {
     await expectTrips(inline('x\\backslash\\backslash'), 'x\\backslash\\');
   });
 
-  // TeX skips the spaces after it, which export wrote as runs Word drops
-  test('\\backslash exports as Word\'s \\ before a symbol after a space, which Word drops', async () => {
-    expect((await equations(inline('x\\backslash \\alpha'))).map(shown)).toEqual(['x\\α']);
-    const again = (await convertDocx((await convertMdToDocx(inline('x\\backslash \\alpha'))).docx)).markdown;
-    expect(again).toBe(inline('x\\backslash\\alpha'));
-    await expectTrips(again, 'x\\α');
+  // Brackets after it, which import wrote bare, as (y), which export writes
+  // as text, before which it wrote \backslash as text: Word gained the
+  // letters, and the Markdown lost \left and \right
+  test.each([
+    ['parentheses', parens(run('y')), inline('x\\backslash\\left(y\\right)')],
+    ['square brackets', brackets('[', ']', '', run('y')), inline('x\\backslash\\left[y\\right]')],
+    ['bars', brackets('|', '|', '', run('y')), inline('x\\backslash\\left|y\\right|')],
+    ['an opening parenthesis alone', brackets('(', '', '', run('y')), inline('x\\backslash\\left(y\\right.')],
+    ['a closing parenthesis alone', brackets('', ')', '', run('y')), inline('x\\backslash\\left.y\\right)')],
+  ])('%s after Word\'s \\ get \\left and \\right, which export writes as Word\'s \\ and the brackets, and again', async (_name, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(run('x\\') + omml, inline('y')))).markdown).toBe(markdown);
+    await expectTrips(markdown, 'x\\' + shown(omml));
+  });
+
+  // Export writes a space after it, the source's, which TeX skips, or a
+  // control space, as a run of a space, which import reads back as the
+  // source's, so Word's \ before one would come back as \ and a space. So
+  // \backslash is text there, as on main, and a control space comes back
+  // as the source's, as on main
+  test.each([
+    ['a space before a symbol', inline('x\\backslash \\alpha'), inline('x\\backslash \\alpha'), 'x\\backslash α'],
+    ['a control space before a symbol', inline('x\\backslash\\ \\alpha'), inline('x\\backslash \\alpha'), 'x\\backslash α'],
+    ['a space before a fraction', inline('x\\backslash \\frac{a}{b}'), inline('x\\backslash \\frac{a}{b}'), 'x\\backslash ab'],
+    ['a control space before a fraction', inline('x\\backslash\\ \\frac{a}{b}'), inline('x\\backslash \\frac{a}{b}'), 'x\\backslash ab'],
+    ['a control space before brackets', inline('x\\backslash\\ \\left(y\\right)'), inline('x\\backslash (y)'), 'x\\backslash y'],
+  ])('\\backslash before %s exports as text, as on main, and comes back as on main', async (_name, markdown, again, text) => {
+    expect((await equations(markdown)).map(shown).join('')).toBe(text);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(again);
   });
 
   // Word's \ before each character import writes as a command, as α, which
@@ -3357,6 +3385,11 @@ describe('a lone backslash in an equation', () => {
     ['\\ before ^ in another run', run('x\\') + run('^2'), inline('x\\^2')],
     ['\\ before a space', run('x\\ y'), inline('x\\ y')],
     ['\\ before an escape\'s character', run('x\\') + run('#'), inline('x\\#')],
+    // Brackets that stay bare, as LaTeX can't size them, or as they hold a
+    // separator \middle can't take
+    ['\\ before brackets LaTeX can\'t size', run('x\\') + brackets('«', '»', '', run('y')), inline('x\\«y»')],
+    ['\\ before brackets with a comma between parts', run('x\\') + brackets('(', ')', ',', run('a'), run('b')), inline('x\\(a,b)')],
+    ['\\ and an em space at the end of brackets LaTeX can\'t size', brackets('«', '»', '', run('x\\') + run('\u2003')), inline('«x\\\\quad»')],
     // Older exports wrote \{ and \$ so
     ['\\ before {', run('x\\') + run('{y'), inline('x\\{y')],
     ['\\{ and \\}', run('\\{x\\}'), inline('\\{x\\}')],
@@ -3376,6 +3409,18 @@ describe('a lone backslash in an equation', () => {
       const nodes = equation(count);
       return fastestRun(() => {
         for (let k = 0; k < 20; k++) expect(ommlToLatex(nodes)).toStartWith('x\\backslash\\alpha x\\backslash\\alpha');
+      });
+    };
+    time(500);
+    expect(time(8000) / time(2000)).toBeLessThan(8);
+  }, 60000);
+
+  // Each \backslash looks at the runs after it only up to the next
+  test('many \\backslash and spaces after them export in time linear in their number', () => {
+    const time = (count: number) => {
+      const latex = 'x\\backslash \\alpha'.repeat(count) + '\\backslash' + ' '.repeat(count) + 'y';
+      return fastestRun(() => {
+        for (let k = 0; k < 5; k++) expect(latexToOmml(latex)).toStartWith('<m:r><m:t>x</m:t></m:r><m:r><m:t>\\backslash</m:t>');
       });
     };
     time(500);
