@@ -1,5 +1,5 @@
 import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText } from './bibtex-parser';
-import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, type TrackChange } from './latex-to-omml';
+import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, withEquationBraces, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 import { decodeHtmlCharacterReferences } from './html-entities';
@@ -1388,6 +1388,13 @@ function tracksInPlace(latex: string, parts: CriticMathPart[], numbered: boolean
  * leaves.
  */
 export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings?: string[], display = false): string {
+  // Its \{ and \} export as written, or not, alike in each view and in the
+  // equation Word holds (see bracesAsText in latex-to-omml.ts)
+  const views = [true, false].map(accepted => equationViewLatex(parts, accepted));
+  return withEquationBraces(views, () => trackedMathXml(parts, track, warnings, display));
+}
+
+function trackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings: string[] | undefined, display: boolean): string {
   if (display) {
     parts = parts.map((part, k) => part.type === 'math' ? { ...part, content: withinFences(part.content, k === 0, k === parts.length - 1) } : part);
   }
