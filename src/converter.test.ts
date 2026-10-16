@@ -17431,6 +17431,74 @@ describe('Code block round-trip', () => {
       expect(empty).toEqual([own ? '<w:pPr>' + own + '</w:pPr>' : '']);
     }
   });
+
+  const fenced = '```\nc\n```\n';
+  const styled = (text: string) => '<!-- style: box -->\n' + text + '\n<!-- /style -->\n';
+  const pipeTable = '| a |\n| --- |\n| 1 |';
+  // A block of another style, whose paragraph takes it
+  const note = '<!-- style: note -->\np\n\n';
+  test.each([
+    ['a heading right after a quote', '> q\n', '# h', '> q\n\n# h\n', true],
+    ['a table right after a quote', '> q\n', pipeTable, '> q\n\n' + pipeTable + '\n', true],
+    ['a rule right after a quote', '> q\n', '***', '> q\n---\n', true],
+    ['a quote right after a quote', '> q\n', '> r', '> q\n\n> r\n', true],
+    ['a heading right after a code block', fenced, '# h', fenced + '\n# h\n', true],
+    ['a table right after a code block', fenced, pipeTable, fenced + '\n' + pipeTable + '\n', true],
+    ['a rule right after a code block', fenced, '***', fenced + '\n---\n', true],
+    ['a quote right after a code block', fenced, '> r', fenced + '> r\n', true],
+    ['a heading right after indented code', '    c\n', '# h', fenced + '\n# h\n', true],
+    ['a table right after indented code', '    c\n', pipeTable, fenced + '\n' + pipeTable + '\n', true],
+    ['a rule right after indented code', '    c\n', '***', fenced + '\n---\n', true],
+    ['a quote right after indented code', '    c\n', '> r', fenced + '> r\n', true],
+    // Where a template numbers paragraphs, Word numbers the quote in the
+    // list item too, which import reads as an item, as on main
+    ['a heading right after a quote in a list item', '- x\n\n  > q\n', '# h', '- x\n\n  > q\n\n# h\n', false],
+    ['a table right after a quote in a list item', '- x\n\n  > q\n', pipeTable, '- x\n\n  > q\n\n' + pipeTable + '\n', false],
+    ['a rule right after a quote in a list item', '- x\n\n  > q\n', '***', '- x\n\n  > q\n\n---\n', false],
+    ['a quote right after a quote in a list item', '- x\n\n  > q\n', '> r', '- x\n\n  > q\n> r\n', false],
+    // A blank line after the code, which the code's empty paragraph after it
+    // reads past the fence too
+    ['a heading a blank line after a code block', fenced + '\n', '# h', fenced + '\n# h\n', true],
+    ['a quote a blank line after a code block', fenced + '\n', '> r', fenced + '\n> r\n', true],
+    // The last block of a block of another style that a paragraph took,
+    // whose fence import writes after it, after which export writes no
+    // empty paragraph, as main
+    ['a heading right after a code block that ends a block of another style', note + fenced, '# h', note + fenced + '\n<!-- /style -->\n# h\n', true],
+    ['a heading right after a code block that ends a block of another style with its fence', note + fenced + '<!-- /style -->\n', '# h', note + fenced + '<!-- /style -->\n# h\n', true],
+    ['a heading right after a quote that ends a block of another style, before a block of the heading\'s style', note + '> q\n', '# h\n<!-- /style -->\n<!-- style: box -->\np2',
+      note + '> q\n<!-- /style -->\n# h\n<!-- style: box -->\np2\n\n<!-- /style -->\n', true],
+    // The last block of one that no paragraph took, whose fences import
+    // drops too
+    ['a heading right after a code block that ends a block of another style of code alone', '<!-- style: note -->\n' + fenced, '# h', fenced + '\n# h\n', true],
+    ['a heading right after a quote that ends a block of another style of a quote alone', '<!-- style: note -->\n> q\n', '# h', '> q\n\n# h\n', true],
+    // Guards: a style block of a paragraph or a list item, whose fences
+    // import writes, and the blocks before which export wrote no empty
+    // paragraph, as main
+    ['a paragraph right after a quote', '> q\n', 'p', '> q\n' + styled('p'), true],
+    ['a list item right after a code block', fenced, '- y', fenced + styled('- y'), true],
+    ['a heading right after a paragraph', 'p\n', '# h', 'p\n\n# h\n', true],
+    ['a table right after a list item', '- x\n', pipeTable, '- x\n\n' + pipeTable + '\n', false],
+    ['a rule right after a heading', '# g\n', '***', '# g\n\n---\n', true],
+    ['a quote right after display math', '$' + '$\nm\n$' + '$\n', '> r', '$' + '$\nm\n$' + '$\n> r\n', true],
+    // An alert's paragraph nested in it, after which import writes the
+    // quote in the alert, as main
+    ['a quote right after a quote in a list item\'s alert', '- x\n\n  > [!NOTE]\n  > > n\n', '> r', '- x\n\n  > [!NOTE]\n  > > n\n> r\n', false],
+  ])('keeps Word\'s paragraphs on each trip for a style block of %s, with and without a template that numbers paragraphs', async (_name, before, inside, expected, numbered) => {
+    // Import drops the fences of a style block Word has no paragraph of its
+    // style in, and writes a blank line between the quote or code and what
+    // the block holds, for which the next export wrote the empty paragraph
+    // the first wrote none of
+    const strip = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    for (const template of numbered ? [false, true] : [false]) {
+      const options = template ? { templateDocx: await numberedNormal() } : {};
+      const first = (await convertMdToDocx(before + styled(inside), options)).docx;
+      const once = (await convertDocx(first)).markdown;
+      expect(strip(once)).toBe(expected);
+      const second = (await convertMdToDocx(once, options)).docx;
+      expect(await blocks(second)).toEqual(await blocks(first));
+      expect((await convertDocx(second)).markdown).toBe(once);
+    }
+  });
 });
 
 describe('Inline code import (CodeChar detection)', () => {
