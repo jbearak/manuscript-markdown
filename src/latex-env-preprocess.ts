@@ -17,6 +17,7 @@ import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { exportsLiterally } from './html-blocks';
 import { criticCloserSearch } from './critic-markup';
 import { citationEnd } from './citation-syntax';
+import { highlightCloseAt } from './highlight-syntax';
 import { imagePathsWithSpaces } from './image-paths';
 import { linearInlineComments } from './inline-html-comments';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-delimiters';
@@ -152,7 +153,8 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	// equationReader), so a code span's backticks pair in that text alone,
 	// where the zones above pair one in a paragraph with one in the next, and
 	// a dollar sign in a tag, an autolink, a link's destination or title, a
-	// URL or a citation opens no equation. A fence of two dollar signs that
+	// URL or a citation opens no equation, and a highlight's text is read on
+	// its own, as export reads it. A fence of two dollar signs that
 	// opens none, which export writes as text, as in a line of text, or with
 	// a blank line before its closer, holds the rest of that text, as an
 	// environment there, wrapped, would be its equation. Before, each fence
@@ -164,7 +166,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	{
 		// Apart where they touch, as two list items' paragraphs
 		const units = joinedUnits(inlineBlocks.concat(htmlRegions).sort((a, b) => a.start - b.start), critic);
-		const read: EquationRead = { zones, critic, nextCritic: 0, from: 0, inert: new Map(), runAt: -1, runEnd: -1 };
+		const read: EquationRead = { zones, critic, nextCritic: 0, from: 0, inert: new Map(), top: undefined, apart: [], runState: undefined, runAt: -1, runEnd: -1 };
 		let code = 0;
 		let unit = 0;
 		for (let at = text.indexOf('$'); at !== -1;) {
@@ -193,13 +195,18 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 /** What readEquations reads with: the zones it adds to, the CriticMarkup
  *  spans, sorted and merged, and the first that may reach the text it reads
  *  next, where that text starts, the spans in it, each end by where it
- *  starts in it, and the run of dollar signs read last there */
+ *  starts in it, the state that reads that text, the highlights' texts in it
+ *  to read on their own after it, and the run of dollar signs read last, and
+ *  the state that read it */
 interface EquationRead {
 	zones: Zone[];
 	critic: Zone[];
 	nextCritic: number;
 	from: number;
 	inert: Map<number, number>;
+	top: StateInline | undefined;
+	apart: Zone[];
+	runState: StateInline | undefined;
 	runAt: number;
 	runEnd: number;
 }
@@ -207,19 +214,43 @@ interface EquationRead {
 /** markdown-it with the inline rules of export's (see createMarkdownIt in
  *  md-to-docx.ts) that read past a dollar sign before its math rule can: an
  *  escape, a code span, raw HTML, an autolink, a link's or an image's
- *  destination and title, a URL linkify reads, a citation, and CriticMarkup
- *  as the zones above have it, which comes first, as one may start a text
- *  that a span from before joins. And that math rule */
+ *  destination and title, a URL linkify reads, a highlight, a citation, and
+ *  CriticMarkup as the zones above have it, which comes first, as one may
+ *  start a text that a span from before joins. And that math rule.
+ *
+ *  Only the state readEquations reads its text with records a zone, at
+ *  offsets in that text: its tokens, a link's text's too, which markdown-it
+ *  reads with that state, and the scans for a link's or an image's label in
+ *  it. Not the parses of other texts, as an image's alt, which markdown-it
+ *  parses as a text of its own with the same env, or a citation's first
+ *  item, which citationEnd parses to see whether its prefix is plain text,
+ *  nor citationEnd's scans ahead, in a state of their own: their offsets
+ *  are in other texts, or their reading may not be the text's, and an alt's
+ *  [0, 3) made a zone at the paragraph's start, over the environment there */
 const equationReader = new MarkdownIt({ html: true, linkify: true });
 equationReader.linkify.set({ fuzzyLink: false });
 equationReader.linkify.add('//', null);
 equationReader.use(imagePathsWithSpaces);
 equationReader.use(linearInlineComments);
 equationReader.inline.ruler.before('text', 'inert', (state, silent) => {
-	const end = (state.env as EquationRead).inert.get(state.pos);
+	const read = state.env as EquationRead;
+	// Its offsets are in the text read
+	if (state.src !== read.top?.src) return false;
+	const end = read.inert.get(state.pos);
 	if (end === undefined) return false;
 	if (!silent) state.pending += state.src.slice(state.pos, end);
 	state.pos = end;
+	return true;
+});
+// A highlight, whose text export reads on its own, so a dollar sign in it
+// opens or closes no equation out of it (see coloredHighlightRule in
+// md-to-docx.ts). A {color} after it holds no dollar sign
+equationReader.inline.ruler.before('emphasis', 'highlight', (state, silent) => {
+	const close = highlightCloseAt(state, state.pos);
+	if (close === -1) return false;
+	const read = state.env as EquationRead;
+	if (!silent && state === read.top) read.apart.push({ start: read.from + state.pos + 2, end: read.from + close });
+	state.pos = close + 2;
 	return true;
 });
 equationReader.inline.ruler.before('emphasis', 'citation', (state, silent) => {
@@ -227,21 +258,53 @@ equationReader.inline.ruler.before('emphasis', 'citation', (state, silent) => {
 	const end = citationEnd(state, state.pos);
 	if (end === -1) return false;
 	if (!silent) state.pending += state.src.slice(state.pos, end + 1);
+	// Export reads no equation in it, and its text is the citation's, so
+	// display math with an environment in it is left as main left it, which
+	// paired its fences
+	if (!silent && state === (state.env as EquationRead).top) pairFences(state.src, state.pos + 1, end, state.env as EquationRead);
 	state.pos = end + 1;
 	return true;
 });
 equationReader.inline.ruler.before('emphasis', 'math', readMath);
 
-/** export's math rule (see mathRule in md-to-docx.ts), which adds each
- *  equation it reads to the read's zones, and the rest of the text after a
- *  fence that opens none */
+/** Adds to `read`'s zones from each fence of two dollar signs in `src` from
+ *  `start` to `end`, which no backslash escapes, to the next, as main paired
+ *  each fence in the text with the next, but in that text alone, and from
+ *  the last, without one, to `end` */
+function pairFences(src: string, start: number, end: number, read: EquationRead): void {
+	let open = -1;
+	for (let at = src.indexOf('$', start); at !== -1 && at < end - 1;) {
+		if (src.charCodeAt(at + 1) !== 0x24 || isEscapedAt(src, at)) {
+			at = src.indexOf('$', at + 1);
+			continue;
+		}
+		if (open === -1) open = at;
+		else {
+			read.zones.push({ start: read.from + open, end: read.from + at + 2 });
+			open = -1;
+		}
+		at = src.indexOf('$', at + 2);
+	}
+	if (open !== -1) read.zones.push({ start: read.from + open, end: read.from + end });
+}
+
+/** export's math rule (see mathRule in md-to-docx.ts). In the text read,
+ *  it adds each equation it reads to the read's zones, and the rest of that
+ *  text after a fence that opens none. In a scan for a label there, it adds
+ *  display math, whose fences main paired too, and such a fence: with an
+ *  environment after it wrapped, the scan would read an equation from it to
+ *  the wrapped one's opening fence, and so no label, as of an image, whose
+ *  alt markdown-it then reads in a text of its own. But not an inline
+ *  equation, which main read as none */
 function readMath(state: StateInline, silent: boolean): boolean {
 	const src = state.src;
 	const at = state.pos;
 	if (src.charCodeAt(at) !== 0x24) return false;
 	const read = state.env as EquationRead;
+	const top = state === read.top;
 	// The run of dollar signs from here, counted once for each run
-	if (!(read.runAt <= at && at < read.runEnd)) {
+	if (read.runState !== state || !(read.runAt <= at && at < read.runEnd)) {
+		read.runState = state;
 		read.runAt = at;
 		read.runEnd = at;
 		while (src.charCodeAt(read.runEnd) === 0x24) read.runEnd++;
@@ -252,34 +315,41 @@ function readMath(state: StateInline, silent: boolean): boolean {
 		// turn, from the first and then from the end of each, each time
 		// counting the rest of the run, so a long one took time in its square
 		const end = at + run - run % 4;
-		if (!silent) read.zones.push({ start: read.from + at, end: read.from + end });
+		if (top) read.zones.push({ start: read.from + at, end: read.from + end });
 		state.pos = end;
 		return true;
 	}
 	const match = findDollarMathAt(src, at, DOCX_DOLLAR_MATH_OPTIONS);
 	if (match?.kind === 'math') {
-		if (!silent) read.zones.push({ start: read.from + match.start, end: read.from + match.end });
+		if (top && (!silent || match.delimiterLength === 2)) read.zones.push({ start: read.from + match.start, end: read.from + match.end });
 		state.pos = match.end;
 		return true;
 	}
 	// A fence export writes as text
-	if (!silent && run >= 2 && !isEscapedAt(src, at)) read.zones.push({ start: read.from + at, end: read.from + src.length });
+	if (top && run >= 2 && !isEscapedAt(src, at)) read.zones.push({ start: read.from + at, end: read.from + src.length });
 	return false;
 }
 
 /** Adds to `read`'s zones each equation export reads in the text of `text`
  *  from `start` to `end`, which it reads on its own, and the rest of that
- *  text after a fence that opens none */
+ *  text after a fence that opens none, and then so for each highlight's
+ *  text in it */
 function readEquations(text: string, start: number, end: number, read: EquationRead): void {
 	read.from = start;
 	read.inert.clear();
-	read.runAt = read.runEnd = -1;
 	const { critic } = read;
 	while (read.nextCritic < critic.length && critic[read.nextCritic].end <= start) read.nextCritic++;
 	for (let k = read.nextCritic; k < critic.length && critic[k].start < end; k++) {
 		read.inert.set(Math.max(critic[k].start, start) - start, Math.min(critic[k].end, end) - start);
 	}
-	equationReader.inline.parse(text.slice(start, end), equationReader, read, []);
+	const apart: Zone[] = [];
+	read.apart = apart;
+	// As inline.parse reads it, but for the rules after its tokens', which
+	// read none of its dollar signs
+	const state = new equationReader.inline.State(text.slice(start, end), equationReader, read, []);
+	read.top = state;
+	equationReader.inline.tokenize(state);
+	for (const span of apart) readEquations(text, span.start, span.end, read);
 }
 
 /** `units`, sorted, none in another, with each that a span of `spans`,

@@ -426,6 +426,122 @@ describe('dollar signs and backticks as export reads them around a bare environm
 	});
 });
 
+describe('equations in a highlight, an image\'s alt and a citation around a bare environment', () => {
+	const D = '$' + '$';
+	const aligned = '\\begin{aligned}\na &= b\n\\end{aligned}';
+	const bare = '\\begin{equation}\nx\n\\end{equation}';
+	const wordXml = async (md: string) => {
+		const { docx } = await convertMdToDocx(md);
+		return (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+	};
+	// Word's text, out of its equations
+	const wordText = (xml: string) => [...xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '').matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join('');
+
+	// markdown-it parses an image's alt, and citationEnd a citation's first
+	// item, as a text of its own, with the read's env. The read took the
+	// equations there for the paragraph's, at their offsets in that text,
+	// so at the paragraph's start, over the environment there, which Word
+	// got as text
+	test.each([
+		['an equation in an image\'s alt', '![$x$](x.png)'],
+		['a fence in an image\'s alt', '![' + D + '](x.png)'],
+		['an equation in a citation\'s locator', '[see @ref, $x$]'],
+		['an equation in a citation\'s prefix', '[see $x$ @ref]'],
+	])('wraps an environment at a paragraph\'s start before %s, as before', async (_name, after) => {
+		const md = bare + '\n' + after + '\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(D + bare + D + '\n' + after + '\n');
+		expect(wordText(await wordXml(md))).not.toContain('begin{equation}');
+	});
+
+	// Export reads a highlight's text on its own (see coloredHighlightRule),
+	// so its dollar sign is text there. The read took it for an inline
+	// equation's opener, to the one before \alpha, over the environment
+	test.each([
+		['a highlight', 'Text ==cost $=='],
+		['a highlight with a color', 'Text ==cost $=={red}'],
+	])('wraps an environment after a dollar sign in %s, as before', async (_name, before) => {
+		const md = before + '\n' + bare + '\n$\\alpha$ here.\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(before + '\n' + D + bare + D + '\n$\\alpha$ here.\n');
+		expect(wordText(await wordXml(md))).not.toContain('begin{equation}');
+	});
+
+	test('wraps an environment in a highlight after a dollar sign in it, as before', async () => {
+		const md = '==cost $\n' + bare + '\nb== $\\alpha$\n';
+		expect(wrapBareLatexEnvironments(md)).toBe('==cost $\n' + D + bare + D + '\nb== $\\alpha$\n');
+		expect(wordText(await wordXml(md))).not.toContain('begin{equation}');
+	});
+
+	// The scan for the image's label, in the paragraph's text, read the
+	// fence as text. Wrapped, the environment's opening fence closed an
+	// equation from it, past the alt's ], so no image was read, and Word got
+	// an empty equation and the environment as text
+	test('leaves an environment after a fence in an image\'s alt in its paragraph as it is, as before', async () => {
+		const md = 'Text ![' + D + '](x.png)\n' + bare + '\n$\\alpha$ here.\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const xml = await wordXml(md);
+		expect([...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].every(m => /<m:t[^>]*>[^<]*\S/.test(m[1]))).toBe(true);
+	});
+
+	// As main left them, whose fences it paired: export reads an image's alt
+	// and a citation's text as theirs, with no equation in them
+	test.each([
+		['an image\'s alt', '![' + D + '\n' + aligned + '\n' + D + '](x.png)\n'],
+		['a citation', '[see @ref, ' + D + '\n' + aligned + '\n' + D + ']\n'],
+		['a highlight', '==' + D + '\n' + aligned + '\n' + D + '==\n'],
+		['a link\'s text', '[' + D + '\n' + aligned + '\n' + D + '](u)\n'],
+	])('leaves an environment in display math in %s as it is, as before', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+
+	// Each inline construct with a dollar sign in it, before an environment
+	// with an inline equation after it, and after one at a paragraph's start
+	test.each([
+		['in a code span', '`$`'],
+		['in a code span\'s equation', '`$x$`'],
+		['in a code span\'s fence', '`' + D + '`'],
+		['in a tag\'s attribute', '<span title="$">c</span>'],
+		['in a tag\'s attribute in single quotes', '<span title=\'$\'>c</span>'],
+		['in a tag\'s attribute without quotes', '<span title=$>c</span>'],
+		['in a comment', '<!-- $ -->'],
+		['in a comment\'s fence', '<!-- ' + D + ' -->'],
+		['in an autolink', '<http://x.org/$y>'],
+		['in an email\'s autolink', '<a$b@x.org>'],
+		['in a URL', 'http://x.org/$y'],
+		['in a link\'s destination', '[a](x/$y)'],
+		['in a link\'s title', '[a](x "t $")'],
+		['in a link\'s equation', '[$x$](u)'],
+		['in a link\'s display math', '[' + D + 'x' + D + '](u)'],
+		['in an image\'s destination', '![a](x/$y.png)'],
+		['in an image\'s title', '![a](x.png "t $")'],
+		['in an image\'s alt\'s equation', '![$x$](x.png)'],
+		['in a citation\'s locator', '[@a, p. $5]'],
+		['in a citation\'s equation', '[see @ref, $x$]'],
+		['in a citation\'s prefix', '[see $x$ @ref]'],
+		['in a citation\'s fence', '[@a, ' + D + ']'],
+		['in a highlight', '==cost $=='],
+		['in a highlight\'s equation', '==$x$=='],
+		['in a highlight\'s fence', '==' + D + '=='],
+		['in a highlight with a color', '==cost $=={red}'],
+		['in an insertion', '{++cost $++}'],
+		['in a deletion', '{--cost $--}'],
+		['in a substitution', '{~~$~>b~~}'],
+		['in a CriticMarkup highlight', '{==cost $==}'],
+		['in a CriticMarkup comment', '{>>cost $<<}'],
+		['in a comment with an id', '{#c1>>cost $<<}'],
+		['escaped', 'cost \\$'],
+		['as an entity', 'cost &#36;'],
+		['in an inline equation', '$x$'],
+	])('exports an environment as an equation by a dollar sign %s', async (_name, construct) => {
+		for (const md of ['Text ' + construct + '\n' + bare + '\n$\\alpha$ here.\n', bare + '\nText ' + construct + ' $\\alpha$.\n']) {
+			const xml = await wordXml(md);
+			expect(wordText(xml)).not.toContain('begin{equation}');
+			const equations = [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]);
+			expect(equations.length).toBeGreaterThanOrEqual(2);
+			expect(equations.every(m => /<m:t[^>]*>[^<]*\S/.test(m))).toBe(true);
+		}
+	});
+});
+
 describe('wrapBareLatexEnvironments with stray fences in time linear in the text', () => {
 	const D = '$' + '$';
 	const env = '\\begin{equation}\nx\n\\end{equation}\n\n';
@@ -448,6 +564,11 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		['citations without their ends in one paragraph', '[@a $ ', 0],
 		['autolinks without their ends in one paragraph', '<http://x/$ ', 0],
 		['URLs in one paragraph', 'http://x.org/$y ', 0],
+		['highlights in one paragraph', '==a $== ', 0],
+		['highlights without their ends in one paragraph', '==a ==} $ ', 0],
+		['images with equations in their alts in one paragraph', '![$x$](x.png) ', 0],
+		['citations with equations in one paragraph', '[see @a, $x$] ', 0],
+		['citations with fences in one paragraph', '[@a, ' + D + '] ', 0],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		const count = (text: string) => wrapBareLatexEnvironments(text).split(D + '\\begin').length - 1;
 		expect(count(unit.repeat(2))).toBe(wrapped * 2);
