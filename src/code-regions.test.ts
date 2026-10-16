@@ -9,6 +9,7 @@ import {
 	overlapsCodeRegion,
 } from './code-regions';
 import { extractAllDecorationRanges } from './highlight-colors';
+import { navigationMatches } from './navigation-matches';
 
 // ---------------------------------------------------------------------------
 // Task 3.2: Unit tests for computeCodeRegions() and isInsideCodeRegion()
@@ -395,12 +396,7 @@ const combinedPattern =
 
 function scanNavigation(text: string): Array<{ start: number; end: number }> {
 	const codeRegions = computeCodeRegions(text);
-	const re = new RegExp(combinedPattern.source, combinedPattern.flags);
-	const matches: Array<{ start: number; end: number }> = [];
-	let m: RegExpExecArray | null;
-	while ((m = re.exec(text)) !== null) {
-		matches.push({ start: m.index, end: m.index + m[0].length });
-	}
+	const matches = navigationMatches(combinedPattern, text);
 	// Filter out matches inside code regions
 	const nonCodeMatches = matches.filter(
 		match => !overlapsCodeRegion(match.start, match.end, codeRegions)

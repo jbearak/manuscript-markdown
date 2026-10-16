@@ -2,28 +2,26 @@ import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
 import * as fs from 'fs';
 import * as path from 'path';
+import { navigationMatches } from './navigation-matches';
+import { fastestRun } from './test-timing';
 
 // We'll test the regex pattern directly since we can't import vscode in tests
 // This is the same pattern used in changes.ts
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
 const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
-// Helper function to find all pattern matches in text
+// Helper function to find all pattern matches in text, as getAllMatches
+// finds them
 function findAllPatterns(text: string): Array<{ start: number; end: number; matched: string }> {
-  const matches: Array<{ start: number; end: number; matched: string }> = [];
+  return navigationMatches(combinedPattern, text).map(({ start, end }) => ({ start, end, matched: text.slice(start, end) }));
+}
+
+// The matches a global exec of the pattern finds one after another
+function execAll(text: string): Array<{ start: number; end: number }> {
+  const matches: Array<{ start: number; end: number }> = [];
+  const re = new RegExp(combinedPattern.source, combinedPattern.flags);
   let match;
-  
-  // Reset regex state
-  combinedPattern.lastIndex = 0;
-  
-  while ((match = combinedPattern.exec(text)) !== null) {
-    matches.push({
-      start: match.index,
-      end: match.index + match[0].length,
-      matched: match[0]
-    });
-  }
-  
+  while ((match = re.exec(text)) !== null) matches.push({ start: match.index, end: match.index + match[0].length });
   return matches;
 }
 
@@ -585,4 +583,40 @@ describe('Navigation regex reads an == after an escaped { as a highlight\'s open
   it('reads no highlight after a {== that no ==} closes, as the preview does', () => {
     expect(findAllPatterns('a {==x== b').map(m => m.matched)).toEqual([]);
   });
+});
+
+// An opener with no closer after it searched the rest of the text for one
+describe('Navigation steps past an opener with no closer after it', () => {
+  const fragment = fc.constantFrom('{', '}', '+', '-', '~', '=', '>', '<', '#', '/', '!', '\\', 'a', ' ', '\n',
+    '{++', '++}', '{--', '--}', '{~~', '~~}', '~>', '{==', '==}', '{>>', '<<}', '{#a>>', '{#a-1>>', '{#a}', '{/a}',
+    '<!--', '-->', '==', '~~', '{red}', '\\{', '<!-->', '<!---->');
+
+  it('finds what a global exec of the pattern finds', () => {
+    fc.assert(fc.property(fc.array(fragment, { maxLength: 40 }).map(parts => parts.join('')), text => {
+      expect(navigationMatches(combinedPattern, text)).toEqual(execAll(text));
+    }), { numRuns: 2000 });
+  });
+
+  it.each<[string, string, string[]]>([
+    ['an insertion with no closer before one that has one', '{++a {++b++}', ['{++a {++b++}']],
+    ['an insertion after the last ++}', 'a++} {++b', []],
+    ['a comment with an ID after the last <<}', '{#a>>b <<} {#c>>d', ['{#a>>b <<}']],
+    ['a comment with an ID and no closer before a range end', '{#a>>b {/a}', ['{/a}']],
+    ['an HTML comment whose --> is in its opener', '<!--> a', []],
+    ['a substitution with no closer, whose ~~ strike through', '{~~a~~ b', ['~~a~~']],
+    ['a critic highlight with no closer before a highlight', '{==a ==b==', ['==b==']],
+  ])('reads %s as a global exec does', (_name, text, expected) => {
+    expect(findAllPatterns(text).map(m => m.matched)).toEqual(expected);
+    expect(navigationMatches(combinedPattern, text)).toEqual(execAll(text));
+  });
+
+  it.each(['{>>', '{++', '{--', '{~~', '{==', '{#c1>>', '<!--'])('finds the changes in a text of many %s with no closer in linear time', (opener) => {
+    const text = '{++a++} ' + ('word ' + opener + ' more text here\n').repeat(20_000) + '{#1}';
+    let found: Array<{ start: number; end: number }> = [];
+    // Searching the rest of the text from each opener took seconds here;
+    // linear takes milliseconds
+    expect(fastestRun(() => { found = navigationMatches(combinedPattern, text); })).toBeLessThan(1000);
+    // The ~~ of a {~~ with no ~~} strikes through to the next {~~'s
+    expect(found.map(({ start, end }) => text.slice(start, end)).filter(m => !m.startsWith('~~'))).toEqual(['{++a++}', '{#1}']);
+  }, 30000);
 });

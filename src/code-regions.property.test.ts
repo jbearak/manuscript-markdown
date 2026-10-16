@@ -7,6 +7,7 @@
 import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
 import { extractAllDecorationRanges } from './highlight-colors';
+import { navigationMatches } from './navigation-matches';
 import { scanCitationUsages } from './lsp/citekey-language';
 
 // **Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.10**
@@ -190,12 +191,7 @@ const combinedPattern =
 
 function scanNavigation(text: string): Array<{ start: number; end: number }> {
 	const codeRegions = computeCodeRegionsForTest(text);
-	const re = new RegExp(combinedPattern.source, combinedPattern.flags);
-	const matches: Array<{ start: number; end: number }> = [];
-	let m: RegExpExecArray | null;
-	while ((m = re.exec(text)) !== null) {
-		matches.push({ start: m.index, end: m.index + m[0].length });
-	}
+	const matches = navigationMatches(combinedPattern, text);
 	// Filter out matches inside code regions
 	const nonCodeMatches = matches.filter(
 		match => !overlapsCodeRegion(match.start, match.end, codeRegions)
