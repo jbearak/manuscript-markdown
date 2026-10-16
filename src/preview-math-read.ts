@@ -15,7 +15,11 @@
  * of its kind is before. The extension took the text before each closing
  * line, and html_inline searched on to the end from each of many
  * processing instructions, declarations or CDATA sections with no end,
- * which this reads apart, each to its end, found once for all of them.
+ * which this reads apart, each to its end, found once for all of them, in
+ * each text the inline rules read, a paragraph's and an image's alt, which
+ * the image rule reads as a text of its own. And the extension's inline
+ * math tested the tag before each of many dollar signs after it again,
+ * which this tests once.
  *
  * Not the preview's own rules (manuscript-markdown-plugin.ts), which read
  * CriticMarkup, citations and highlights, nor linkify, which the paragraphs
@@ -49,9 +53,15 @@ interface PreviewRead {
 	lineStarts: number[] | undefined;
 	/** The inline parses to read: by the line each inline token starts on */
 	wanted: (line: number) => boolean;
-	/** For html_inline: the end of the next of each kind, as found last */
+}
+
+/** For html_inline, in a text the inline rules read, a paragraph's or an
+ *  image's alt, which the image rule reads as a text of its own: the end of
+ *  the next of each kind, as found last, and the end of each comment, found
+ *  once */
+interface TextEnds {
 	next: Map<string, { from: number; at: number }>;
-	ends: Int32Array | undefined;
+	comments: Int32Array | undefined;
 }
 
 /** VS Code's math extension's rules, as it registers them, for a test that
@@ -76,8 +86,6 @@ parser.core.ruler.at('inline', (state: StateCore) => {
 		read.line = token.map ? token.map[0] : line;
 		read.src = token.content;
 		read.lineStarts = undefined;
-		read.ends = undefined;
-		read.next.clear();
 		state.md.inline.parse(token.content, state.md, state.env, token.children ??= []);
 	}
 });
@@ -87,7 +95,7 @@ parser.core.ruler.disable(['linkify', 'replacements', 'smartquotes', 'text_join'
  *  of the block rule, and those of the inline rules in each paragraph,
  *  heading or table cell that starts on a line `wanted` holds */
 export function previewEquations(text: string, wanted: (line: number) => boolean): PreviewEquation[] {
-	const read: PreviewRead = { equations: [], line: 0, src: '', lineStarts: undefined, wanted, next: new Map(), ends: undefined };
+	const read: PreviewRead = { equations: [], line: 0, src: '', lineStarts: undefined, wanted };
 	parser.parse(text, read);
 	return read.equations;
 }
@@ -135,7 +143,7 @@ function blockMath(state: StateBlock, start: number, end: number, silent: boolea
 			// The text to the fence, as the extension finds it, at the first
 			// fence of the whole text, by its offset after the text's leading
 			// white space, so mostly none
-			lastLine = src.slice(pos, firstFence(src));
+			lastLine = src.slice(pos, firstFence(state));
 			found = true;
 		}
 	}
@@ -149,21 +157,24 @@ function blockMath(state: StateBlock, start: number, end: number, silent: boolea
 	return true;
 }
 
-let fenceSource: string | undefined;
-let fenceOffset = -1;
-
-/** The offset of the first fence in `src`, after its leading white space,
- *  less that white space's length, as the extension's block rule takes it
- *  for a closing line with a fence before its end: the indexOf of the text
- *  to that line's end, trimmed. Found once for each text */
-function firstFence(src: string): number {
-	if (fenceSource !== src) {
+/** The offset of the first fence in the parse's text, after its leading
+ *  white space, less that white space's length, as the extension's block
+ *  rule takes it for a closing line with a fence before its end: the
+ *  indexOf of the text to that line's end, trimmed. Found once for each
+ *  parse, by its state, as a text compared with the one before, which may
+ *  be the same text again, took time in its length for each such line */
+function firstFence(state: StateBlock): number {
+	let offset = firstFences.get(state);
+	if (offset === undefined) {
+		const src = state.src;
 		const leading = src.length - src.trimStart().length;
-		fenceSource = src;
-		fenceOffset = src.indexOf('$' + '$', leading) - leading;
+		offset = src.indexOf('$' + '$', leading) - leading;
+		firstFences.set(state, offset);
 	}
-	return fenceOffset;
+	return offset;
 }
+
+const firstFences = new WeakMap<object, number>();
 
 function isWordCharacterOrNumber(code: number): boolean {
 	return code >= 0x30 && code <= 0x39 || code >= 0x41 && code <= 0x5A || code >= 0x61 && code <= 0x7A || code === 0x5F;
@@ -255,13 +266,28 @@ function inlineMathBlock(state: StateInline, silent: boolean): boolean {
 	return true;
 }
 
+/** Whether the last token is an opening tag, as the extension's inline math
+ *  reads it, after which a dollar sign opens none: tested once for each
+ *  token, as each of many dollar signs after a long tag tested it again */
+function afterOpenTag(state: StateInline): boolean {
+	const last = state.tokens[state.tokens.length - 1];
+	if (last?.type !== 'html_inline') return false;
+	let open = openTags.get(last);
+	if (open === undefined) {
+		open = /^<\w+.+[^/]>$/.test(last.content);
+		openTags.set(last, open);
+	}
+	return open;
+}
+
+const openTags = new WeakMap<object, boolean>();
+
 /** The extension's inline math: inlineMath */
 function inlineMath(state: StateInline, silent: boolean): boolean {
 	const src = state.src;
 	const pos = state.pos;
 	if (src.charCodeAt(pos) !== 0x24) return false;
-	const last = state.tokens[state.tokens.length - 1];
-	if (last?.type === 'html_inline' && /^<\w+.+[^/]>$/.test(last.content)) return false;
+	if (afterOpenTag(state)) return false;
 	const before = src[pos - 1];
 	if (before === '$' || before === '\\' || before !== undefined && !isWhitespace(before) && isWordCharacterOrNumber(before.charCodeAt(0))) {
 		if (!silent) state.pending += '$';
@@ -311,8 +337,7 @@ function htmlInline(state: StateInline, silent: boolean): boolean {
 		if (src.startsWith('<!-->', pos)) end = pos + 5;
 		else if (src.startsWith('<!--->', pos)) end = pos + 6;
 		else if (src.startsWith('<!--', pos)) {
-			const read = state.env as PreviewRead;
-			const ends = read.src === src ? read.ends ??= commentEnds(src) : commentEnds(src);
+			const ends = endsIn(state).comments ??= commentEnds(src);
 			end = ends[pos + 4] === -1 ? -1 : ends[pos + 4] + 3;
 		} else if (src.startsWith('<![CDATA[', pos)) end = nextEnd(state, ']]>', pos + 9);
 		else if (/[A-Za-z]/.test(src[pos + 2])) end = nextEnd(state, '>', pos + 3);
@@ -329,10 +354,24 @@ function htmlInline(state: StateInline, silent: boolean): boolean {
 /** Past the first `needle` at or after `from` in the inline text, or -1,
  *  from the one found last where it is still the first */
 function nextEnd(state: StateInline, needle: string, from: number): number {
-	const read = state.env as PreviewRead;
-	const found = read.src === state.src ? read.next.get(needle) : undefined;
+	const { next } = endsIn(state);
+	const found = next.get(needle);
 	if (found && found.from <= from && (found.at === -1 || from <= found.at)) return found.at === -1 ? -1 : found.at + needle.length;
 	const at = state.src.indexOf(needle, from);
-	if (read.src === state.src) read.next.set(needle, { from, at });
+	next.set(needle, { from, at });
 	return at === -1 ? -1 : at + needle.length;
 }
+
+/** What html_inline found in the text the inline rules read, by the
+ *  inline parse's state, one for each text, not by the text, which a lookup
+ *  compares with an equal one in time in its length */
+function endsIn(state: StateInline): TextEnds {
+	let ends = textEnds.get(state);
+	if (!ends) {
+		ends = { next: new Map(), comments: undefined };
+		textEnds.set(state, ends);
+	}
+	return ends;
+}
+
+const textEnds = new WeakMap<object, TextEnds>();

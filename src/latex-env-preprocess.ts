@@ -400,8 +400,9 @@ function readParagraphOnItsOwn(text: string, unit: Zone, environments: BareEnvir
 	const ofMain = new Set(byMain.map(e => e.start));
 	// A fence of the paragraph is sure where this read reads it in inline
 	// math, and one of another paragraph where that paragraph's read does
+	const inlineMath = before.equations.filter(e => !e.display);
 	const sure = (offset: number) => unit.start <= offset && offset < unit.end
-		? overlapsAnyZone(offset, offset + 2, zonesOf.steps) || before.equations.some(e => !e.display && e.start <= at(offset) && at(offset) + 2 <= e.end)
+		? overlapsAnyZone(offset, offset + 2, zonesOf.steps) || inEquation(inlineMath, at(offset))
 		: zonesOf.sure(offset);
 	for (const environment of wrapped) {
 		if (!ofMain.has(environment.start) && !mainZoneIsWrong(environment, zonesOf.fences, sure)) return asMain;
@@ -484,6 +485,7 @@ function mainZoneIsWrong(environment: BareEnvironment, fences: FenceZone[], sure
  *  CriticMarkup and none of `environments`, whose text the read would read
  *  as nothing. Each paragraph is read once, for all of its fences */
 function fenceIsSure(text: string, steps: Zone[], units: Zone[], environments: BareEnvironment[]): FenceIsSure {
+	// Each paragraph's inline equations, or null where it is not read
 	const reads = new Map<number, Equation[] | null>();
 	return offset => {
 		if (overlapsAnyZone(offset, offset + 2, steps)) return true;
@@ -500,12 +502,25 @@ function fenceIsSure(text: string, steps: Zone[], units: Zone[], environments: B
 		if (equations === undefined) {
 			const source = text.slice(unit.start, unit.end);
 			const read = overlapsAnyZone(unit.start, unit.end, environments) || CRITIC_MARKUP.test(source) ? null : readParagraph(source, source.length);
-			equations = read && read.unsimple === -1 ? read.equations : null;
+			equations = read && read.unsimple === -1 ? read.equations.filter(e => !e.display) : null;
 			reads.set(lo, equations);
 		}
-		const at = offset - unit.start;
-		return !!equations?.some(e => !e.display && e.start <= at && at + 2 <= e.end);
+		return equations !== null && inEquation(equations, offset - unit.start);
 	};
+}
+
+/** Whether the fence at `at` is in one of `equations`, which are in order
+ *  and apart: the first that ends at or after its end, found by binary
+ *  search, as each fence asks, starts at or before it */
+function inEquation(equations: Equation[], at: number): boolean {
+	let lo = 0;
+	let hi = equations.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (equations[mid].end < at + 2) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo < equations.length && equations[lo].start <= at;
 }
 
 /**

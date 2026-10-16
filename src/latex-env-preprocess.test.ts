@@ -9,6 +9,7 @@ import { scanOrientationDirectives } from './orientation-scan';
 import MarkdownIt from 'markdown-it';
 import { manuscriptMarkdownPlugin } from './preview/manuscript-markdown-plugin';
 import { vscodeMath } from './preview-math-read';
+import { wrapBareLatexEnvironmentsWithMap } from './preview/preprocess-with-map';
 
 describe('wrapBareLatexEnvironments', () => {
 	test('wraps a bare equation environment', () => {
@@ -766,4 +767,136 @@ describe('a paragraph of many openers around a bare environment, which no rule o
 			expect(time(32000) / small).toBeLessThan(8);
 		}
 	}, 60000);
+});
+
+describe('every shape of the probes, many times in each layout, in time linear in the text', () => {
+	// Each search of the paragraph's equations, for each of its fences, from
+	// the start, took time in the square of their number (see inEquation in
+	// latex-env-preprocess.ts). So each shape the probes build, stray fences,
+	// equations, environments, code spans, comments and the openers of the
+	// preview's port, goes many times into one paragraph, with an
+	// environment after each, into one after fences in code spans, whose
+	// environments the paragraph's own read wraps, into a paragraph of each,
+	// and into list items in a quote, 4,000 times and 16,000. Through the
+	// wrapper, each takes less than 8 times as long at four times the size,
+	// and so do the orientation scan the language server runs after each edit
+	// and the preview's wrapper, which run the wrapper, where the paragraph's
+	// read wraps, which runs every read of the wrapper's and the preview's
+	// port. At 8,000 and 32,000, the same took about three minutes. Each
+	// text is built again for each run
+	const D = '$' + '$';
+	const env = '\\begin{equation}\nx\n\\end{equation}';
+	const al = '\\begin{aligned}\na &= b\n\\end{aligned}';
+	const ind = (text: string, prefix: string) => text.replace(/\n/g, '\n' + prefix);
+	const shapes: Array<[string, string]> = Object.entries({
+		// Stray fences
+		'a fenced code block': '```\nx = ' + D + '\n```', 'a code block of tildes': '~~~sh\necho ' + D + '\n~~~', 'an indented code block': '    echo ' + D,
+		'a code span': 'Use `' + D + '` here.', 'a comment': '<!-- ' + D + ' -->', 'a comment in text': 'Text <!-- ' + D + ' --> more.',
+		'a line of text': 'A ' + D + ' sign.', 'two inline equations': '$x' + D + 'y$', 'an insertion': '{++a ' + D + ' b++}',
+		'a CriticMarkup comment': 'Text{>>a ' + D + '<<}.', 'escaped dollar signs': 'Costs \\$\\$ here.', 'inline equations': 'Both $a$ and $b$.',
+		'a heading': '# Cost ' + D, 'a list item': '- a ' + D, 'a quote': '> a ' + D, 'a table': '| a ' + D + ' | b |\n| - | - |\n| c | d |',
+		'a run of three': 'Run ' + D + '$ here.', 'an HTML block': '<div>\nx ' + D + '\n</div>', 'a link definition': '[a]: ' + D,
+		'a comment over a blank line': 'a <!-- b ' + D + '\n\nc --> d', 'a grid table': '+-----+-----+\n| a ' + D + ' | b   |\n+-----+-----+',
+		'two list items': '- a ' + D + '\n- b ' + D, 'a tag': 'A <b title="' + D + '">x</b> b.', 'a link': 'See [a](x' + D + 'y).',
+		'a tag with a dollar sign': 'Text <span title="$">cost</span> b.', 'a link with a dollar sign': 'See [a](x/$y) b.',
+		'a link title with a dollar sign': 'See [a](x "t $") b.', 'an autolink': 'Mail <http://x.org/$y> b.', 'a URL': 'Go http://x.org/$y b.',
+		'a citation': 'Text [@a, p. $5] b.', 'a backtick': 'A ` tick.', 'a comment\'s opener': 'a <!-- b', 'backticks apart': 'A `x` and ` b.',
+		'a highlight': 'Text ==cost $== b.', 'a colored highlight': 'Text ==cost $=={red} b.', 'a fence in a highlight': 'Text ==' + D + '== b.',
+		'an alt': 'See ![$x$](x.png) b.', 'a fence in an alt': 'See ![' + D + '](x.png) b.', 'a citation\'s equation': 'Text [see @ref, $x$] b.',
+		'a prefix\'s equation': 'Text [see $x$ @ref] b.', 'a fence in a link\'s text': 'See [' + D + '](u) b.', 'a note': 'Text[^s].\n\n[^s]: A ' + D + ' sign.',
+		'a reference link': 'See [http://x.org/' + D + '][r] b.', 'a fence in a reference': 'See [a ' + D + '][nope] b.', 'a shortcut': 'See [' + D + '] b.',
+		// Equations
+		'display math': D + '\n' + al + '\n' + D, 'display math on one line': D + 'x' + D, 'an environment': env, 'display math in a list item': '- ' + D + '\n  ' + ind(al, '  ') + '\n  ' + D,
+		'display math in a quote': '> ' + D + '\n> ' + ind(al, '> ') + '\n> ' + D, 'display math in text': 'See ' + D + '\n\\begin{cases}\na & b\n\\end{cases}\n' + D + ' here.',
+		'an inline equation over lines': 'The matrix $\n\\begin{pmatrix}\na & b\n\\end{pmatrix}\n$ is.', 'a blank line in an environment': D + '\n\\begin{aligned}\na &= b\n\n\\end{aligned}\n' + D,
+		'display math in a note': 'Text[^n].\n\n[^n]: ' + D + '\n    ' + ind(al, '    ') + '\n    ' + D, 'display math in a cell': '| ' + D + 'x' + D + ' | b |\n| - | - |\n| c | d |',
+		'a blank line before an environment': D + '\nx\n\n' + al + '\n' + D, 'CriticMarkup over a blank line': D + '\na {++b\n\nc++} d\n' + al + '\n' + D,
+		'display math in an HTML block': '<div>\n' + D + '\n' + al + '\n' + D + '\n</div>', 'a fence in a code span in display math': D + '\na `' + D + '` b\n' + al + '\n' + D,
+		'a fence in a comment in display math': D + '\na <!-- ' + D + ' --> b\n' + al + '\n' + D, 'a backtick in display math': D + '\na ` b\n' + al + '\n' + D,
+		'a comment\'s closer in display math': D + '\nx --> y\n' + al + '\n' + D, 'an environment after a tag': 'Text <span title="$">cost</span>\n' + env + '\n$\\alpha$ here.',
+		'an environment over a highlight': '==cost $\n' + env + '\nb== $\\alpha$', 'display math in a link\'s text': '[' + D + '\n' + al + '\n' + D + '](u)',
+		'display math in an alt': '![' + D + '\n' + al + '\n' + D + '](x.png)', 'display math unclosed': D + '\n' + al,
+		'an environment with dollar signs': '\\begin{equation}\na $ b % $\n\\end{equation}', 'an environment with a fence': '\\begin{equation}\na ' + D + ' b\n\\end{equation}',
+		'nested environments': '\\begin{equation}\n\\begin{aligned}\na\n\\end{aligned}\n\\end{equation}',
+		// Code spans and comments
+		'a code span alone': '`x`', 'code spans of two': '``x` y``', 'a whole comment': '<!-- x -->', 'a comment\'s closer': '-->',
+		// The preview port's openers: its block rule's, at a line's start,
+		// and its inline rules'
+		'a fence': D, 'three fences on a line': D + ' a ' + D + ' b ' + D, 'a fence before text': D + 'x', 'a fence in a line': 'x ' + D + ' y',
+		'display math in a line': 'a ' + D + 'x' + D + ' b', 'display math before a word': 'a ' + D + 'x' + D + 'y', 'an escaped fence': 'a \\' + D + ' b',
+		'runs of dollar signs': '$'.repeat(3) + ' ' + '$'.repeat(4) + ' ' + '$'.repeat(5), 'a dollar sign': 'a $ b', 'a price': '$5', 'a dollar sign in a word': 'x$y',
+		'a processing instruction': '<?x', 'a declaration': '<!x', 'a CDATA section': '<![CDATA[', 'a tag\'s opener': '<a', 'a closing tag\'s opener': '</',
+		'a tag before a dollar sign': '<b c="d">$', 'a bracket': '[', 'an image\'s opener': '![', 'a link without its end': '[a](', 'emphasis': '*a _b **c',
+	});
+	const layouts: Array<[string, (shape: string) => string]> = [
+		['in one paragraph', shape => shape + '\n' + env + '\n'],
+		['in one paragraph after fences in code spans', shape => 'Use `' + D + '` x\n' + env + '\n' + shape + '\n'],
+		['in paragraphs', shape => shape + '\n' + env + '\n\n'],
+		['in list items in a quote', shape => '> - ' + ind(shape + '\n' + env, '>   ') + '\n'],
+	];
+	const works: Array<(text: string) => unknown> = [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives, text => wrapBareLatexEnvironmentsWithMap(text)];
+	const linear = (make: (n: number) => string, through = works) => {
+		for (const work of through) {
+			const time = (n: number) => {
+				let fastest = Infinity;
+				for (let k = 0; k < 2; k++) {
+					const text = make(n);
+					fastest = Math.min(fastest, fastestRun(() => work(text), 1));
+				}
+				return fastest;
+			};
+			work(make(4000));
+			const small = time(4000);
+			expect(time(16000) / small).toBeLessThan(8);
+		}
+	};
+
+	test.each(shapes)('reads many of %s in each layout in linear time', (_name, shape) => {
+		for (const [, layout] of layouts) {
+			const unit = layout(shape);
+			linear(n => unit.repeat(n), layout === layouts[1][1] ? works : works.slice(0, 1));
+		}
+	}, 120000);
+
+	// A cache of the first fence by its text compared each text with the one
+	// before, so the same text again, as another string, took time in its
+	// length for each line that closed the preview's display math with a
+	// fence before its end, as the lines of fences in code spans do in main's
+	// wraps of display math after them (see firstFence in
+	// preview-math-read.ts). So each run here follows one of an equal text
+	test('reads display math after fences in code spans in one paragraph again, as another string, in linear time', () => {
+		const unit = layouts[1][1](D + '\n' + al + '\n' + D);
+		for (const work of works) {
+			const again = (n: number) => {
+				work(unit.repeat(n));
+				const text = unit.repeat(n);
+				return fastestRun(() => work(text), 1);
+			};
+			again(4000);
+			const small = Math.min(again(4000), again(4000));
+			expect(Math.min(again(16000), again(16000)) / small).toBeLessThan(8);
+		}
+	}, 120000);
+
+	// After an environment its paragraph's read wraps, which the preview's
+	// port reads with each of markdown-it's inline rules, many openers in the
+	// text after it, and in an image's alt, which the image rule reads as a
+	// text of its own. And a tag the extension's inline math tested again
+	// before each of many dollar signs after it
+	const over = 'Use `' + D + '` x\n' + env + '\n';
+	test.each(Object.entries({
+		'comments in an alt': (n: number) => over + '![' + '<!-- '.repeat(n) + '](x.png)\n',
+		'processing instructions in an alt': (n: number) => over + '![' + '<?x '.repeat(n) + '](x.png)\n',
+		'CDATA sections in an alt': (n: number) => over + '![' + '<![CDATA[ '.repeat(n) + '](x.png)\n',
+		'images of comments': (n: number) => over + '![<!-- a](x.png) <!-- '.repeat(n) + '\n',
+		'brackets': (n: number) => over + '[ '.repeat(n) + '\n',
+		'image openers': (n: number) => over + '![ '.repeat(n) + '\n',
+		'links without their ends': (n: number) => over + '[a]( '.repeat(n) + '\n',
+		'emphasis': (n: number) => over + '*a _b **c '.repeat(n) + '\n',
+		'fences': (n: number) => over + ('a ' + D + ' ').repeat(n) + '\n',
+		'lines of fences': (n: number) => over + (D + ' a\n').repeat(n),
+		'dollar signs after a long tag': (n: number) => over + '<span title="' + 'x'.repeat(8 * n) + '">' + ' $'.repeat(n) + '\n',
+	}))('reads many %s after an environment its paragraph\'s read wraps in linear time', (_name, make) => {
+		linear(make);
+	}, 120000);
 });
