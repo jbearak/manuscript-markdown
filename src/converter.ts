@@ -15126,7 +15126,9 @@ function buildMarkdownOnce(
   const formsKeys = edgesBefore(mergedContent);
   const plain = plainParagraphs(mergedContent);
 
-  // Build 1-indexed comment ID remap (order of first appearance in document)
+  // Build 1-indexed comment ID remap: the ID export named each comment
+  // with, and the next free number for the others, in the order they first
+  // appear (see where it's built, after collectCommentMetadata)
   const commentIdRemap = new Map<string, string>();
   const usedRemapIds = new Set<string>();
   // Comments that overlap anywhere in the document should use ID syntax
@@ -15144,14 +15146,9 @@ function buildMarkdownOnce(
     nextRemapId++;
     return id;
   }
-  function assignRemappedId(id: string): string {
-    const mapped = options?.commentIdMapping?.get(id);
-    if (mapped && !usedRemapIds.has(mapped)) {
-      usedRemapIds.add(mapped);
-      return mapped;
-    }
-    return nextAvailableNumericId();
-  }
+  // The comments in the order they first appear in the body and then the
+  // notes, which take their IDs once all are found
+  const commentsInOrder = new Set<string>();
   // Comments over an HTML comment, which an anchor can't hold, and over
   // other content, which goes in one: only ID syntax keeps them whole
   const overUnanchored = new Set<string>();
@@ -15175,9 +15172,7 @@ function buildMarkdownOnce(
           let holdsAnchorEnd = item.type === 'math' ? item.latex.includes('==}')
             : item.type === 'image' && (item.alt + '\n' + item.src + '\n' + (item.markdown ?? '')).includes('==}');
           for (const id of ids) {
-            if (!commentIdRemap.has(id)) {
-              commentIdRemap.set(id, assignRemappedId(id));
-            }
+            commentsInOrder.add(id);
             if (item.type === 'html_comment' && !inTable) overHtmlComment.add(id);
             (item.type === 'html_comment' ? overUnanchored : overAnchored).add(id);
             // A citation without keys goes as text (see keylessCitationRun),
@@ -15215,6 +15210,19 @@ function buildMarkdownOnce(
   const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(withoutHiddenCommentSpace(joinTrackedParagraphBreaks(entry.body, marks)))]));
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
+  // The comments export named take their names first, and then the others
+  // take the free numbers. Otherwise a comment export didn't name, as one
+  // written inline, whose ID doesn't show, took the number of a later one
+  // written with its ID, which took the next free number, so its ID changed
+  // from one trip to the next.
+  for (const id of commentsInOrder) {
+    const mapped = options?.commentIdMapping?.get(id);
+    if (mapped && !usedRemapIds.has(mapped)) {
+      usedRemapIds.add(mapped);
+      commentIdRemap.set(id, mapped);
+    }
+  }
+  for (const id of commentsInOrder) if (!commentIdRemap.has(id)) commentIdRemap.set(id, nextAvailableNumericId());
   // A comment in a table cell whose body has more than one line takes ID
   // syntax, which puts the body after the table, as a cell has one line
   const bodyHasLines = (c: Comment) => c.text.includes('\n') || (!!c.replies?.length

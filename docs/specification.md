@@ -984,7 +984,7 @@ An ID can have more than one range. DOCX import writes a comment that goes from 
 
 #### ID Format
 
-IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`.
+IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`. On DOCX import, a comment keeps the ID it was exported with. The others, such as those added in Word, take the numbers no comment kept, in the order they first appear. So an ID stays the same from one round trip to the next, even after a comment written as `{==text==}{>>comment<<}`, whose ID doesn't show.
 
 #### Backward Compatibility
 
