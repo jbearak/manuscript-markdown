@@ -10621,11 +10621,12 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
   // import writes a comment that reaches into a table in a range of each
   // paragraph and cell, gets one from its first start to its last end. As
   // the preview reads them, a range with no end after its start ends with
-  // the paragraph or cell it starts in. An end before its ID's first start
-  // here, as one in a note whose start is in the text, and the markers of an
-  // ID no body has anywhere, as a Pandoc heading ID's in `# Intro {#intro}`,
-  // are of no range Word gets, and write nothing, so that Word gets no
-  // range marker without its comment and its other end
+  // the paragraph or cell it starts in (see unended below). An end before
+  // its ID's first start here, as one in a note whose start is in the
+  // text, and the markers of an ID no body has anywhere, as a Pandoc
+  // heading ID's in `# Intro {#intro}`, are of no range Word gets, and
+  // write nothing, so that Word gets no range marker without its comment
+  // and its other end
   const bodies = state.commentBodyIds ?? commentBodyIdsIn(tokens);
   // The markers of each ID, with the paragraph or cell each is in and
   // where it is among them all
@@ -10650,29 +10651,38 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
     for (const row of token.rows ?? []) for (const cell of row.cells) collectMarkers(cell.runs, cell);
   }
   let unwritten = false;
-  // The ends of the ranges with none, which go at the end of each's
-  // paragraph or cell, there in the order they start, as import ends
-  // ranges that end together
+  // The ends of the ranges that end with a paragraph or cell, which go at
+  // its end, there in the order the ranges start, as import ends ranges
+  // that end together
   const ends = new Map<{ runs: MdRun[] }, Array<{ end: MdRun; at: number }>>();
   for (const [mdId, found] of markers) {
     const first = found.findIndex(({ run }) => run.type === 'comment_range_start');
+    // The last end after the first start, if any, and the last start
     let last = found.length - 1;
     while (last > first && found[last].run.type !== 'comment_range_end') last--;
+    if (last <= first) last = -1;
+    let lastStart = found.length - 1;
+    while (lastStart > first && found[lastStart].run.type !== 'comment_range_start') lastStart--;
     const ranged = first !== -1 && bodies.has(mdId);
+    // A start no end comes after ends with its paragraph or cell, so the
+    // one range Word gets ends with the last such start's, which keeps
+    // all the preview shows of each, as `{#a}one`, then `{#a}two`, with no
+    // `{/a}`, gives Word one range over both
+    const unended = ranged && lastStart > last;
     found.forEach(({ run }, k) => {
       if (!ranged || k < first) {
         run.unwrittenRangeMarker = true;
         unwritten = true;
-      } else if (k !== first && k !== last) {
+      } else if (k !== first && (unended || k !== last)) {
         run.innerRangeMarker = true;
       }
     });
-    if (ranged && last === first) {
-      const { owner, at } = found[first];
+    if (unended) {
       const end: MdRun = { type: 'comment_range_end', text: '', commentId: mdId };
+      const { owner } = found[lastStart];
       const owned = ends.get(owner);
-      if (owned) owned.push({ end, at });
-      else ends.set(owner, [{ end, at }]);
+      if (owned) owned.push({ end, at: found[first].at });
+      else ends.set(owner, [{ end, at: found[first].at }]);
     }
   }
   for (const [owner, owned] of ends) owner.runs = owner.runs.concat(owned.sort((a, b) => a.at - b.at).map(({ end }) => end));

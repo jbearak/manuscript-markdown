@@ -1025,6 +1025,46 @@ describe('Overlapping comments: the markers of no range Word gets', () => {
     expect(twice).toBe(once);
   });
 
+  // An ID's starts with no end after them, in more than one paragraph or
+  // cell, each of which the preview shows to its paragraph's or cell's
+  // end, get Word's one range from the first to the end of the last's
+  // paragraph or cell. Main wrote the first start alone, with no end, which
+  // import read to the end of the text
+  test.each([
+    ['two paragraphs', '{#a}one\n\n{#a}two\n\n{#a>>c<<}\n', 'two', '{#a}one\n\ntwo{/a}\n{#a>>c<<}\n', 1],
+    ['three paragraphs', '{#a}one\n\nmid\n\n{#a}two\n\nafter\n\n{#a>>c<<}\n', 'two', '{#a}one\n\nmid\n\ntwo{/a}\n{#a>>c<<}\n\nafter\n', 1],
+    ['a table\'s cell, then a paragraph', '| t {#a}u | v |\n|---|---|\n| w | x |\n\nPara {#a}y.\n\nAfter.\n\n{#a>>c<<}\n', 'Para y.',
+      '| t {#a}u | v |\n| --- | --- |\n| w | x |\n\nPara y.{/a}\n{#a>>c<<}\n\nAfter.\n', 1],
+    ['a list item, then a paragraph', '- {#a}one\n\nPara two {#a}x.\n\nend\n\n{#a>>c<<}\n', 'Para two x.', '- {#a}one\n\nPara two x.{/a}\n{#a>>c<<}\n\nend\n', 1],
+    ['a paragraph, then one with a range of another ID', '{#a}one {#b}x\n\n{#a}two{/b} z\n\n{#a>>c<<}\n{#b>>d<<}\n', 'two z',
+      '{#a}one {#b}x\n\ntwo{/b} z{/a}\n{#a>>c<<}\n{#b>>d<<}\n', 2],
+    ['the text and a note, a range in each', 'Text {#a}here[^1].\n\n[^1]: Note {#a}x.\n\n    More.\n\n{#a>>c<<}\n', 'Text here.',
+      'Text {==here[^1].==}{>>c<<}\n\n[^1]: Note {==x.==}{>>c<<}\n\n    More.\n', 1],
+  ])('ends an ID\'s starts with no end in %s with the last one\'s', async (_name, md, shown, back, comments) => {
+    const word = await wordOf((await convertMdToDocx(md)).docx);
+    expect(markerErrors(word)).toEqual([]);
+    expect(word.comments).toHaveLength(comments);
+    expect(word.paragraphs.map(paragraph => paragraph.trim())).toContain(shown);
+    const { once, twice } = await trips(md);
+    expect(strip(once)).toBe(back);
+    expect(twice).toBe(once);
+  });
+
+  // A start after the ID's last end, which main wrote nothing of, as Word
+  // takes one range, though the preview shows its text, now ends the range
+  // with its paragraph, so Word's range holds the text after it too
+  test.each([
+    ['in the next paragraph', '{#a}one{/a}\n\n{#a}two\n\n{#a>>c<<}\n', '{#a}one\n\ntwo{/a}\n{#a>>c<<}\n'],
+    ['in its paragraph', '{#a}one{/a} and {#a}two\n\n{#a>>c<<}\n', '{==one and two==}{>>c<<}\n'],
+  ])('ends the range with a start after its last end %s', async (_name, md, back) => {
+    const word = await wordOf((await convertMdToDocx(md)).docx);
+    expect(markerErrors(word)).toEqual([]);
+    expect(word.comments).toHaveLength(1);
+    const { once, twice } = await trips(md);
+    expect(strip(once)).toBe(back);
+    expect(twice).toBe(once);
+  });
+
   // Which main wrote so too
   test.each([
     ['a range with its body', 'Text {#1}x{/1} here.\n\n{#1>>c<<}\n', 'Text {==x==}{>>c<<} here.\n', 1],
@@ -1032,6 +1072,7 @@ describe('Overlapping comments: the markers of no range Word gets', () => {
     ['a range with a reply', 'Text {#1}x{/1} here.\n\n{#1>>c<<}{>>r<<}\n', 'Text {==x==}{>>c<<}{>>r<<} here.\n', 2],
     ['a range from a heading to the next paragraph', '# H {#a}\n\nText{/a}.\n\n{#a>>c<<}\n', '# H {#a}\n\nText{/a}.\n{#a>>c<<}\n', 1],
     ['ranges that overlap', 'A {#1}b {#2}c{/1} d{/2} e.\n\n{#1>>one<<}\n{#2>>two<<}\n', 'A {#1}b {#2}c{/1} d{/2} e.\n{#1>>one<<}\n{#2>>two<<}\n', 2],
+    ['a start before another and a later end', '{#a}one\n\n{#a}two{/a} three\n\n{#a>>c<<}\n', '{#a}one\n\ntwo{/a} three\n{#a>>c<<}\n', 1],
     ['a Pandoc ID with a class', 'Text {#sec .class} here.\n', 'Text \\{#sec .class} here.\n', 0],
     ['a Pandoc ID with a colon', '# Intro {#sec:intro}\n', '# Intro \\{#sec:intro}\n', 0],
   ])('writes %s as before', async (_name, md, back, comments) => {
