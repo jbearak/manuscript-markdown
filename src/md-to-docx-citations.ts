@@ -1391,7 +1391,7 @@ export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChan
   // Its \{ and \} export as written, or not, alike in each view and in the
   // equation Word holds (see bracesAsText in latex-to-omml.ts)
   const views = [true, false].map(accepted => equationViewLatex(parts, accepted));
-  return withEquationBraces(views, () => trackedMathXml(parts, track, warnings, display));
+  return withEquationBraces(views, () => trackedMathXml(parts, track, warnings, display), display);
 }
 
 function trackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings: string[] | undefined, display: boolean): string {

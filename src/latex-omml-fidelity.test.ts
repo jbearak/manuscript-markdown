@@ -2921,6 +2921,18 @@ describe('a brace in an equation', () => {
     await expectTrips(markdown, text);
   });
 
+  // The number Word holds for a \tag counts: its \% is a bare %
+  test.each([
+    ['display math', display('\\{x\\} \\tag{50\\%}')],
+    ['a row of gather*', display('\\begin{gather*}\n\\{x\\} \\tag{50\\%} \\\\\ny\n\\end{gather*}')],
+    ['a tracked change', display('{++a++} \\{x\\} \\tag{50\\%}')],
+  ])('\\{ and \\} before an equation number holding \\% in %s come back as on main, and again', async (_name, markdown) => {
+    const once = await equations(markdown);
+    const twice = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(twice).toBe(markdown);
+    expect(await equations(twice)).toEqual(once);
+  });
+
   test('\\{ and \\} beside an insertion of a command export writes as text are tracked in place, as on main', async () => {
     const [omml] = await equations(inline('\\{x\\} {++\\foo++}'));
     expect(omml).toMatch(/^(?:(?!<w:ins)[\s\S])*\\\{(?:(?!<w:ins)[\s\S])*<w:ins /);

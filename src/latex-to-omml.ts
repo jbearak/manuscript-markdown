@@ -117,14 +117,18 @@ let equationBracesAsText: boolean | undefined;
 
 /**
  * `write()`, whose equations write \{ and \} as written if Word's text for
- * any of `views` holds LaTeX (see bracesAsText), as one equation: a tracked
+ * any of `views`, numbered in `display` math, holds LaTeX (see bracesAsText), as one equation: a tracked
  * change's accepted and rejected equations, which Word holds in one, in
  * place or replaced, and import reads as one.
  */
-export function withEquationBraces<T>(views: readonly string[], write: () => T): T {
+export function withEquationBraces<T>(views: readonly string[], write: () => T, display = false): T {
   const outer = equationBracesAsText;
   equationBracesAsText = undefined;
-  const asText = views.some(view => /\\[{}]/.test(view)) ? views.some(view => new Parser(tokenize(view)).bracesAsText()) : undefined;
+  const asText = views.some(view => /\\[{}]/.test(view)) ? views.some(view => {
+    const parser = new Parser(tokenize(view));
+    parser.numbered = display;
+    return parser.bracesAsText();
+  }) : undefined;
   equationBracesAsText = asText;
   try {
     return write();
@@ -138,7 +142,9 @@ export function withEquationBraces<T>(views: readonly string[], write: () => T):
  * run of no style or alphabet, as the \begin{array}{cc} or \foo that
  * export writes as text, and \%. Import reads such an equation's braces as
  * LaTeX, as before, where it writes another's as \{ and \} (see
- * holdsLatexText in omml.ts).
+ * holdsLatexText in omml.ts). That one reads Word's m:nor as runStyleOf
+ * does, with its m:val; this one takes any m:nor as a style, since export
+ * writes one only on a comment's runs, which neither counts.
  */
 function holdsLatexText(omml: string): boolean {
   for (const [, run] of omml.matchAll(/<m:r>([\s\S]*?)<\/m:r>/g)) {
@@ -498,7 +504,9 @@ class Parser {
       if (asText === undefined) {
         const trial = new Parser(source, undefined, 'math', track && ((element, omml) => '<' + element + '>' + omml + '</' + element + '>'));
         trial.bracesAsText = () => false;
-        asText = holdsLatexText(trial.parseExpression(false));
+        // With the number Word holds for its \tag, whose \% is a bare %
+        trial.numbered = this.numbered;
+        asText = holdsLatexText(trial.numberedEquation(trial.parseExpression(false)));
       }
       return asText;
     };
