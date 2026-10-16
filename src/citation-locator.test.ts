@@ -111,6 +111,20 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
     expect(readCitationLocator(text)).toEqual(expected);
   });
 
+  // A brace or a backslash after a backslash is that character as text,
+  // so a locator can hold a brace no other closes; a backslash before any
+  // other character is text
+  it.each<[string, CitationLocator]>([
+    ['p. A\\{B', { locator: 'A{B', label: 'page' }],
+    ['{p. A\\{B}', { locator: 'A{B', label: 'page' }],
+    ['{p. \\}\\{}', { locator: '}{', label: 'page' }],
+    ['{p. A\\\\}', { locator: 'A\\', label: 'page' }],
+    ['p. 2, see \\{x\\}', { locator: '2', label: 'page', suffix: ', see {x}' }],
+    ['p. 2\\x', { locator: '2', label: 'page', suffix: '\\x' }],
+  ])('reads the escapes in %j', (text, expected) => {
+    expect(readCitationLocator(text)).toEqual(expected);
+  });
+
   it('keeps a line end in a locator, as export did before', () => {
     expect(readCitationLocator('p. 1\n2')).toEqual({ locator: '1\n2', label: 'page' });
     expect(readCitationLocator('p.\n2')).toEqual({ locator: '2', label: 'page' });
@@ -147,6 +161,28 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
     for (const text of texts) expect(fastestRun(() => readCitationLocator(text))).toBeLessThan(2000);
     expect(fastestRun(() => citationLocatorText('1-'.repeat(40000) + '1', 'chapter', ', x'.repeat(40000)))).toBeLessThan(2000);
   }, 60000);
+
+  // A run of one character, at 16,000 and at 64,000, in several places,
+  // read and written: linear work takes 4 times as long at 64,000, where a
+  // scan that read a run of spaces or backslashes again from each of its
+  // characters took 16 times as long, and seconds
+  it.each([' ', '1', ',', '-', '{', '}', '{}', 'i', 'M', '\\'])('reads and writes a long run of %j in linear time', run => {
+    const places = [(text: string) => text, (text: string) => 'p. ' + text, (text: string) => '1' + text + '2', (text: string) => '{p. 1' + text + '}'];
+    const works = [
+      (text: string) => readCitationLocator(text),
+      (text: string) => citationLocatorText(text, 'page', undefined),
+      (text: string) => citationLocatorText('2', 'chapter', text),
+      (text: string) => citationLocatorText(undefined, undefined, text),
+    ];
+    for (const place of places) {
+      for (const work of works) {
+        const [small, large] = [16000, 64000].map(length => place(run.repeat(length / run.length)));
+        const [smallTime, largeTime] = [fastestRun(() => work(small)), fastestRun(() => work(large))];
+        expect(largeTime).toBeLessThan(2000);
+        expect(largeTime).toBeLessThan(8 * smallTime + 100);
+      }
+    }
+  }, 120000);
 });
 
 describe('citationLocatorText, as import writes a locator', () => {
@@ -189,6 +225,12 @@ describe('citationLocatorText, as import writes a locator', () => {
     [undefined, undefined, 'emphasis added', '{} emphasis added'],
     [undefined, undefined, ', ch. 2', '{}ch. 2'],
     [undefined, undefined, ', sec. A', '{}sec. A'],
+    // A brace no other closes, and a backslash before a brace, escaped
+    ['A{B', 'page', undefined, '{p. A\\{B}'],
+    ['A}B', 'chapter', ', for more', '{chap. A\\}B}, for more'],
+    ['A\\', 'page', undefined, '{p. A\\\\}'],
+    ['A\\{B', 'page', undefined, '{p. A\\\\\\{B}'],
+    ['2', 'page', ', see \\{x', 'p. 2, see \\\\\\{x'],
     [undefined, undefined, undefined, ''],
   ])('writes %j, %j and %j as %j', (locator, label, suffix, expected) => {
     expect(citationLocatorText(locator, label, suffix)).toBe(expected);
@@ -363,8 +405,31 @@ const ZOTERO_COMPATIBLE: Array<[FieldItem, string]> = [
   [{ locator: '2', label: 'supplement' }, 'supp. 2'],
 ];
 
+// What citeproc reads as markup in a prefix and a suffix, which Word shows
+// as written: each one's Markdown, its field's items, and Word's text
+const AFFIXES: Array<[string, FieldItem[], string]> = [
+  ['A [@doe2020, p. 2, <i>emphasis</i>] b.\n', [{ locator: '2', label: 'page', suffix: ', <i>emphasis</i>' }], '(Doe 2020, 2, <i>emphasis</i>)'],
+  ['A [@doe2020, p. 2, "emphasis added"] b.\n', [{ locator: '2', label: 'page', suffix: ', "emphasis added"' }], '(Doe 2020, 2, "emphasis added")'],
+  ["A [@doe2020, p. 2, it's 'x'] b.\n", [{ locator: '2', label: 'page', suffix: ", it's 'x'" }], "(Doe 2020, 2, it's 'x')"],
+  ['A [@doe2020, {}<sup>2</sup>] b.\n', [{ suffix: ', <sup>2</sup>' }], '(Doe 2020, <sup>2</sup>)'],
+  ['A [see "x" @doe2020] b.\n', [{ prefix: 'see "x"' }], '(see "x" Doe 2020)'],
+  ['A [\\<i>see\\</i> @doe2020, p. 2] b.\n', [{ locator: '2', label: 'page', prefix: '<i>see</i>' }], '(<i>see</i> Doe 2020, 2)'],
+];
+
+// A brace no other closes, escaped: each one's Markdown and its field's item
+const ESCAPES: Array<[string, FieldItem]> = [
+  ['A [@doe2020, {p. A\\{B}] b.\n', { locator: 'A{B', label: 'page' }],
+  ['A [@doe2020, {chap. A\\}B}, for more] b.\n', { locator: 'A}B', label: 'chapter', suffix: ', for more' }],
+];
+
+const ZOTERO_ESCAPES: Array<[FieldItem, string]> = [
+  [{ locator: 'A{B', label: 'page' }, '{p. A\\{B}'],
+  [{ locator: '2', label: 'page', suffix: ', see \\{x' }, 'p. 2, see \\\\\\{x'],
+];
+
 const markdownTrips = once(() => fromMarkdown([...TERMS.map(([, term]) => 'A [@doe2020, ' + term + ' 2] b.\n'), ...SUFFIXES.map(([md]) => md), ...MORE, ...GUARDS.map(([md]) => md),
-  ...COMPATIBLE.map(([text]) => 'A [@roe2019, ' + text + '] b.\n'), 'A [@roe2019, ' + COMPATIBLE_SUFFIX + '] b.\n']));
+  ...COMPATIBLE.map(([text]) => 'A [@roe2019, ' + text + '] b.\n'), 'A [@roe2019, ' + COMPATIBLE_SUFFIX + '] b.\n',
+  ...AFFIXES.map(([md]) => md), ...ESCAPES.map(([md]) => md)]));
 const zoteroTrips = once(() => fromZotero([
   ...TERMS.map(([label]) => ({ keys: ['doe2020'], items: [{ locator: '2', label }] })),
   ...ZOTERO_SUFFIXES.map(([item]) => ({ keys: ['doe2020'], items: [item] })),
@@ -372,6 +437,9 @@ const zoteroTrips = once(() => fromZotero([
   // Edited by hand (see the guard below)
   { keys: ['doe2020'], items: [{ locator: '2', label: 'page' }], edited: '(Doe 2020, 2, my emphasis)' },
   ...ZOTERO_COMPATIBLE.map(([item]) => ({ keys: ['doe2020'], items: [item] })),
+  ...ZOTERO_ESCAPES.map(([item]) => ({ keys: ['doe2020'], items: [item] })),
+  // Zotero's markup in a suffix (see the test below)
+  { keys: ['doe2020'], items: [{ locator: '2', label: 'page', suffix: ', <i>sic</i>' }] },
 ]));
 const markdownTrip = async (k: number) => (await markdownTrips())[k];
 const zoteroTrip = async (k: number) => (await zoteroTrips())[k];
@@ -469,6 +537,46 @@ describe('a citation\'s locator, its label and its suffix through Word', () => {
     expect(trip.markdown).toBe('A [@doe2020, ' + written + '] b.\n');
     expect(trip.next.items).toEqual([item]);
     expect(trip.next.shown).toBe(trip.shown);
+  }, 60000);
+
+  const affixes = compatible + COMPATIBLE.length + 1;
+  const escapes = affixes + AFFIXES.length;
+  const zoteroEscapes = zoteroCompatible + ZOTERO_COMPATIBLE.length;
+
+  it.each(AFFIXES.map((c, k) => [...c, affixes + k] as const))('shows the markup of %j as written', async (md, items, shown, k) => {
+    const trip = await markdownTrip(k);
+    expect(trip.first.items).toEqual(items);
+    expect(trip.first.shown).toBe(shown);
+    expect(trip.markdown).toBe(md);
+    expect(trip.next).toEqual(trip.first);
+  }, 60000);
+
+  it.each(ESCAPES.map((c, k) => [...c, escapes + k] as const))('exports the escaped brace in %j', async (md, item, k) => {
+    const trip = await markdownTrip(k);
+    expect(trip.first.items).toEqual([item]);
+    expect(trip.markdown).toBe(md);
+    expect(trip.next).toEqual(trip.first);
+  }, 60000);
+
+  // As main kept a locator, as p. A{B, which it read to the ]
+  it.each(ZOTERO_ESCAPES.map((c, k) => [c[0], zoteroEscapes + k] as const))('keeps Zotero\'s %j through import and export', async (item, k) => {
+    const trip = await zoteroTrip(k);
+    expect(trip.next.items).toEqual([item]);
+    expect(trip.next.shown).toBe(trip.shown);
+  }, 60000);
+
+  it.each(ZOTERO_ESCAPES.map((c, k) => [...c, zoteroEscapes + k] as const))('imports Zotero\'s %j with its braces escaped', async (_item, written, k) => {
+    expect((await zoteroTrip(k)).markdown).toBe('A [@doe2020, ' + written + '] b.\n');
+  }, 60000);
+
+  // Not fixed: the field keeps Zotero's markup, as <i>sic</i>, which Zotero
+  // shows when it refreshes the field, but Word's text at the next export
+  // shows it as written, as citeproc has no escape for it
+  it('keeps Zotero\'s markup in a suffix in the field, and shows it as written', async () => {
+    const trip = await zoteroTrip(zoteroEscapes + ZOTERO_ESCAPES.length);
+    expect(trip.markdown).toBe('A [@doe2020, p. 2, <i>sic</i>] b.\n');
+    expect(trip.next.items).toEqual([{ locator: '2', label: 'page', suffix: ', <i>sic</i>' }]);
+    expect(trip.next.shown).toBe('(Doe 2020, 2, <i>sic</i>)');
   }, 60000);
 
   it('imports a plural locator with the plural term', async () => {

@@ -20,9 +20,11 @@
 //
 // Where it differs from Pandoc: Pandoc writes each space as one; here a
 // locator and a suffix keep the whitespace written in them, as a line end,
-// which export kept in a locator before. The text is read as text: Pandoc
-// reads Markdown's formatting in a suffix, which export takes as written,
-// as it does a locator.
+// which export kept in a locator before. The text is read as text, but
+// for an escaped brace or backslash (see ESCAPED_RE): Pandoc reads
+// Markdown's formatting in a suffix, which export takes as written, as it
+// does a locator, and Word shows as written (see AFFIX_MARKUP in
+// md-to-docx-citations.ts).
 //
 // Every scan here is linear in the text: a term is at most
 // MAX_TERM_LENGTH characters, so the search for the longest term looks no
@@ -119,13 +121,23 @@ export interface CitationLocator {
 }
 
 /** A token as Pandoc's parser reads one: a run of whitespace, a
- *  punctuation character but :, or a run of other characters */
+ *  punctuation character but :, or a run of other characters, with an
+ *  escaped brace or backslash among them (see ESCAPED_RE) */
 interface Token {
   text: string;
   space: boolean;
 }
 
-const TOKEN_RE = /\s+|(?:[^\s\p{P}]|:)+|\p{P}/gu;
+const TOKEN_RE = /\s+|(?:\\[\\{}]|[^\s\p{P}]|:)+|\p{P}/gu;
+// A brace or a backslash after a backslash, as \{, which is that
+// character as text, not a brace or an escape: the Markdown escapes read
+// here, so a locator can hold a brace no other brace closes, as A\{B, and
+// a backslash before one, which import writes so (citationLocatorText).
+// Pandoc shows each as that character too, but reads an escaped brace as
+// a brace here. Other text is read as written, a backslash before another
+// character too.
+const ESCAPED_RE = /\\([\\{}])/g;
+const unescaped = (text: string) => text.replace(ESCAPED_RE, (_escape, character: string) => character);
 const PUNCTUATION_RE = /^\p{P}/u;
 const DIGIT_RE = /[0-9]/;
 // A Roman numeral as Pandoc reads one, its case aside: each part greedy,
@@ -302,10 +314,11 @@ function readLocator(text: string, withCompatible: boolean): CitationLocator {
   if (single(at) === ',') at++;
   if (tokens[at]?.space) at++;
   const read = delimited(at) ?? integrated(at);
-  if (!read) return { suffix: withComma(0) };
-  const suffix = read.label || read.locator ? textFrom(read.next) : withComma(read.next);
+  if (!read) return { suffix: unescaped(withComma(0)) };
+  const suffix = unescaped(read.label || read.locator ? textFrom(read.next) : withComma(read.next));
+  const locator = unescaped(read.locator);
   return {
-    ...(read.locator ? { locator: read.locator, ...(read.label ? { label: read.label } : {}) } : {}),
+    ...(locator ? { locator, ...(read.label ? { label: read.label } : {}) } : {}),
     ...(suffix ? { suffix } : {}),
   };
 }
@@ -336,7 +349,12 @@ const SPACED_SUFFIX_RE = /^(?:[&a-zA-Z\u0e01-\u0e5b\u00c0-\u017f\u0370-\u03ff\u0
  *  and the first is a number or a Roman numeral (its processNumber), but
  *  for a page's subsections, as 12a-c */
 function pluralLocator(locator: string): boolean {
-  const parts = locator.trim().split(/\s*&\s*|,?\s+and\s+|[;,]\s+|\s*\\*[-\u2013]+\s*/);
+  // Each run of whitespace as one space, and each run of backslashes before
+  // a dash left out, so no separator below reads a run more than once:
+  // linear time
+  const text = locator.trim().replace(/\s+/g, ' ')
+    .replace(/\\+/g, (run: string, at: number, all: string) => /[-\u2013]/.test(all.charAt(at + run.length)) ? '' : run);
+  const parts = text.split(/ ?& ?|,? and |[;,] | ?[-\u2013]+ ?/);
   if (parts.length < 2) return false;
   if (parts.length === 2 && /^\d+[,a-z]+$/i.test(parts[0]) && /^[,a-z]+$/i.test(parts[1])) return false;
   return /^\d/.test(parts[0]) || /^[ivxlcm]+$/i.test(parts[0]);
@@ -361,10 +379,16 @@ function knownLabel(label: string | undefined): string {
  *  locator's words wouldn't read as one or the suffix would read as more
  *  of it. Without a locator, the suffix after its comma and space, then
  *  after {}, which reads as no locator, where it would read as one or
- *  starts with neither. Of these, the first Pandoc reads the same too,
- *  else the first export reads so, as app. A, for a label Pandoc has no
- *  term for (see COMPATIBLE_TERMS). Failing all, the last of them, which
- *  reads the locator, or none, as given. Empty where there's neither.
+ *  starts with neither. With a brace or a backslash in the locator or the
+ *  suffix, each of these with its braces and backslashes escaped too, as
+ *  p. A\{B, for a brace no other closes.
+ *  Of these, the first Pandoc reads the same too, else the first export
+ *  reads so, as app. A, for a label Pandoc has no term for (see
+ *  COMPATIBLE_TERMS). Failing all, with a locator, as one with a backslash
+ *  before a brace, the first, the label's term and the locator, as main
+ *  wrote it; without, as for a suffix that starts with a digit, the last,
+ *  which reads as the suffix with a space before it. Empty where there's
+ *  neither.
  *  `locator` and `suffix` hold no ; or ], which would end the item or the
  *  citation. */
 export function citationLocatorText(locator: string | undefined, label: string | undefined, suffix: string | undefined): string {
@@ -381,17 +405,19 @@ export function citationLocatorText(locator: string | undefined, label: string |
     return (read.locator ?? '') === loc && read.label === wanted
       && (readSuffix === after || SPACED_SUFFIX_RE.test(after) && readSuffix === ' ' + after);
   };
+  // The text as written, then with its braces and backslashes escaped,
+  // where it has any, which reads as the text (see ESCAPED_RE)
+  const escapes = (text: string) => /[\\{}]/.test(text) ? [text, text.replace(/[\\{}]/g, character => '\\' + character)] : [text];
   let candidates: string[];
   if (loc) {
-    const terms = LABEL_TERMS.get(wanted!)!;
-    const plain = terms[pluralLocator(loc) ? 1 : 0] + ' ' + loc;
-    const braced = '{' + plain + '}';
-    candidates = after ? [plain + after, plain + ' ' + after, braced + after, braced + ' ' + after] : [plain, braced];
+    const term = LABEL_TERMS.get(wanted!)![pluralLocator(loc) ? 1 : 0];
+    const forms = escapes(loc).flatMap(written => [term + ' ' + written, '{' + term + ' ' + written + '}']);
+    candidates = after ? forms.flatMap(form => escapes(after).flatMap(written => [form + written, form + ' ' + written])) : forms;
   } else {
-    candidates = after.startsWith(', ') ? [after.slice(2), '{}' + after.slice(2)] : [];
-    candidates.push('{}' + after, '{} ' + after);
+    candidates = escapes(after).flatMap(written => [...(written.startsWith(', ') ? [written.slice(2), '{}' + written.slice(2)] : []), '{}' + written, '{} ' + written]);
   }
   // As export reads it, and as Pandoc does too where one reads so, as
   // {p. A}, not p. A, which Pandoc reads as text
-  return candidates.find(text => reads(text, true) && reads(text, false)) ?? candidates.find(text => reads(text, true)) ?? candidates[candidates.length - 1];
+  return candidates.find(text => reads(text, true) && reads(text, false)) ?? candidates.find(text => reads(text, true))
+    ?? (loc ? candidates[0] : candidates[candidates.length - 1]);
 }
