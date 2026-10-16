@@ -364,6 +364,82 @@ describe('Syntax grammar invariants', () => {
   });
 });
 
+// A { after an odd run of backslashes opens no CriticMarkup, as export and
+// the preview read it: the last backslash escapes it. Markdown's own escape
+// pattern takes \{ in a paragraph, before the grammar's openers; in a
+// CriticMarkup span, where it doesn't apply, the grammar's escaped_brace does
+describe('Syntax grammar escaped CriticMarkup openers', () => {
+  const grammar = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json'), 'utf-8'));
+  type Rule = { match?: string; begin?: string; end?: string };
+  // Its patterns, in order, as JS regexes: Oniguruma's possessive
+  // quantifiers as greedy ones, which match the same here
+  const asRegExp = (source: string) => new RegExp(source.replace(/([+*?])\+/g, '$1'), 'g');
+  const rules = (grammar.patterns as Array<{ include: string }>).map(({ include }) => {
+    const name = include.slice(1);
+    const rule = grammar.repository[name] as Rule;
+    return { name, start: asRegExp((rule.match ?? rule.begin)!), end: rule.end === undefined ? undefined : asRegExp(rule.end) };
+  });
+
+  /** The rules whose match or begin pattern the grammar reads in `line`, in
+   *  order: at each step the earliest match of its patterns or of the end
+   *  of the span it's in, a pattern before the end where they tie, as
+   *  vscode-textmate scans with an L: injection inside a span of its own,
+   *  markdown's patterns aside */
+  const opened = (line: string): string[] => {
+    const names: string[] = [];
+    const ends: RegExp[] = [];
+    for (let at = 0; at < line.length;) {
+      let best: RegExpExecArray | null = null;
+      let bestRule: (typeof rules)[number] | undefined;
+      for (const rule of rules) {
+        rule.start.lastIndex = at;
+        const match = rule.start.exec(line);
+        if (match && (!best || match.index < best.index)) {
+          best = match;
+          bestRule = rule;
+        }
+      }
+      const end = ends[ends.length - 1];
+      if (end) {
+        end.lastIndex = at;
+        const match = end.exec(line);
+        if (match && (!best || match.index < best.index)) {
+          best = match;
+          bestRule = undefined;
+        }
+      }
+      if (!best) break;
+      if (bestRule) {
+        names.push(bestRule.name);
+        if (bestRule.end) ends.push(new RegExp(bestRule.end.source, 'g'));
+      } else {
+        ends.pop();
+      }
+      at = Math.max(best.index + best[0].length, at + 1);
+    }
+    return names;
+  };
+
+  it.each<[string, string, string[]]>([
+    ['an escaped deletion in an insertion', '{++a \\{--x--} b++}', ['addition', 'escaped_brace']],
+    ['an escaped insertion in a comment', '{>>a \\{++x++} b<<}', ['comment', 'escaped_brace']],
+    ['an escaped substitution in a deletion', '{--a \\{~~x~>y~~} b--}', ['deletion', 'escaped_brace']],
+    ['an escaped comment in a critic highlight', '{==a \\{>>c<<} b==}', ['highlight', 'escaped_brace']],
+    ['an escaped range start in an insertion', '{++a \\{#1}x{/1} b++}', ['addition', 'escaped_brace', 'comment_range_end']],
+    ['an escaped critic highlight in an insertion', '{++a {/1}\\{==x==} b++}', ['addition', 'comment_range_end', 'escaped_brace']],
+    ['an escaped comment with an ID in an insertion', '{++a \\{#1>>c<<} b++}', ['addition', 'escaped_brace']],
+    ['an escaped insertion', 'a \\{++x++} b', ['escaped_brace']],
+    ['an insertion after three backslashes', 'a \\\\\\{++x++} b', ['escaped_brace']],
+    ['a deletion in an insertion', '{++a {--x--} b++}', ['addition', 'deletion']],
+    ['a deletion after an escaped backslash in an insertion', '{++a \\\\{--x--} b++}', ['addition', 'deletion']],
+    ['an insertion after an escaped backslash', 'a \\\\{++x++} b', ['addition']],
+    ['a critic highlight and its comment', 'a {==x==}{>>c<<} b', ['highlight', 'comment']],
+    ['a comment\'s range and body', 'a {#1}x{/1}{#1>>c<<} b', ['comment_range_start', 'comment_range_end', 'comment_with_id']],
+  ])('reads %s as export does', (_name, line, expected) => {
+    expect(opened(line)).toEqual(expected);
+  });
+});
+
 describe('Syntax grammar citation keys', () => {
   const grammar = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json'), 'utf-8'));
   const rule = grammar.repository.citation_list;

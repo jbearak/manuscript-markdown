@@ -14,6 +14,10 @@ import { isEscapedAt } from './math-delimiters';
 // - An == after an odd run of backslashes opens no format highlight, as export and
 //   the preview read it; a closing == has no such check. Keep hlRe and
 //   isBlockedPredecessor in step with combinedPattern in changes.ts and the grammar
+// - A { after an odd run of backslashes, whose last escapes it, opens no CriticMarkup,
+//   as export and the preview read it. Keep criticSpans, criticIn and
+//   extractAllDecorationRanges in step with combinedPattern in changes.ts and the
+//   grammar's escaped_brace
 // - extractCriticDelimiterRanges(): skip comment/highlight delimiters so decoration
 //   doesn't override TextMate scopes
 // - Typed delimiter arrays (additionDelimiters, deletionDelimiters, substitutionDelimiters)
@@ -141,7 +145,8 @@ interface CriticSpan { start: number; contentStart: number; contentEnd: number; 
 /**
  * The CriticMarkup spans of `text` in no other span, in order. Each opener
  * is paired as extractAllDecorationRanges pairs it, and the next is looked
- * for after its closer; an opener without a closer is text:
+ * for after its closer; an opener without a closer, or whose { is escaped,
+ * is text:
  *   {== ==}, {++ ++}, {-- --}, {~~ ~~}  with the first closer after it
  *   {>> <<}, {#id>> <<}                  with findMatchingClose (depth-aware)
  */
@@ -150,7 +155,7 @@ function criticSpans(text: string): CriticSpan[] {
   const len = text.length;
   let i = 0;
   while (i < len) {
-    if (text.charCodeAt(i) === 0x7B && i + 2 < len) { // '{'
+    if (text.charCodeAt(i) === 0x7B && i + 2 < len && !isEscapedAt(text, i)) { // '{'
       const c2 = text.charCodeAt(i + 1);
       const c3 = text.charCodeAt(i + 2);
       let contentStart = -1;
@@ -208,10 +213,12 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
 
   // CriticMarkup highlights {==text==} — content only (skip delimiters)
   const criticIn = (from: number, to: number) => {
-    const criticRe = /\{==([\s\S]*?)==\}/g;
+    // Each opener's { after no escaping backslash, which the part's start,
+    // after an opener, never has
+    const criticRe = /\{(?<!(?<!\\)(?:\\\\)*\\\{)==([\s\S]*?)==\}/g;
     const part = text.slice(from, to);
     // None in text that holds another opener (see extractAllDecorationRanges)
-    if (/\{(?:\+\+|--|~~|>>|#[0-9A-Za-z_-]+>>)/.test(part)) return;
+    if (/\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+|--|~~|>>|#[0-9A-Za-z_-]+>>)/.test(part)) return;
     let c;
     while ((c = criticRe.exec(part)) !== null) {
       push('critic', from + c.index + 3, from + c.index + c[0].length - 3);
@@ -521,13 +528,13 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
    */
   const scanCriticHighlights = (regionStart: number, regionEnd: number) => {
     for (let p = regionStart; p + 3 <= regionEnd; p++) {
-      if (text.charCodeAt(p) !== 0x7B) continue;
+      if (text.charCodeAt(p) !== 0x7B || isEscapedAt(text, p)) continue;
       const c2 = text.charCodeAt(p + 1);
       if ((c2 === 0x2B || c2 === 0x2D || c2 === 0x7E || c2 === 0x3E) && text.charCodeAt(p + 2) === c2) return;
       if (c2 === 0x23 && detectCommentIdOpener(text, p, regionEnd) !== -1) return;
     }
     for (let p = regionStart; p + 3 <= regionEnd; p++) {
-      if (text.charCodeAt(p) !== 0x7B || text.charCodeAt(p + 1) !== 0x3D || text.charCodeAt(p + 2) !== 0x3D) continue;
+      if (text.charCodeAt(p) !== 0x7B || text.charCodeAt(p + 1) !== 0x3D || text.charCodeAt(p + 2) !== 0x3D || isEscapedAt(text, p)) continue;
       // The first ==} after it, as for one outside a span
       const ci = closers.next('==}', p + 3);
       if (ci === -1 || ci + 3 > regionEnd) return;
@@ -541,7 +548,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
   const len = text.length;
   let i = 0;
   while (i < len) {
-    if (text.charCodeAt(i) === 0x7B && i + 2 < len) {
+    // A { an odd run of backslashes escapes opens nothing (see criticSpans)
+    if (text.charCodeAt(i) === 0x7B && i + 2 < len && !isEscapedAt(text, i)) {
       const c2 = text.charCodeAt(i + 1);
       const c3 = text.charCodeAt(i + 2);
 
@@ -656,7 +664,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
         let found = false;
         while (k < len) {
           // Check for CriticMarkup opening delimiters — process and skip entire spans
-          if (text.charCodeAt(k) === 0x7B && k + 2 < len) {
+          if (text.charCodeAt(k) === 0x7B && k + 2 < len && !isEscapedAt(text, k)) {
             const d2 = text.charCodeAt(k + 1);
             const d3 = text.charCodeAt(k + 2);
             if (d2 === 0x3D && d3 === 0x3D) { // {==

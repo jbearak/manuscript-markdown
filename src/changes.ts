@@ -16,7 +16,13 @@ import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 // runs only where an == is. The grammar's patterns match the run of
 // backslashes instead: Oniguruma's lookbehind of no fixed length steps back to
 // the line's start at each == after an even run.
-const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+// A { after an odd run of backslashes, whose last escapes it, opens no
+// CriticMarkup, as export and the preview read it (markdown-it's escape
+// rule): \{++a++} is text, \\{++a++} an insertion. The openers share one {,
+// with the lookbehind after it, so it runs only where a { is. The grammar's
+// escaped_brace and extractAllDecorationRanges in highlight-colors.ts read
+// the same.
+const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Version-keyed cache for navigation match results (single-document cache)
 let cachedUri: string | undefined;
