@@ -9066,30 +9066,36 @@ function criticSpanStart(text: string, opener: string, closer: string, from: num
  *  leaves open at its end, while it does: where it starts and ends, its
  *  Markdown, and the last three characters of that, which an end may start
  *  in. The next comment's Markdown, written right after it, goes on in it,
- *  as the two comments Word split <!-- x<!-- a --> into read as one. */
-interface HiddenComments { starts: Map<number, number>; open?: { start: number; end: number; text: string; tail: string } }
+ *  as the two comments Word split <!-- x<!-- a --> into read as one. Once
+ *  one holds Markdown that isn't a comment (`mixed`), no more are noted. */
+interface HiddenComments { starts: Map<number, number>; open?: { start: number; end: number; text: string; tail: string }; mixed?: true }
 
 /** Notes in `hidden` the comments in `written`, the Markdown of a hidden
  *  comment just written at `at` in a paragraph's, as export reads them,
  *  which hides them: each from its <!-- to its end as markdown-it reads it
  *  inline, past a -> or --!> in it, and in an HTML table's cell as the
- *  browser reads it, to a --> or --!>. Only where it holds nothing else
- *  but whitespace, which is all export then reads it as. Anything else is
- *  text Word hid with them, which shows once export reads it, as the x of
+ *  browser reads it, to a --> or --!>. Only while the hidden comments'
+ *  Markdown in the paragraph holds nothing but comments and whitespace,
+ *  which is all export then reads it as. Anything else is text Word hid
+ *  with them, which shows once export reads it, as the x of
  *  <!-- a -->x<!-- b --> does, and which, as code, an escape, an autolink,
  *  a tag, a link or CriticMarkup, can make a later <!-- text, as of
- *  <!-- a -->`<!-- b `, or show what lastVisibleChar would read past, as
- *  the text of <!-- a -->{++<!-- b -->++}, so none of them is noted. Nor is
- *  one after a <!-- that has no end there, as of <!-- a --->, which
- *  markdown-it reads as text. One with nothing that may end it after it
- *  waits for the next comment's Markdown, which goes on in it where it
- *  comes right after, and is read from its <!-- only once one may, so a run
- *  of comments Word split one into is read once. Where Markdown comes
- *  between, as a comment's body, the comment holds that and the next one's
- *  start, as export reads it, so nothing is noted until it may end. Only
- *  `written` is read, not the paragraph's Markdown, which reading would
- *  join for each comment. */
+ *  <!-- a -->`<!-- b `, though that's in the next hidden run or after text
+ *  between, or show what lastVisibleChar would read past, as the text of
+ *  <!-- a -->{++<!-- b -->++}. So from the hidden run that holds it on, no
+ *  comment in the paragraph is noted. Nor is any from a <!-- that has no
+ *  end there, as of <!-- a --->, which markdown-it reads as text, on. The
+ *  text that isn't hidden can't do that, as import escapes what it would
+ *  open, as \` and \[. One with nothing that may end it after it waits for
+ *  the next comment's Markdown, which goes on in it where it comes right
+ *  after, and is read from its <!-- only once one may, so a run of comments
+ *  Word split one into is read once. Where Markdown comes between, as a
+ *  comment's body, the comment holds that and the next one's start, as
+ *  export reads it, so none is noted from there on either. Only `written`
+ *  is read, not the paragraph's Markdown, which reading would join for
+ *  each comment. */
 function noteHiddenComments(hidden: HiddenComments, written: string, at: number): void {
+  if (hidden.mixed) return;
   const commentEnd = (text: string, start: number): number => {
     if (!readsMarkdown) {
       const piece = htmlPieceAt(text, start);
@@ -9103,7 +9109,7 @@ function noteHiddenComments(hidden: HiddenComments, written: string, at: number)
   const open = hidden.open;
   hidden.open = undefined;
   if (open && open.end !== at) {
-    if (!mayEnd.test(written)) hidden.open = open;
+    hidden.mixed = true;
     return;
   }
   // Where each ends, with where it starts, kept until all of `written` is read
@@ -9116,7 +9122,10 @@ function noteHiddenComments(hidden: HiddenComments, written: string, at: number)
       return;
     }
     const end = commentEnd(text, 0);
-    if (end === -1) return;
+    if (end === -1) {
+      hidden.mixed = true;
+      return;
+    }
     noted.push([open.start + end, open.start]);
     from = Math.max(0, end - open.text.length);
   }
@@ -9125,10 +9134,12 @@ function noteHiddenComments(hidden: HiddenComments, written: string, at: number)
     space.test(written);
     const start = space.lastIndex;
     if (start === written.length) break;
-    if (!written.startsWith('<!--', start)) return;
-    const end = commentEnd(written, start);
+    const end = written.startsWith('<!--', start) ? commentEnd(written, start) : -1;
     if (end === -1) {
-      if (mayEnd.test(written.slice(start + 4))) return;
+      if (!written.startsWith('<!--', start) || mayEnd.test(written.slice(start + 4))) {
+        hidden.mixed = true;
+        return;
+      }
       hidden.open = { start: at + start, end: at + written.length, text: written.slice(start), tail: written.slice(-3) };
       break;
     }

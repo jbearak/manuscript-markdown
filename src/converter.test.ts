@@ -25696,8 +25696,41 @@ describe('a citation right after a hidden HTML comment', () => {
   });
 
   test.each([
+    // Code that opens in one hidden run and closes in a later one, past
+    // text between them too, and with IDs
+    ['code from one to the next', [comment('<!-- a -->` '), comment('<!-- b `x -->')], 'a <!-- a -->` <!-- b `x --> [@doe2020] b'],
+    ['code from one alone to the next', [comment('<!-- a -->'), comment('` '), comment('<!-- b `x -->')], 'a <!-- a -->` <!-- b `x --> [@doe2020] b'],
+    ['code past text between', [comment('<!-- a -->` '), plain('y '), comment('<!-- b `x -->')], 'a <!-- a -->` y <!-- b `x --> [@doe2020] b'],
+    ['code past text between, its spaces in the runs', [comment('<!-- a -->`'), plain(' y'), comment(' <!-- b `x -->')], 'a <!-- a -->` y <!-- b `x --> [@doe2020] b'],
+    // Which leave a later <!-- text, or hide it, as main reads them
+    ['an insertion', [comment('<!-- a -->{++'), comment('<!-- b -->++}')], 'a <!-- a -->{++<!-- b -->++} [@doe2020] b'],
+    ['an escape', [comment('<!-- a -->\\'), comment('<!-- b -->')], 'a <!-- a -->\\<!-- b --> [@doe2020] b'],
+    ['a tag\'s attribute', [comment('<!-- a --><span title="'), comment('<!-- b -->">')], 'a <!-- a --><span title="<!-- b -->"> [@doe2020] b'],
+    ['a link', [comment('<!-- a -->[l](<'), comment('<!-- b -->>)')], 'a <!-- a -->[l](<<!-- b -->>) [@doe2020] b'],
+    ['math', [comment('<!-- a -->$'), comment('<!-- b -->$')], 'a <!-- a -->$<!-- b -->$ [@doe2020] b'],
+    ['an autolink', [comment('<!-- a --><http://x/'), comment('<!-- b -->')], 'a <!-- a --><http://x/<!-- b --> [@doe2020] b'],
+    ['a comment markdown-it reads as text', [comment('<!-- a --->`'), comment('<!-- b `x -->')], 'a <!-- a --->`<!-- b `x --> [@doe2020] b'],
+  ])('keeps the space after hidden runs that hold %s, as before', (_name, comments, expected) => {
+    // What one holds goes on into the Markdown of the next
+    expect(buildMarkdown([plain('a '), ...comments, citation(), plain(' b')], new Map()).trim()).toBe(expected);
+  });
+
+  test('keeps the space after hidden runs that hold code from one to the next, with IDs, as before', () => {
+    const ranged = (item: ContentItem): ContentItem => ({ ...item, commentIds: new Set(['c1']) } as ContentItem);
+    const comments = new Map([['c1', { author: 'A', text: 'x', date: '2025-01-01T00:00:00Z' }]]);
+    const markdown = buildMarkdown([plain('a '), ranged(comment('<!-- a -->` ')), ranged(comment('<!-- b `x -->')), ranged(citation()), plain(' b')], comments, { alwaysUseCommentIds: true });
+    expect(markdown).toContain('a {#1}<!-- a -->` <!-- b `x --> [@doe2020]{/1} b');
+  });
+
+  test('writes no space after hidden runs of comments alone', () => {
+    expect(buildMarkdown([plain('a '), comment('<!-- a -->'), comment(' <!-- b -->'), citation(), plain(' b')], new Map()).trim()).toBe('a <!-- a --><!-- b -->[@doe2020] b');
+  });
+
+  test.each([
     ['code', '&lt;!-- a --&gt;` &lt;!-- b `x --&gt;', 'a <!-- a -->` <!-- b `x --> [@doe2020] b.'],
     ['an insertion', '&lt;!-- a --&gt;{++&lt;!-- b --&gt;++}', 'a <!-- a -->{++<!-- b -->++} [@doe2020] b.'],
+    // Two hidden runs, the code from one to the next
+    ['code, split', '&lt;!-- a --&gt;` </w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">\u200B&lt;!-- b `x --&gt;', 'a <!-- a -->` <!-- b `x --> [@doe2020] b.'],
   ])('keeps the space after Word\'s hidden run of a comment and %s, as before', async (_name, hiddenText, expected) => {
     // Export shows what follows the comment, so the citation went right
     // after its >
