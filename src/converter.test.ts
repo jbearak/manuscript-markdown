@@ -25674,6 +25674,42 @@ describe('a citation right after a hidden HTML comment', () => {
   });
 
   test.each([
+    ['code', '` <!-- b `x -->'],
+    ['an insertion', '{++<!-- b -->++}'],
+    ['a deletion', '{--<!-- b -->--}'],
+    ['a Word comment\'s range', '{==<!-- b -->==}{>><<}'],
+    ['a Word comment\'s body', '{>><!-- b --><<}'],
+    ['an escape', '\\<!-- b -->'],
+    ['an autolink', '<http://x/<!-- b -->'],
+    ['a tag\'s attribute', '<span title="<!-- b -->">'],
+    ['a link\'s title', '[l](u "<!-- b -->")'],
+    ['a reference', '&lt;!-- b -->'],
+    ['an emphasis mark', '**'],
+    ['an ID comment\'s marker', '{#c1}'],
+    ['text and a comment', ' x <!-- b -->'],
+    ['math', '$<!-- b -->$'],
+  ])('keeps the space after a hidden run that holds %s after its comment, as before', (_name, rest) => {
+    // Text Word hid with the comment, which shows once export reads it,
+    // and can make a later <!-- text, as code does, or show what the space
+    // read past, as an insertion's text
+    expect(buildMarkdown([plain('a '), comment('<!-- a -->' + rest), citation(), plain(' b')], new Map()).trim()).toBe('a <!-- a -->' + rest + ' [@doe2020] b');
+  });
+
+  test.each([
+    ['code', '&lt;!-- a --&gt;` &lt;!-- b `x --&gt;', 'a <!-- a -->` <!-- b `x --> [@doe2020] b.'],
+    ['an insertion', '&lt;!-- a --&gt;{++&lt;!-- b --&gt;++}', 'a <!-- a -->{++<!-- b -->++} [@doe2020] b.'],
+  ])('keeps the space after Word\'s hidden run of a comment and %s, as before', async (_name, hiddenText, expected) => {
+    // Export shows what follows the comment, so the citation went right
+    // after its >
+    const zip = await JSZip.loadAsync((await convertMdToDocx('a <!-- h -->[@doe2020] b.\n', { bibtex })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain('&lt;!-- h --&gt;');
+    zip.file('word/document.xml', xml.replace('&lt;!-- h --&gt;', hiddenText));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected + '\n');
+  });
+
+  test.each([
     ['before a citation', (n: number) => [plain('a '), ...Array.from({ length: n }, () => comment('<!-- h -->')), citation()]],
     // Which Word split one comment into, which is read once
     ['of one, before a citation', (n: number) => [plain('a '), ...Array.from({ length: n }, (_, i) => comment(i === n - 1 ? '<!-- x -->' : '<!-- x')), citation()]],
