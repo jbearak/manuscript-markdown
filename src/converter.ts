@@ -10279,6 +10279,138 @@ function emphasisGroup(
  *  ends at a highlighted equation */
 const emphasislessRuns = new WeakMap<ContentItem[], { from: number; to: number; end: number; commentIds: ReadonlySet<string> }>();
 
+/** Text, a run's or a comment's range's, in the delimiters of the run of
+ *  emphasis around it (see emphasisWithComments), escaped as markedFormatting
+ *  escapes text in delimiters of its own, before the runs `after` */
+function textInEmphasis(text: string, after: RunsAfter): string {
+  const [leading, core, trailing] = edgeWhitespace(text);
+  const keys = new Set<number>();
+  return leading + escapeSensitiveHtmlLikeTags(escapeMarkdownChars(core, false, after, keys), keys) + trailing;
+}
+
+/**
+ * Bold, italic or struck text from `start` with CriticMarkup comments in
+ * it, as one run of its delimiters around them, so that *a {>>c<<} b* stays
+ * one run of italic. In delimiters of their own, the runs on each side would
+ * keep the spaces next to the comment outside them, *a* {>>c<<} *b*, which
+ * the next export writes without the italic. Its text is in one formatting,
+ * bold, italic or strikethrough and no other, in no link or revision, with
+ * no line break. Its comments are on no text or on text in that formatting,
+ * whose range goes in it, as in *a {==b==}{>>c<<} d*, each range whole. A
+ * comment at its start or end goes in it only where whitespace is next to
+ * it there, which would go outside the delimiters, as in *a {>>c<<}* d, and
+ * where no text in some of that emphasis, nor an equation, which
+ * emphasisGroup can write in it, is on the comment's other side. Elsewhere
+ * it stays outside them, as Word reads it the same. Those at its start go
+ * in or stay out together, as the first of them does. Undefined where no
+ * comment goes in it, and where an inline equation comes right after its
+ * text, and in an HTML table's cell, which writes tags.
+ */
+function emphasisWithComments(
+  segment: ContentItem[], start: number, end: number, comments: Map<string, Comment>, timezone?: string,
+): { text: string; end: number } | undefined {
+  if (!readsMarkdown) return undefined;
+  const none = commentlessEmphasis.get(segment);
+  if (none && none.from < start && start < none.to && none.end === end) return undefined;
+  const plain = (k: number): ContentItem & { type: 'text' } | undefined => {
+    const item = segment[k];
+    return k < end && item?.type === 'text' && !item.revision && !item.href && !item.text.includes('\n') ? item : undefined;
+  };
+  // The formatting, the first text's past comments on none
+  let k = start;
+  while (plain(k)?.text === '' && plain(k)!.commentIds.size > 0) k++;
+  const fmt = plain(k)?.formatting;
+  if (!fmt || !(fmt.bold || fmt.italic || fmt.strikethrough)
+      || !formattingEquals(fmt, { ...DEFAULT_FORMATTING, bold: fmt.bold, italic: fmt.italic, strikethrough: fmt.strikethrough })) {
+    // Nor from the comments after the first, which reach the same run
+    if (k > start) commentlessEmphasis.set(segment, { from: start, to: k, end });
+    return undefined;
+  }
+  // Where its text without comments starts, the end of the last of it, and
+  // whether a comment comes between two pieces of it, read to `to`, as far
+  // as it can go. Whitespace alone, which markedFormatting writes without
+  // delimiters, isn't such text: at an edge it would go outside them and
+  // leave a comment next to them, which the next import writes outside. It
+  // goes between the others
+  let first = -1;
+  let last = -1;
+  let range = -1;
+  let inside = false;
+  let to = start;
+  while (plain(to)) {
+    const item = plain(to)!;
+    if (item.commentIds.size === 0) {
+      if (item.text === '' || !formattingEquals(item.formatting, fmt)) break;
+      if (item.text.trim()) {
+        if (first === -1) first = to;
+        else if (range >= last) inside = true;
+        last = to + 1;
+      }
+      to++;
+      continue;
+    }
+    const ids = item.commentIds;
+    let rangeEnd = to;
+    for (let run; (run = plain(rangeEnd)) && commentSetsEqual(run.commentIds, ids) && (run.text === '' || formattingEquals(run.formatting, fmt));) rangeEnd++;
+    const next = segment[rangeEnd];
+    if (rangeEnd < end && 'commentIds' in next && commentSetsEqual(next.commentIds, ids)) break;
+    range = to;
+    to = rangeEnd;
+  }
+  const noGroup = (until = to) => {
+    commentlessEmphasis.set(segment, { from: start, to: until, end });
+    return undefined;
+  };
+  const inlineMath = (item: ContentItem | undefined) => item?.type === 'math' && !item.display;
+  if (first === -1 || inlineMath(segment[last])) return noGroup();
+  // Text in some of this emphasis, or an equation, which emphasisGroup can
+  // write in it, next to comments at its edge, which go outside it then
+  const takes = (item: ContentItem | undefined) => inlineMath(item) || item?.type === 'text'
+    && (fmt.bold && item.formatting.bold || fmt.italic && item.formatting.italic || fmt.strikethrough && item.formatting.strikethrough);
+  const text = (from: number, to: number) => segment.slice(from, to).map(item => (item as ContentItem & { type: 'text' }).text).join('');
+  // Whitespace alone at the comments' outer edge, which goes outside the
+  // delimiters, so it keeps none in
+  const alone = (k: number) => plain(k)!.commentIds.size === 0;
+  let from = first;
+  if (start < first) {
+    // Nor from the comments after, which stay out with it
+    if (alone(start) || takes(segment[start - 1]) || !/\s$/.test(text(start, first)) && !/^\s/.test(text(first, first + 1))) return noGroup(first);
+    from = start;
+  }
+  let groupEnd = last;
+  if (last < to && !alone(to - 1) && !takes(segment[to]) && (/\s$/.test(text(last - 1, last)) || /^\s/.test(text(last, to)))) groupEnd = to;
+  if (!inside && from === first && groupEnd === last) return noGroup();
+  let inner = '';
+  for (let g = from; g < groupEnd;) {
+    const ids = plain(g)!.commentIds;
+    let r = g;
+    let runs = '';
+    for (; r < groupEnd && commentSetsEqual(plain(r)!.commentIds, ids); r++) runs += textInEmphasis(plain(r)!.text, runsAfter(segment, r + 1, end));
+    if (ids.size === 0) {
+      inner += runs;
+    } else {
+      if (runs) inner += '{==' + runs + '==}';
+      for (const id of [...ids].sort()) {
+        const comment = comments.get(id);
+        if (comment) inner += syntaxText(formatCommentBody(id, comment, timezone));
+      }
+    }
+    g = r;
+  }
+  // A ~ at its edge would join the ~~ around it (see markedFormatting)
+  if (fmt.strikethrough) {
+    const [leading, core, trailing] = edgeWhitespace(inner);
+    inner = leading + core.replace(/^~/, '\\~').replace(/((?:^|[^\\])(?:\\\\)*)~$/, (_m, before: string) => before + '\\~') + trailing;
+  }
+  return { text: wrapFormatting(inner, fmt), end: groupEnd };
+}
+
+/** Per segment, a run of items from which emphasisWithComments found no
+ *  group, to the `end`, so that none starts later in it either, which
+ *  keeps import linear in a long run of them, as of comments, each read
+ *  once, not again from each before it */
+const commentlessEmphasis = new WeakMap<ContentItem[], { from: number; to: number; end: number }>();
+
 /** The start of a line that would start a block within a paragraph: a
  *  heading, list item, quote, code fence, HTML, display math or a table's
  *  row. Not a note's definition, as the [ of [^1] is escaped, nor a tag of
@@ -10725,6 +10857,18 @@ function renderInlineRange(
 
     if (item.type !== 'text' && item.type !== 'footnote_ref' && item.type !== 'citation' && item.type !== 'math' && item.type !== 'image') {
       i++;
+      continue;
+    }
+
+    // Bold, italic or struck text with comments in it keeps one run of its
+    // emphasis
+    const across = item.type === 'text' ? emphasisWithComments(segment, i, segmentEnd, comments, renderOpts?.timezone) : undefined;
+    if (across) {
+      const before = out;
+      out += across.text;
+      trailingBreak = trailingBreakOf(before, across.text, out);
+      noteHtmlBlock(htmlBlock, across.text, out.length);
+      i = across.end;
       continue;
     }
 

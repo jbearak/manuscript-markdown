@@ -6359,6 +6359,126 @@ describe('Emphasis between runs', () => {
   });
 });
 
+describe('Comments in emphasis', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const importOf = async (docx: Uint8Array) => strip((await convertDocx(docx)).markdown);
+  // Word's runs and the comments' anchors and text, without the IDs each
+  // export makes up
+  const wordOf = async (docx: Uint8Array) => {
+    const zip = await JSZip.loadAsync(docx);
+    const parts = await Promise.all(['word/document.xml', 'word/footnotes.xml', 'word/comments.xml']
+      .map(async part => (await zip.file(part)?.async('string'))?.replace(/ w14:\w+="[^"]*"| w:rsid\w*="[^"]*"/g, '')));
+    return parts.join('\n');
+  };
+  /** The Markdown the import after one export writes and the one after a
+   *  second, and whether the second gave Word what the first did */
+  const trips = async (md: string) => {
+    const first = (await convertMdToDocx(md)).docx;
+    const once = await importOf(first);
+    const second = (await convertMdToDocx(once)).docx;
+    return { once, twice: await importOf(second), sameWord: await wordOf(first) === await wordOf(second) };
+  };
+
+  test.each([
+    ['italic', 'A *B {>>c<<} C* D'],
+    ['bold', 'A **B {>>c<<} C** D'],
+    ['strikethrough', 'A ~~B {>>c<<} C~~ D'],
+    ['bold italic', 'A ***B {>>c<<} C*** D'],
+    ['struck italic', 'A *~~B {>>c<<} C~~* D'],
+    ['italic with no spaces', 'A *B{>>c<<}C* D'],
+    ['italic, on text', 'A *B {==x==}{>>c<<} C* D'],
+    ['italic, on two pieces of text', 'A *B {==x==}{>>c<<}{==y==}{>>d<<} C* D'],
+    ['italic, two together', 'A *B {>>c<<}{>>d<<} C* D'],
+    ['italic, two apart', 'A *B {>>c<<} C {>>d<<} E* F'],
+    ['italic, with a reply', 'A *B {>>c\n  {>>r<<}\n<<} C* D'],
+    ['italic, with an asterisk in it', 'A *B {>>c * d<<} C* D'],
+    ['italic, between escaped asterisks', 'A *B\\* {>>c<<} \\*C* D'],
+    ['italic, before a line break', 'A *B {>>c<<} C*\\\nD'],
+    ['italic, at its end after a space', 'A *B {>>c<<}* D'],
+    ['italic, at its start before a space', 'A *{>>c<<} B* D'],
+    ['italic, on text at its end after a space', 'A *B {==x==}{>>c<<}* D'],
+    ['italic, on text at its start before a space', 'A *{==x==}{>>c<<} B* D'],
+    ['italic in a heading', '# H *B {>>c<<} C*'],
+    ['italic in a list item', '- *B {>>c<<} C*'],
+    ['italic in a quote', '> *B {>>c<<} C*'],
+    ['italic in a table\'s cell', '| a |\n| --- |\n| *B {>>c<<} C* |'],
+    ['italic in a footnote', 'A.[^1]\n\n[^1]: *B {>>c<<} C* D'],
+  ])('keeps a comment in %s inside it', async (_name, md) => {
+    // Each side went in delimiters of its own, as *B* {>>c<<} *C*, which
+    // left the spaces next to the comment outside them, without the italic
+    expect(await trips(md)).toEqual({ once: md, twice: md, sameWord: true });
+  });
+
+  test.each([
+    ['underscores', 'A _B {>>c<<} C_ D', 'A *B {>>c<<} C* D', true],
+    ['ID syntax', 'A *B {#1}x{/1} C* D\n\n{#1>>c<<}', 'A *B {==x==}{>>c<<} C* D', true],
+    // As each side does with no comment, as *B* ***E F*** *C*
+    ['bold in italic', 'A *B **E {>>c<<} F** C* D', 'A *B* ***E {>>c<<} F*** *C* D', false],
+    // Word's runs are the same with the comment inside or outside
+    ['italic, at its start', '*{>>c<<}B C* D', '{>>c<<}*B C* D', true],
+    ['italic, at its end', 'A *B C{>>c<<}*', 'A *B C*{>>c<<}', true],
+  ])('writes a comment in emphasis in %s as Word reads it', async (_name, md, expected, sameWord) => {
+    expect(await trips(md)).toEqual({ once: expected, twice: expected, sameWord });
+  });
+
+  test.each([
+    ['a comment before emphasis', '{>>c<<}*B C* D'],
+    ['a comment after emphasis', 'A *B C*{>>c<<}'],
+    ['a comment between emphasis with plain spaces', 'A *B* {>>c<<} *C* D'],
+    ['a comment on emphasis', 'This is {==*important*==}{>>c<<} text'],
+    ['a comment on emphasis before emphasis', '{==*x*==}{>>c<<}*B*'],
+    ['a comment between emphasis and emphasis with an equation', 'A *B $x$ C* {>>c<<} *D* E'],
+    ['a comment between highlights', 'A ==B =={>>c<<}== C== D'],
+    ['a comment between links', '[B ](u){>>c<<}[ C](u)'],
+  ])('keeps %s as written', async (_name, md) => {
+    expect(await trips(md)).toEqual({ once: md, twice: md, sameWord: true });
+  });
+
+  const run = (text: string, formatting: Partial<RunFormatting> = {}, ids: string[] = []): ContentItem =>
+    ({ type: 'text', text, commentIds: new Set(ids), formatting: { ...DEFAULT_FORMATTING, ...formatting } });
+  const comments = new Map([['c1', { author: '', text: 'c', date: '' }]]);
+  test.each([
+    // Where * can't close, after the comment's } and before a letter
+    ['italic before a letter', [run('A '), run('B ', { italic: true }), run('', {}, ['c1']), run('D')], 'A <i>B {>>c<<}</i>D'],
+    ['struck text with a ~ at each edge', [run('~B ', { strikethrough: true }), run('', {}, ['c1']), run(' C~', { strikethrough: true })], '~~\\~B {>>c<<} C\\~~~'],
+    ['struck text with spaces at its edges', [run('A'), run(' B ', { strikethrough: true }), run('', {}, ['c1']), run(' C ', { strikethrough: true }), run('D')], 'A<s> B {>>c<<} C </s>D'],
+    ['italic text with an escape at its end', [run('a\\', { italic: true }), run('', {}, ['c1']), run('b', { italic: true })], '*a\\\\{>>c<<}b*'],
+  ])('writes Word\'s %s around a comment as one run of emphasis', async (_name, items, markdown) => {
+    const written = buildMarkdown([{ type: 'para' }, ...items], comments).trim();
+    expect(written).toBe(markdown);
+    expect(await importOf((await convertMdToDocx(written)).docx)).toBe(markdown);
+  });
+
+  test.each([
+    ['in emphasis with an equation after the last', (i: number, n: number): ContentItem[] => i < n - 1 ? [run('a ', { italic: true }), run('', {}, ['c1'])]
+      : [run('a', { italic: true }), { type: 'math', latex: 'x', display: false, commentIds: new Set() }]],
+    ['on emphasis with no text between their ranges', (): ContentItem[] => [run('a', { italic: true }, ['c1'])]],
+    // Each comment read those after it to the text after them
+    ['on no text before plain text', (i: number, n: number): ContentItem[] => [i < n - 1 ? run('', {}, ['c1']) : run('a')]],
+    ['on no text before an equation', (i: number, n: number): ContentItem[] => [i < n - 1 ? run('', {}, ['c1'])
+      : { type: 'math', latex: 'x', display: false, commentIds: new Set() }]],
+    ['on no text before italic text', (i: number, n: number): ContentItem[] => [i < n - 1 ? run('', {}, ['c1']) : run('a', { italic: true })]],
+    ['on italic text before italic text', (i: number, n: number): ContentItem[] => [run('a', { italic: true }, i < n - 1 ? ['c1'] : [])]],
+  ])('writes many comments %s in time linear in their number', (_name, items) => {
+    // Where no run of emphasis goes around them, each piece of it would read
+    // the rest of it again
+    const time = (n: number) => {
+      const content = [{ type: 'para' } as ContentItem, ...Array.from({ length: n }, (_, i) => items(i, n)).flat()];
+      // Kept apart, each in a range of its own
+      content.forEach((item, k) => { if (item.type === 'text' && item.commentIds.size) item.commentIds = new Set(['c' + k]); });
+      const all = new Map(content.map((_, k) => ['c' + k, { author: '', text: 'c', date: '' }]));
+      let fastest = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const start = performance.now();
+        buildMarkdown(content, all);
+        fastest = Math.min(fastest, performance.now() - start);
+      }
+      return fastest;
+    };
+    expect(time(16000) / time(4000)).toBeLessThan(8);
+  }, 60000);
+});
+
 describe('buildMarkdown', () => {
   type Formatting = { bold: boolean; italic: boolean; strikethrough: boolean; underline: boolean; highlight: boolean; superscript: boolean; subscript: boolean; code: boolean };
 
