@@ -107,16 +107,17 @@ function isLinkifyToken(token: Token): boolean {
   return (token.type === 'link_open' || token.type === 'link_close') && token.markup === 'linkify';
 }
 
-/** Whether a bracket's first item is plain text up to a real key, as in
- *  [e.g., @key] or [for n = 10, see @key]. Formatting before or around the key
+/** Where the key of a bracket's first item starts in it, where the item is
+ *  plain text up to a real key, as in [e.g., @key] or [for n = 10, see @key],
+ *  or -1. Formatting before or around the key
  *  (code, emphasis, CriticMarkup, math, HTML) leaves the brackets ordinary
  *  Markdown: a Zotero prefix is plain text, and an `@` inside a code span is not
  *  a key. Escaped characters count as text but never start a key. citation_list
  *  in the grammar approximates this with a regex; hasCitations() in md-to-docx.ts
  *  asks the parse. */
-function isPlainPrefixedCitationItem(state: Pick<StateInline, 'md' | 'env'>, item: string): boolean {
+function plainPrefixedKeyStart(state: Pick<StateInline, 'md' | 'env'>, item: string): number {
   const key = CITATION_KEY_RE.exec(item);
-  if (!key) return false;
+  if (!key) return -1;
   // Parse with the key replaced by a plain word. The key is opaque, so the
   // underscores in @_smith2020_ are not emphasis, but a code span or emphasis
   // wrapped around the key still shows up.
@@ -129,10 +130,182 @@ function isPlainPrefixedCitationItem(state: Pick<StateInline, 'md' | 'env'>, ite
     if (token.type === 'text') text += token.content;
     else if (token.type === 'text_special') text += '�';
     else if (token.type === 'softbreak') text += '\n';
-    else if (!isLinkifyToken(token)) return false;
-    if (CITATION_KEY_START_RE.test(text)) return true;
+    else if (!isLinkifyToken(token)) return -1;
+    if (CITATION_KEY_START_RE.test(text)) return keyStart;
+  }
+  return -1;
+}
+
+/** Whether the [ at `start` opens a link's text past the ] at `close`,
+ *  as markdown-it reads it, as in [$a @key]$](url). An equation or code
+ *  that starts in the first item's prefix, before its key at `keyStart`,
+ *  and runs past the ] takes that ] for its own, though
+ *  plainPrefixedKeyStart, whose parse ends at the ], reads the prefix as
+ *  plain text. Where a link follows the next ] after it, the link rule
+ *  reads one there, as Pandoc does (see linkAfter).
+ *
+ *  It reads only those two, with escapes and plain text, so that each
+ *  citation's scan reads its own part of the text (see lookaheadStep). It
+ *  leaves the citation as it is, as before, where the prefix has another
+ *  token's start first, as a tag's or CriticMarkup's, and where the text
+ *  after the equation or code holds anything but plain text and escapes
+ *  before that ]. So does an equation or code that starts in a key or a
+ *  locator, which are read as written, and one with no ( or [ after that
+ *  ], as in [see $x @key] y$. */
+function opensLinkPast(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: number, keyStart: number, close: number): boolean {
+  const ahead = lookaheadOf(state);
+  let pos = start + 1;
+  while (pos < keyStart) {
+    pos = lookaheadStep(ahead, pos);
+    if (pos === -1) return false;
+  }
+  if (pos <= close) return false;
+  const { src, posMax } = ahead.state;
+  while (pos < posMax) {
+    const ch = src.charAt(pos);
+    if (ch === ']') return linkAfter(ahead.state, start + 1, pos);
+    // Where another token may start, whose search for its end the next
+    // citation's scan would read again
+    if (ch === '[' || ch === '$' || ch === '`') return false;
+    pos = lookaheadStep(ahead, pos);
+    if (pos === -1) return false;
   }
   return false;
+}
+
+/** A [, or what may start a token in a reference's label: code, a tag or
+ *  an autolink, an equation, CriticMarkup, a highlight or a URL */
+const LABEL_TOKEN_START_RE = /[[`<$={:]/;
+
+/** Whether a link follows the ] at `close` that ends the text from
+ *  `labelStart`, as markdown-it's link rule reads one: a destination in
+ *  ( ), or a reference defined in the document, named in [ ] or by the
+ *  text. Where it reads none, the brackets stay a citation, as before. A
+ *  label longer than a label may be is read as no link, which no
+ *  definition could name, and so is one holding a [ or what may start a
+ *  token that the link rule's label would skip whole, ] and all (see
+ *  LABEL_TOKEN_START_RE), as before. */
+function linkAfter(state: StateInline, labelStart: number, close: number): boolean {
+  const { src, posMax: max, md, env } = state;
+  const skipSpaces = (at: number) => {
+    while (at < max && (md.utils.isSpace(src.charCodeAt(at)) || src.charCodeAt(at) === 0x0A)) at++;
+    return at;
+  };
+  let pos = close + 1;
+  if (src.charAt(pos) === '(') {
+    pos = skipSpaces(pos + 1);
+    if (pos >= max) return false;
+    const destination = md.helpers.parseLinkDestination(src, pos, max);
+    if (destination.ok) {
+      if (md.validateLink(md.normalizeLink(destination.str))) pos = destination.pos;
+      const start = pos;
+      pos = skipSpaces(pos);
+      const title = md.helpers.parseLinkTitle(src, pos, max);
+      if (pos < max && start !== pos && title.ok) pos = skipSpaces(title.pos);
+    }
+    if (pos < max && src.charAt(pos) === ')') return true;
+    pos = close + 1;
+  } else if (src.charAt(pos) !== '[') {
+    return false;
+  }
+  const references = env?.references as Record<string, unknown> | undefined;
+  if (!references) return false;
+  let label = '';
+  if (src.charAt(pos) === '[') {
+    let end = pos + 1;
+    while (end < max && end - pos <= 1000 && src.charAt(end) !== ']') {
+      if (LABEL_TOKEN_START_RE.test(src.charAt(end))) return false;
+      end += src.charAt(end) === '\\' ? 2 : 1;
+    }
+    if (end >= max || src.charAt(end) !== ']') return false;
+    label = src.slice(pos + 1, end);
+  }
+  return Boolean(references[md.utils.normalizeReference(label || src.slice(labelStart, close))]);
+}
+
+// What opensLinkPast reads each state's text with: a state of its own,
+// apart from the state markdown-it is reading, which no scan ahead may
+// change, as its backtick rule's cache assumes it reads its text once, in
+// order, and the backtick runs of the text, found once
+interface Lookahead {
+  state: StateInline;
+  runs?: Map<number, number[]>;
+}
+const lookaheads = new WeakMap<object, Lookahead>();
+
+/** opensLinkPast's reading of `state`'s text, to where it ends, at its
+ *  nesting and link level */
+function lookaheadOf(state: Pick<StateInline, 'src' | 'md' | 'env'>): Lookahead {
+  const live = state instanceof state.md.inline.State ? state as StateInline & { linkLevel: number } : undefined;
+  const posMax = live?.posMax ?? state.src.length;
+  const level = live?.level ?? 0;
+  const linkLevel = live?.linkLevel ?? 0;
+  let ahead = lookaheads.get(state);
+  if (!ahead || ahead.state.src !== state.src || ahead.state.md !== state.md) lookaheads.set(state, ahead = { state: new state.md.inline.State(state.src, state.md, state.env, []) });
+  const scan = ahead.state as StateInline & { linkLevel: number };
+  // Where each token ends depends on these
+  if (scan.posMax !== posMax || scan.level !== level || scan.linkLevel !== linkLevel) {
+    scan.posMax = posMax;
+    scan.level = level;
+    scan.linkLevel = linkLevel;
+    scan.cache = {};
+  }
+  return ahead;
+}
+
+/** Where what starts at `pos` ends, as the parse reads it, in plain text,
+ *  an escape, an equation or code, or -1 where another token may start
+ *  there: a tag or an autolink, CriticMarkup, a highlight's == or a URL's
+ *  :, which these scans don't read. An equation is the reader's own, its
+ *  rule run once for each $, whose search ends at the next $. Code ends
+ *  at the next run of as many backticks, from an index of the runs. */
+function lookaheadStep(ahead: Lookahead, pos: number): number {
+  const { src, posMax } = ahead.state;
+  const ch = src.charAt(pos);
+  if (ch === '\\') return pos + 2;
+  if (ch === '$') {
+    ahead.state.pos = pos;
+    ahead.state.md.inline.skipToken(ahead.state);
+    return ahead.state.pos;
+  }
+  if (ch === '`') {
+    let end = pos;
+    while (end < posMax && src.charCodeAt(end) === 0x60) end++;
+    const length = end - pos;
+    const close = nextRun(ahead, length, end);
+    // A run with no other as long after it is text, as markdown-it reads it
+    return close !== -1 && close + length <= posMax ? close + length : end;
+  }
+  if (ch === '{' || ch === ':' || ch === '<' && /[A-Za-z/!?]/.test(src.charAt(pos + 1)) || ch === '=' && src.charAt(pos + 1) === '=') return -1;
+  return pos + 1;
+}
+
+/** Where the first run of exactly `length` backticks at or after `from`
+ *  starts, or -1 */
+function nextRun(ahead: Lookahead, length: number, from: number): number {
+  if (!ahead.runs) {
+    const runs = new Map<number, number[]>();
+    const { src } = ahead.state;
+    for (let at = src.indexOf('`'); at !== -1; at = src.indexOf('`', at)) {
+      let end = at;
+      while (src.charCodeAt(end) === 0x60) end++;
+      let starts = runs.get(end - at);
+      if (!starts) runs.set(end - at, starts = []);
+      starts.push(at);
+      at = end;
+    }
+    ahead.runs = runs;
+  }
+  const starts = ahead.runs.get(length);
+  if (!starts) return -1;
+  let low = 0;
+  let high = starts.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (starts[mid] < from) low = mid + 1;
+    else high = mid;
+  }
+  return low < starts.length ? starts[low] : -1;
 }
 
 /** A citation prefix as the plain text Zotero stores: backslash escapes
@@ -164,7 +337,9 @@ export function citationEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, star
     // `[label]: url` definition, so a citation here would drop the URL.
     const references = state.env?.references as Record<string, unknown> | undefined;
     if (references && references[state.md.utils.normalizeReference(rawContent)]) return -1;
-    if (!isPlainPrefixedCitationItem(state, rawContent.split(';')[0])) return -1;
+    const keyStart = plainPrefixedKeyStart(state, rawContent.split(';')[0]);
+    if (keyStart === -1) return -1;
+    if (opensLinkPast(state, start, start + 1 + keyStart, endPos)) return -1;
   }
   return endPos;
 }
