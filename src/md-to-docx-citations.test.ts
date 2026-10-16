@@ -906,6 +906,7 @@ describe('citation prefixes', () => {
     ['a reference no definition names', '[see $a @smith2020]$][missing]', ['smith2020'], false],
     ['a destination that ( ) doesn\'t close', '[see $a @smith2020]$](a b c) d', ['smith2020'], false],
     ['a [ in the label', '[see $a @smith2020]$][a[b]', ['smith2020'], false],
+    ['code holding a ] in the label', '[see $a @smith2020]$][`a]b`]\n\n[`a]: u', ['smith2020'], false],
     ['a defined reference', '[see $a @smith2020]$][r]\n\n[r]: https://example.com', undefined, true],
     ['a destination and a title', '[see $a @smith2020]$](u "t")', undefined, true],
   ])('reads a citation whose prefix starts an equation past its ], then %s, as markdown-it reads a link there', (_name, md, keys, links) => {

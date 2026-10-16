@@ -173,12 +173,18 @@ function opensLinkPast(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: nu
   return false;
 }
 
+/** A [, or what may start a token in a reference's label: code, a tag or
+ *  an autolink, an equation, CriticMarkup, a highlight or a URL */
+const LABEL_TOKEN_START_RE = /[[`<$={:]/;
+
 /** Whether a link follows the ] at `close` that ends the text from
  *  `labelStart`, as markdown-it's link rule reads one: a destination in
  *  ( ), or a reference defined in the document, named in [ ] or by the
  *  text. Where it reads none, the brackets stay a citation, as before. A
- *  label holding a [ or longer than a label may be is read as no link,
- *  which no definition could name. */
+ *  label longer than a label may be is read as no link, which no
+ *  definition could name, and so is one holding a [ or what may start a
+ *  token that the link rule's label would skip whole, ] and all (see
+ *  LABEL_TOKEN_START_RE), as before. */
 function linkAfter(state: StateInline, labelStart: number, close: number): boolean {
   const { src, posMax: max, md, env } = state;
   const skipSpaces = (at: number) => {
@@ -208,7 +214,7 @@ function linkAfter(state: StateInline, labelStart: number, close: number): boole
   if (src.charAt(pos) === '[') {
     let end = pos + 1;
     while (end < max && end - pos <= 1000 && src.charAt(end) !== ']') {
-      if (src.charAt(end) === '[') return false;
+      if (LABEL_TOKEN_START_RE.test(src.charAt(end))) return false;
       end += src.charAt(end) === '\\' ? 2 : 1;
     }
     if (end >= max || src.charAt(end) !== ']') return false;
