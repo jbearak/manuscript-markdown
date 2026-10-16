@@ -7,8 +7,9 @@
  *
  * Only recognized display-math environments are wrapped. Code regions, HTML
  * comments, CriticMarkup spans, and the display math export reads, are
- * treated as "inert zones" and skipped, with the rest of a paragraph after
- * a fence of two dollar signs export reads as text.
+ * treated as "inert zones" and skipped. Where these leave an environment
+ * otherwise than main's pairing of each fence with the next, main's
+ * decision holds but where the read is certain (see environmentDecider).
  */
 
 import MarkdownIt from 'markdown-it';
@@ -42,11 +43,12 @@ interface Zone { start: number; end: number }
 
 /**
  * Compute sorted, merged "inert zones" where bare environments should NOT
- * be recognized: code regions, HTML comments, CriticMarkup, the display
- * math export reads, and a paragraph's text after a fence export reads as
- * text.
+ * be recognized: code regions, HTML comments, CriticMarkup, and the display
+ * math export reads.
  * Not the HTML blocks export writes as text, which latexReplacements reads
- * past the environments it finds.
+ * past the environments it finds. Where these leave an environment
+ * otherwise than main's zones do, latexReplacements takes main's decision
+ * for it but where the read is certain (see environmentDecider).
  */
 export function computeInertZones(text: string): Zone[] {
 	return inertZonesAndLiteralHtml(text).zones;
@@ -54,8 +56,8 @@ export function computeInertZones(text: string): Zone[] {
 
 /** The display math step 4 of computeInertZones reads in `text`, as export
  *  reads it, each from its opening fence to past its closing one, and the
- *  texts it reads as main did, for the test that checks them against the
- *  display math of export's own parse */
+ *  texts it can't read for certain, in which it finds none, for the test
+ *  that checks them against the display math of export's own parse */
 export function displayZones(text: string): DisplaysFound {
 	const found: DisplaysFound = { displays: [], fallbacks: [] };
 	inertZonesAndLiteralHtml(text, found);
@@ -67,10 +69,27 @@ interface DisplaysFound {
 	fallbacks: Zone[];
 }
 
+/** The inert zones of `text`, and what step 4 read them from */
+interface InertReading {
+	/** Sorted and merged */
+	zones: Zone[];
+	/** The HTML blocks export writes as text */
+	literalHtml: Zone[];
+	/** The zones of steps 1 to 3, as main found them too */
+	steps: Zone[];
+	/** The texts export's inline parse reads on its own, sorted (see
+	 *  exportUnits) */
+	units: Zone[];
+	/** The text of each environment read as nothing, with a dollar sign or
+	 *  a backtick in it (see withEnvironmentsMasked) */
+	masked: Zone[];
+	read: EquationRead;
+}
+
 /** The inert zones of `text`, and the HTML blocks export writes as text,
- *  with step 4's display math, and the texts it reads as main did, added to
- *  `found`'s */
-function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound): { zones: Zone[]; literalHtml: Zone[] } {
+ *  with step 4's display math, and the texts it can't read for certain,
+ *  added to `found`'s */
+function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound): InertReading {
 	const zones: Zone[] = [];
 
 	// 1. Code regions (fenced blocks + inline code spans), as export reads
@@ -162,34 +181,41 @@ function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound): { zones:
 	// its opening fence to the one it reads as its closing fence: those
 	// fences paired, as main paired each fence with the next, but no other.
 	// Not a fence export reads as no display math's, in code, a comment, a
-	// tag's attribute, a link's destination, a URL, or inline math, as in
-	// $x, a fence and y$. A citation's, whose text export writes as it is,
-	// pair in that text, as main paired them. Before, each fence in the text
-	// paired with the next, so one of those paired with the opening fence of display math
-	// after it, and the environment in that math, out of each zone, was
-	// wrapped again, as was each in display math after it. What export reads
-	// is read in each text markdown-it's inline parse reads on its own: a
-	// paragraph's or a heading's (see inlineBlocks in code-regions.ts), with
-	// those a CriticMarkup span joins, as preprocessCriticMarkup puts its line
-	// ends in placeholders, an HTML block's, or else a line's, as a table
-	// row's or a note's first line's. It is read with the inline rules of
-	// export's that read past a dollar sign before its math rule can (see
-	// equationReader), and with the text of each bare environment the wrap
-	// may wrap read as nothing, as it is display math's once wrapped (see
-	// withEnvironmentsMasked). A fence that opens nothing, which export
-	// writes as text, holds the rest of its text, as an environment there,
-	// wrapped, would be display math from it. Inline math makes no zone, as
-	// on main: the text is read before the wrap, and the inline math export
-	// reads after it may not be what the read finds. Each text with a dollar
-	// sign out of a code block is read once. Where export reads a CriticMarkup
-	// span's line end in it as a placeholder, and the read reads that line end
-	// out of CriticMarkup, the read can't tell export's display math, so the
-	// text's fences pair, as on main (see readEquations)
+	// tag's attribute, a link's destination, a URL, a citation, inline math,
+	// as in $x, a fence and y$, or as text. Before, each fence in the text
+	// paired with the next, so one of those paired with the opening fence of
+	// display math after it, and the environment in that math, out of each
+	// zone, was wrapped again, as was each in display math after it.
+	// What export reads is read in each text markdown-it's inline parse
+	// reads on its own: a paragraph's or a heading's (see inlineBlocks in
+	// code-regions.ts), with those a CriticMarkup span joins, as
+	// preprocessCriticMarkup puts its line ends in placeholders, an HTML
+	// block's, or else a line's, as a table row's or a note's first line's.
+	// It is read with the inline rules of export's that read past a dollar
+	// sign before its math rule can (see equationReader), and with the text
+	// of each bare environment the wrap may wrap read as nothing, as it is
+	// display math's once wrapped (see withEnvironmentsMasked). Nothing else
+	// makes a zone: not inline math, as on main, as the text is read before
+	// the wrap, and the inline math export reads after it may not be what
+	// the read finds, nor a fence export writes as text, which an
+	// environment after it in its paragraph, once wrapped, would pair with,
+	// nor a citation, whose text export writes as it is. Each text with a
+	// dollar sign out of a code block is read once. Where export reads a
+	// CriticMarkup span's line end in it as a placeholder, and the read reads
+	// that line end out of CriticMarkup, the read can't tell export's display
+	// math, so it reads none there (see readEquations). Where the zones leave
+	// an environment otherwise than main's, main's decision holds, but where
+	// the read is certain, and the parse after the wrap confirms a wrap main
+	// didn't make, so an environment after a fence export writes as text, or
+	// in a citation, is left as main left it (see environmentDecider)
+	const steps = zones.slice();
+	const { units, breaks } = exportUnits(text, inlineBlocks, htmlRegions);
+	const { source, masked } = text.includes('\\begin{') ? withEnvironmentsMasked(text, mergeZones(zones), literalHtmlRegions) : { source: text, masked: [] };
+	const read: EquationRead = {
+		zones, found, references, from: 0, top: undefined, uncertain: false, apart: [], critics: [], runState: undefined, runAt: -1, runEnd: -1,
+		certainDisplays: [], certainInline: [], alts: [], unread: [],
+	};
 	{
-		// Apart where they touch, as two list items' paragraphs
-		const { units, breaks } = exportUnits(text, inlineBlocks, htmlRegions);
-		const source = text.includes('\\begin{') ? withEnvironmentsMasked(text, mergeZones(zones), literalHtmlRegions) : text;
-		const read: EquationRead = { zones, found, references, from: 0, top: undefined, apart: [], critics: [], runState: undefined, runAt: -1, runEnd: -1 };
 		let code = 0;
 		let unit = 0;
 		let lineBreak = 0;
@@ -216,33 +242,45 @@ function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound): { zones:
 		}
 	}
 
-	return { zones: mergeZones(zones), literalHtml: literalHtmlRegions };
+	return { zones: mergeZones(zones), literalHtml: literalHtmlRegions, steps, units, masked, read };
 }
 
 /** What readEquations reads with: the zones it adds to, with the display
- *  math among them, and the texts it reads as main did, where a test asks
- *  for those (see displayZones), the link definitions, which markdown-it's
- *  link rule reads from its env, as export's reads the document's, where
- *  the text read starts, the state that reads it, the texts in it to read
- *  on their own after it, the CriticMarkup read in the text, and the run of
- *  dollar signs read last, and the state that read it */
+ *  math among them, and the texts it can't read for certain, where a test
+ *  asks for those (see displayZones), the link definitions, which
+ *  markdown-it's link rule reads from its env, as export's reads the
+ *  document's, where the text read starts, the state that reads it,
+ *  whether that text is in an image's alt, the texts in it to read on
+ *  their own after it, the CriticMarkup read in the text, and the run of
+ *  dollar signs read last, and the state that read it. And for
+ *  environmentDecider, the display math and the inline math read outside
+ *  images' alts, the alts, and the texts it can't read for certain, where
+ *  main's decisions hold */
 interface EquationRead {
 	zones: Zone[];
 	found: DisplaysFound | undefined;
 	references: Record<string, unknown> | undefined;
 	from: number;
 	top: StateInline | undefined;
+	uncertain: boolean;
 	apart: Apart[];
 	critics: Zone[];
 	runState: StateInline | undefined;
 	runAt: number;
 	runEnd: number;
+	certainDisplays: Zone[];
+	certainInline: Zone[];
+	alts: Zone[];
+	unread: Zone[];
 }
 
 /** A text that export's parse reads on its own, as a highlight's or an
- *  image's alt, and the link level it reads it at */
+ *  image's alt, the link level it reads it at, and whether it is in an
+ *  image's alt, whose fences the scan for the image's label in the
+ *  paragraph reads too */
 interface Apart extends Zone {
 	linkLevel: number;
+	uncertain: boolean;
 }
 
 /** markdown-it's typing leaves out linkLevel, which its linkify rule reads */
@@ -261,15 +299,14 @@ type LinkState = StateInline & { linkLevel: number };
  *
  *  Only the state readEquations reads its text with records a zone, at
  *  offsets in that text: its display math, a link's text's too, which
- *  markdown-it reads with that state, and a fence that opens none there or
- *  in its scans for a link's or an image's label. Not the parses of other
- *  texts, as a citation's first item, which citationEnd parses to see
- *  whether its prefix is plain text, nor citationEnd's scans ahead, in a
- *  state of their own. A highlight's text and an image's alt, which export
- *  parses as texts of their own, are read after the text, each on its own,
- *  a highlight's at the link level it is at, an alt's at none, at their
- *  offsets in the text. A reference link reads the document's link
- *  definitions, as export's does */
+ *  markdown-it reads with that state, but not in its scans for a link's or
+ *  an image's label, which record nothing. Not the parses of other texts, as a citation's first item, which
+ *  citationEnd parses to see whether its prefix is plain text, nor
+ *  citationEnd's scans ahead, in a state of their own. A highlight's text
+ *  and an image's alt, which export parses as texts of their own, are read
+ *  after the text, each on its own, a highlight's at the link level it is
+ *  at, an alt's at none, at their offsets in the text. A reference link
+ *  reads the document's link definitions, as export's does */
 const equationReader = new MarkdownIt({ html: true, linkify: true });
 equationReader.linkify.set({ fuzzyLink: false });
 equationReader.linkify.add('//', null);
@@ -287,7 +324,11 @@ equationReader.use(linearInlineComments);
 			const labelEnd = equationReader.helpers.parseLinkLabel(state, start + 1, false);
 			state.push('image', 'img', 0);
 			const read = state.env as EquationRead;
-			if (state === read.top && labelEnd > start + 2) read.apart.push({ start: read.from + start + 2, end: read.from + labelEnd, linkLevel: 0 });
+			if (state === read.top && labelEnd > start + 2) {
+				const alt = { start: read.from + start + 2, end: read.from + labelEnd };
+				read.alts.push(alt);
+				read.apart.push({ ...alt, linkLevel: 0, uncertain: true });
+			}
 		}
 		return true;
 	});
@@ -315,7 +356,7 @@ equationReader.inline.ruler.before('emphasis', 'highlight', (state, silent) => {
 	const read = state.env as EquationRead;
 	if (!silent) {
 		state.push('mark_open', 'mark', 0);
-		if (state === read.top) read.apart.push({ start: read.from + state.pos + 2, end: read.from + close, linkLevel: (state as LinkState).linkLevel });
+		if (state === read.top) read.apart.push({ start: read.from + state.pos + 2, end: read.from + close, linkLevel: (state as LinkState).linkLevel, uncertain: read.uncertain });
 	}
 	state.pos = close + 2;
 	return true;
@@ -343,14 +384,11 @@ equationReader.inline.ruler.before('emphasis', 'citation', (state, silent) => {
 	if (state.pos + 2 >= state.posMax) return false;
 	const end = citationEnd(state, state.pos);
 	if (end === -1) return false;
-	const read = state.env as EquationRead;
-	if (!silent) {
-		state.push('citation', '', 0);
-		// Export reads no equation in it, and its text is the citation's, so
-		// display math with an environment in it is left as main left it,
-		// which paired its fences
-		if (state === read.top) pairFences(state.src, state.pos + 1, end, read);
-	}
+	// Export reads no equation in it, and writes its text as it is. Where the
+	// read wraps an environment in it, as no zone holds it, and main left it,
+	// the parse after the wrap reads no display math there, so main's
+	// decision holds (see rejectedWraps)
+	if (!silent) state.push('citation', '', 0);
 	state.pos = end + 1;
 	return true;
 });
@@ -392,35 +430,14 @@ function criticEnd(state: StateInline, start: number): number {
 
 const CRITIC_CLOSERS = new Map([['{++', '++}'], ['{--', '--}'], ['{~~', '~~}'], ['{==', '==}'], ['{>>', '<<}']]);
 
-/** Adds to `read`'s zones from each fence of two dollar signs in `src` from
- *  `start` to `end`, which no backslash escapes, to the next, as main paired
- *  each fence in the text with the next, but in that text alone, and from
- *  the last, without one, to `end` */
-function pairFences(src: string, start: number, end: number, read: EquationRead): void {
-	let open = -1;
-	for (let at = src.indexOf('$', start); at !== -1 && at < end - 1;) {
-		if (src.charCodeAt(at + 1) !== 0x24 || isEscapedAt(src, at)) {
-			at = src.indexOf('$', at + 1);
-			continue;
-		}
-		if (open === -1) open = at;
-		else {
-			read.zones.push({ start: read.from + open, end: read.from + at + 2 });
-			open = -1;
-		}
-		at = src.indexOf('$', at + 2);
-	}
-	if (open !== -1) read.zones.push({ start: read.from + open, end: read.from + end });
-}
-
 /** export's math rule (see mathRule in md-to-docx.ts), which pushes a
  *  token for each equation it reads, as export's does. In the text read,
- *  it adds each display math to the read's zones, but no inline math, and
- *  the rest of that text after a fence that opens none, which a scan for a
- *  label there adds too:
- *  with an environment after it wrapped, the scan would read an equation
- *  from it to the wrapped one's opening fence, and so no label, as of an
- *  image, whose alt markdown-it then reads in a text of its own */
+ *  but not in a scan for a link's or an image's label, it adds each display
+ *  math to the read's zones, but no inline math, and out of an image's alt,
+ *  each equation to the read's certain ones too (see environmentDecider).
+ *  The scan reads a fence as the parse after it may not, as in a URL in a
+ *  label without its link, which the parse reads after the scan finds no
+ *  link. A link's text is read again, and an image's alt on its own */
 function readMath(state: StateInline, silent: boolean): boolean {
 	const src = state.src;
 	const at = state.pos;
@@ -452,40 +469,43 @@ function readMath(state: StateInline, silent: boolean): boolean {
 		if (!silent) {
 			state.push('math', '', 0);
 			if (top && match.delimiterLength === 2) addDisplay(read, match.start, match.end);
+			else if (top && !read.uncertain) read.certainInline.push({ start: read.from + match.start, end: read.from + match.end });
 		}
 		state.pos = match.end;
 		return true;
 	}
-	// A fence export writes as text
-	if (top && run >= 2 && !isEscapedAt(src, at)) read.zones.push({ start: read.from + at, end: read.from + src.length });
 	return false;
 }
 
 /** Adds the display math from `start` to `end` in the text read to
- *  `read`'s zones, and to its display math */
+ *  `read`'s zones, and to its display math, and out of an image's alt, to
+ *  its certain display math */
 function addDisplay(read: EquationRead, start: number, end: number): void {
 	const zone = { start: read.from + start, end: read.from + end };
 	read.zones.push(zone);
 	read.found?.displays.push(zone);
+	if (!read.uncertain) read.certainDisplays.push(zone);
 }
 
 /** Adds to `read`'s zones the display math export reads in the text of
- *  `text` from `start` to `end`, which it reads on its own, and the rest of
- *  that text after a fence that opens none, and then so for each text in
- *  it that export reads on its own, in turn. But where a line end of
- *  `breaks`, sorted, which export reads as a placeholder, is out of the
- *  CriticMarkup read, as in a citation's key or an equation, the
+ *  `text` from `start` to `end`, which it reads on its own, and then so for
+ *  each text in it that export reads on its own, in turn. But where a line
+ *  end of `breaks`, sorted, which export reads as a placeholder, is out of
+ *  the CriticMarkup read, as in a citation's key or an equation, the
  *  placeholder is no space to the math rule, as in $5, a line end, and 6$,
  *  which export reads as an equation, which may hold a fence, and the read
- *  of the text could find other display math than export's. There the
- *  text's fences pair, as on main */
+ *  of the text could find other display math than export's. There it adds
+ *  none, and the text is one the read is not certain of, where main's
+ *  decisions hold (see environmentDecider) */
 function readEquations(text: string, start: number, end: number, read: EquationRead, breaks: number[]): void {
 	const zoneCount = read.zones.length;
 	const displayCount = read.found?.displays.length ?? 0;
+	const certainCounts = [read.certainDisplays.length, read.certainInline.length, read.alts.length];
 	read.critics = [];
-	const texts: Apart[] = [{ start, end, linkLevel: 0 }];
+	const texts: Apart[] = [{ start, end, linkLevel: 0, uncertain: false }];
 	for (let next = texts.pop(); next; next = texts.pop()) {
 		read.from = next.start;
+		read.uncertain = next.uncertain;
 		read.apart = [];
 		// As inline.parse reads it, but for the rules after its tokens', which
 		// read none of its dollar signs
@@ -506,8 +526,8 @@ function readEquations(text: string, start: number, end: number, read: EquationR
 			read.found.displays.length = displayCount;
 			read.found.fallbacks.push({ start, end });
 		}
-		read.from = 0;
-		pairFences(text, start, end, read);
+		[read.certainDisplays.length, read.certainInline.length, read.alts.length] = certainCounts;
+		read.unread.push({ start, end });
 		return;
 	}
 }
@@ -544,7 +564,44 @@ function exportUnits(text: string, inlineBlocks: Zone[], htmlRegions: Zone[]): {
 			if (joined < textStarts.length) breaks.push(textStarts[joined] - 1);
 		}
 	}
-	return { units: sorted(regions.inlineBlocks.concat(regions.htmlRegions).map(({ start, end }) => ({ start: inText(start), end: inText(end) }))), breaks };
+	const units: Zone[] = [];
+	for (const { start, end } of sorted(regions.inlineBlocks.concat(regions.htmlRegions))) {
+		const unit = { start: inText(start), end: inText(end) };
+		// An opener preprocessCriticMarkup moved from the end of the line
+		// before, or the line before a blank line, which its line maps past,
+		// so the read took the span's text and its fences out of it (see
+		// moveLeadingBreakOutsideCritic in critic-markup.ts). The unit starts
+		// at the opener, and the unit before it ends there
+		movedOpener.lastIndex = start;
+		const moved = movedOpener.exec(output);
+		if (moved) {
+			const opener = openerBefore(text, unit.start, moved[1]);
+			if (opener !== -1) {
+				unit.start = opener;
+				const before = units[units.length - 1];
+				if (before && before.end > opener) before.end = opener;
+			}
+		}
+		units.push(unit);
+	}
+	return { units, breaks };
+}
+
+const movedOpener = /[ \t>]*(\{\+\+|\{--|\{~~|\{==|\{>>)/y;
+
+/** Where `opener` is in `text` before the line at `lineStart`, at the end
+ *  of the line before it, or of the line before that, where the line
+ *  between is blank or a quote's marker alone, as
+ *  moveLeadingBreakOutsideCritic moves it from, or -1 where the line at
+ *  `lineStart` holds it */
+function openerBefore(text: string, lineStart: number, opener: string): number {
+	movedOpener.lastIndex = lineStart;
+	if (movedOpener.exec(text)?.[1] === opener) return -1;
+	const lineEnd = lineStart - 1;
+	if (text.startsWith(opener, lineEnd - opener.length)) return lineEnd - opener.length;
+	const before = text.lastIndexOf('\n', lineEnd - 1);
+	if (before !== -1 && /^[ \t]*(?:>[ \t]*)?$/.test(text.slice(before + 1, lineEnd)) && text.startsWith(opener, before - opener.length)) return before - opener.length;
+	return -1;
 }
 
 /** `zones` sorted by start, with those that overlap or touch merged */
@@ -634,33 +691,254 @@ interface Replacement {
 function latexReplacements(text: string): Replacement[] {
 	// Fast path: no \begin{ means nothing to do
 	if (!text.includes('\\begin{')) return [];
-	const { zones, literalHtml } = inertZonesAndLiteralHtml(text);
-	return bareEnvironments(text, zones, literalHtml).map(({ start, indent, end }) => ({
+	const reading = inertZonesAndLiteralHtml(text);
+	const decider = environmentDecider(text, reading);
+	// Each environment's decision, by where its line starts, and those the
+	// read wraps where main left them
+	const decided = new Map<number, Decision>();
+	const environments = bareEnvironments(text, (begin, end) => {
+		const decision = decider.decide(begin, end);
+		decided.set(begin.start, decision);
+		return decision === 'leave';
+	}, reading.literalHtml);
+	const unconfirmed = environments.filter(e => decided.get(e.start) === 'unconfirmed');
+	const rejected = unconfirmed.length === 0 ? new Set<number>() : rejectedWraps(text, reading, environments, unconfirmed);
+	// Main's decision for those the parse after the wrap doesn't confirm, and
+	// for an environment in one of them, which the read didn't decide
+	const wrapped = rejected.size === 0 ? environments : bareEnvironments(text, (begin, end) => {
+		const decision = rejected.has(begin.start) ? undefined : decided.get(begin.start);
+		return decision === undefined ? decider.leftByMain(begin, end) : decision === 'leave';
+	}, reading.literalHtml);
+	return wrapped.map(({ start, indent, end }) => ({
 		start,
 		end,
-		// Without its indent, and with \n\n in it collapsed to \n, so
-		// markdown-it sees it as one paragraph
-		replacement: text.slice(start, start + indent) + '$' + '$' + text.slice(start + indent, end).replace(/\n{2,}/g, '\n') + '$' + '$',
+		replacement: wrappedText(text, start, indent, end),
 	}));
+}
+
+/** The environment of `text` from `start` to `end` in its fences, after its
+ *  indent, `indent` long, and with \n\n in it collapsed to \n, so
+ *  markdown-it sees it as one paragraph */
+function wrappedText(text: string, start: number, indent: number, end: number): string {
+	return text.slice(start, start + indent) + '$' + '$' + text.slice(start + indent, end).replace(/\n{2,}/g, '\n') + '$' + '$';
+}
+
+/** Whether the wrap leaves an environment as it is, wraps it, or wraps it
+ *  where main's step 4 left it, if the parse after the wrap confirms it
+ *  (see rejectedWraps) */
+type Decision = 'leave' | 'wrap' | 'unconfirmed';
+
+/** Where the lines start of those of `unconfirmed`, which the read wraps
+ *  where main's step 4 left them, whose wrap export's parse after it
+ *  doesn't confirm. Their paragraph is read with each environment there of
+ *  `environments`, sorted, wrapped, and the parse is to read display math
+ *  from each one's opening fence to its closing fence, where a scan for a
+ *  link's label over it may read its fences otherwise, or a dollar sign
+ *  before it pair with its opening fence. Where one in a paragraph is not
+ *  confirmed, none is. Each paragraph is read once, with those after it the
+ *  last environment in it goes on into, whose blank lines the wrap joins */
+function rejectedWraps(text: string, reading: InertReading, environments: BareEnvironment[], unconfirmed: BareEnvironment[]): Set<number> {
+	const rejected = new Set<number>();
+	const { units } = reading;
+	const toConfirm = new Set(unconfirmed);
+	let next = 0;
+	for (let first = 0; first < unconfirmed.length;) {
+		const from = paragraphStart(text, units, unconfirmed[first].start);
+		let to = paragraphEnd(text, units, unconfirmed[first].end - 1);
+		let last = first + 1;
+		while (last < unconfirmed.length && unconfirmed[last].start < to) to = Math.max(to, paragraphEnd(text, units, unconfirmed[last++].end - 1));
+		// The paragraph with each environment in it wrapped, and where the
+		// fences of those of `unconfirmed` are in it
+		const parts: string[] = [];
+		const fences: Zone[] = [];
+		let length = 0;
+		let at = from;
+		const add = (part: string) => {
+			parts.push(part);
+			length += part.length;
+		};
+		while (next < environments.length && environments[next].start < from) next++;
+		// An environment wrapped before the paragraph, into it, over a blank
+		// line, which the wrap joins it to, is not in this read of it
+		let confirmable = next === 0 || environments[next - 1].end <= from;
+		for (; next < environments.length && environments[next].start < to; next++) {
+			const { start, indent, end } = environments[next];
+			add(text.slice(at, start));
+			const opening = length + indent;
+			add(wrappedText(text, start, indent, end));
+			if (toConfirm.has(environments[next])) fences.push({ start: opening, end: length });
+			at = end;
+		}
+		if (at > to) confirmable = false;
+		add(text.slice(at, to));
+		const paragraph = parts.join('');
+		const read: EquationRead = {
+			zones: [], found: undefined, references: reading.read.references, from: 0, top: undefined, uncertain: false, apart: [], critics: [], runState: undefined, runAt: -1, runEnd: -1,
+			certainDisplays: [], certainInline: [], alts: [], unread: [],
+		};
+		// Each text between blank lines on its own, as export's block parse
+		// reads them
+		const blank = /\n[ \t]*\n/g;
+		for (let piece = 0; piece < paragraph.length;) {
+			const gap = blank.exec(paragraph);
+			const pieceEnd = gap ? gap.index + 1 : paragraph.length;
+			const dollar = paragraph.indexOf('$', piece);
+			if (dollar !== -1 && dollar < pieceEnd) readEquations(paragraph, piece, pieceEnd, read, []);
+			piece = gap ? gap.index + gap[0].length : paragraph.length;
+		}
+		const displays = new Set(read.certainDisplays.map(d => d.start + ':' + d.end));
+		if (!confirmable || fences.some(f => !displays.has(f.start + ':' + f.end))) {
+			for (let i = first; i < last; i++) rejected.add(unconfirmed[i].start);
+		}
+		first = last;
+	}
+	return rejected;
+}
+
+/** Where the text export's inline parse reads `offset` in ends, of
+ *  `units`, sorted, or else past `offset`'s line */
+function paragraphEnd(text: string, units: Zone[], offset: number): number {
+	let lo = 0;
+	let hi = units.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (units[mid].start <= offset) lo = mid + 1;
+		else hi = mid;
+	}
+	const unit = units[lo - 1];
+	if (unit && offset < unit.end) return unit.end;
+	const lineEnd = text.indexOf('\n', offset);
+	return lineEnd === -1 ? text.length : lineEnd + 1;
+}
+
+/** Whether a zone of `zones`, sorted and merged, holds part of `begin` or
+ *  of `end` */
+function holdsEither(begin: Zone, end: Zone, zones: Zone[]): boolean {
+	return overlapsAnyZone(begin.start, begin.end, zones) || overlapsAnyZone(end.start, end.end, zones);
+}
+
+/** Whether the wrap leaves the environment whose \begin{...} is `begin`
+ *  and whose \end{...} is `end` as it is, and whether main's step 4, which
+ *  paired each fence in the text with the next, leaves it so. As
+ *  `reading`'s zones leave it, where main's leave it so too. Where the two
+ *  differ, as the zones leave it only where the read is certain, and as
+ *  main's do else, so that the wrap leaves an environment otherwise than
+ *  main only for a reason export's parse confirms:
+ *  - Its paragraph, to its \end{...}, is read for certain: none of it is a
+ *    text the read can't read (see readEquations), with no fence in an
+ *    image's alt, which the scan for the image's label reads on into the
+ *    paragraph, as into an environment wrapped after it, and no
+ *    environment's text with a dollar sign or a backtick in it, which the
+ *    read takes for display math's (see withEnvironmentsMasked), as it may
+ *    not be.
+ *  - If the zones leave it, the display math that holds it is the
+ *    paragraph's parse's, or a highlight's, not an image's alt's.
+ *  - If the zones wrap it, no inline equation the paragraph's parse reads
+ *    holds its \begin{...}, as export may read one over it once it is
+ *    wrapped too, and the parse of the paragraph after the wrap reads it as
+ *    display math (see rejectedWraps).
+ *  A fence before its paragraph pairs with none in it, as export reads each
+ *  paragraph on its own, so it changes nothing, whatever it is. Main's
+ *  pairing of such a fence with one in the paragraph was the bug, and so
+ *  each decision of main's is checked against its paragraph's own */
+function environmentDecider(text: string, reading: InertReading): { decide: (begin: Zone, end: Zone) => Decision; leftByMain: (begin: Zone, end: Zone) => boolean } {
+	const { zones, steps, units, masked, read } = reading;
+	const main = mainFenceZones(text);
+	const mainZones = mergeZones(steps.concat(main.zones));
+	const displays = mergeZones(read.certainDisplays);
+	const inline = mergeZones(read.certainInline);
+	const uncertain = mergeZones(read.unread.concat(masked));
+	// Main's fences in an image's alt, in order
+	const alts = mergeZones(read.alts);
+	const altFences: number[] = [];
+	let alt = 0;
+	for (const fence of main.fences) {
+		while (alt < alts.length && alts[alt].end <= fence) alt++;
+		if (alt < alts.length && alts[alt].start < fence + 2) altFences.push(fence);
+	}
+	const leftByMain = (begin: Zone, end: Zone) => holdsEither(begin, end, mainZones);
+	const decide = (begin: Zone, end: Zone): Decision => {
+		const left = holdsEither(begin, end, zones);
+		if (left === leftByMain(begin, end)) return left ? 'leave' : 'wrap';
+		const from = paragraphStart(text, units, begin.start);
+		if (overlapsAnyZone(from, end.end, uncertain) || firstFrom(altFences, from) < end.end) return left ? 'wrap' : 'leave';
+		if (left) return holdsEither(begin, end, displays) ? 'leave' : 'wrap';
+		return overlapsAnyZone(begin.start, begin.end, inline) ? 'leave' : 'unconfirmed';
+	};
+	return { decide, leftByMain };
+}
+
+/** Step 4 as main had it: each fence of two dollar signs in `text` that no
+ *  backslash escapes paired with the next, and the last, without one, to the
+ *  text's end, as zones, and those fences, in order */
+function mainFenceZones(text: string): { zones: Zone[]; fences: number[] } {
+	const zones: Zone[] = [];
+	const fences: number[] = [];
+	let open = -1;
+	for (let at = text.indexOf('$'); at !== -1 && at < text.length - 1;) {
+		if (text.charCodeAt(at + 1) !== 0x24 || isEscapedAt(text, at)) {
+			at = text.indexOf('$', at + 1);
+			continue;
+		}
+		fences.push(at);
+		if (open === -1) open = at;
+		else {
+			zones.push({ start: open, end: at + 2 });
+			open = -1;
+		}
+		at = text.indexOf('$', at + 2);
+	}
+	if (open !== -1) zones.push({ start: open, end: text.length });
+	return { zones, fences };
+}
+
+/** Where the text export's inline parse reads `offset` in starts, of
+ *  `units`, sorted, or else `offset`'s line */
+function paragraphStart(text: string, units: Zone[], offset: number): number {
+	let lo = 0;
+	let hi = units.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (units[mid].start <= offset) lo = mid + 1;
+		else hi = mid;
+	}
+	const unit = units[lo - 1];
+	return unit && offset < unit.end ? unit.start : text.lastIndexOf('\n', offset - 1) + 1;
+}
+
+/** The first of `sorted` at or after `from`, or Infinity */
+function firstFrom(sorted: number[], from: number): number {
+	let lo = 0;
+	let hi = sorted.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (sorted[mid] < from) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo < sorted.length ? sorted[lo] : Infinity;
 }
 
 /** The text of `text` with that of each bare environment out of `zones`,
  *  sorted and merged, which the wrap may wrap, from past its \begin{...} to
- *  its \end{...}, as x, but its line ends. Wrapped, it is display math's,
- *  so a dollar sign, a backtick or a bracket in it opens and closes nothing
- *  out of it, where the read of the text before the wrap paired a dollar
- *  sign in a comment in it, as in x = 1 % $, with one after it */
-function withEnvironmentsMasked(text: string, zones: Zone[], literalHtml: Zone[]): string {
-	const environments = bareEnvironments(text, zones, literalHtml);
-	if (environments.length === 0) return text;
+ *  its \end{...}, as x, but its line ends, and those texts with a dollar
+ *  sign or a backtick in them. Wrapped, it is display math's, so a dollar
+ *  sign, a backtick or a bracket in it opens and closes nothing out of it,
+ *  where the read of the text before the wrap paired a dollar sign in a
+ *  comment in it, as in x = 1 % $, with one after it */
+function withEnvironmentsMasked(text: string, zones: Zone[], literalHtml: Zone[]): { source: string; masked: Zone[] } {
+	const environments = bareEnvironments(text, (begin, end) => holdsEither(begin, end, zones), literalHtml);
+	const masked: Zone[] = [];
+	if (environments.length === 0) return { source: text, masked };
 	const parts: string[] = [];
 	let from = 0;
 	for (const { contentStart, contentEnd } of environments) {
-		parts.push(text.slice(from, contentStart), text.slice(contentStart, contentEnd).replace(/[^\n]/g, 'x'));
+		const content = text.slice(contentStart, contentEnd);
+		if (/[$`]/.test(content)) masked.push({ start: contentStart, end: contentEnd });
+		parts.push(text.slice(from, contentStart), content.replace(/[^\n]/g, 'x'));
 		from = contentEnd;
 	}
 	parts.push(text.slice(from));
-	return parts.join('');
+	return { source: parts.join(''), masked };
 }
 
 interface BareEnvironment {
@@ -674,12 +952,12 @@ interface BareEnvironment {
 	end: number;
 }
 
-/** The bare environments of `text` out of `zones`, sorted and merged, in
- *  order, as latexReplacements wraps them: each \begin{...} at a line's
- *  start of a display math environment, but in an environment before it,
- *  to its \end{...}, but one in an HTML block export writes as text, of
- *  `literalHtml` */
-function bareEnvironments(text: string, inertZones: Zone[], literalHtml: Zone[]): BareEnvironment[] {
+/** The bare environments of `text` that `inert` doesn't leave, by their
+ *  \begin{...} and their \end{...}, in order, as latexReplacements wraps
+ *  them: each \begin{...} at a line's start of a display math environment,
+ *  but in an environment before it, to its \end{...}, but one in an HTML
+ *  block export writes as text, of `literalHtml` */
+function bareEnvironments(text: string, inert: (begin: Zone, end: Zone) => boolean, literalHtml: Zone[]): BareEnvironment[] {
 	if (!text.includes('\\begin{')) return [];
 	const environments: BareEnvironment[] = [];
 	// The HTML blocks export writes as text, but one that starts in an
@@ -725,8 +1003,6 @@ function bareEnvironments(text: string, inertZones: Zone[], literalHtml: Zone[])
 		if (!DISPLAY_MATH_ENVIRONMENTS.has(envName)) continue;
 
 		const blockStart = match.index;
-		if (overlapsAnyZone(blockStart, blockStart + match[0].length, inertZones)) continue;
-
 		// Skip if this match falls inside an already-collected environment
 		// (handles nested environments — only the outermost is wrapped)
 		if (environments.length > 0 && blockStart < environments[environments.length - 1].end) continue;
@@ -738,7 +1014,7 @@ function bareEnvironments(text: string, inertZones: Zone[], literalHtml: Zone[])
 		if (endIdx === -1) continue;
 		const blockEnd = endIdx + endMarker.length;
 
-		if (overlapsAnyZone(endIdx, blockEnd, inertZones)) continue;
+		if (inert({ start: blockStart, end: blockStart + match[0].length }, { start: endIdx, end: blockEnd })) continue;
 
 		environments.push({ start: blockStart, indent: match[1].length, contentStart: blockStart + match[0].length, contentEnd: endIdx, end: blockEnd });
 	}

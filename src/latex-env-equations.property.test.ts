@@ -16,8 +16,8 @@ import { preprocessCriticMarkup, PARA_PLACEHOLDER, LINE_PLACEHOLDER } from './cr
 // wrapper's read of export's state was wrong, which a test found one at a
 // time: a citation whose prefix held an equation, a highlight's text in a
 // link, a substitution without its ~>, and others. Where the wrapper can't
-// read export's state with certainty, it reads the text as main did, with
-// its fences paired, which this counts apart
+// read export's state with certainty, it finds no display math in the text,
+// and the wrap takes main's decisions there, which this counts apart
 
 const D = '$' + '$';
 
@@ -267,8 +267,8 @@ function compare(docs: string[]) {
 		const exported = found.ranges.map(r => offsets ? { start: offsets[r.start], end: offsets[r.end] } : r);
 		const { displays: read, fallbacks } = displayZones(text);
 		if (fallbacks.length > 0) fellBack++;
-		// Out of the texts the wrapper read as main did, which hold none of
-		// its display math
+		// Out of the texts the wrapper can't read for certain, which hold
+		// none of its display math
 		const outside = exported.filter(r => !fallbacks.some(f => f.start < r.end && r.start < f.end));
 		displays += outside.length;
 		// Its opening fence and its closing one

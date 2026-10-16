@@ -347,7 +347,9 @@ describe('a stray fence of two dollar signs before display math', () => {
 
 	test('wraps an environment after a blank line in display math, which export reads as text, as that environment\'s equation', async () => {
 		// The paragraph before it holds the fence before the blank line, as
-		// text, and its own the one after it. Before, the two paired
+		// text, and its own the one after it. Before, the two paired. Wrapped,
+		// the parse reads the environment as display math, which confirms
+		// the wrap (see environmentDecider)
 		const md = D + '\nx\n\n' + aligned + '\n' + D + '\n';
 		expect(wrapBareLatexEnvironments(md)).toBe(D + '\nx\n\n' + D + aligned + D + '\n' + D + '\n');
 		const { docx } = await convertMdToDocx(md);
@@ -454,10 +456,11 @@ describe('equations in a highlight, an image\'s alt and a citation around a bare
 		expect(wordText(await wordXml(md))).not.toContain('begin{equation}');
 	});
 
-	// The scan for the image's label, in the paragraph's text, read the
-	// fence as text. Wrapped, the environment's opening fence closed an
-	// equation from it, past the alt's ], so no image was read, and Word got
-	// an empty equation and the environment as text
+	// The scan for the image's label, in the paragraph's text, reads the
+	// fence. Wrapped, the environment's opening fence closed an equation
+	// from it, past the alt's ], so no image was read, and Word got an empty
+	// equation and the environment as text. The read, which reads the alt on
+	// its own, isn't certain of that fence, so main's decision holds
 	test('leaves an environment after a fence in an image\'s alt in its paragraph as it is, as before', async () => {
 		const md = 'Text ![' + D + '](x.png)\n' + bare + '\n$\\alpha$ here.\n';
 		expect(wrapBareLatexEnvironments(md)).toBe(md);
@@ -582,14 +585,14 @@ describe('a citation\'s prefix, a highlight in a link and CriticMarkup around a 
 	// equation, and before the line end no equation, for a sum of money.
 	// Where the read of the text leaves the span's line end out of the
 	// CriticMarkup it reads, as in a citation's key, an autolink, a link's
-	// destination or an equation, it reads the text as main did, with its
-	// fences paired, and no equation in it
+	// destination or an equation, it can't read the text for certain, and
+	// finds no display math in it, where the wrap takes main's decisions
 	test.each([
 		['in a citation\'s key', '[@{++]$5\n++}$\n'],
 		['in an autolink', '<http://x/{++>$5\n++}$\n'],
 		['in a link\'s destination', '[a](x/{++)$5\n++}$\n'],
 		['in an equation', 'a $x {++b\nc++} y$ d\n'],
-	])('reads a text with a CriticMarkup span\'s line end %s as main did', (_name, md) => {
+	])('reads a text with a CriticMarkup span\'s line end %s as one it can\'t read for certain', (_name, md) => {
 		expect(displayZones(md)).toEqual({ displays: [], fallbacks: [{ start: 0, end: md.length }] });
 	});
 
@@ -635,6 +638,78 @@ describe('dollar signs in and around a bare environment, as export reads them on
 	});
 });
 
+describe('a bare environment the read leaves otherwise than main, as main left it but where the read is certain', () => {
+	const D = '$' + '$';
+	const bare = '\\begin{equation}\nx\n\\end{equation}';
+	const word = async (md: string) => {
+		const { docx } = await convertMdToDocx(md);
+		const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+		return {
+			text: [...xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '').matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join(''),
+			equations: [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]),
+		};
+	};
+
+	// preprocessCriticMarkup moves the comment's opener from its line's end
+	// to the next line's start, after a blank line, and the read of that
+	// paragraph started at its line, past the opener, so it read the
+	// comment's fence as text, whose zone held the environment. A scan for
+	// the link's label read the URL's fence as text, which the parse after
+	// it, as it finds no link, reads in the URL, and its zone held the
+	// environment. Now the paragraph's read starts at the opener, and a
+	// fence export writes as text makes no zone, as main's decision holds
+	// where the read's rests on one (see environmentDecider)
+	test.each([
+		['after a comment whose opener preprocessCriticMarkup moves', 'Use `' + D + '` {>>\nThe delimiter is ' + D + '.<<}\n' + bare + '\n'],
+		['after a URL in what a scan reads as a link\'s label', 'Use `' + D + '`. See [https://example.org/' + D + '].\n' + bare + '\n'],
+	])('wraps an environment %s, as before', async (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toContain(D + bare + D);
+		const { text, equations } = await word(md);
+		expect(text).not.toContain('begin{equation}');
+		expect(equations).toHaveLength(1);
+		expect(equations.every(m => /<m:t[^>]*>[^<]*\S/.test(m))).toBe(true);
+	});
+
+	// Main's zone from the stray fence held each, by chance. The read wraps
+	// the first, in what its parse reads as an inline equation, which export
+	// may read over it once wrapped too, and the second for a dollar sign in
+	// its text, which it reads as nothing, as it is display math's once
+	// wrapped. So neither is certain, and main's decision holds
+	test.each([
+		['in an inline equation over lines, after a fence in a code span', 'Use `' + D + '` here.\n\nThe matrix $\n\\begin{pmatrix}\na & b\n\\end{pmatrix}\n$ is.\n'],
+		['with a dollar sign in it, after a dollar sign and a fence in a line of text', 'A ' + D + ' sign.\n\n$\n\\begin{equation}$\\end{equation}\n'],
+	])('leaves an environment %s as it is, as before', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+
+	// The read wraps it, as no zone holds it. Wrapped, the parse reads it in
+	// the citation, as no display math, so it doesn't confirm the wrap, and
+	// main's decision holds
+	test('leaves an environment in a citation over lines, after a fence in a code span, as it is, as before', () => {
+		const md = 'Use `' + D + '` here.\n\nSee [@ref\n' + bare + '\n]\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+
+	// The read is certain of each: the fence in the code span, which main
+	// paired with the opening fence of the display math, and the display
+	// math, in the paragraph's own parse
+	test('leaves an environment in display math after a fence in a code span as it is', () => {
+		const md = 'Use `' + D + '` here.\n\n' + D + '\n' + bare + '\n' + D + '\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+
+	// Main paired the code span's fence with the one after the environment.
+	// Wrapped, the parse reads it as display math to its closing fence,
+	// before that one, which confirms the wrap
+	test('wraps an environment with a fence right after it, after a fence in a code span', async () => {
+		const md = 'Use `' + D + '` here.\n\n' + bare + D + ' b\n';
+		expect(wrapBareLatexEnvironments(md)).toContain(D + bare + D + D + ' b');
+		const { text, equations } = await word(md);
+		expect(text).not.toContain('begin{equation}');
+		expect(equations).toHaveLength(1);
+	});
+});
+
 describe('wrapBareLatexEnvironments with stray fences in time linear in the text', () => {
 	const D = '$' + '$';
 	const env = '\\begin{equation}\nx\n\\end{equation}\n\n';
@@ -670,6 +745,10 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		['CriticMarkup spans over lines in one paragraph', '{++a\nb++} $x$ ', 0],
 		['CriticMarkup spans over lines in citations\' keys in one paragraph', '[@{++]$5\n++} ', 0],
 		['environments with dollar signs in them', '\\begin{equation}\na $ b % $\n\\end{equation}\n\n', 1],
+		['fences in images\' alts before environments in their paragraphs', 'Text ![' + D + '](x.png)\n' + env + 'Text ![' + D + '](x.png)\n' + env, 1],
+		// Which main's fences leave every other one of, and which the read
+		// of the paragraph with the wraps confirms, in one read of it
+		['fences in code spans before environments in one paragraph', '`' + D + '` x\n\\begin{equation}\nx\n\\end{equation}\n', 1],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		const count = (text: string) => wrapBareLatexEnvironments(text).split(D + '\\begin').length - 1;
 		expect(count(unit.repeat(2))).toBe(wrapped * 2);
