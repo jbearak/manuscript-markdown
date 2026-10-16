@@ -1005,6 +1005,8 @@ On DOCX import, ranges that end at the same place end in the order they start, a
 
 An ID can have more than one range. DOCX import writes a comment that goes from a paragraph into a table so, with a range in each paragraph and each cell, as `{#1}Before.{/1}` and `| {#1}a{/1} | b |`, since a cell can't hold a range that goes on past it. Word takes one range for each comment, so export writes one, from the ID's first start to its last end.
 
+Export writes Word a range's markers only with its comment and both its ends, as the preview shows it. A `{#id}` with a body and no `{/id}` after it ends with its paragraph or table cell, so Word's one range for the ID runs from its first `{#id}` to the end of the last such one's paragraph or cell, past its last `{/id}` where that comes before. The markers of an ID with no body anywhere, which export warns of, and a `{/id}` before its ID's first `{#id}`, or in a note whose `{#id}` is in the text, write nothing. Where such a marker has a space on each side, or a space and a line's start or end, the space on one side goes with it, as for a word taken out: `Text {#sec} here.` gives Word `Text here.`, and a Pandoc heading ID, as in `# Intro {#intro}`, gives `Intro`.
+
 #### ID Format
 
 IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`. On DOCX import, a comment keeps the ID it was exported with. The others, such as those added in Word, take the numbers no comment kept, in the order they first appear. So an ID stays the same from one round trip to the next, even after a comment written as `{==text==}{>>comment<<}`, whose ID doesn't show.
