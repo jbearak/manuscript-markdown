@@ -427,6 +427,11 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
     ['an escaped comment in a critic highlight', '{==a \\{>>c<<} b==}', ['highlight', 'escaped_brace']],
     ['an escaped range start in an insertion', '{++a \\{#1}x{/1} b++}', ['addition', 'escaped_brace', 'comment_range_end']],
     ['an escaped critic highlight in an insertion', '{++a {/1}\\{==x==} b++}', ['addition', 'comment_range_end', 'escaped_brace']],
+    // An == right after an escaped { opens a format highlight, whose pattern
+    // takes the \{ before escaped_brace does
+    ['a format highlight after an escaped {', 'a \\{==x==\\} b', ['format_highlight']],
+    ['a format highlight after an escaped { in an insertion', '{++a \\{==x==\\} b++}', ['addition', 'format_highlight']],
+    ['a critic highlight after an escaped backslash', 'a \\\\{==x==} b', ['highlight']],
     ['an escaped comment with an ID in an insertion', '{++a \\{#1>>c<<} b++}', ['addition', 'escaped_brace']],
     ['an escaped insertion', 'a \\{++x++} b', ['escaped_brace']],
     ['an insertion after three backslashes', 'a \\\\\\{++x++} b', ['escaped_brace']],
@@ -602,5 +607,36 @@ describe('Syntax grammar format highlights', () => {
     ['a backslash before the closer, which escapes none', '==a\\== b', ['==a\\==']],
   ])('scopes %s as export reads it', (_name, line, expected) => {
     expect(highlighted(line)).toEqual(expected);
+  });
+
+  // An == right after a { that an odd run of backslashes escapes opens a
+  // highlight, as export and the preview read it: the { is text, as in
+  // \{==x==\}, which import writes for Word's literal braces around a
+  // highlight. The pattern takes the run and the \{ as escapes, before
+  // escaped_brace or Markdown's escape would. One right after a { no odd run
+  // escapes opens none, as before
+  it.each<[string, string, string[]]>([
+    ['an escaped { and } around a highlight', '\\{==x==\\}', ['==x==']],
+    ['a highlight after three backslashes and a {', '\\\\\\{==x==\\}', ['==x==']],
+    ['an escaped { and } around a highlight in text', 'a \\{==x==\\} b', ['==x==']],
+    ['a colored highlight after an escaped {', 'a \\{==x=={red} b', ['==x=={red}']],
+    ['a highlight after an escaped { without a closing brace', 'a \\{==x== b', ['==x==']],
+    ['an escaped critic highlight, whose == before a } closes none', 'a \\{==x==} b', []],
+    ['a critic highlight, which another rule reads', 'a {==x==} b', []],
+    ['a critic highlight after an escaped backslash, which another rule reads', 'a \\\\{==x==} b', []],
+    ['a highlight', 'a ==x== b', ['==x==']],
+    ['an escaped opener', 'a \\==x== b', []],
+  ])('scopes %s as export reads it', (_name, line, expected) => {
+    expect(highlighted(line)).toEqual(expected);
+  });
+
+  it('scopes the backslashes and the escaped { before one as escapes', () => {
+    const rule = grammar.repository.format_highlight as MatchRule;
+    expect(rule.captures?.['1']?.name).toBe('constant.character.escape.manuscript-markdown');
+    const regex = new RegExp(rule.match.replace(/([+*?])\+/g, '$1'), 'd');
+    for (const [line, escapes] of [['a \\{==x==\\}', '\\{'], ['a \\\\\\{==x==\\}', '\\\\\\{'], ['a \\\\==x==', '\\\\'], ['a ==x==', '']]) {
+      const [start, end] = regex.exec(line)!.indices![1];
+      expect(line.slice(start, end)).toBe(escapes);
+    }
   });
 });

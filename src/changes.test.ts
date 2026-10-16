@@ -6,7 +6,7 @@ import * as path from 'path';
 // We'll test the regex pattern directly since we can't import vscode in tests
 // This is the same pattern used in changes.ts
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
-const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Helper function to find all pattern matches in text
 function findAllPatterns(text: string): Array<{ start: number; end: number; matched: string }> {
@@ -557,5 +557,32 @@ describe('Navigation regex skips an escaped CriticMarkup opener', () => {
     ['a comment\'s range and body', 'a {#1}x{/1}{#1>>c<<} b', ['{#1}', '{/1}', '{#1>>c<<}']],
   ])('reads %s as export does', (_name, text, expected) => {
     expect(findAllPatterns(text).map(m => m.matched)).toEqual(expected);
+  });
+});
+
+// An == right after a { that an odd run of backslashes escapes opens a
+// highlight, as export and the preview read it: the { is text, as in
+// \{==x==\}, which import writes for Word's literal braces around a
+// highlight. One right after a { no odd run escapes opens none, as before
+describe('Navigation regex reads an == after an escaped { as a highlight\'s opener', () => {
+  it.each<[string, string, string[]]>([
+    ['an escaped { and } around a highlight', '\\{==x==\\}', ['==x==']],
+    ['a highlight after three backslashes and a {', '\\\\\\{==x==\\}', ['==x==']],
+    ['an escaped { and } around a highlight in text', 'a \\{==x==\\} b', ['==x==']],
+    ['a colored highlight after an escaped {', 'a \\{==x=={red} b', ['==x=={red}']],
+    ['a highlight after an escaped { without a closing brace', 'a \\{==x== b', ['==x==']],
+    ['an escaped critic highlight, whose == before a } closes none', 'a \\{==x==} b', []],
+    ['a critic highlight', 'a {==x==} b', ['{==x==}']],
+    ['a critic highlight after an escaped backslash', 'a \\\\{==x==} b', ['{==x==}']],
+    ['a highlight', 'a ==x== b', ['==x==']],
+    ['an escaped opener', 'a \\==x== b', []],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(findAllPatterns(text).map(m => m.matched)).toEqual(expected);
+  });
+
+  // Export reads a highlight there, its { text, but the preview none, and
+  // only a search past it for its ==} could tell the two apart
+  it('reads no highlight after a {== that no ==} closes, as the preview does', () => {
+    expect(findAllPatterns('a {==x== b').map(m => m.matched)).toEqual([]);
   });
 });
