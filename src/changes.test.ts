@@ -6,7 +6,7 @@ import * as path from 'path';
 // We'll test the regex pattern directly since we can't import vscode in tests
 // This is the same pattern used in changes.ts
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
-const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Helper function to find all pattern matches in text
 function findAllPatterns(text: string): Array<{ start: number; end: number; matched: string }> {
@@ -533,5 +533,29 @@ describe('Property 8: Overlapping pattern filtering with colored highlights', ()
       }),
       { numRuns: 100 }
     );
+  });
+});
+
+// A { after an odd run of backslashes opens no CriticMarkup, as export and
+// the preview read it: the last backslash escapes it
+describe('Navigation regex skips an escaped CriticMarkup opener', () => {
+  it.each<[string, string, string[]]>([
+    ['an escaped insertion', 'a \\{++x++} b', []],
+    ['an escaped deletion', 'a \\{--x--} b', []],
+    ['an escaped substitution, whose ~~ strike through its text', 'a \\{~~x~>y~~} b', ['~~x~>y~~']],
+    ['an escaped comment', 'a \\{>>c<<} b', []],
+    ['an escaped critic highlight', 'a \\{==x==} b', []],
+    ['an escaped range start', 'a \\{#1}x{/1}{#1>>c<<} b', ['{/1}', '{#1>>c<<}']],
+    ['an escaped range end', 'a {#1}x\\{/1}{#1>>c<<} b', ['{#1}', '{#1>>c<<}']],
+    ['an escaped comment with an ID', 'a {#1}x{/1}\\{#1>>c<<} b', ['{#1}', '{/1}']],
+    ['an insertion after three backslashes', 'a \\\\\\{++x++} b', []],
+    ['an insertion', 'a {++x++} b', ['{++x++}']],
+    ['an insertion after an escaped backslash', 'a \\\\{++x++} b', ['{++x++}']],
+    ['a deletion after two escaped backslashes', 'a \\\\\\\\{--x--} b', ['{--x--}']],
+    ['a substitution', 'a {~~x~>y~~} b', ['{~~x~>y~~}']],
+    ['a critic highlight and its comment', 'a {==x==}{>>c<<} b', ['{==x==}', '{>>c<<}']],
+    ['a comment\'s range and body', 'a {#1}x{/1}{#1>>c<<} b', ['{#1}', '{/1}', '{#1>>c<<}']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(findAllPatterns(text).map(m => m.matched)).toEqual(expected);
   });
 });

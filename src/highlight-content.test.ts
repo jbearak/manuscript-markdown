@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import JSZip from 'jszip';
-import { convertMdToDocx } from './md-to-docx';
+import { convertMdToDocx, parseMd } from './md-to-docx';
 import { buildMarkdown, convertDocx, DEFAULT_FORMATTING, type ContentItem } from './converter';
 import { orderRPr } from './md-to-docx-citations';
 import { fastestRun } from './test-timing';
@@ -195,4 +195,50 @@ describe('a comment nested in a highlight or a revision', () => {
     expect(body).toMatch(/<w:commentRangeStart w:id="0"\/><w:r><w:t>b<\/w:t><\/w:r><w:commentRangeEnd w:id="0"\/>/);
     expect(await imported(docx)).toBe('Seen {++a ++}{=={++b++}==}{>>c<<}{++ d++} on.');
   });
+});
+
+// An == right before a } closes no format highlight, as the preview and the
+// editor read it: the search for its closing == goes on past it. So
+// \{==x==}, whose { a backslash escapes, is text, as the preview shows it.
+// Import writes a } right after a highlight's closing == as \}.
+describe('a format highlight\'s == right before a }', () => {
+  /** Each run's text in the body, a highlighted one's in [] */
+  const runs = (body: string) => [...body.matchAll(/<w:r>((?:(?!<\/w:r>).)*)<\/w:r>/g)].map(([, run]) => {
+    const text = /<w:t[^>]*>([^<]*)<\/w:t>/.exec(run)?.[1] ?? '';
+    return run.includes('<w:highlight ') ? '[' + text + ']' : text;
+  });
+  const withoutRsids = (body: string) => body.replace(/ w:rsid\w*="[^"]*"/g, '');
+
+  it.each<[string, string, string[]]>([
+    ['an escaped critic highlight', 'a \\{==x==} b', ['a {==x==} b']],
+    ['an == before a }', 'a ==x==} b', ['a ==x==} b']],
+    ['a highlight past an == before a }', 'a ==x==}y== b', ['a ', '[x==}y]', ' b']],
+    ['a highlight before an escaped }', 'a ==x==\\} b', ['a ', '[x]', '} b']],
+    ['a colored highlight before a }', 'a ==x=={red}} b', ['a ', '[x]', '} b']],
+    ['a highlight after an escaped {, as import writes it', 'a \\{==x==\\} b', ['a {', '[x]', '} b']],
+    ['a critic highlight', 'a {==x==}{>>c<<} b', ['a ', 'x', ' b']],
+  ])('exports %s as the preview shows it, and the same after a round trip', async (_name, text, expected) => {
+    const first = await exportParts(text);
+    expect(runs(first.body).filter(run => run !== '')).toEqual(expected);
+    // Twice over: the second export gives Word what the first did, and the
+    // second import the first's Markdown
+    const back = await imported(first.docx);
+    const second = await exportParts(back);
+    expect(withoutRsids(second.body)).toBe(withoutRsids(first.body));
+    expect(await imported(second.docx)).toBe(back);
+  });
+
+  it('reads ==} repeated, highlights\' closers without their {==, in time linear in their number', () => {
+    // Each == is a highlight's opener, whose search for its closing == read
+    // on past each ==} after it to the text's end
+    const input = (n: number) => ('==} ' + '*a* '.repeat(4)).repeat(n);
+    expect(parseMd(input(2))[0].runs.some(run => run.highlight)).toBe(false);
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => parseMd(text));
+    };
+    time(1500);
+    const small = time(1500);
+    expect(time(6000) / small).toBeLessThan(8);
+  }, 60000);
 });

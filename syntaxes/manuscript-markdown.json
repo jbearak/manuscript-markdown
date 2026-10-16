@@ -6,6 +6,7 @@
         { "include": "#footnote_def" },
         { "include": "#colored_format_highlight" },
         { "include": "#format_highlight" },
+        { "include": "#escaped_brace" },
         { "include": "#addition" },
         { "include": "#deletion" },
         { "include": "#substitution" },
@@ -135,6 +136,10 @@
 		},
 		"trailing_backslash_break": {
 			"match": "\\\\$",
+			"name": "constant.character.escape.manuscript-markdown"
+		},
+		"escaped_brace": {
+			"match": "(?<!\\\\)(?:\\\\\\\\)*+\\\\\\{",
 			"name": "constant.character.escape.manuscript-markdown"
 		},
 		"citation_list": {

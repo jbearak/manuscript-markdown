@@ -160,6 +160,50 @@ describe('Editor decorations for CriticMarkup without its closers', () => {
   }, 60000);
 });
 
+// A { after an odd run of backslashes opens no CriticMarkup, as export and
+// the preview read it: the last backslash escapes it
+describe('Editor decorations skip an escaped CriticMarkup opener', () => {
+  type Range = { start: number; end: number };
+  /** Each decoration's text in document order: a delimiter as itself, a
+   *  span's text after what it is */
+  const decorations = (text: string) => {
+    const all = extractAllDecorationRanges(text, 'yellow');
+    const named: Array<[string, Range]> = [
+      ...[...all.additionDelimiters, ...all.deletionDelimiters, ...all.substitutionDelimiters, ...all.highlightDelimiters, ...all.commentDelimiters]
+        .map(range => ['', range] as [string, Range]),
+      ...all.additions.map(range => ['addition: ', range] as [string, Range]),
+      ...all.deletions.map(range => ['deletion: ', range] as [string, Range]),
+      ...all.substitutionOld.map(range => ['old: ', range] as [string, Range]),
+      ...all.substitutionNew.map(range => ['new: ', range] as [string, Range]),
+      ...all.comments.map(range => ['comment: ', range] as [string, Range]),
+      ...[...all.highlights].flatMap(([key, list]) => list.map(range => [key + ': ', range] as [string, Range])),
+    ];
+    return named
+      .sort((a, b) => a[1].start - b[1].start || b[1].end - a[1].end)
+      .map(([name, range]) => name + text.slice(range.start, range.end));
+  };
+
+  it.each<[string, string, string[]]>([
+    ['an escaped insertion', 'a \\{++x++} b', []],
+    ['an escaped deletion', 'a \\{--x--} b', []],
+    ['an escaped substitution', 'a \\{~~x~>y~~} b', []],
+    ['an escaped comment', 'a \\{>>c<<} b', []],
+    ['an escaped comment with an ID', 'a \\{#1>>c<<} b', []],
+    ['an escaped critic highlight', 'a \\{==x==} b', []],
+    ['an insertion after three backslashes', 'a \\\\\\{++x++} b', []],
+    ['an escaped critic highlight in an insertion', '{++a \\{==x==} b++}', ['{++', 'addition: a \\{==x==} b', '++}']],
+    ['a critic highlight in an insertion beside an escaped deletion', '{++a \\{--x--} {==y==} b++}', ['{++', 'addition: a \\{--x--} {==y==} b', '{==', 'critic: y', '==}', '++}']],
+    ['an insertion', 'a {++x++} b', ['{++', 'addition: x', '++}']],
+    ['an insertion after an escaped backslash', 'a \\\\{++x++} b', ['{++', 'addition: x', '++}']],
+    ['a substitution', 'a {~~x~>y~~} b', ['{~~', 'old: x', '~>', 'new: y', '~~}']],
+    ['a critic highlight and its comment', 'a {==x==}{>>c<<} b', ['{==', 'critic: x', '==}', '{>>', 'comment: c', '<<}']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(decorations(text)).toEqual(expected);
+    // And extractHighlightRanges as extractAllDecorationRanges
+    expect([...extractHighlightRanges(text, 'yellow')]).toEqual([...extractAllDecorationRanges(text, 'yellow').highlights]);
+  });
+});
+
 // Feature: highlight-colors, Property 9: Default highlight color respects configuration
 describe('Property 9: Default highlight color respects configuration', () => {
 

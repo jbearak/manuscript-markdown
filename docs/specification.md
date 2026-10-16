@@ -804,6 +804,8 @@ Five annotation operations for tracking changes. See [CriticMarkup Syntax](criti
 - Comment: `{>>text<<}`
 - Highlight: `{==text==}`
 
+A backslash before an opener's `{` makes it text, as in Markdown: `\{++text++}` is the text `{++text++}` in export, the preview and the editor. So is `\{#id}`, `\{/id}` or `\{#id>>`. Two backslashes are an escaped backslash, so `\\{++text++}` is a `\` and an addition.
+
 > [!NOTE]
 > We use CriticMarkup's `{==text==}` highlight syntax to denote text associated with a comment. To colorize text without commenting on it, see [color highlights](#color-highlights) below.
 
@@ -849,6 +851,7 @@ A backslash before the opening `==` escapes it, as in Markdown: `\==text==` is t
 - `{==text==}` is a **CriticMarkup highlight** (rendered with grey background) — denotes a commented-on region
 - `==text==` is a **format highlight** (rendered with the configured default color) — denotes colored text
 - The `{color}` suffix is unambiguous because CriticMarkup uses `{` *before* `==`, not after
+- An `==` right before a `}`, as of `{==text==}`, closes no format highlight, so `\{==text==}` is the text `{==text==}`. DOCX import writes a `}` right after a highlight as `\}`, as in `==text==\}`
 
 #### Markdown in a highlight
 
