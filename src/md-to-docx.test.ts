@@ -4216,6 +4216,11 @@ describe('List blockquote round-trip', () => {
       // A quote out of the item, which ends it, starts a quote of its own,
       // and an alert's marker there is its own
       ['a lazy line after a \\, in an alert out of the item', '- > a\n> [!NOTE] b\\\nc', '- \n  > a\n> [!NOTE] b\\\n> c', ['a', '\u203B Note\nb\nc']],
+      // A quote on the marker line whose lines go on, as the item's indent
+      // takes them in, or which ends the item, is read as none there
+      ['an alert\'s next line four spaces in', '- > [!NOTE]\n    > b', '- \n  > [!NOTE]\n  > b', ['\u203B Note\n b']],
+      ['a quote\'s next line four spaces in, then a lazy line', '- > a\n    > b\n  c', '- \n  > a b c', ['a b c']],
+      ['a lazy line after a \\, in a quote out of the item after its next line', '- > [l](u)\n  > b\n> c\\\nd', '- \n  > [l](u) b\n> c\\\n> d', ['l b', 'c\nd']],
     ])('keeps %s as before', async (_name, md, back, quote) => {
       expect(await quoted(md)).toEqual(quote);
       expect(await roundTripBody(md)).toBe(back);
