@@ -9958,6 +9958,38 @@ export function globallyOverlappingComments(items: ContentItem[]): Set<string> {
   return overlappingCommentRanges(commentRangesAcross(items));
 }
 
+/** The comments on no text right after the last run of another comment's
+ *  range, in `items` and their tables' cells, which take ID syntax. Without
+ *  it, import wrote the comment's body right after the range's, as
+ *  {==t==}{>>a<<}{>>c<<}, which export reads as a comment and its reply, as
+ *  it reads each {>>...<<} right after a {==...==} anchor's body. With it,
+ *  the paragraph goes as {#1}t{/1}{#2}{/2}, each body after it. Not where
+ *  anything is between them, as a space, which goes between the bodies, nor
+ *  after a comment on no text, as {>>a<<}{>>c<<}, which export reads as two
+ *  comments, nor after an HTML comment's comment, whose body follows it with
+ *  no anchor, nor after a display equation's, which takes ID syntax outside
+ *  a table. Runs of no text and no comment write nothing, so they're
+ *  skipped. */
+function pointsAfterRanges(items: ContentItem[]): string[] {
+  const points: string[] = [];
+  let before: ContentItem | undefined;
+  for (const item of items) {
+    if (item.type === 'table') {
+      for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) pushAll(points, pointsAfterRanges(para));
+      before = item;
+      continue;
+    }
+    if (item.type === 'text' && item.text === '' && !item.revision && item.commentIds.size === 0) continue;
+    const ranged = before && 'commentIds' in before && before.type !== 'html_comment' && !(before.type === 'math' && before.display)
+      && !(before.type === 'text' && before.text === '') ? before.commentIds : undefined;
+    if (item.type === 'text' && isCommentPoint(item) && ranged?.size && ![...item.commentIds].some(id => ranged.has(id))) {
+      pushAll(points, item.commentIds);
+    }
+    before = item;
+  }
+  return points;
+}
+
 function formatDateSuffix(date: string | undefined, timezone?: string): string {
   if (!date) return '';
   try {
@@ -15365,6 +15397,12 @@ function buildMarkdownOnce(
   // document, or in a note
   for (const items of [mergedContent, ...noteEntries.map(entry => entry.body)]) {
     for (const id of globallyOverlappingComments(items)) forceIdCommentIds.add(id);
+  }
+  // A comment on no text right after another's range, whose body would
+  // follow the range's as its reply (see pointsAfterRanges), in the runs
+  // as they render
+  for (const items of [mergedContent, ...noteBodies.values()]) {
+    for (const id of pointsAfterRanges(items)) forceIdCommentIds.add(id);
   }
   // Over an HTML comment, a range takes ID syntax, as {#1}<!-- a -->{/1},
   // where the paragraph that holds it, as written, reads back as one
