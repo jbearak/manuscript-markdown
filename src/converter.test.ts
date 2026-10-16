@@ -16463,7 +16463,8 @@ describe('a line of display math that would start a Markdown block', () => {
   test.each([
     ['an addition', '{++' + wrapped('a\n- b') + '++}\n\nAfter.\n', '{++' + wrapped('a\n- b') + '++}\n\nAfter.\n'],
     ['a deletion', '{--' + wrapped('a\n- b') + '--}\n\nAfter.\n', '{--' + wrapped('a\n- b') + '--}\n\nAfter.\n'],
-    ['an addition after text', 'Text {++' + wrapped('a\n- b') + '++} more.\n', 'Text\n\n{++' + wrapped('a\n- b') + '++}\n\n&#32;more.\n'],
+    // In its paragraph, as export keeps it there
+    ['an addition after text', 'Text {++' + wrapped('a\n- b') + '++} more.\n', 'Text\n{++' + wrapped('a\n- b') + '++}&#32;more.\n'],
     // Each side, which import writes as a deletion and an addition
     ['a substitution, on each side', '{~~' + wrapped('a\n- b') + '~>' + wrapped('c\n- d') + '~~}\n\nAfter.\n',
       '{--' + wrapped('a\n- b') + '--}\n{++' + wrapped('c\n- d') + '++}\n\nAfter.\n'],
@@ -16516,16 +16517,19 @@ describe('a line of display math that would start a Markdown block', () => {
     expect(await equations(back)).toBe(1);
   });
 
-  // Which export writes in the paragraph, where {==...==} would end it
+  // Which export writes in the paragraph, and in its highlight there, as
+  // export keeps {==...==} around the equation alone in the paragraph
   test('in a highlight in a paragraph\'s text stays in the paragraph', async () => {
     const back = await roundTrip('a ==' + fence + 'x' + fence + '== b\n');
-    expect(back).toBe('a\n' + fence + '\nx\n' + fence + '&#32;b\n');
+    expect(back).toBe('a\n{==' + fence + '\nx\n' + fence + '==}&#32;b\n');
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(back)).docx)).file('word/document.xml')!.async('string');
     expect(xml.match(/<w:p[ >]/g)).toHaveLength(1);
+    expect(xml).toContain('<m:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><m:t>x</m:t></m:r>');
+    expect(await roundTrip(back)).toBe(back);
   });
 
-  // Two equations in a paragraph, the first highlighted, as main writes
-  // them, where {==...==} around the first would end the paragraph there
+  // Two equations in a paragraph, the first highlighted, which comes back
+  // in {==...==}, which export keeps in the paragraph
   test.each([
     ['', '', 'word/document.xml', 1],
     // A note's, where its walker reads the paragraph, and its marker's
@@ -16534,9 +16538,10 @@ describe('a line of display math that would start a Markdown block', () => {
   ])('in a highlight before another equation in its paragraph stays in the paragraph%s', async (_name, note, part, paragraphs) => {
     const indent = note ? '    ' : '';
     const back = await roundTrip(note + (note ? ' ' : '') + '==' + fence + 'x' + fence + '==' + fence + 'y' + fence + '\n');
-    expect(back).toBe(note + (note ? '\n\n' : '') + [fence, 'x', fence, fence, 'y', fence].map(line => indent + line).join('\n') + '\n');
+    expect(back).toBe(note + (note ? '\n\n' : '') + ['{==' + fence, 'x', fence + '==}', fence, 'y', fence].map(line => indent + line).join('\n') + '\n');
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(back)).docx)).file(part)!.async('string');
     expect(xml.match(/<w:p[ >]/g)).toHaveLength(paragraphs);
+    expect(await roundTrip(back)).toBe(back);
   });
 
   // Its comment, as {==...==}{>>...<<} reads, goes around the equation in

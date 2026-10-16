@@ -27,9 +27,12 @@ type Block =
   | { kind: 'open' | 'close' }
   | { kind: 'code' | 'html' | 'latex' | 'latexComment' | 'grid' | 'definition' | 'critic' | 'moved' | 'quote' | 'note' }
   | { kind: SplitKind };
-// Blocks export splits in two or more, at a revised equation or a paragraph
-// break in a revision: a comment after an equation on its line, or after
-// such a break, and a quote with an equation in its text
+// Blocks of a line with a revised equation or a paragraph break in a
+// revision: a comment after an equation on its line, which export keeps in
+// the equation's paragraph, as after one in no revision, and import writes
+// apart from it; a comment after such a break, which export splits off;
+// and a quote with an equation in its text, which stays in the quote's
+// paragraph
 type SplitKind = 'mathComment' | 'breakComment' | 'mathQuote';
 const SPLIT_KINDS: readonly string[] = ['mathComment', 'breakComment', 'mathQuote'];
 // The blocks whose spacing doesn't hang on the blank lines next to them,
@@ -249,11 +252,12 @@ describe('Comment spacing through preprocessing', () => {
       trailing: 0,
       lineEnd: '\r\n',
     };
-    // The comment after the equation, or the break, is the first comment
-    // alone, with none of the blank lines around it its own, and the last
-    // comment is the second
+    // The comment after the break is the first comment alone, with none
+    // of the blank lines around it its own, and the last comment is the
+    // second. The one after the equation is in the equation's paragraph, as
+    // after an equation in no revision, so the last is the first alone
     const spacing = await commentSpacing((await convertMdToDocx(markdownOf(document, 'written'))).docx);
-    expect(spacing).toContain('MANUSCRIPT_HTML_COMMENT_AFTER_GAPS_1={"1":0}');
+    expect(spacing).toContain('MANUSCRIPT_HTML_COMMENT_AFTER_GAPS_1={"' + (split === 'mathComment' ? 0 : 1) + '":0}');
     await expectSameSpacing(document);
   });
 

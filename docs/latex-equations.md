@@ -23,6 +23,8 @@ A heading can't go past its line, so display math that's all of a heading goes o
 
 Inline math right after a display equation in a paragraph, as Word can have it, comes back on the line after the equation's closing fence, as a display equation right after one does. On the fence's line, its `$` would run into the fence and read as text. Export reads that line end as a space, as it does the line end before an opening fence, so Word gets a space between the equations. Where line ends are line breaks (`breaks: true`), that line end would be a line break in Word, so import keeps the inline math on the fence's line there, as before.
 
+A tracked change, a highlight or a comment around display math alone, as import writes one, keeps the equation in its paragraph, with text before or after it there, as display math in none is kept. Word gets the change, the highlight or the comment on the equation there. A highlight with a comment over it, or with a comment right after it in its paragraph, comes back without the highlight, as before, since `{==...==}{>>...<<}` reads as a comment over the equation. A span with a blank line between its equations still puts each in a paragraph of its own. In a heading, the equation goes in a paragraph of its own after the heading's, as above. Inline math right after such a span stays on the span's closing line, as `++}`, `--}` or `==}` keeps it apart from the fence.
+
 ### Tracked changes inside inline equations
 
 CriticMarkup can wrap a changed fragment inside an inline equation. Keep each
