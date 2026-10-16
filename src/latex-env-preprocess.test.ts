@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
 import { renderWithPlugin } from './test-helpers';
+import { scanOrientationDirectives } from './orientation-scan';
 
 describe('wrapBareLatexEnvironments', () => {
 	test('wraps a bare equation environment', () => {
@@ -647,5 +648,57 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		time(32000);
 		const small = time(32000);
 		expect(time(128000) / small).toBeLessThan(8);
+	}, 60000);
+});
+
+describe('a paragraph of many openers around a bare environment, which no rule of its read closes', () => {
+	const D = '$' + '$';
+	const env = '\\begin{equation}\nx\n\\end{equation}';
+	// From each of many < with no end, html_inline searched on to the
+	// paragraph's end for the end of a processing instruction or a
+	// declaration, in the read of the environment's paragraph (see
+	// readParagraph in latex-env-preprocess.ts), which the language server
+	// runs through the orientation scan after each edit. A run of each length
+	// from one to seven, with text after it
+	const runs = (mark: string) => (n: number) => {
+		const parts: string[] = [];
+		for (let i = 0; i < n; i++) parts.push(mark.repeat(1 + i % 7) + ' a ');
+		return parts.join('');
+	};
+	const openers: Array<[string, (n: number) => string]> = [
+		['<?x', n => '<?x '.repeat(n)],
+		['<!x', n => '<!x '.repeat(n)],
+		['<![CDATA[', n => '<![CDATA[ '.repeat(n)],
+		['<a', n => '<a '.repeat(n)],
+		['</', n => '</ '.repeat(n)],
+		['<!--', n => '<!-- '.repeat(n)],
+		['<!-->', n => '<!--> '.repeat(n)],
+		['runs of backticks', runs('`')],
+		['runs of dollar signs', runs('$')],
+	];
+	// Before the environment, where the paragraph is not simple and its read
+	// stops, after it, where the read goes on, and after it where a fence in
+	// a code span before it, which main paired with none, leaves it to the
+	// paragraph's own parse, which reads the paragraph again with the wrap
+	const places: Array<[string, (openers: string) => string]> = [
+		['before an environment in its paragraph', openers => 'Text ' + openers + '\n' + env + '\n'],
+		['after an environment in its paragraph', openers => env + '\nText ' + openers + '\n'],
+		['after an environment after a fence in a code span', openers => 'Use `' + D + '` x\n' + env + '\nText ' + openers + '\n'],
+	];
+	const rows = openers.flatMap(([name, make]) => places.map(([where, place]) => [name, where, (n: number) => place(make(n))] as const));
+
+	test.each(rows)('reads a paragraph of many %s %s, through the wrapper and the orientation scan, in linear time', (name, where, text) => {
+		// The dollar signs before it pair with its fences, as on main
+		const wraps = !(name === 'runs of dollar signs' && where.startsWith('before'));
+		expect(wrapBareLatexEnvironments(text(8000)).includes(D + env + D)).toBe(wraps);
+		for (const work of [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives]) {
+			const time = (n: number) => {
+				const input = text(n);
+				return fastestRun(() => work(input));
+			};
+			time(8000);
+			const small = time(8000);
+			expect(time(32000) / small).toBeLessThan(8);
+		}
 	}, 60000);
 });

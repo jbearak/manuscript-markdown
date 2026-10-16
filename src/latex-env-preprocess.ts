@@ -354,7 +354,11 @@ function readParagraphOnItsOwn(text: string, unit: Zone, environments: BareEnvir
 		from = at(contentEnd);
 	}
 	masked.push(source.slice(from));
-	const before = readParagraph(masked.join(''));
+	// Main's decision holds where the paragraph is not simple to its last
+	// environment's end, so the read stops there
+	const last = at(environments[environments.length - 1].end);
+	const before = readParagraph(masked.join(''), last);
+	if (before.unsimple !== -1) return byMain;
 	const displays = before.equations.filter(e => e.display);
 	const wrapped = environments.filter(e => !holdsEither({ start: at(e.start), end: at(e.contentStart) }, { start: at(e.contentEnd), end: at(e.end) }, displays));
 	if (wrapped.length === byMain.length && wrapped.every((e, i) => e.start === byMain[i].start)) return byMain;
@@ -391,9 +395,8 @@ function readParagraphOnItsOwn(text: string, unit: Zone, environments: BareEnvir
 		}
 		return offset + 2 * lo;
 	};
-	const after = readParagraph(parts.join(''));
-	const last = at(environments[environments.length - 1].end);
-	if (after.unsimple.length > 0 && after.unsimple[0] < moved(last, true)) return byMain;
+	const after = readParagraph(parts.join(''), moved(last, true));
+	if (after.unsimple !== -1) return byMain;
 	const expected = before.equations.map(e => ({ start: moved(e.start, true), end: moved(e.end, false), display: e.display }))
 		.concat(wraps).sort((a, b) => a.start - b.start);
 	const same = expected.length === after.equations.length && expected.every((e, i) => {
@@ -471,20 +474,30 @@ function openerBefore(text: string, lineStart: number, opener: string): number {
 interface Equation extends Zone { display: boolean }
 
 /** What a read of a paragraph records, in its state's env: its equations,
- *  in order, where a rule of export's the read doesn't have may start, in
- *  order (see unsimpleRule), and the run of dollar signs read last */
+ *  in order, and the first place before `limit` where a rule of export's
+ *  the read doesn't have may start (see unsimpleRule), at which the read
+ *  stops, or -1, and the run of dollar signs read last */
 interface ParagraphRead {
 	equations: Equation[];
-	unsimple: number[];
+	unsimple: number;
+	limit: number;
 	runAt: number;
 	runEnd: number;
 }
 
 /** markdown-it with the inline rules of export's (see createMarkdownIt in
  *  md-to-docx.ts) that read past a dollar sign in a simple paragraph: an
- *  escape, a code span and a comment. And export's math rule. Export's other
- *  rules read emphasis, entities and line ends, past no dollar sign, or
- *  start where unsimpleRule records it */
+ *  escape, a code span and a comment, through linearInlineComments, which
+ *  reads no other HTML, as unsimpleRule reads each other < as text. And
+ *  export's math rule. Export's other rules read emphasis, entities and
+ *  line ends, past no dollar sign, or start where unsimpleRule records it.
+ *  Each rule reads in time linear in the paragraph, all of its openers
+ *  together: a code span through markdown-it's cache of the backtick runs
+ *  it found, a comment through commentEnds, and an equation, whose search
+ *  for its closer ends at the next run of dollar signs that may close it,
+ *  of one for inline math and of two or more for display math, which no
+ *  opener of its kind is before, so no part of the text is searched more
+ *  than twice for each kind, but a run of four or more, read in one step */
 const reader = new MarkdownIt('zero', { html: true });
 reader.inline.ruler.enable(['escape', 'backticks', 'html_inline']);
 reader.use(linearInlineComments);
@@ -492,9 +505,9 @@ reader.inline.ruler.before('text', 'unsimple', unsimpleRule);
 reader.inline.ruler.push('math', readMath);
 
 /** The read of `src`, a paragraph's text, as export's inline parse reads it
- *  where it is simple */
-function readParagraph(src: string): ParagraphRead {
-	const read: ParagraphRead = { equations: [], unsimple: [], runAt: -1, runEnd: -1 };
+ *  where it is simple, which stops where it is not before `limit` */
+function readParagraph(src: string, limit: number): ParagraphRead {
+	const read: ParagraphRead = { equations: [], unsimple: -1, limit, runAt: -1, runEnd: -1 };
 	reader.inline.tokenize(new reader.inline.State(src, reader, read, []));
 	return read;
 }
@@ -504,8 +517,12 @@ function readParagraph(src: string): ParagraphRead {
  *  close a link, an image, a citation or a note's reference, a < that opens
  *  no comment, which may open a tag or an autolink, the :// of a URL
  *  linkify reads, a highlight's ==, a { that opens CriticMarkup or a
- *  comment's range, or a CriticMarkup span's closer. Reads nothing */
-function unsimpleRule(state: StateInline): boolean {
+ *  comment's range, or a CriticMarkup span's closer. Before the read's
+ *  limit, it stops the read there, where main's decision holds. Past it, it
+ *  reads such a < as text, where html_inline searched, from each of many,
+ *  on to the paragraph's end for the end of a declaration or a processing
+ *  instruction, and reads nothing else */
+function unsimpleRule(state: StateInline, silent: boolean): boolean {
 	const { src, pos } = state;
 	const code = src.charCodeAt(pos);
 	const next = src.charCodeAt(pos + 1);
@@ -515,7 +532,17 @@ function unsimpleRule(state: StateInline): boolean {
 		|| code === 0x3D && next === 0x3D
 		|| code === 0x7B && (next === 0x23 || next === 0x2F || (next === 0x2B || next === 0x2D || next === 0x7E || next === 0x3E) && src.charCodeAt(pos + 2) === next)
 		|| (code === 0x2B || code === 0x2D || code === 0x7E) && next === code && src.charCodeAt(pos + 2) === 0x7D) {
-		(state.env as ParagraphRead).unsimple.push(pos);
+		const read = state.env as ParagraphRead;
+		if (pos < read.limit) {
+			read.unsimple = pos;
+			state.pos = state.posMax;
+			return true;
+		}
+		if (code === 0x3C) {
+			if (!silent) state.pending += '<';
+			state.pos++;
+			return true;
+		}
 	}
 	return false;
 }
@@ -559,10 +586,10 @@ export function paragraphEquations(text: string): Array<Zone & { simple: boolean
 	const { inlineBlocks } = computeMarkdownRegions(text, { html: 'all', inlineBlocks: true });
 	return exportUnits(text, inlineBlocks).map(unit => {
 		const source = text.slice(unit.start, unit.end);
-		const read = readParagraph(source);
+		const read = readParagraph(source, source.length);
 		return {
 			...unit,
-			simple: read.unsimple.length === 0 && !CRITIC_MARKUP.test(source),
+			simple: read.unsimple === -1 && !CRITIC_MARKUP.test(source),
 			equations: read.equations.map(e => ({ start: unit.start + e.start, end: unit.start + e.end, display: e.display })),
 		};
 	});
