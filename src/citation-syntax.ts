@@ -141,8 +141,8 @@ function plainPrefixedKeyStart(state: Pick<StateInline, 'md' | 'env'>, item: str
  *  that starts in the first item's prefix, before its key at `keyStart`,
  *  and runs past the ] takes that ] for its own, though
  *  plainPrefixedKeyStart, whose parse ends at the ], reads the prefix as
- *  plain text. Where a ( or [ follows the next ] after it, the link rule
- *  reads a link there, as Pandoc does.
+ *  plain text. Where a link follows the next ] after it, the link rule
+ *  reads one there, as Pandoc does (see linkAfter).
  *
  *  It reads only those two, with escapes and plain text, so that each
  *  citation's scan reads its own part of the text (see lookaheadStep). It
@@ -163,10 +163,7 @@ function opensLinkPast(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: nu
   const { src, posMax } = ahead.state;
   while (pos < posMax) {
     const ch = src.charAt(pos);
-    if (ch === ']') {
-      const after = src.charAt(pos + 1);
-      return after === '(' || after === '[';
-    }
+    if (ch === ']') return linkAfter(ahead.state, start + 1, pos);
     // Where another token may start, whose search for its end the next
     // citation's scan would read again
     if (ch === '[' || ch === '$' || ch === '`') return false;
@@ -174,6 +171,50 @@ function opensLinkPast(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: nu
     if (pos === -1) return false;
   }
   return false;
+}
+
+/** Whether a link follows the ] at `close` that ends the text from
+ *  `labelStart`, as markdown-it's link rule reads one: a destination in
+ *  ( ), or a reference defined in the document, named in [ ] or by the
+ *  text. Where it reads none, the brackets stay a citation, as before. A
+ *  label holding a [ or longer than a label may be is read as no link,
+ *  which no definition could name. */
+function linkAfter(state: StateInline, labelStart: number, close: number): boolean {
+  const { src, posMax: max, md, env } = state;
+  const skipSpaces = (at: number) => {
+    while (at < max && (md.utils.isSpace(src.charCodeAt(at)) || src.charCodeAt(at) === 0x0A)) at++;
+    return at;
+  };
+  let pos = close + 1;
+  if (src.charAt(pos) === '(') {
+    pos = skipSpaces(pos + 1);
+    if (pos >= max) return false;
+    const destination = md.helpers.parseLinkDestination(src, pos, max);
+    if (destination.ok) {
+      if (md.validateLink(md.normalizeLink(destination.str))) pos = destination.pos;
+      const start = pos;
+      pos = skipSpaces(pos);
+      const title = md.helpers.parseLinkTitle(src, pos, max);
+      if (pos < max && start !== pos && title.ok) pos = skipSpaces(title.pos);
+    }
+    if (pos < max && src.charAt(pos) === ')') return true;
+    pos = close + 1;
+  } else if (src.charAt(pos) !== '[') {
+    return false;
+  }
+  const references = env?.references as Record<string, unknown> | undefined;
+  if (!references) return false;
+  let label = '';
+  if (src.charAt(pos) === '[') {
+    let end = pos + 1;
+    while (end < max && end - pos <= 1000 && src.charAt(end) !== ']') {
+      if (src.charAt(end) === '[') return false;
+      end += src.charAt(end) === '\\' ? 2 : 1;
+    }
+    if (end >= max || src.charAt(end) !== ']') return false;
+    label = src.slice(pos + 1, end);
+  }
+  return Boolean(references[md.utils.normalizeReference(label || src.slice(labelStart, close))]);
 }
 
 // What opensLinkPast reads each state's text with: a state of its own,

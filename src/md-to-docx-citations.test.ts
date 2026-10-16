@@ -902,6 +902,18 @@ describe('citation prefixes', () => {
   });
 
   it.each([
+    // markdown-it reads no link after the ], so neither did export
+    ['a reference no definition names', '[see $a @smith2020]$][missing]', ['smith2020'], false],
+    ['a destination that ( ) doesn\'t close', '[see $a @smith2020]$](a b c) d', ['smith2020'], false],
+    ['a [ in the label', '[see $a @smith2020]$][a[b]', ['smith2020'], false],
+    ['a defined reference', '[see $a @smith2020]$][r]\n\n[r]: https://example.com', undefined, true],
+    ['a destination and a title', '[see $a @smith2020]$](u "t")', undefined, true],
+  ])('reads a citation whose prefix starts an equation past its ], then %s, as markdown-it reads a link there', (_name, md, keys, links) => {
+    expect(findCitationRun(parseMd(md))?.keys).toEqual(keys);
+    expect(parseMd(md).flatMap(t => t.runs).some(r => r.href !== undefined)).toBe(links);
+  });
+
+  it.each([
     // Each scan ran markdown-it's rule for <? on the rest of the text
     ['a <? left open', (n: number) => '[see <?a @x] '.repeat(n)],
     ['a $ left open', (n: number) => '[see $a @x] '.repeat(n)],
