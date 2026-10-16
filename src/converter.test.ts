@@ -25561,3 +25561,263 @@ describe('a citation in a deletion\'s formatting or after an ID comment\'s marke
     expect(await roundTrip(md)).toBe(md);
   });
 });
+
+// A citation right after a hidden HTML comment got a space before it, as
+// the comment's > read as the text before it, so from the second export on
+// Word showed two spaces before it where it had one
+describe('a citation right after a hidden HTML comment', () => {
+  const bibtex = '@book{roe2019,\n  author = {Roe, Rick},\n  title = {A Book},\n  publisher = {Pub},\n  year = {2019}\n}\n\n'
+    + '@article{doe2020,\n  author = {Doe, Jane},\n  title = {A Title},\n  journal = {J},\n  year = {2020}\n}\n';
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  /** The text Word shows before the bibliography, a paragraph a line: no
+   *  hidden run's, and a field's result */
+  const shown = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const end = xml.indexOf('ZOTERO_BIBL');
+    return xml.slice(xml.indexOf('<w:body>'), end === -1 ? undefined : end).split('</w:p>')
+      .map(paragraph => [...paragraph.replace(/<w:r>(?:(?!<\/w:r>)[\s\S])*?<w:vanish\/>[\s\S]*?<\/w:r>/g, '').matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join(''))
+      .filter(text => text !== '').join('\n').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  };
+  /** Each export's text and each import's Markdown, over two trips */
+  const trips = async (md: string) => {
+    const views: string[] = [];
+    const markdowns: string[] = [];
+    let markdown = md;
+    let bib = bibtex;
+    for (;;) {
+      const { docx } = await convertMdToDocx(markdown, { bibtex: bib });
+      views.push(await shown(docx));
+      if (views.length === 3) return { views, markdowns };
+      const result = await convertDocx(docx);
+      markdown = result.markdown;
+      bib = result.bibtex || bib;
+      markdowns.push(strip(markdown));
+    }
+  };
+
+  const containers: Array<[string, (line: string) => string]> = [
+    ['a paragraph', line => line],
+    ['a heading', line => '# ' + line],
+    ['a list item', line => '- ' + line],
+    ['a table\'s cell', line => '| h |\n| --- |\n| ' + line + ' |'],
+  ];
+  const citations = [['[@doe2020]', '(Doe, 2020)'], ['[see @roe2019]', '(see Roe, 2019)']];
+  test.each(containers.flatMap(([name, wrap]) => citations.map(([citation, result]) => [name, citation, wrap, result] as const)))(
+    'writes no space between the comment and the citation in %s, as in %s', async (_name, citation, wrap, result) => {
+      const md = wrap('a <!-- h -->' + citation + ' b.') + '\n';
+      const { views, markdowns } = await trips(md);
+      expect(markdowns[0]).toBe(md);
+      expect(markdowns[1]).toBe(md);
+      expect(views[0]).toContain('a ' + result + ' b.');
+      expect(views[1]).toBe(views[0]);
+      expect(views[2]).toBe(views[0]);
+    });
+
+  test.each([
+    ['two comments', 'a <!-- h --><!-- i -->[@doe2020] b.'],
+    ['a comment with what look like its end in it', 'a <!-- x -> y --!> z -- w -->[@doe2020] b.'],
+    ['a comment with another\'s start in it', 'a <!-- x <!-- y -->[@doe2020] b.'],
+    ['a comment and a Word comment on no text', 'a <!-- h -->{>>c<<}[@doe2020] b.'],
+    ['a comment, before an inserted citation', 'a <!-- h -->{++[@doe2020]++} b.'],
+    ['a comment, before a highlighted citation', 'a <!-- h -->==[@doe2020]== b.'],
+    // Word's text here leaves out what's deleted
+    ['a comment, before a substitution\'s citation', 'a <!-- h -->{~~x~>[@doe2020]~~} b.'],
+    ['a comment, before a substitution of more than one run', 'a <!-- h -->{~~x y~>[@doe2020] z~~} b.', 'a (Doe, 2020) z b.'],
+    // Whose text goes after the # or |, so the comment starts no line
+    ['a comment at a heading\'s start', '# <!-- h -->[@doe2020] b.', '(Doe, 2020) b.'],
+    ['a comment at a table cell\'s start', '| h |\n| --- |\n| <!-- h -->[@doe2020] b. |', '(Doe, 2020) b.'],
+  ])('writes no space after %s', async (_name, md, text = 'a (Doe, 2020) b.') => {
+    const { views, markdowns } = await trips(md + '\n');
+    expect(markdowns[0]).toBe(md + '\n');
+    expect(markdowns[1]).toBe(md + '\n');
+    expect(views[0]).toContain(text);
+    expect(views[1]).toBe(views[0]);
+  });
+
+  test('writes no space after a comment in emphasis', async () => {
+    // Import writes the comment after the emphasis, as before
+    const { views, markdowns } = await trips('**a <!-- h -->**[@doe2020] b.\n');
+    expect(markdowns[0]).toBe('**a** <!-- h -->[@doe2020] b.\n');
+    expect(markdowns[1]).toBe(markdowns[0]);
+    expect(views[0]).toBe('a (Doe, 2020) b.');
+    expect(views[1]).toBe(views[0]);
+  });
+
+  test.each([
+    // Where Word shows no space, import puts one before the citation, as
+    // before (see citationSeparator)
+    ['no space before the comment', 'a<!-- h -->[@doe2020] b.', 'a<!-- h --> [@doe2020] b.'],
+    ['a space after the comment', 'a <!-- h --> [@doe2020] b.', ''],
+    // Text Word shows, which reads as no comment
+    ['Word\'s text that looks like a comment', 'a \\<!-- h -->[@doe2020] b.', 'a \\<!-- h --> [@doe2020] b.'],
+    ['a comment in code', 'a `<!-- h -->`[@doe2020] b.', 'a `<!-- h -->` [@doe2020] b.'],
+    ['a comment with no end', 'a <!-- h [@doe2020] b.', 'a \\<!-- h [@doe2020] b.'],
+    ['a comment markdown-it reads as text', 'a <!-- h --->[@doe2020] b.', 'a \\<!-- h ---> [@doe2020] b.'],
+    ['a comment\'s end alone', 'a -->[@doe2020] b.', 'a --> [@doe2020] b.'],
+    // After ID syntax, which is Markdown other than Word's text
+    ['a comment in an ID comment\'s range', 'x {#c1}a <!-- h -->{/c1}[@doe2020] b.\n{#c1>>@A | b<<}', 'x {#c1}a <!-- h -->{/c1} [@doe2020] b.\n{#c1>>@A | b<<}'],
+    // An HTML block, which shows the comment as text (known)
+    ['a comment at a paragraph\'s start', '<!-- h -->[@doe2020] b.', ''],
+    ['a comment at a list item\'s start', '- <!-- h -->[@doe2020] b.', ''],
+  ])('writes a citation after %s as before', async (_name, md, imported) => {
+    const { markdowns } = await trips(md + '\n');
+    expect(markdowns[0]).toBe((imported || md) + '\n');
+    expect(markdowns[1]).toBe(markdowns[0]);
+  });
+
+  const plain = (text: string): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } });
+  const comment = (text: string): ContentItem => ({ type: 'html_comment', text, commentIds: new Set() });
+  const citation = (): ContentItem => ({ type: 'citation', text: '(Doe, 2020)', commentIds: new Set(), pandocKeys: ['@doe2020'] });
+
+  test.each([
+    // Of one comment, which Word split at an <!-- in it, and at its -->
+    ['Word split at an <!-- in one', 'a ', [comment('<!-- x'), comment('<!-- y -->')], 'a <!-- x<!-- y -->[@doe2020] b'],
+    ['Word split at a -->', 'a ', [comment('<!-- x -'), comment('-> y')], 'a <!-- x --> y --> [@doe2020] b'],
+    // A space Word hides with one, which shows once export reads it
+    ['with a space Word hides before one', 'a', [comment(' <!-- x -->')], 'a <!-- x -->[@doe2020] b'],
+    ['with text between two in one run', 'a ', [comment('<!-- x -->y<!-- z -->')], 'a <!-- x -->y<!-- z --> [@doe2020] b'],
+  ])('reads hidden comments %s as export reads them', (_name, before, comments, expected) => {
+    expect(buildMarkdown([plain(before), ...comments, citation(), plain(' b')], new Map()).trim()).toBe(expected);
+  });
+
+  test.each([
+    ['code', '` <!-- b `x -->'],
+    ['an insertion', '{++<!-- b -->++}'],
+    ['a deletion', '{--<!-- b -->--}'],
+    ['a Word comment\'s range', '{==<!-- b -->==}{>><<}'],
+    ['a Word comment\'s body', '{>><!-- b --><<}'],
+    ['an escape', '\\<!-- b -->'],
+    ['an autolink', '<http://x/<!-- b -->'],
+    ['a tag\'s attribute', '<span title="<!-- b -->">'],
+    ['a link\'s title', '[l](u "<!-- b -->")'],
+    ['a reference', '&lt;!-- b -->'],
+    ['an emphasis mark', '**'],
+    ['an ID comment\'s marker', '{#c1}'],
+    ['text and a comment', ' x <!-- b -->'],
+    ['math', '$<!-- b -->$'],
+  ])('keeps the space after a hidden run that holds %s after its comment, as before', (_name, rest) => {
+    // Text Word hid with the comment, which shows once export reads it,
+    // and can make a later <!-- text, as code does, or show what the space
+    // read past, as an insertion's text
+    expect(buildMarkdown([plain('a '), comment('<!-- a -->' + rest), citation(), plain(' b')], new Map()).trim()).toBe('a <!-- a -->' + rest + ' [@doe2020] b');
+  });
+
+  test.each([
+    // Code that opens in one hidden run and closes in a later one, past
+    // text between them too, and with IDs
+    ['code from one to the next', [comment('<!-- a -->` '), comment('<!-- b `x -->')], 'a <!-- a -->` <!-- b `x --> [@doe2020] b'],
+    ['code from one alone to the next', [comment('<!-- a -->'), comment('` '), comment('<!-- b `x -->')], 'a <!-- a -->` <!-- b `x --> [@doe2020] b'],
+    ['code past text between', [comment('<!-- a -->` '), plain('y '), comment('<!-- b `x -->')], 'a <!-- a -->` y <!-- b `x --> [@doe2020] b'],
+    ['code past text between, its spaces in the runs', [comment('<!-- a -->`'), plain(' y'), comment(' <!-- b `x -->')], 'a <!-- a -->` y <!-- b `x --> [@doe2020] b'],
+    // Which leave a later <!-- text, or hide it, as main reads them
+    ['an insertion', [comment('<!-- a -->{++'), comment('<!-- b -->++}')], 'a <!-- a -->{++<!-- b -->++} [@doe2020] b'],
+    ['an escape', [comment('<!-- a -->\\'), comment('<!-- b -->')], 'a <!-- a -->\\<!-- b --> [@doe2020] b'],
+    ['a tag\'s attribute', [comment('<!-- a --><span title="'), comment('<!-- b -->">')], 'a <!-- a --><span title="<!-- b -->"> [@doe2020] b'],
+    ['a link', [comment('<!-- a -->[l](<'), comment('<!-- b -->>)')], 'a <!-- a -->[l](<<!-- b -->>) [@doe2020] b'],
+    ['math', [comment('<!-- a -->$'), comment('<!-- b -->$')], 'a <!-- a -->$<!-- b -->$ [@doe2020] b'],
+    ['an autolink', [comment('<!-- a --><http://x/'), comment('<!-- b -->')], 'a <!-- a --><http://x/<!-- b --> [@doe2020] b'],
+    ['a comment markdown-it reads as text', [comment('<!-- a --->`'), comment('<!-- b `x -->')], 'a <!-- a --->`<!-- b `x --> [@doe2020] b'],
+  ])('keeps the space after hidden runs that hold %s, as before', (_name, comments, expected) => {
+    // What one holds goes on into the Markdown of the next
+    expect(buildMarkdown([plain('a '), ...comments, citation(), plain(' b')], new Map()).trim()).toBe(expected);
+  });
+
+  test('keeps the space after hidden runs that hold code from one to the next, with IDs, as before', () => {
+    const ranged = (item: ContentItem): ContentItem => ({ ...item, commentIds: new Set(['c1']) } as ContentItem);
+    const comments = new Map([['c1', { author: 'A', text: 'x', date: '2025-01-01T00:00:00Z' }]]);
+    const markdown = buildMarkdown([plain('a '), ranged(comment('<!-- a -->` ')), ranged(comment('<!-- b `x -->')), ranged(citation()), plain(' b')], comments, { alwaysUseCommentIds: true });
+    expect(markdown).toContain('a {#1}<!-- a -->` <!-- b `x --> [@doe2020]{/1} b');
+  });
+
+  const unembedded = (markdown: string): ContentItem => ({ type: 'image', rId: '', src: '', alt: '', widthPx: 0, heightPx: 0, commentIds: new Set(), markdown });
+  test.each([
+    ['an image export couldn\'t embed', unembedded('![i](x.png)\u200B'), 'a ![i](x.png)'],
+    ['one that holds code', unembedded('![i](x.png)`\u200B'), 'a ![i](x.png)`'],
+    ['math', { type: 'math', latex: 'x', display: false, commentIds: new Set() } as ContentItem, 'a $x$'],
+    ['a link', { ...plain('l'), href: 'http://x/' } as ContentItem, 'a [l](http://x/)'],
+    ['an insertion', { ...plain('i'), revision: { type: 'addition', author: 'A', date: '' } } as ContentItem, 'a {++i++}'],
+  ])('keeps the space after a hidden comment after %s and a space, as before', (_name, item, written) => {
+    // Markdown other than Word's text, which can leave what a later <!--
+    // is read in open, as an image's Markdown, Word's hidden text as it is,
+    // can, so no comment after it is read past
+    expect(buildMarkdown([plain('a '), item, plain(' '), comment('<!-- h -->'), citation(), plain(' b')], new Map()).trim()).toBe(written + ' <!-- h --> [@doe2020] b');
+  });
+
+  test.each([
+    ['code', '` ', 'b `x', 'a ![i](x.png)` <!-- b `x --> [@doe2020] b.'],
+    ['an insertion', '{++ ', 'b ++}', 'a ![i](x.png){++ <!-- b ++} --> [@doe2020] b.'],
+    ['math', ' $x ', 'b$', 'a ![i](x.png) $x <!-- b$ --> [@doe2020] b.'],
+  ])('keeps the space after a hidden comment after Word\'s hidden Markdown of an image that holds %s, as before', async (_name, rest, inComment, expected) => {
+    // Import writes the image's Markdown as Word has it, so what that
+    // opens goes on into the comment's, which export then shows
+    const zip = await JSZip.loadAsync((await convertMdToDocx('a ![i](x.png)<!-- ' + inComment + ' -->[@doe2020] b.\n', { bibtex })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain('(x.png)\u200B');
+    zip.file('word/document.xml', xml.replace('(x.png)\u200B', '(x.png)' + rest + '\u200B'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected + '\n');
+  });
+
+  test('writes no space after hidden runs of comments alone', () => {
+    expect(buildMarkdown([plain('a '), comment('<!-- a -->'), comment(' <!-- b -->'), citation(), plain(' b')], new Map()).trim()).toBe('a <!-- a --><!-- b -->[@doe2020] b');
+  });
+
+  test('writes no space after a hidden comment on the line after a line break, after text', () => {
+    expect(buildMarkdown([plain('a'), plain('\\\n'), plain('b '), comment('<!-- h -->'), citation(), plain(' b')], new Map()).trim()).toBe('a\\\nb <!-- h -->[@doe2020] b');
+  });
+
+  test.each([
+    // Which ends the paragraph, so export shows the rest of the comment
+    ['a blank line in it', [comment('<!-- a\n\nb -->')], 'a <!-- a\n\nb --> [@doe2020] b'],
+    ['a blank line across the pieces Word split it into', [comment('<!-- a\n'), comment('\nb -->')], 'a <!-- a\n\nb --> [@doe2020] b'],
+    ['a blank line in the next one', [comment('<!-- a -->'), comment('<!-- b\n\nc -->')], 'a <!-- a --><!-- b\n\nc --> [@doe2020] b'],
+    // Whose next line could start a block
+    ['a line end in it', [comment('<!-- a\nb -->')], 'a <!-- a\nb --> [@doe2020] b'],
+    ['a line end before a quote\'s marker in it', [comment('<!-- a\n> b -->')], 'a <!-- a\n    > b --> [@doe2020] b'],
+    ['a line end ending a piece Word split it into', [comment('<!-- a\n'), comment('b -->')], 'a <!-- a\nb --> [@doe2020] b'],
+  ])('keeps the space after a hidden comment with %s, as before', (_name, comments, expected) => {
+    expect(buildMarkdown([plain('a '), ...comments, citation(), plain(' b')], new Map()).trim()).toBe(expected);
+  });
+
+  test.each([
+    ['after a line break and spaces', [plain('a'), plain('\\\n'), plain('  '), comment('<!-- h -->')], 'a\\\n&#32;&#32;<!-- h --> [@doe2020] b'],
+    ['after a line break, the spaces in its run', [plain('a'), plain('\\\n'), comment('  <!-- h -->')], 'a\\\n&#32;&#32;<!-- h --> [@doe2020] b'],
+    ['after spaces at the paragraph\'s start', [plain('    '), comment('<!-- h -->')], '&#32;&#32;&#32;&#32;<!-- h --> [@doe2020] b'],
+  ])('keeps the space after a hidden comment at a line\'s start, %s, as before', (_name, items, expected) => {
+    // Where a <!-- would start a block
+    expect(buildMarkdown([...items, citation(), plain(' b')], new Map()).trim()).toBe(expected);
+  });
+
+  test.each([
+    ['code', '&lt;!-- a --&gt;` &lt;!-- b `x --&gt;', 'a <!-- a -->` <!-- b `x --> [@doe2020] b.'],
+    ['an insertion', '&lt;!-- a --&gt;{++&lt;!-- b --&gt;++}', 'a <!-- a -->{++<!-- b -->++} [@doe2020] b.'],
+    // Two hidden runs, the code from one to the next
+    ['code, split', '&lt;!-- a --&gt;` </w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">\u200B&lt;!-- b `x --&gt;', 'a <!-- a -->` <!-- b `x --> [@doe2020] b.'],
+    // A comment with a blank line in it, which ends the paragraph
+    ['two line breaks in it', '&lt;!-- a</w:t><w:br/><w:br/><w:t xml:space="preserve">b --&gt;', 'a <!-- a\n\nb --> [@doe2020] b.'],
+  ])('keeps the space after Word\'s hidden run of a comment and %s, as before', async (_name, hiddenText, expected) => {
+    // Export shows what follows the comment, so the citation went right
+    // after its >
+    const zip = await JSZip.loadAsync((await convertMdToDocx('a <!-- h -->[@doe2020] b.\n', { bibtex })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain('&lt;!-- h --&gt;');
+    zip.file('word/document.xml', xml.replace('&lt;!-- h --&gt;', hiddenText));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected + '\n');
+  });
+
+  test.each([
+    ['before a citation', (n: number) => [plain('a '), ...Array.from({ length: n }, () => comment('<!-- h -->')), citation()]],
+    // Which Word split one comment into, which is read once
+    ['of one, before a citation', (n: number) => [plain('a '), ...Array.from({ length: n }, (_, i) => comment(i === n - 1 ? '<!-- x -->' : '<!-- x')), citation()]],
+  ])('writes many hidden comments %s in time linear in their number', (_name, make) => {
+    // Each comment's end is read from its own Markdown, not the
+    // paragraph's, which reading would join for each, and the citation
+    // reads past each once
+    const time = (n: number) => {
+      const items = make(n);
+      return fastestRun(() => buildMarkdown(items, new Map()), 5);
+    };
+    expect(time(32000) / time(8000)).toBeLessThan(8);
+  }, 30000);
+});
