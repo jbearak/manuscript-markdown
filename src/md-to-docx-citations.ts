@@ -3,6 +3,7 @@ import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLI
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 import { decodeHtmlCharacterReferences } from './html-entities';
+import { readCitationLocator } from './citation-locator';
 
 export interface CiteprocName {
   family?: string;
@@ -51,6 +52,7 @@ interface CiteprocCitationItem {
   label?: string;
   'suppress-author'?: boolean;
   prefix?: string;
+  suffix?: string;
   itemData?: CiteprocItemData;
   uris?: string[];
 }
@@ -458,27 +460,71 @@ export function renderCitationText(
   try {
     const rawList = keys.map((key, i) => {
       const item: CiteprocCitationItem = { id: key };
-      const locator = locators?.get(key);
-      if (locator) {
-        const parsed = parseLocator(locator);
-        item.locator = parsed.locator;
-        item.label = parsed.label;
-      }
       if (suppressAuthorKeys?.has(key)) {
         item['suppress-author'] = true;
       }
-      const prefix = prefixes?.[i];
-      if (prefix) item.prefix = prefix;
-      return item;
+      return withAffixes(item, locators?.get(key), prefixes?.[i]);
     });
 
     if (sort) sort.tokens = [];
-    return engine.makeCitationCluster(rawList) as string;
+    const html = engine.makeCitationCluster(rawList) as string;
+    // Each suffix as written (see AFFIX_MARKUP), where one holds markup, but
+    // where citeproc shows a stand-in already, as in a name, which would
+    // come back as what it stands for. A prefix's markup is citeproc's, as
+    // before, as <i>see</i> in italics.
+    if (!rawList.some(item => item.suffix && withStandIns(item.suffix) !== item.suffix) || hasStandIn(html)) return html;
+    return fromStandIns(engine.makeCitationCluster(rawList.map(item => item.suffix ? { ...item, suffix: withStandIns(item.suffix) } : item)) as string);
   } catch {
     return undefined;
   } finally {
     if (sort && sortTokens) sort.tokens = sortTokens;
   }
+}
+
+/** What citeproc reads as markup in an item's suffix (its FlipFlopper): a
+ *  tag, as <i> or <sup>, which starts with < and ends with >, and quotes,
+ *  straight or curly, which it pairs, curls and turns, as 'x' to a
+ *  double-quoted x. It has no escape for them, and shows an entity as
+ *  written, so renderCitationText gives it each as its stand-in, the
+ *  private-use character at its place after STAND_IN_BASE, which citeproc
+ *  shows as it is, and turns those back after: Word shows a suffix as
+ *  written, as export showed one before, in the locator, where citeproc
+ *  showed such markup after a word as written. The field holds it as
+ *  written, which Zotero's citeproc reads its markup in when it refreshes
+ *  the field. A tag around a locator's word is the locator's (see TAG_RE
+ *  in citation-locator.ts), which citeproc formats, as a prefix's. */
+const AFFIX_MARKUP = String.fromCharCode(0x3c, 0x3e, 0x22, 0x27, 0x201c, 0x201d, 0x2018, 0x2019, 0xab, 0xbb, 0x2039, 0x203a, 0x201e, 0x201a);
+const STAND_IN_BASE = 0xe000;
+
+/** Whether `text` holds a stand-in (see AFFIX_MARKUP) */
+function hasStandIn(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= STAND_IN_BASE && code < STAND_IN_BASE + AFFIX_MARKUP.length) return true;
+  }
+  return false;
+}
+
+/** `text` with each character citeproc reads as markup as its stand-in */
+function withStandIns(text: string): string {
+  let out = '';
+  for (const c of text) {
+    const at = AFFIX_MARKUP.indexOf(c);
+    out += at < 0 ? c : String.fromCharCode(STAND_IN_BASE + at);
+  }
+  return out;
+}
+
+/** citeproc's HTML with each stand-in as what it stands for: a tag's < and
+ *  > as references, as citeproc writes them in text */
+function fromStandIns(html: string): string {
+  let out = '';
+  for (const c of html) {
+    const code = c.charCodeAt(0);
+    const markup = code >= STAND_IN_BASE ? AFFIX_MARKUP[code - STAND_IN_BASE] : undefined;
+    out += markup === undefined ? c : markup === '<' ? '&#60;' : markup === '>' ? '&#62;' : markup;
+  }
+  return out;
 }
 
 /**
@@ -618,15 +664,7 @@ function buildCitationFieldCode(
       // embedded/local URI shape to force graceful fallback to embedded itemData.
       citationItem.uris = ['http://zotero.org/users/local/embedded/items/' + key];
     }
-    const locator = locators?.get(key);
-    if (locator) {
-      const parsed = parseLocator(locator);
-      citationItem.locator = parsed.locator;
-      citationItem.label = parsed.label;
-    }
-    const prefix = prefixes?.[i];
-    if (prefix) citationItem.prefix = prefix;
-    citationItems.push(citationItem);
+    citationItems.push(withAffixes(citationItem, locators?.get(key), prefixes?.[i]));
   }
 
   // Defect 3: key ordering — citationID, properties, citationItems, schema
@@ -1081,16 +1119,20 @@ export function parseAuthors(authorString: string): CiteprocName[] {
   });
 }
 
-function parseLocator(locator: string): { locator: string; label: string } {
-  const trimmed = locator.trim();
-  if (trimmed.startsWith('p.') || trimmed.startsWith('pp.')) {
-    // Over a line break too, after which the page's text goes on
-    const pageMatch = trimmed.match(/^pp?\.\s*([\s\S]+)$/);
-    if (pageMatch) {
-      return { locator: pageMatch[1], label: 'page' };
-    }
+/** `item` with the locator, its label and the suffix Pandoc reads in
+ *  `text`, what follows its key's comma (see readCitationLocator), and
+ *  `prefix`, in the order Zotero writes them. A locator Pandoc reads no
+ *  term for, as {A to B}, a page's, as citeproc and Zotero take one
+ *  without a label. */
+function withAffixes(item: CiteprocCitationItem, text: string | undefined, prefix: string | undefined): CiteprocCitationItem {
+  const { locator, label, suffix } = text ? readCitationLocator(text) : {};
+  if (locator !== undefined) {
+    item.locator = locator;
+    item.label = label ?? 'page';
   }
-  return { locator: trimmed, label: 'page' };
+  if (prefix) item.prefix = prefix;
+  if (suffix !== undefined) item.suffix = suffix;
+  return item;
 }
 
 export function generateFallbackText(keys: string[], entries: Map<string, BibtexEntry>, locators?: Map<string, string>, suppressAuthorKeys?: Set<string>, prefixes?: string[]): string {
