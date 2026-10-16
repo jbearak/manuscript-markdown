@@ -355,6 +355,84 @@ describe('display math in a heading', () => {
   });
 });
 
+// Export writes a space for the line end before an equation in a paragraph,
+// a list item or a quote, which import takes off where it writes the
+// equation on the line after the text. After a line break, import wrote the
+// spaces before the equation all as references, on the line after the
+// break, as Model\ and then &#32; alone on its line, and the next export
+// read the line end after them as one more space, so they grew each trip.
+// A space alone before an equation came back as an empty line before the
+// opening fence, which the next trip dropped with the space. And a comment
+// that starts a list item's or a quote's text, an HTML block of its own
+// line to Markdown, came back with the equation on the next line, which
+// export reads as a paragraph of its own, and the next trip put a blank
+// line between them
+describe('display math in a paragraph after a line break, a space or a comment', () => {
+  const fence = '$'.repeat(2);
+  const display = fence + 'x' + fence;
+  const after = fence + '\nx\n' + fence + '\n';
+  const roundTrip = async (md: string) => stripFrontmatter((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  // The text of each of Word's paragraphs with any, with each line break as
+  // [break], each display equation as [equation] and each hidden run, as a
+  // comment's, as [hidden]
+  const word = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).map(p => [...p.matchAll(/<w:r[ >][\s\S]*?<\/w:r>|<m:oMathPara>[\s\S]*?<\/m:oMathPara>/g)]
+      .map(([run]) => run.startsWith('<m:oMathPara>') ? '[equation]' : run.includes('<w:vanish/>') ? '[hidden]'
+        : run.replace(/<w:br\/>/g, '<w:t>[break]</w:t>').match(/<w:t(?: [^>]*)?>[^<]*<\/w:t>/g)?.map(t => t.replace(/<[^>]*>/g, '')).join('') ?? '').join(''))
+      .filter(text => text !== '');
+  };
+  /** A document from Word, `md`'s with its XML changed by `change` */
+  const fromWord = async (md: string, change: (xml: string) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(change(xml)).not.toBe(xml);
+    zip.file('word/document.xml', change(xml));
+    return stripFrontmatter((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  // Word shows nothing for a space at the end of the line before the
+  // equation, after the line break, which goes, as the break's line end
+  // reads as none; a second stays, as a reference. Export writes no heading
+  // in a list item or a quote, but the comment in a hidden run in its text
+  it.each([
+    ['a line break and a space', 'Model <br> ' + display + '\n', 'Model \\\n' + after, ['Model [break][equation]']],
+    ['a line break and two spaces', 'Model <br>  ' + display + '\n', 'Model \\\n&#32;\n' + after, ['Model [break]  [equation]']],
+    ['a line break and a space in a list item', '- Model <br> ' + display + '\n', '- Model \\\n  ' + fence + '\n  x\n  ' + fence + '\n', ['Model [break][equation]']],
+    ['a line break and a space in a quote', '> Model <br> ' + display + '\n', '> Model \\\n> ' + fence + '\n> x\n> ' + fence + '\n', ['Model [break][equation]']],
+    ['a space alone', '&#32;' + display + '\n', after, ['[equation]']],
+    ['a space alone in a list item', '- &#32;' + display + '\n', '- ' + fence + '\n  x\n  ' + fence + '\n', ['[equation]']],
+    ['a space alone in a quote', '> &#32;' + display + '\n', '> ' + fence + '\n> x\n> ' + fence + '\n', ['[equation]']],
+    ['a comment in a list item', '- # <!-- c --> ' + display + '\n', '- <!-- c -->\n\n  ' + fence + '\n  x\n  ' + fence + '\n', ['[hidden]', '[equation]']],
+    ['a comment in a quote', '> # <!-- c -->' + display + '\n', '> <!-- c -->\n>\n> ' + fence + '\n> x\n> ' + fence + '\n', ['[hidden]', '[equation]']],
+    ['a comment and text in a list item', '- # <!-- c --> a ' + display + ' b\n', '- <!-- c --> a\n\n  ' + fence + '\n  x\n  ' + fence + '&#32;b\n', undefined],
+  ])('writes the equation after %s as the next trip does', async (_name, md, expected, paragraphs) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+    const shown = await word(back);
+    if (paragraphs) expect(shown).toEqual(paragraphs);
+    expect(await word(await roundTrip(back))).toEqual(shown);
+  });
+
+  // As on main: a line break right before the equation, two spaces alone,
+  // of which one is the line end's, a task's box before the space, text
+  // after one equation before the next, and a comment alone before the
+  // equation in a paragraph, whose blank lines after it export records
+  it.each([
+    ['a line break', () => roundTrip('Model\\\n' + display + '\n'), 'Model\\\n' + after],
+    ['two spaces alone', () => roundTrip('&#32;&#32;' + display + '\n'), '&#32;\n' + after],
+    ['a task\'s box and a space', () => roundTrip('- [ ] &#32;' + display + '\n'), '- [ ] \n  ' + fence + '\n  x\n  ' + fence + '\n'],
+    ['text after an equation', () => roundTrip('Model ' + display + ' and ' + fence + 'y' + fence + '\n'), 'Model\n' + fence + '\nx\n' + fence + '&#32;and\n' + fence + '\ny\n' + fence + '\n'],
+    ['a comment alone in a paragraph', () => fromWord('# <!-- c --> ' + display + '\n', xml => xml.replace('<w:pStyle w:val="Heading1"/>', '')), '<!-- c -->\n' + after],
+  ])('keeps an equation after %s as on main', async (_name, imported, expected) => {
+    const back = await imported();
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+    expect(await word(await roundTrip(back))).toEqual(await word(back));
+  });
+});
+
 // A display equation in a tracked change, in a paragraph with text around
 // it, came back in its paragraph, as a\n{++...++}&#32;b., which export split
 // into three paragraphs, the text before, the equation and the text after,
