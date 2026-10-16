@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
 import * as fs from 'fs';
 import * as path from 'path';
-import { navigationMatches } from './navigation-matches';
+import { navigationMatches, navigationRanges } from './navigation-matches';
 import { fastestRun } from './test-timing';
 
 // We'll test the regex pattern directly since we can't import vscode in tests
@@ -661,4 +661,82 @@ describe('Navigation steps past an opener with no closer after it', () => {
     // The ~~ of a {~~ with no ~~} strikes through to the next {~~'s
     expect(found.map(({ start, end }) => text.slice(start, end)).filter(m => !m.startsWith('~~'))).toEqual(['{++a++}', '{#1}']);
   }, 30000);
+});
+
+// One == navigation read as a format highlight's opener, as x == y in a
+// paragraph or keep if foreign == 1 in a Stata block, took the next
+// highlight's opener as its closer, and so on through the document: the
+// pattern read past a paragraph's end and through code, and getAllMatches
+// dropped what overlapped code only after. Export and the preview read each
+// highlight in its paragraph's text alone, and nothing in code. An opener in
+// code took the next closer of its kind the same way.
+describe('Navigation pairs no == or opener in code, nor a highlight past its paragraph', () => {
+  /** The text of each range navigation stops at, as getAllMatches finds them */
+  const stops = (text: string) => navigationRanges(combinedPattern, text).map(({ start, end }) => text.slice(start, end));
+
+  it.each<[string, string, string[]]>([
+    ['an == in a paragraph before one with highlights', 'If x == y then.\n\nSee ==a== and ==b==.', ['==a==', '==b==']],
+    ['an == in a code span before a paragraph with highlights', 'A `x == y` b.\n\nSee ==a== and ==b==.', ['==a==', '==b==']],
+    ['an == in a code span before highlights in its paragraph', 'A `x == y` b ==a== and ==b==.', ['==a==', '==b==']],
+    ['an == in a code span before one highlight', 'A `x == y` b.\n\nSee ==a==.', ['==a==']],
+    ['an == in a fenced block', '```stata\nkeep if foreign == 1\n```\n\nSee ==a== and ==b==.', ['==a==', '==b==']],
+    ['an == in an indented block', '    keep if foreign == 1\n\nSee ==a== and ==b==.', ['==a==', '==b==']],
+    ['an == before colored highlights', 'If x == y.\n\n==a=={red} and ==b=={blue}', ['==a=={red}', '==b=={blue}']],
+    ['an == in a list item before the next', '- x == y\n- See ==a== and ==b==', ['==a==', '==b==']],
+    ['an == in a heading before the paragraph under it', '# x == y\nSee ==a== and ==b==', ['==a==', '==b==']],
+    ['an == in a quote\'s paragraph before its next', '> x == y\n>\n> See ==a== and ==b==', ['==a==', '==b==']],
+    ['an == in a table\'s row before the next', '| x == y |\n|---|\n| ==a== and ==b== |', ['==a==', '==b==']],
+    ['an opener and a closer a blank line apart', '==a\n\nb==', []],
+    ['an opener and a closer a fenced block apart', '==a\n```\nx\n```\nb== and ==c==', ['== and ==']],
+    ['an insertion\'s opener in a code span', 'A `{++` b.\n\nSee {++a++} and {++b++}.', ['{++a++}', '{++b++}']],
+    ['a deletion\'s opener in a code span', 'A `{--` b.\n\nSee {--a--} and {--b--}.', ['{--a--}', '{--b--}']],
+    ['a substitution\'s opener in a code span', 'A `{~~` b.\n\nSee {~~a~>c~~} and {~~b~>d~~}.', ['{~~a~>c~~}', '{~~b~>d~~}']],
+    ['a critic highlight\'s opener in a code span', 'A `{==` b.\n\nSee {==a==} and {==b==}.', ['{==a==}', '{==b==}']],
+    ['a comment\'s opener in a code span', 'A `{>>` b.\n\nSee {>>a<<} and {>>b<<}.', ['{>>a<<}', '{>>b<<}']],
+    ['a comment with an ID\'s opener in a code span', 'A `{#c1>>` b.\n\nSee {#c1>>a<<} and {#c2>>b<<}.', ['{#c1>>a<<}', '{#c2>>b<<}']],
+    ['an HTML comment\'s opener in a code span', 'A `<!--` b.\n\nSee <!-- a --> and <!-- b -->.', ['<!-- a -->', '<!-- b -->']],
+    ['a strikethrough\'s ~~ in a code span', 'A `~~` b.\n\nSee ~~a~~ and ~~b~~.', ['~~a~~', '~~b~~']],
+    ['an insertion\'s opener in a fenced block', '```\n{++\n```\n\nSee {++a++} and {++b++}.', ['{++a++}', '{++b++}']],
+    ['a critic highlight\'s opener in a fenced block', '```\n{==\n```\n\nSee {==a==} and {==b==}.', ['{==a==}', '{==b==}']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  // As before, and as export and the preview read them
+  it.each<[string, string, string[]]>([
+    ['a highlight over a line end in its paragraph', '==a\nb==', ['==a\nb==']],
+    ['a highlight over a line end in a list item', '- ==a\n  b==', ['==a\n  b==']],
+    ['a highlight over a line end in a quote', '> ==a\n> b==', ['==a\n> b==']],
+    ['an == before a highlight in its paragraph, which export pairs with the highlight\'s opener', 'If x == y then ==a==.', ['== y then ==']],
+    ['an insertion over a blank line', '{++a\n\nb++}', ['{++a\n\nb++}']],
+    ['a critic highlight over a blank line', '{==a\n\nb==}', ['{==a\n\nb==}']],
+    ['a comment over a blank line', '{>>a\n\nb<<}', ['{>>a\n\nb<<}']],
+    ['an escaped opener', '\\==a\n\nb ==c==', ['==c==']],
+    ['highlights and CriticMarkup in code', '`==a== {++b++}`\n\n```\n{--c--}\n```', []],
+    ['a highlight that holds a code span', '==a `b` c==', []],
+    ['an insertion that holds a code span', '{++a `b` c++}', []],
+    ['an insertion whose closer is in a code span', '{++a `x++}` b++} {++c++}', ['{++c++}']],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  // Each paragraph's end is found by binary search, and each match's
+  // overlap with code too, where each stepped through every code region
+  // before it, which took seconds here; linear takes milliseconds
+  it.each<[string, (n: number) => string]>([
+    ['many lone == in paragraphs', n => 'If x == y then.\n\n'.repeat(n) + 'See ==a==.'],
+    ['many lone == in one paragraph', n => 'x == y '.repeat(n) + '\n'],
+    ['many code spans holding ==, each before a highlight', n => 'A `x == y` b ==a==.\n'.repeat(n)],
+    ['many code spans before many highlights', n => '`x` '.repeat(n) + '\n\n' + '==a== '.repeat(n)],
+    ['many openers with no closer in code', n => 'a `{++` `{--` `{~~` `{==` `{>>` `{#c1>>` `<!--` b\n'.repeat(n) + '{++c++}'],
+  ])('finds the stops in %s in linear time', (_name, input) => {
+    const text = input(100_000);
+    expect(fastestRun(() => navigationRanges(combinedPattern, text))).toBeLessThan(1000);
+  }, 120000);
+
+  it('reads what those texts hold', () => {
+    expect(stops('If x == y then.\n\n'.repeat(3) + 'See ==a==.')).toEqual(['==a==']);
+    expect(stops('A `x == y` b ==a==.\n'.repeat(2))).toEqual(['==a==', '==a==']);
+    expect(stops('a `{++` `{--` `{~~` `{==` `{>>` `{#c1>>` `<!--` b\n'.repeat(2) + '{++c++}')).toEqual(['{++c++}']);
+  });
 });

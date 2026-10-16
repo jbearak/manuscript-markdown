@@ -1,3 +1,5 @@
+import { codeOverlapTest, editorBlocks, type EditorBlocks } from './code-regions';
+
 /** Whether `ch` is a character of a comment's ID, [a-zA-Z0-9_-] */
 function isIdChar(ch: number): boolean {
   return (ch >= 0x30 && ch <= 0x39) || (ch >= 0x41 && ch <= 0x5A) || (ch >= 0x61 && ch <= 0x7A) || ch === 0x5F || ch === 0x2D;
@@ -22,8 +24,15 @@ function isIdChar(ch: number): boolean {
  * from its end, as the global exec's does. A bare ~~ with no ~~ after it
  * still searches the rest of the text, but only the last two ~~ of the text
  * can have none.
+ *
+ * With `blocks` (see editorBlocks in code-regions.ts), no match starts in
+ * code, and a format highlight's match that runs past its paragraph's text
+ * (see limitAt there), as past a blank line, is none: the scan goes on at
+ * the character after its opener's first, as where the pattern doesn't
+ * match. A match from an opener before code still reads the code's text
+ * for its closer, as export's search does.
  */
-export function navigationMatches(pattern: RegExp, text: string): Array<{ start: number; end: number }> {
+export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<EditorBlocks, 'inCode' | 'limitAt'>): Array<{ start: number; end: number }> {
   const sticky = new RegExp(pattern.source, pattern.flags.replace('g', '') + 'y');
   const lastAddition = text.lastIndexOf('++}');
   const lastDeletion = text.lastIndexOf('--}');
@@ -55,12 +64,36 @@ export function navigationMatches(pattern: RegExp, text: string): Array<{ start:
     const ch = text.charCodeAt(at);
     if (ch !== 0x7B && ch !== 0x3D && ch !== 0x7E && ch !== 0x3C) continue; // { = ~ <
     if ((ch === 0x7B || ch === 0x3C) && unclosed(at)) continue;
+    if (blocks && blocks.inCode(at)) continue;
     sticky.lastIndex = at;
     const match = sticky.exec(text);
     if (match === null) continue;
+    // A format highlight's match, the only one that starts with an =
+    if (ch === 0x3D && blocks && at + match[0].length > blocks.limitAt(at)) continue;
     matches.push({ start: at, end: at + match[0].length });
     // Each alternative matches at least its opener and closer
     at += match[0].length - 1;
   }
   return matches;
+}
+
+/**
+ * The ranges navigation stops at in `text`, as getAllMatches in changes.ts
+ * finds them with `pattern`, its combinedPattern: navigationMatches's with
+ * no match starting in code and each format highlight held to its
+ * paragraph's text (see editorBlocks), without those that hold code, nor
+ * one in the last kept.
+ */
+export function navigationRanges(pattern: RegExp, text: string): Array<{ start: number; end: number }> {
+  const blocks = editorBlocks(text);
+  const holdsCode = codeOverlapTest(blocks.codeRegions);
+  const ranges: Array<{ start: number; end: number }> = [];
+  let lastKept: { start: number; end: number } | undefined;
+  for (const range of navigationMatches(pattern, text, blocks)) {
+    if (holdsCode(range.start, range.end)) continue;
+    if (lastKept && lastKept.start <= range.start && range.end <= lastKept.end) continue;
+    ranges.push(range);
+    lastKept = range;
+  }
+  return ranges;
 }

@@ -668,3 +668,94 @@ export function overlapsCodeRegion(start: number, end: number, regions: readonly
 	}
 	return false;
 }
+
+/**
+ * Whether a range [start, end) overlaps any of `regions`, sorted by start,
+ * as overlapsCodeRegion reads it, in time logarithmic in their number. A
+ * document's many ranges each stepped through every region before their
+ * end in overlapsCodeRegion, which took time in their number times the
+ * regions'.
+ */
+export function codeOverlapTest(regions: readonly CodeRegion[]): (start: number, end: number) => boolean {
+	// The largest end of each region and those before it, as a code span may
+	// hold a code block (see computeInlineCodeRegions)
+	const reach: number[] = [];
+	let max = -Infinity;
+	for (const r of regions) reach.push(max = Math.max(max, r.end));
+	return (start, end) => {
+		// The number of regions that start before the range's end
+		let lo = 0;
+		let hi = regions.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (regions[mid].start < end) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo > 0 && reach[lo - 1] > start;
+	};
+}
+
+/**
+ * For an offset of `text`, where the text that a format highlight opening
+ * there may hold ends: the end of the paragraph's, heading's or list item
+ * paragraph's text that holds the offset, of `inlineBlocks` (see
+ * computeMarkdownRegions), or outside them, as in a table's row, the end of
+ * the offset's line. Export and the preview read a highlight in that text
+ * alone, so none runs past a blank line, into a list's next item or out of
+ * a heading. Each is found by binary search.
+ */
+export function formatHighlightLimit(text: string, inlineBlocks: readonly CodeRegion[]): (offset: number) => number {
+	let lineStarts: number[] | undefined;
+	return offset => {
+		// The blocks that start at or before the offset
+		let lo = 0;
+		let hi = inlineBlocks.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (inlineBlocks[mid].start <= offset) lo = mid + 1;
+			else hi = mid;
+		}
+		if (lo > 0 && offset < inlineBlocks[lo - 1].end) return inlineBlocks[lo - 1].end;
+		lineStarts ??= computeLineStarts(text);
+		// The start of the line after the offset's
+		lo = 0;
+		hi = lineStarts.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (lineStarts[mid] <= offset) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo < lineStarts.length ? lineStarts[lo] : text.length;
+	};
+}
+
+/** How the editor's decorations and navigation read a document's blocks
+ *  (see editorBlocks) */
+export interface EditorBlocks {
+	/** The code spans and blocks, as computeCodeRegions finds them */
+	codeRegions: CodeRegion[];
+	/** Whether code holds `offset`. Nothing opens there: an == or a
+	 *  CriticMarkup opener in code pairs with nothing, as export and the
+	 *  preview read none in code. A search from an opener before the code
+	 *  for its closer still reads the code's text, as theirs does. */
+	inCode(offset: number): boolean;
+	/** Where the text that a format highlight opening at `offset` may hold
+	 *  ends (see formatHighlightLimit) */
+	limitAt(offset: number): number;
+}
+
+/**
+ * The code and the paragraphs of `text` for the editor's decorations and
+ * navigation, from one parse of its blocks. A lone == that one read as a
+ * highlight's opener, as x == y in a paragraph or keep if foreign == 1 in a
+ * Stata block, took the next highlight's opener as its closer, and so on
+ * through the document, as an opener in code took the next closer of its
+ * kind; export and the preview read each highlight in its paragraph's text
+ * alone, and nothing in code.
+ */
+export function editorBlocks(text: string): EditorBlocks {
+	const { codeRegions, inlineBlocks } = computeMarkdownRegions(text, { inlineBlocks: true });
+	const code = new Uint8Array(text.length);
+	for (const { start, end } of codeRegions) code.fill(1, start, end);
+	return { codeRegions, inCode: offset => code[offset] === 1, limitAt: formatHighlightLimit(text, inlineBlocks) };
+}

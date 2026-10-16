@@ -8,6 +8,7 @@ import {
   extractCriticDelimiterRanges,
   extractCommentRanges,
   extractAllDecorationRanges,
+  editorDecorationRanges,
   setDefaultHighlightColor,
   getDefaultHighlightColor,
   resolveMarkdownColor,
@@ -480,5 +481,97 @@ describe('Editor decorations read no highlight that a {==\'s == would close', ()
   ])('reads %s as export does', (_name, text, expected) => {
     expect(highlights(text, extractAllDecorationRanges(text, 'yellow').highlights)).toEqual(expected);
     expect(highlights(text, extractHighlightRanges(text, 'yellow'))).toEqual(expected);
+  });
+});
+
+// One == the editor read as a format highlight's opener, as x == y in a
+// paragraph or keep if foreign == 1 in a Stata block, took the next
+// highlight's opener as its closer, and so on through the document: its scan
+// read past a paragraph's end and through code, and dropped what overlapped
+// code only after. Export and the preview read each highlight in its
+// paragraph's text alone, and nothing in code. A CriticMarkup opener in code
+// took the next closer of its kind the same way.
+describe('Editor decorations pair no == or opener in code, nor a highlight past its paragraph', () => {
+  type Range = { start: number; end: number };
+  /** What the editor paints, in document order: each highlight's text after
+   *  its key, each span's text after what it is */
+  const painted = (text: string) => {
+    const all = editorDecorationRanges(text, 'yellow');
+    const named: Array<[string, Range]> = [
+      ...[...all.highlights].flatMap(([key, list]) => list.map(range => [key, range] as [string, Range])),
+      ...all.additions.map(range => ['addition', range] as [string, Range]),
+      ...all.deletions.map(range => ['deletion', range] as [string, Range]),
+      ...all.substitutionOld.map(range => ['old', range] as [string, Range]),
+      ...all.substitutionNew.map(range => ['new', range] as [string, Range]),
+      ...all.comments.map(range => ['comment', range] as [string, Range]),
+    ];
+    return named
+      .sort((a, b) => a[1].start - b[1].start || b[1].end - a[1].end)
+      .map(([name, range]) => name + ': ' + text.slice(range.start, range.end));
+  };
+  const ab = ['yellow: ==a==', 'yellow: ==b=='];
+
+  it.each<[string, string, string[]]>([
+    ['an == in a paragraph before one with highlights', 'If x == y then.\n\nSee ==a== and ==b==.', ab],
+    ['an == in a code span before a paragraph with highlights', 'A `x == y` b.\n\nSee ==a== and ==b==.', ab],
+    ['an == in a code span before highlights in its paragraph', 'A `x == y` b ==a== and ==b==.', ab],
+    ['an == in a code span before one highlight', 'A `x == y` b.\n\nSee ==a==.', ['yellow: ==a==']],
+    ['an == in a fenced block', '```stata\nkeep if foreign == 1\n```\n\nSee ==a== and ==b==.', ab],
+    ['an == in an indented block', '    keep if foreign == 1\n\nSee ==a== and ==b==.', ab],
+    ['an == before colored highlights', 'If x == y.\n\n==a=={red} and ==b=={blue}', ['red: ==a=={red}', 'blue: ==b=={blue}']],
+    ['an == in a list item before the next', '- x == y\n- See ==a== and ==b==', ab],
+    ['an == in a heading before the paragraph under it', '# x == y\nSee ==a== and ==b==', ab],
+    ['an == in a quote\'s paragraph before its next', '> x == y\n>\n> See ==a== and ==b==', ab],
+    ['an == in a table\'s row before the next', '| x == y |\n|---|\n| ==a== and ==b== |', ab],
+    ['an opener and a closer a blank line apart', '==a\n\nb==', []],
+    ['an opener and a closer a fenced block apart', '==a\n```\nx\n```\nb== and ==c==', ['yellow: == and ==']],
+    ['an insertion\'s opener in a code span', 'A `{++` b.\n\nSee {++a++} and {++b++}.', ['addition: a', 'addition: b']],
+    ['a deletion\'s opener in a code span', 'A `{--` b.\n\nSee {--a--} and {--b--}.', ['deletion: a', 'deletion: b']],
+    ['a substitution\'s opener in a code span', 'A `{~~` b.\n\nSee {~~a~>c~~} and {~~b~>d~~}.', ['old: a', 'new: c', 'old: b', 'new: d']],
+    ['a critic highlight\'s opener in a code span', 'A `{==` b.\n\nSee {==a==} and {==b==}.', ['critic: a', 'critic: b']],
+    ['an insertion\'s opener in a fenced block', '```\n{++\n```\n\nSee {++a++} and {++b++}.', ['addition: a', 'addition: b']],
+    ['a critic highlight\'s opener in a fenced block', '```\n{==\n```\n\nSee {==a==} and {==b==}.', ['critic: a', 'critic: b']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(painted(text)).toEqual(expected);
+  });
+
+  // As before, and as export and the preview read them
+  it.each<[string, string, string[]]>([
+    ['a highlight over a line end in its paragraph', '==a\nb==', ['yellow: ==a\nb==']],
+    ['a highlight over a line end in a list item', '- ==a\n  b==', ['yellow: ==a\n  b==']],
+    ['a highlight over a line end in a quote', '> ==a\n> b==', ['yellow: ==a\n> b==']],
+    ['an == before a highlight in its paragraph, which export pairs with the highlight\'s opener', 'If x == y then ==a==.', ['yellow: == y then ==']],
+    ['an insertion over a blank line', '{++a\n\nb++}', ['addition: a\n\nb']],
+    ['a critic highlight over a blank line', '{==a\n\nb==}', ['critic: a\n\nb']],
+    ['a highlight over a blank line in an insertion', '{++==a\n\nb==++}', ['yellow: ==a\n\nb==', 'addition: ==a\n\nb==']],
+    ['a highlight around an insertion over a blank line', '==a {++b\n\nc++} d==', ['yellow: ==a {++b\n\nc++} d==', 'addition: b\n\nc']],
+    ['a comment\'s opener in a code span', 'A `{>>` b.\n\nSee {>>a<<} and {>>b<<}.', ['comment: a', 'comment: b']],
+    ['an escaped opener', '\\==a\n\nb ==c==', ['yellow: ==c==']],
+    ['highlights and CriticMarkup in code', '`==a== {++b++}`\n\n```\n{--c--}\n```', []],
+    ['a highlight that holds a code span', '==a `b` c==', []],
+    ['an insertion that holds a code span', '{++a `b` c++}', []],
+    ['an insertion whose closer is in a code span', '{++a `x++}` b++} {++c++}', ['addition: c']],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(painted(text)).toEqual(expected);
+  });
+
+  // Each paragraph's end is found by binary search, and each range's
+  // overlap with code too, where each stepped through every code region
+  // before it, which took seconds here; linear takes milliseconds
+  it.each<[string, (n: number) => string]>([
+    ['many lone == in paragraphs', n => 'If x == y then.\n\n'.repeat(n) + 'See ==a==.'],
+    ['many lone == in one paragraph', n => 'x == y '.repeat(n) + '\n'],
+    ['many code spans holding ==, each before a highlight', n => 'A `x == y` b ==a==.\n'.repeat(n)],
+    ['many code spans before many highlights', n => '`x` '.repeat(n) + '\n\n' + '==a== '.repeat(n)],
+    ['many CriticMarkup openers with no closer in code', n => 'a `{++` `{--` `{~~` `{==` `{>>` b\n'.repeat(n) + '{++c++}'],
+  ])('decorates %s in linear time', (_name, input) => {
+    const text = input(100_000);
+    expect(fastestRun(() => editorDecorationRanges(text, 'yellow'))).toBeLessThan(1000);
+  }, 120000);
+
+  it('reads what those texts hold', () => {
+    expect(painted('If x == y then.\n\n'.repeat(3) + 'See ==a==.')).toEqual(['yellow: ==a==']);
+    expect(painted('A `x == y` b ==a==.\n'.repeat(2))).toEqual(['yellow: ==a==', 'yellow: ==a==']);
+    expect(painted('a `{++` `{--` `{~~` `{==` `{>>` b\n'.repeat(2) + '{++c++}')).toEqual(['addition: c']);
   });
 });

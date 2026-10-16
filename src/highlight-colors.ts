@@ -1,5 +1,5 @@
 import { criticCloserSearch, type CriticCloserSearch } from './critic-markup';
-import { overlapsCodeRegion, type CodeRegion } from './code-regions';
+import { codeOverlapTest, editorBlocks, type CodeRegion, type EditorBlocks } from './code-regions';
 import { isEscapedAt } from './math-delimiters';
 
 // --- Implementation notes ---
@@ -31,6 +31,10 @@ import { isEscapedAt } from './math-delimiters';
 //   one side of a substitution, where export and the preview show it
 // - Comment token scope: use meta.comment* not comment.block* — comment.block suppresses
 //   editor features (bracket matching, auto-complete, snippets)
+// - editorDecorationRanges(): nothing opens in code, and a format highlight stays in its
+//   paragraph's text (see editorBlocks in code-regions.ts), as export and the preview
+//   read them. Keep it in step with navigationRanges in navigation-matches.ts. The
+//   grammar reads one line at a time, and no code span or fenced block
 
 /** Canonical color name → hex value mapping for Word highlight colors */
 export const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -434,7 +438,20 @@ export interface AllDecorationRanges {
   commentDelimiters: Array<{ start: number; end: number }>;
 }
 
-export function extractAllDecorationRanges(text: string, defaultColor: string): AllDecorationRanges {
+/**
+ * The ranges to decorate in `text`. With `blocks` (see editorBlocks in
+ * code-regions.ts), nothing opens in code: no CriticMarkup span, no format
+ * highlight, and in a format highlight's text, no span but a critic
+ * highlight, as export's search for its closing == reads a {== there and
+ * no other opener. A format highlight outside CriticMarkup holds no text
+ * past its paragraph's (see limitAt there), but for a span's, which reads
+ * as one run of text, whose end goes on in the paragraph there, as export
+ * and the preview read a span over a blank line. One in a span's text reads
+ * past it, as they read one there. Without `blocks`, as for
+ * extractHighlightRanges, an opener in code opens, and a format highlight
+ * reads to its closing == wherever that is.
+ */
+export function extractAllDecorationRanges(text: string, defaultColor: string, blocks?: Pick<EditorBlocks, 'inCode' | 'limitAt'>): AllDecorationRanges {
   const resolvedDefault = VALID_COLOR_IDS.includes(defaultColor) ? defaultColor : 'yellow';
   // Each opener's closer, from one search of the text for each closer, as
   // each unclosed opener searched the rest of it
@@ -467,6 +484,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     index > 0 &&
     index < boundEnd &&
     (opensCriticHighlight(index) || text.charCodeAt(index - 1) === 0x3D || isEscapedAt(text, index));
+  // Whether code holds `index`, where nothing opens (see blocks)
+  const inCode = (index: number): boolean => blocks !== undefined && blocks.inCode(index);
   const isBlockedSuccessor = (indexAfterClose: number, boundEnd: number): boolean => {
     if (indexAfterClose >= boundEnd) return false;
     const ch = text.charCodeAt(indexAfterClose);
@@ -486,8 +505,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
         // Check negative lookbehind: not preceded by { or = or an escaping
         // backslash, but for the = of the span's opener before the region,
         // as in {====a====}, which the preview reads as a highlight in the
-        // span
-        if (j > regionStart && isBlockedPredecessor(j, regionEnd)) {
+        // span. Nor in code (see blocks).
+        if ((j > regionStart && isBlockedPredecessor(j, regionEnd)) || inCode(j)) {
           j++;
           continue;
         }
@@ -547,17 +566,18 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
    * region, as past a substitution's ~>, is its span's text to them, as one
    * in a comment is. A region that holds another CriticMarkup opener, as
    * {>> or {~~, records none, as before: a {== in a comment there, or one
-   * across a substitution's ~>, is text to them.
+   * across a substitution's ~>, is text to them. An opener in code is
+   * neither (see blocks).
    */
   const scanCriticHighlights = (regionStart: number, regionEnd: number) => {
     for (let p = regionStart; p + 3 <= regionEnd; p++) {
-      if (text.charCodeAt(p) !== 0x7B || isEscapedAt(text, p)) continue;
+      if (text.charCodeAt(p) !== 0x7B || isEscapedAt(text, p) || inCode(p)) continue;
       const c2 = text.charCodeAt(p + 1);
       if ((c2 === 0x2B || c2 === 0x2D || c2 === 0x7E || c2 === 0x3E) && text.charCodeAt(p + 2) === c2) return;
       if (c2 === 0x23 && detectCommentIdOpener(text, p, regionEnd) !== -1) return;
     }
     for (let p = regionStart; p + 3 <= regionEnd; p++) {
-      if (text.charCodeAt(p) !== 0x7B || text.charCodeAt(p + 1) !== 0x3D || text.charCodeAt(p + 2) !== 0x3D || isEscapedAt(text, p)) continue;
+      if (text.charCodeAt(p) !== 0x7B || text.charCodeAt(p + 1) !== 0x3D || text.charCodeAt(p + 2) !== 0x3D || isEscapedAt(text, p) || inCode(p)) continue;
       // The first ==} after it, as for one outside a span
       const ci = closers.next('==}', p + 3);
       if (ci === -1 || ci + 3 > regionEnd) return;
@@ -571,6 +591,11 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
   const len = text.length;
   let i = 0;
   while (i < len) {
+    // Nothing opens in code (see blocks)
+    if ((text.charCodeAt(i) === 0x7B || text.charCodeAt(i) === 0x3D) && inCode(i)) {
+      i++;
+      continue;
+    }
     // A { an odd run of backslashes escapes opens nothing (see criticSpans)
     if (text.charCodeAt(i) === 0x7B && i + 2 < len && !isEscapedAt(text, i)) {
       const c2 = text.charCodeAt(i + 1);
@@ -685,7 +710,16 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
         let k = contentStart;
         let hasContent = false; // at least 1 non-delimiter char
         let found = false;
-        while (k < len) {
+        // Where the text it may hold ends, which a span it holds moves to
+        // where that text ends at the span's end
+        let limit = blocks ? blocks.limitAt(i) : len;
+        // Reads past a span it holds, which ends before `to`
+        const skipSpan = (to: number) => {
+          hasContent = true;
+          k = to;
+          if (blocks && k >= limit) limit = blocks.limitAt(k);
+        };
+        while (k < limit) {
           // Check for CriticMarkup opening delimiters — process and skip entire spans
           if (text.charCodeAt(k) === 0x7B && k + 2 < len && !isEscapedAt(text, k)) {
             const d2 = text.charCodeAt(k + 1);
@@ -697,11 +731,13 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 pushHighlight('critic', k + 3, ci);
                 highlightDelimiters.push({ start: ci, end: ci + 3 });
                 scanFormatHighlights(k + 3, ci);
-                hasContent = true; k = ci + 3; continue;
+                skipSpan(ci + 3); continue;
               }
               // One with no ==} after it is text, but its == closes no
               // highlight (see opensCriticHighlight), and its = ends [^}=]+
               break;
+            } else if (inCode(k)) {
+              // No other opens in code (see blocks)
             } else if (d2 === 0x3E && d3 === 0x3E) { // {>>
               const ci = closers.matching(k + 3);
               if (ci !== -1) {
@@ -709,7 +745,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 comments.push({ start: k + 3, end: ci });
                 commentDelimiters.push({ start: ci, end: ci + 3 });
                 scanFormatHighlights(k + 3, ci);
-                hasContent = true; k = ci + 3; continue;
+                skipSpan(ci + 3); continue;
               }
             } else if (d2 === 0x23) { // {# — possible {#id>>
               const innerContentStart = detectCommentIdOpener(text, k, len);
@@ -720,7 +756,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                   comments.push({ start: innerContentStart, end: ci });
                   commentDelimiters.push({ start: ci, end: ci + 3 });
                   scanFormatHighlights(innerContentStart, ci);
-                  hasContent = true; k = ci + 3; continue;
+                  skipSpan(ci + 3); continue;
                 }
               }
             } else if (d2 === 0x2B && d3 === 0x2B) { // {++
@@ -731,7 +767,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 additionDelimiters.push({ start: ci, end: ci + 3 });
                 scanFormatHighlights(k + 3, ci);
                 scanCriticHighlights(k + 3, ci);
-                hasContent = true; k = ci + 3; continue;
+                skipSpan(ci + 3); continue;
               }
             } else if (d2 === 0x2D && d3 === 0x2D) { // {--
               const ci = closers.next('--}', k + 3);
@@ -741,7 +777,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 deletionDelimiters.push({ start: ci, end: ci + 3 });
                 scanFormatHighlights(k + 3, ci);
                 scanCriticHighlights(k + 3, ci);
-                hasContent = true; k = ci + 3; continue;
+                skipSpan(ci + 3); continue;
               }
             } else if (d2 === 0x7E && d3 === 0x7E) { // {~~
               const ci = closers.next('~~}', k + 3);
@@ -760,7 +796,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 scanFormatHighlights(k + 3, ci);
                 if (cai === -1) scanCriticHighlights(k + 3, ci);
                 else { scanCriticHighlights(k + 3, k + 3 + cai); scanCriticHighlights(k + 3 + cai + 2, ci); }
-                hasContent = true; k = ci + 3; continue;
+                skipSpan(ci + 3); continue;
               }
             }
           }
@@ -846,11 +882,13 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
  * and fenced code blocks, which show no decorations, as the editor does
  * before it decorates them. Each array keeps its identity, and items are
  * kept one at a time, not spread into splice(), as a document's comments
- * or revisions can number more than a call takes arguments.
+ * or revisions can number more than a call takes arguments. Each overlap is
+ * found by binary search (see codeOverlapTest).
  */
 export function dropRangesInCode(all: AllDecorationRanges, codeRegions: readonly CodeRegion[]): void {
   if (codeRegions.length === 0) return;
-  const keep = (r: { start: number; end: number }) => !overlapsCodeRegion(r.start, r.end, codeRegions);
+  const overlaps = codeOverlapTest(codeRegions);
+  const keep = (r: { start: number; end: number }) => !overlaps(r.start, r.end);
   for (const [key, ranges] of all.highlights) {
     const filtered = ranges.filter(keep);
     if (filtered.length === 0) {
@@ -865,4 +903,17 @@ export function dropRangesInCode(all: AllDecorationRanges, codeRegions: readonly
     for (const range of ranges) if (keep(range)) ranges[kept++] = range;
     ranges.length = kept;
   }
+}
+
+/**
+ * The ranges the editor decorates in `text`, as extension.ts paints them:
+ * extractAllDecorationRanges's with nothing opening in code and each format
+ * highlight held to its paragraph's text (see editorBlocks), without those
+ * that hold code (see dropRangesInCode).
+ */
+export function editorDecorationRanges(text: string, defaultColor: string): AllDecorationRanges {
+  const blocks = editorBlocks(text);
+  const all = extractAllDecorationRanges(text, defaultColor, blocks);
+  dropRangesInCode(all, blocks.codeRegions);
+  return all;
 }

@@ -30,13 +30,11 @@ import {
 	VALID_COLOR_IDS,
 	HIGHLIGHT_DECORATION_COLORS,
 	CRITIC_COMMENT_DECORATION,
-	extractAllDecorationRanges,
-	dropRangesInCode,
+	editorDecorationRanges,
 	setDefaultHighlightColor,
 	getDefaultHighlightColor,
 } from './highlight-colors';
 import { setDefaultColorScheme } from './alert-colors';
-import { computeCodeRegions } from './code-regions';
 import {
 	resolveBibliographyWritePathForOutput,
 	resolveDocumentBibliography,
@@ -898,13 +896,12 @@ export function activate(context: vscode.ExtensionContext) {
 		if (editor.document.languageId !== 'markdown') { return; }
 		const text = editor.document.getText();
 		const defaultColor = getDefaultHighlightColor();
-		const all = extractAllDecorationRanges(text, defaultColor);
-
-		// Filter out any decoration ranges that fall inside code regions (inline code
-		// spans or fenced code blocks). This is done at the call site so that
-		// extractAllDecorationRanges remains code-region-agnostic and preserves parity
-		// with the standalone extraction functions (extractHighlightRanges, etc.).
-		dropRangesInCode(all, computeCodeRegions(text));
+		// Nothing opening in code, none holding code, and a format highlight in
+		// its paragraph's text (see editorDecorationRanges). Without the blocks
+		// it reads, extractAllDecorationRanges stays code-region-agnostic, which
+		// preserves parity with the standalone extraction functions
+		// (extractHighlightRanges, etc.).
+		const all = editorDecorationRanges(text, defaultColor);
 
 		// Clear all decoration types, then set those with ranges
 		for (const [key, decType] of decorationTypes) {
