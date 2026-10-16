@@ -1985,16 +1985,20 @@ function droppedBlocksOf(tokens: MdToken[], source: (line: number) => number): D
  *  finds a block by its paragraphs, and each paragraph of comment bodies
  *  only that Word doesn't get, whose bodies import writes with their
  *  comments. So the blank lines on either side of one are those of the
- *  blocks beside it, as for a block a list item drops */
-function addLinesWordLacks(tokens: MdToken[], source: (line: number) => number, dropped: DroppedLines): void {
-  const drop = ([start, end]: [number, number]) => {
+ *  blocks beside it, as for a block a list item drops. Returns the places
+ *  in `tokens` of those it adds */
+function addLinesWordLacks(tokens: MdToken[], source: (line: number) => number, dropped: DroppedLines): Set<number> {
+  const places = new Set<number>();
+  const drop = (at: number) => {
+    const [start, end] = tokens[at].sourceRange!;
     const from = source(start);
     const to = source(end);
     if (from >= to) return;
     dropped.before.set(to, from);
     dropped.after.set(from, to);
+    places.add(at);
   };
-  let open: { style: string; fences: Array<[number, number]>; shown: boolean } | undefined;
+  let open: { style: string; fences: number[]; shown: boolean } | undefined;
   const close = () => {
     if (open && !open.shown) open.fences.forEach(drop);
     open = undefined;
@@ -2008,7 +2012,7 @@ function addLinesWordLacks(tokens: MdToken[], source: (line: number) => number, 
     if (omitsCommentBodies(at, prev)) {
       // Not one split from a block, whose lines are the block's (see
       // splitPart), which Word gets the rest of
-      if (token.sourceRange && !token.splitPart) drop(token.sourceRange);
+      if (token.sourceRange && !token.splitPart) drop(at);
       continue;
     }
     prev = token;
@@ -2023,9 +2027,9 @@ function addLinesWordLacks(tokens: MdToken[], source: (line: number) => number, 
         close();
         open = { style: fence.style, fences: [], shown: false };
       }
-      if (token.sourceRange) open!.fences.push(token.sourceRange);
+      if (token.sourceRange) open!.fences.push(at);
     } else if (fence?.kind === 'close') {
-      if (open && token.sourceRange) open.fences.push(token.sourceRange);
+      if (open && token.sourceRange) open.fences.push(at);
       close();
     } else if (fence?.kind === 'inline') {
       // Its paragraph is the open block's, of the same style
@@ -2035,6 +2039,7 @@ function addLinesWordLacks(tokens: MdToken[], source: (line: number) => number, 
     else if (open && !unstyledInStyleBlock(token) && !marksSectionOrBibliography(token)) open.shown = true;
   }
   close();
+  return places;
 }
 
 /** The most blank lines in a row from `from` of `lines`, by `step`, from
@@ -2145,9 +2150,13 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
   // Past the blocks list items dropped, so that the blank lines on either
   // side of one are the quote's
   const dropped = droppedBlocksOf(tokens, source);
-  addLinesWordLacks(tokens, source, dropped);
+  const lacked = addLinesWordLacks(tokens, source, dropped);
   const blankRunPastDropped = (from: number, step: 1 | -1) => blankLinesPastDropped(sourceLines, dropped, from, step);
   const unfenced = inStyleBlockNoFenceCloses(tokens);
+  // The place of the last block import writes where it is, past those
+  // Word gets nothing of there (see addLinesWordLacks)
+  let lastWritten = tokens.length - 1;
+  while (lastWritten >= 0 && lacked.has(lastWritten)) lastWritten--;
   groups.forEach((group, g) => {
     if (!group) return;
     const previous = groups[g - 1];
@@ -2166,8 +2175,12 @@ function annotateBlockquoteSpacing(tokens: MdToken[], toSource: LineMap, sourceL
       // after them, after which import writes notes' after a blank line of
       // its own, nor before the end past what Word gets nothing of, as a
       // comment's body or a style block's fences, where the quote is last,
-      // but in a block no fence closes, after which import writes one
-      if (below.line < sourceLines.length && group.last + 1 < tokens.length && (unfenced.has(group.last) || !onlyDroppedFrom(sourceLines, dropped, below.line))
+      // but in a block no fence closes, after which import writes one. Nor
+      // before such blocks with only definitions after them, or between
+      // them, which import writes after the body too, where the quote is
+      // last of what import writes of the body, as at the end
+      if (below.line < sourceLines.length && group.last + 1 < tokens.length
+        && (unfenced.has(group.last) || group.last < lastWritten && !onlyDroppedFrom(sourceLines, dropped, below.line))
         && !(next && !next.markerLine && below.line === next.start)) spacing.after = blankRunPastDropped(group.end + 1, 1);
       if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
     }
