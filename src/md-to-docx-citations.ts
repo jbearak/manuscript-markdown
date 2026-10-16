@@ -3,6 +3,7 @@ import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLI
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 import { decodeHtmlCharacterReferences } from './html-entities';
+import { readCitationLocator } from './citation-locator';
 
 export interface CiteprocName {
   family?: string;
@@ -51,6 +52,7 @@ interface CiteprocCitationItem {
   label?: string;
   'suppress-author'?: boolean;
   prefix?: string;
+  suffix?: string;
   itemData?: CiteprocItemData;
   uris?: string[];
 }
@@ -458,18 +460,10 @@ export function renderCitationText(
   try {
     const rawList = keys.map((key, i) => {
       const item: CiteprocCitationItem = { id: key };
-      const locator = locators?.get(key);
-      if (locator) {
-        const parsed = parseLocator(locator);
-        item.locator = parsed.locator;
-        item.label = parsed.label;
-      }
       if (suppressAuthorKeys?.has(key)) {
         item['suppress-author'] = true;
       }
-      const prefix = prefixes?.[i];
-      if (prefix) item.prefix = prefix;
-      return item;
+      return withAffixes(item, locators?.get(key), prefixes?.[i]);
     });
 
     if (sort) sort.tokens = [];
@@ -618,15 +612,7 @@ function buildCitationFieldCode(
       // embedded/local URI shape to force graceful fallback to embedded itemData.
       citationItem.uris = ['http://zotero.org/users/local/embedded/items/' + key];
     }
-    const locator = locators?.get(key);
-    if (locator) {
-      const parsed = parseLocator(locator);
-      citationItem.locator = parsed.locator;
-      citationItem.label = parsed.label;
-    }
-    const prefix = prefixes?.[i];
-    if (prefix) citationItem.prefix = prefix;
-    citationItems.push(citationItem);
+    citationItems.push(withAffixes(citationItem, locators?.get(key), prefixes?.[i]));
   }
 
   // Defect 3: key ordering — citationID, properties, citationItems, schema
@@ -1081,16 +1067,20 @@ export function parseAuthors(authorString: string): CiteprocName[] {
   });
 }
 
-function parseLocator(locator: string): { locator: string; label: string } {
-  const trimmed = locator.trim();
-  if (trimmed.startsWith('p.') || trimmed.startsWith('pp.')) {
-    // Over a line break too, after which the page's text goes on
-    const pageMatch = trimmed.match(/^pp?\.\s*([\s\S]+)$/);
-    if (pageMatch) {
-      return { locator: pageMatch[1], label: 'page' };
-    }
+/** `item` with the locator, its label and the suffix Pandoc reads in
+ *  `text`, what follows its key's comma (see readCitationLocator), and
+ *  `prefix`, in the order Zotero writes them. A locator Pandoc reads no
+ *  term for, as {A to B}, a page's, as citeproc and Zotero take one
+ *  without a label. */
+function withAffixes(item: CiteprocCitationItem, text: string | undefined, prefix: string | undefined): CiteprocCitationItem {
+  const { locator, label, suffix } = text ? readCitationLocator(text) : {};
+  if (locator !== undefined) {
+    item.locator = locator;
+    item.label = label ?? 'page';
   }
-  return { locator: trimmed, label: 'page' };
+  if (prefix) item.prefix = prefix;
+  if (suffix !== undefined) item.suffix = suffix;
+  return item;
 }
 
 export function generateFallbackText(keys: string[], entries: Map<string, BibtexEntry>, locators?: Map<string, string>, suppressAuthorKeys?: Set<string>, prefixes?: string[]): string {

@@ -11688,13 +11688,14 @@ describe('A citation whose key comes after a prefix, right before a bracket', ()
   test.each([
     ['a citation with a prefix and a locator', 'S [see @roe2019, p. 2] e.', '', 'S «(see Roe, 2019, p. 2)» e.'],
     ['a citation after an equation', 'S $a$ [@roe2019] e.', '', 'S $a$ «(Roe, 2019)» e.'],
-    ['a citation whose locator is an equation', 'S [@roe2019, $y$] e.', 'S [@roe2019, p. $y$] e.', 'S «(Roe, 2019, p. $y$)» e.'],
+    // With no locator term or number, a suffix, as Pandoc reads it
+    ['a citation whose suffix is an equation', 'S [@roe2019, $y$] e.', '', 'S «(Roe, 2019, $y$)» e.'],
     ['a citation before a price', 'S [@roe2019] costs $5 e.', '', 'S «(Roe, 2019)» costs $5 e.'],
     // An equation from a prefix past the ], which no link's text holds
     ['an equation from a prefix, before no link', 'S [$a @roe2019]$ e.', 'S [\\$a @roe2019]$ e.', 'S «($a Roe, 2019)»$ e.'],
     ['an equation from a prefix, before text', 'S [see $x @roe2019] y$ e.', 'S [see \\$x @roe2019] y$ e.', 'S «(see $x Roe, 2019)» y$ e.'],
-    // From a locator, which is read as written
-    ['an equation from a locator, before a link\'s ]', 'S [see @roe2019, $a]$](https://e.org) e.', 'S [see @roe2019, p. $a]$](https://e.org) e.', 'S «(see Roe, 2019, p. $a)»$](⟨https://e.org⟩) e.'],
+    // From a suffix, which is read as written
+    ['an equation from a suffix, before a link\'s ]', 'S [see @roe2019, $a]$](https://e.org) e.', '', 'S «(see Roe, 2019, $a)»$](⟨https://e.org⟩) e.'],
     // As import writes a prefix's $
     ['an escaped $ in a prefix, before a link\'s ]', 'S [\\$a @roe2019]$](https://e.org) e.', '', 'S «($a Roe, 2019)»$](⟨https://e.org⟩) e.'],
     // Word's [ before an equation and a link's ], which import escapes

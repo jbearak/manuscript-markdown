@@ -17,6 +17,7 @@ import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { readCitationItems } from './citation-syntax';
+import { citationLocatorText } from './citation-locator';
 import { bibtexNameParts, citeprocFieldText } from './md-to-docx-citations';
 import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
@@ -195,6 +196,8 @@ export interface CitationMetadata {
   zoteroUris?: string[];  // all the URIs the field lists for the item, its own first (see citedItems)
   itemId?: string;        // the item's ID in the field (see itemIdentifier)
   locator?: string;
+  label?: string;           // the locator's CSL label, as chapter (see citationLocatorText)
+  suffix?: string;          // [@key, p. 5, emphasis added] Pandoc citation suffix
   citationKey?: string;   // CSL citation-key preserved for round-trip
   suppressAuthor?: boolean; // [-@key] Pandoc suppress-author form
   prefix?: string;          // [e.g., @key] Pandoc citation prefix
@@ -6523,6 +6526,13 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
           }
         }
 
+        // The locator's label, as Zotero's chapter, which import writes as
+        // its term, chap.
+        const label = stringField(item, 'label').trim();
+        if (label) {
+          result.label = label;
+        }
+
         // Extract suppress-author flag (Pandoc [-@key] form)
         if (item['suppress-author']) {
           result.suppressAuthor = true;
@@ -6532,6 +6542,13 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
         const prefix = stringField(item, 'prefix').trim();
         if (prefix) {
           result.prefix = prefix;
+        }
+
+        // The suffix as Zotero holds it, its spaces too, which citeproc
+        // shows (Pandoc [@key, p. 5, emphasis added] form)
+        const suffix = stringField(item, 'suffix');
+        if (suffix.trim()) {
+          result.suffix = suffix;
         }
 
         return result;
@@ -6686,7 +6703,9 @@ function escapeCitationPrefix(prefix: string): string {
 }
 
 /** Get the Pandoc citation items for a citation, e.g. `@key`, `-@key, p. 5`
- *  (suppress-author), or `e.g., @key` (prefix). Join with '; ' inside brackets. */
+ *  (suppress-author), `e.g., @key` (prefix), or `@key, chap. 2, emphasis
+ *  added` (a locator's label and a suffix, see citationLocatorText). Join
+ *  with '; ' inside brackets. */
 export function citationPandocKeys(
   citation: ZoteroCitation,
   keyMap: Map<string, string>
@@ -6697,10 +6716,8 @@ export function citationPandocKeys(
       if (!k) return undefined;
       const prefix = meta.prefix ? escapeCitationPrefix(sanitizeCitationText(meta.prefix).replace(/\s+/g, ' ').trim()) : '';
       let item = (prefix ? prefix + ' ' : '') + (meta.suppressAuthor ? '-@' : '@') + k;
-      if (meta.locator) {
-        const safe = sanitizeCitationText(meta.locator);
-        if (safe) item += ', p. ' + safe;
-      }
+      const after = citationLocatorText(meta.locator ? sanitizeCitationText(meta.locator) : '', meta.label, meta.suffix ? sanitizeCitationText(meta.suffix) : '');
+      if (after) item += ', ' + after;
       return item;
     })
     .filter((k): k is string => k !== undefined);

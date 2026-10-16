@@ -10,6 +10,7 @@ import {
 import type { ZoteroCitation, CitationMetadata } from './converter';
 import { parseBibtex } from './bibtex-parser';
 import { buildItemData } from './md-to-docx-citations';
+import { readCitationLocator } from './citation-locator';
 
 /**
  * Feature: zotero-citation-roundtrip
@@ -147,9 +148,11 @@ describe('Feature: zotero-citation-roundtrip, Property 2: BibTeX zotero fields b
  * Property 3: Locator formatting in Pandoc keys
  *
  * For any ZoteroCitation with items that have keys in the key map,
- * citationPandocKeys() returns a key ending with `, p. <locator>` iff
- * that item's locator field is a non-empty string (after sanitization).
- * Items without a locator produce a bare key with no suffix.
+ * citationPandocKeys() returns a key with a locator after its comma iff
+ * that item's locator field is a non-empty string (after sanitization),
+ * which export reads back as that locator, a page's, as Zotero takes one
+ * without a label (see citationLocatorText). Items without a locator
+ * produce a bare key with no suffix.
  *
  * **Validates: Requirements 3.1, 3.2**
  */
@@ -200,7 +203,7 @@ const zoteroCitationArb = fc.integer({ min: 1, max: 5 }).chain(n =>
 );
 
 describe('Feature: zotero-citation-roundtrip, Property 3: Locator formatting in Pandoc keys', () => {
-  it('returns key with `, p. <locator>` suffix iff locator is a non-empty string', () => {
+  it('returns key with a page locator that reads back iff locator is a non-empty string', () => {
     fc.assert(
       fc.property(zoteroCitationArb, ({ citation, keyMap, items }) => {
         const results = citationPandocKeys(citation, keyMap);
@@ -215,9 +218,10 @@ describe('Feature: zotero-citation-roundtrip, Property 3: Locator formatting in 
 
           if (meta.locator && meta.locator.trim().length > 0) {
             // Locator is sanitized (Pandoc-sensitive chars stripped)
-            const sanitized = meta.locator.replace(/[\[\];@]/g, '');
+            const sanitized = meta.locator.replace(/[\[\];@]/g, '').trim();
             if (sanitized) {
-              expect(result).toBe(`@${baseKey}, p. ${sanitized}`);
+              expect(result.startsWith(`@${baseKey}, `)).toBe(true);
+              expect(readCitationLocator(result.slice(`@${baseKey}, `.length))).toEqual({ locator: sanitized, label: 'page' });
             } else {
               expect(result).toBe(`@${baseKey}`);
             }
