@@ -431,6 +431,19 @@ describe('display math in a paragraph after a line break, a space or a comment',
     expect(await roundTrip(back)).toBe(back);
     expect(await word(await roundTrip(back))).toEqual(await word(back));
   });
+
+  // As on main, where comments start the text after a task's box or an
+  // alert's marker: the space after the line break stays a reference, as
+  // before, which the next trip adds one to, where a draft ended the line
+  // twice, so the next export lost the break and split the paragraph
+  it.each([
+    ['a task\'s box', '- [ ] <!-- c -->a<br> ' + display + '\n', '- [ ] <!-- c -->a\\\n  &#32;\n  ' + fence + '\n  x\n  ' + fence + '\n'],
+    ['an alert\'s marker', '> [!NOTE] <!-- c -->a<br> ' + display + '\n', '> [!NOTE] <!-- c -->a\\\n> &#32;\n> ' + fence + '\n> x\n> ' + fence + '\n'],
+  ])('keeps an equation after a line break and a space, after comments that start the text after %s, as on main', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect((await word(back)).some(text => /\[break\][^[]*\[equation\]/.test(text))).toBe(true);
+  });
 });
 
 // A display equation in a tracked change, in a paragraph with text around

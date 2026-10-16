@@ -17072,8 +17072,12 @@ function buildMarkdownOnce(
       // keepParagraphWhitespace would write all as references, as in
       // Model\<line end>&#32;<line end> before the opening fence, which
       // export reads as two spaces, where Word had one (see
-      // beforeParagraphMath)
-      const lineEndSpace = mathFollows && text.endsWith(' ') && (/^[ \t]*$/.test(text) || referenced.endsWith('&#32;'));
+      // beforeParagraphMath). Not where HTML starts the text after a task's
+      // box or an alert's marker, which beforeParagraphMath reads as an HTML
+      // block, as it isn't there, so it keeps the space, and the math branch
+      // would end the line twice
+      const lineEndSpace = mathFollows && text.endsWith(' ') && (/^[ \t]*$/.test(text) || referenced.endsWith('&#32;')
+        && !(/^[ \t]*</.test(text) && (alertMarkerLineEnd !== undefined || lastLine(output).replace(CONTAINER_PREFIX, '') !== '')));
       const edged = lineEndSpace ? keepParagraphWhitespace(text.slice(0, -1), atStart, atEnd) + ' '
         : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + text.slice(htmlIndent.length)) && !inline()
           ? htmlIndent + keepParagraphWhitespace(text.slice(htmlIndent.length), true, atEnd)
