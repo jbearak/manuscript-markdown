@@ -329,6 +329,107 @@ function splitAlertsInQuote(state: StateCore, tokens: Token[]): void {
   }
 }
 
+/** A display equation's fence, as VS Code's math extension reads one */
+const DISPLAY_MATH_FENCE = '$'.repeat(2);
+
+/**
+ * Core rule: the text after a display equation's closing fence on its
+ * line, as import writes the text that goes on in the equation's paragraph,
+ * in a paragraph after the equation, as text on the next line is, or at the
+ * start of the paragraph on the next line, which goes on from it, as export
+ * writes both in the equation's Word paragraph. VS Code's math extension's
+ * block rule ends the equation at that fence and leaves the rest of the line
+ * out, so the preview showed none of that text. A $ right after the fence
+ * stays text, as export opens no inline math there, after the fence's $.
+ * In passes over the tokens, each once, for a document of many equations.
+ */
+function displayMathTailRule(state: StateCore): void {
+  const tokens = state.tokens;
+  let lines: string[] | undefined;
+  // The text after each equation's closing fence, by its token's index
+  const tails = new Map<number, { text: string; closing: number }>();
+  // The line the block after the token at hand starts on
+  let nextStart = Infinity;
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const token = tokens[i];
+    const after = nextStart;
+    if (token.map) nextStart = token.map[0];
+    if (token.type !== 'math_block' || token.markup !== DISPLAY_MATH_FENCE || !token.map) continue;
+    // Its last line, which holds the closing fence, where the rule found
+    // one: not the opening fence's, which ends with it if it closes there,
+    // nor one the block after it starts on, as where it found none
+    const closing = token.map[1] - 1;
+    if (closing <= token.map[0] || after <= closing) continue;
+    lines ??= state.src.split('\n');
+    const line = lines[closing] ?? '';
+    const fence = line.indexOf(DISPLAY_MATH_FENCE);
+    // At the line's start, after a list item's indent or a quote's >, as
+    // import writes it; a line that ends with a fence holds the equation's
+    // text before it
+    if (fence === -1 || !/^[ \t>]*$/.test(line.slice(0, fence)) || line.trimEnd().endsWith(DISPLAY_MATH_FENCE)) continue;
+    const rest = line.slice(fence + DISPLAY_MATH_FENCE.length);
+    // Without the spaces before it, as a paragraph's line, but with those
+    // after it, a line break's before a line that goes on from it
+    const text = (rest.startsWith('$') ? '\\' : '') + rest.replace(/^[ \t]+/, '');
+    if (text.trim()) tails.set(i, { text, closing });
+  }
+  if (tails.size === 0) return;
+  // Whether each list's paragraphs are hidden, as a tight list's are, by
+  // the list's token: the block each token at a level is in is the last
+  // one opened at the level before it. From its paragraphs, or, in a list
+  // of equations alone, as markdown-it reads one tight: with no blank line
+  // between its items' blocks, nor at the end of one that another follows
+  const openAt: Token[] = [];
+  const tight = new Map<Token, boolean>();
+  const blocks = new Map<Token, { end: number; loose: boolean }>();
+  const blank = (line: number) => /^[ \t>]*$/.test(lines![line] ?? '');
+  for (const token of tokens) {
+    const item = openAt[token.level - 1];
+    if (item?.type === 'list_item_open' && token.map && token.nesting !== -1) {
+      const list = openAt[token.level - 2];
+      if (token.type === 'paragraph_open') tight.set(list, token.hidden);
+      const before = blocks.get(list);
+      let loose = before?.loose ?? false;
+      for (let line = before ? before.end - 1 : token.map[0]; !loose && line < token.map[0]; line++) loose = blank(line);
+      blocks.set(list, { end: token.map[1], loose });
+    }
+    if (token.nesting === 1) openAt[token.level] = token;
+  }
+  const output: Token[] = [];
+  openAt.length = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    output.push(token);
+    if (token.nesting === 1) openAt[token.level] = token;
+    const tail = tails.get(i);
+    if (!tail) continue;
+    const { text, closing } = tail;
+    // The paragraph on the next line, which goes on from the text
+    const next = tokens[i + 1];
+    if (next?.type === 'paragraph_open' && next.map?.[0] === closing + 1 && tokens[i + 2]?.type === 'inline') {
+      const inline = tokens[i + 2];
+      inline.content = text + '\n' + inline.content;
+      next.map = [closing, next.map[1]];
+      if (inline.map) inline.map = [closing, inline.map[1]];
+      continue;
+    }
+    const list = openAt[token.level - 2];
+    const hidden = openAt[token.level - 1]?.type === 'list_item_open' && (tight.get(list) ?? !blocks.get(list)?.loose);
+    const open = new state.Token('paragraph_open', 'p', 1);
+    const inline = new state.Token('inline', '', 0);
+    const close = new state.Token('paragraph_close', 'p', -1);
+    open.map = inline.map = [closing, closing + 1];
+    open.level = close.level = token.level;
+    inline.level = token.level + 1;
+    open.block = inline.block = close.block = true;
+    open.hidden = close.hidden = hidden;
+    inline.content = text.trim();
+    inline.children = [];
+    output.push(open, inline, close);
+  }
+  state.tokens = output;
+}
+
 function autolinkLiteralsRule(state: StateCore): void {
   const urlPattern = /https?:\/\/[^\s<]+/g;
   for (const blockToken of state.tokens) {
@@ -2277,6 +2378,10 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // Register the block-level rule to handle multi-line patterns with empty lines
   // This must run very early, before heading and paragraph parsing
   md.block.ruler.before('heading', 'manuscript_markdown_block', manuscriptMarkdownBlock);
+
+  // After block parsing, where VS Code's math extension's block rule, which
+  // can register before or after this plugin, has made its tokens
+  md.core.ruler.after('block', 'manuscript_display_math_tail', displayMathTailRule);
 
   // Register inline rule for paragraph placeholder (before other inline rules)
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
