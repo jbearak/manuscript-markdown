@@ -1,36 +1,25 @@
 import { describe, test, expect } from 'bun:test';
-import { displayZones } from './latex-env-preprocess';
+import { paragraphEquations } from './latex-env-preprocess';
 import { createMarkdownIt } from './md-to-docx';
 import { preprocessBlocks } from './block-preprocess';
 import { preprocessCriticMarkup, PARA_PLACEHOLDER, LINE_PLACEHOLDER } from './critic-markup';
 
-// The fences of the display math the wrapper reads to leave the
-// environments in it as they are (see step 4 of computeInertZones in
-// latex-env-preprocess.ts), against those of the display math export's own
-// parse reads, as the source offsets of its math tokens' fences, over
-// generated paragraphs of inline constructs nested two or three deep, with
-// dollar signs and fences in each and line ends between them: links,
-// images, highlights, CriticMarkup, citations, autolinks, URLs, code spans,
-// comments and HTML. None holds a bare environment, so export reads the text
-// the wrapper read. Each difference was a shape of the text where the
-// wrapper's read of export's state was wrong, which a test found one at a
-// time: a citation whose prefix held an equation, a highlight's text in a
-// link, a substitution without its ~>, and others. Where the wrapper can't
-// read export's state with certainty, it finds no display math in the text,
-// and the wrap takes main's decisions there, which this counts apart
+// The equations the wrapper reads in a simple paragraph, where it decides
+// each environment on the paragraph's own parse (see decideParagraphs in
+// latex-env-preprocess.ts), against those export's own parse reads there,
+// as the source offsets of its math tokens, over generated paragraphs of
+// inline constructs nested two or three deep, with dollar signs and fences
+// in each and line ends between them: links, images, highlights,
+// CriticMarkup, citations, autolinks, URLs, code spans, comments and HTML,
+// and paragraphs of the simple ones alone. None holds a bare environment, so
+// export reads the text the wrapper read. Each paragraph the wrapper takes
+// for simple is to be read as export reads it, and the others, where main's
+// decisions hold, are left out
 
 const D = '$' + '$';
 
-// The link definitions the documents' links read, after their text, or, for a
-// note's body, which export parses on its own, from the document's, as
-// parseMd in md-to-docx.ts reads them
+// The link definitions the documents' links read, after their text
 const DEFINITIONS = '[r]: u\n[a$b]: v\n';
-const NOTE_DEFINITIONS: Record<string, unknown> = {};
-{
-	const env: { references?: Record<string, unknown> } = {};
-	createMarkdownIt().parse(DEFINITIONS, env);
-	Object.assign(NOTE_DEFINITIONS, env.references);
-}
 
 /** mulberry32, in 32-bit integer arithmetic throughout, so each seed gives
  *  its own documents */
@@ -84,12 +73,25 @@ const wraps: Array<{ critic: boolean; wrap: (a: string, b: string) => string }> 
 	{ critic: false, wrap: a => '`' + a + '`' },
 ];
 
+// Those of a simple paragraph's alone, which the read reads as export does
+const simpleLeaves = [
+	'a', 'b c', '$x$', '$a+b$', '$', ' $ ', D, D + 'x' + D, D + '\nw x\n' + D, D + D, D + ' y ' + D, '$x' + D + 'y$', '\\' + D + 'x' + D,
+	'$\nw y\n$', '\\$', '$5', 'x$y', '`$`', '`' + D + '`', '`', '``$``', '<!-- $ -->', '<!-- ' + D + ' -->', '<!--', '-->', '&#36;',
+	';', ',', '*', '\\[', '\\<',
+];
+const simpleWraps: typeof wraps = [
+	{ critic: false, wrap: a => '*' + a + '*' },
+	{ critic: false, wrap: a => '**' + a + '**' },
+	{ critic: false, wrap: a => '~~' + a + '~~' },
+	{ critic: false, wrap: a => '`' + a + '`' },
+	{ critic: false, wrap: a => '<!-- ' + a + ' -->' },
+];
+
 /** Documents of one or two paragraphs or headings, in a quote or a list
  *  item where `blocks` is, with line ends in CriticMarkup where
- *  `criticLines` is, and the link definitions their links read, but where
- *  each is a note's body, `inNote`, which reads the document's (see
- *  NOTE_DEFINITIONS) */
-function documents(seed: number, count: number, criticLines: boolean, blocks: boolean, inNote = false): string[] {
+ *  `criticLines` is, of the constructs of a simple paragraph alone where
+ *  `simple` is, and the link definitions their links read */
+function documents(seed: number, count: number, criticLines: boolean, blocks: boolean, simple: boolean): string[] {
 	const rnd = random(seed);
 	const pick = <T,>(xs: T[]) => xs[Math.floor(rnd() * xs.length)];
 	const items = (depth: number, lines: boolean): string => {
@@ -97,12 +99,13 @@ function documents(seed: number, count: number, criticLines: boolean, blocks: bo
 		const parts: string[] = [];
 		for (let i = 0; i < n; i++) {
 			if (depth > 0 && rnd() < 0.55) {
-				const { critic, wrap } = pick(wraps);
+				const { critic, wrap } = pick(simple ? simpleWraps : wraps);
 				const inner = lines && (criticLines || !critic);
 				parts.push(wrap(items(depth - 1, inner), items(depth - 1, inner)));
 			} else {
-				let leaf = pick(leaves);
-				while (!lines && leaf.includes('\n')) leaf = pick(leaves);
+				const from = simple ? simpleLeaves : leaves;
+				let leaf = pick(from);
+				while (!lines && leaf.includes('\n')) leaf = pick(from);
 				parts.push(leaf);
 			}
 		}
@@ -123,7 +126,7 @@ function documents(seed: number, count: number, criticLines: boolean, blocks: bo
 		const paragraphs: string[] = [];
 		const k = 1 + Math.floor(rnd() * 2);
 		for (let i = 0; i < k; i++) paragraphs.push(contain((rnd() < 0.15 ? '# H ' : 'P ') + items(1 + Math.floor(rnd() * 3), true)));
-		docs.push(paragraphs.join('\n\n') + (inNote ? '\n' : '\n\n' + DEFINITIONS));
+		docs.push(paragraphs.join('\n\n') + '\n\n' + DEFINITIONS);
 	}
 	return docs;
 }
@@ -170,17 +173,16 @@ function sourceOffsets(processed: string, raw: string): number[] | null {
 	return map;
 }
 
-interface Range { start: number; end: number }
+interface Range { start: number; end: number; display: boolean }
 
-/** The source range of each display math token export's parse of
- *  `processed` reads in a text whose offsets in `text` are known: a paragraph's or a
- *  heading's, a link's text, which markdown-it reads with that state, and a
- *  highlight's text or an image's alt, which it reads in a state of its own
- *  at an offset in that one. And how many it read in others, as a citation's
- *  item, and whether an inline text's lines didn't line up with those of
- *  `processed`. With `linkDefinitions`, as of a note's body, which its
- *  links read after its own */
-function exportEquations(processed: string, linkDefinitions?: Record<string, unknown>): { ranges: Range[]; unplaced: number; unmapped: boolean } {
+/** The source range of each math token export's parse of `processed`
+ *  reads in a text whose offsets in `text` are known, and whether it is
+ *  display math: a paragraph's or a heading's, a link's text, which
+ *  markdown-it reads with that state, and a highlight's text or an image's
+ *  alt, which it reads in a state of its own at an offset in that one. And
+ *  how many it read in others, as a citation's item, and whether an inline
+ *  text's lines didn't line up with those of `processed` */
+function exportEquations(processed: string): { ranges: Range[]; unplaced: number; unmapped: boolean } {
 	const md = createMarkdownIt();
 	const ranges: Range[] = [];
 	let unplaced = 0;
@@ -224,11 +226,11 @@ function exportEquations(processed: string, linkDefinitions?: Record<string, unk
 	md.inline.ruler.at('math', (state, silent) => {
 		const start = state.pos;
 		const read = math(state, silent);
-		// Display math's, from a fence of two dollar signs
-		if (read && !silent && (state as unknown as { src: string }).src.startsWith('$' + '$', start)) {
+		if (read && !silent) {
 			const place = places.get(state);
 			if (!place) unplaced++;
-			else ranges.push({ start: place.map[place.offset + start], end: place.map[place.offset + state.pos] });
+			// Display math's, from a fence of two dollar signs
+			else ranges.push({ start: place.map[place.offset + start], end: place.map[place.offset + state.pos], display: (state as unknown as { src: string }).src.startsWith('$' + '$', start) });
 		}
 		return read;
 	});
@@ -256,61 +258,58 @@ function exportEquations(processed: string, linkDefinitions?: Record<string, unk
 			inlineMap = undefined;
 		}
 	});
-	md.parse(processed, linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {});
+	md.parse(processed, {});
 	return { ranges, unplaced, unmapped };
 }
 
-/** How the fences of the wrapper's display math in each of `docs` compare
- *  with export's, each read with `linkDefinitions` after its own */
-function compare(docs: string[], linkDefinitions?: Record<string, unknown>) {
+/** How the equations the wrapper reads in each simple paragraph of each of
+ *  `docs` compare with export's */
+function compare(docs: string[]) {
 	let compared = 0;
-	let fellBack = 0;
-	let displays = 0;
+	let simple = 0;
+	let equations = 0;
 	const differences: string[] = [];
 	for (const raw of docs) {
-		const { deLazified, output } = preprocessBlocks(raw, linkDefinitions);
+		const { deLazified, output } = preprocessBlocks(raw);
 		// No environment to wrap, so export reads the text the wrapper does
 		expect(output).toBe(deLazified);
 		const text = deLazified;
 		const processed = preprocessCriticMarkup(output);
 		const offsets = processed === text ? null : sourceOffsets(processed, text);
 		if (processed !== text && !offsets) continue;
-		const found = exportEquations(processed, linkDefinitions);
+		const found = exportEquations(processed);
 		if (found.unmapped) continue;
 		compared++;
-		const exported = found.ranges.map(r => offsets ? { start: offsets[r.start], end: offsets[r.end] } : r);
-		const { displays: read, fallbacks } = displayZones(text, linkDefinitions);
-		if (fallbacks.length > 0) fellBack++;
-		// Out of the texts the wrapper can't read for certain, which hold
-		// none of its display math
-		const outside = exported.filter(r => !fallbacks.some(f => f.start < r.end && r.start < f.end));
-		displays += outside.length;
-		// Its opening fence and its closing one
-		const fences = (ranges: Range[]) => ranges.slice().sort((a, b) => a.start - b.start).map(r => text.slice(r.start, r.end) + ' with fences at ' + r.start + ' and ' + (r.end - 2));
-		const ours = fences(read);
-		const theirs = fences(outside);
-		if (ours.join('\n') !== theirs.join('\n') && differences.length < 5) {
-			differences.push(JSON.stringify(text) + '\n  export: ' + JSON.stringify(theirs) + '\n  wrapper: ' + JSON.stringify(ours));
+		const exported = found.ranges.map(r => offsets ? { start: offsets[r.start], end: offsets[r.end], display: r.display } : r);
+		const show = (ranges: Range[]) => ranges.slice().sort((a, b) => a.start - b.start)
+			.map(r => (r.display ? 'display math ' : 'inline math ') + JSON.stringify(text.slice(r.start, r.end)) + ' at ' + r.start).join('\n');
+		for (const unit of paragraphEquations(text)) {
+			if (!unit.simple) continue;
+			simple++;
+			const theirs = exported.filter(r => unit.start <= r.start && r.start < unit.end);
+			equations += theirs.length;
+			if (show(unit.equations) !== show(theirs) && differences.length < 5) {
+				differences.push(JSON.stringify(text.slice(unit.start, unit.end)) + '\n  export: ' + show(theirs) + '\n  wrapper: ' + show(unit.equations));
+			}
 		}
 	}
-	return { compared, fellBack, displays, differences };
+	return { compared, simple, equations, differences };
 }
 
-describe('the display math the wrapper reads around a bare environment, against export\'s parse', () => {
+describe('the equations the wrapper reads in a simple paragraph, against export\'s parse', () => {
 	test.each([
-		['without line ends in CriticMarkup', 1, false, false, false],
-		['with line ends in CriticMarkup, in quotes and list items', 2, true, true, false],
-		// Which export parses each on its own, with the document's link
-		// definitions after its own, as the read reads it
-		['as notes\' bodies, with the document\'s link definitions', 3, true, true, true],
-	])('are export\'s in documents of nested constructs %s', (_name, seed, criticLines, blocks, inNote) => {
+		['of nested constructs, without line ends in CriticMarkup', 1, false, false, false],
+		['of nested constructs, with line ends in CriticMarkup, in quotes and list items', 2, true, true, false],
+		['of a simple paragraph\'s constructs, in quotes and list items', 3, false, true, true],
+	])('are export\'s in documents %s', (_name, seed, criticLines, blocks, simpleOnly) => {
 		const count = 2000;
-		const { compared, fellBack, displays, differences } = compare(documents(seed, count, criticLines, blocks, inNote), inNote ? NOTE_DEFINITIONS : undefined);
+		const { compared, simple, equations, differences } = compare(documents(seed, count, criticLines, blocks, simpleOnly));
 		expect(differences).toEqual([]);
-		// Nearly all are compared, with display math in many, and few have a
-		// text the read can't read for certain
+		// Nearly all are compared, and some of their paragraphs are simple,
+		// and nearly all where only a simple paragraph's constructs are, with
+		// equations in many
 		expect(compared).toBeGreaterThan(count * 0.97);
-		expect(displays).toBeGreaterThan(count / 6);
-		expect(fellBack).toBeLessThan(count * 0.05);
+		expect(simple).toBeGreaterThan(simpleOnly ? count : count / 20);
+		expect(equations).toBeGreaterThan(simple / 5);
 	}, 60000);
 });

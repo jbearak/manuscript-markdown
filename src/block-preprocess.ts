@@ -18,14 +18,11 @@ export interface PreprocessedBlocks {
   lines: number[];
 }
 
-/** The Markdown as markdown-it reads it, before CriticMarkup is preprocessed.
- *  `linkDefinitions` are those a note's body resolves its reference links
- *  with after its own, the document's, which the read of its equations
- *  resolves them with too (see wrapBareLatexEnvironments) */
-export function preprocessBlocks(markdown: string, linkDefinitions?: Record<string, unknown>): PreprocessedBlocks {
+/** The Markdown as markdown-it reads it, before CriticMarkup is preprocessed */
+export function preprocessBlocks(markdown: string): PreprocessedBlocks {
   const grid = preprocessGridTablesWithSourceMap(markdown);
   const quotes = deLazifyBlockquotesWithLines(grid.output);
-  const latex = wrapBareLatexEnvironmentsWithLines(quotes.output, linkDefinitions);
+  const latex = wrapBareLatexEnvironmentsWithLines(quotes.output);
   return { deLazified: quotes.output, output: latex.output, lines: latex.lines.map(line => grid.lines[quotes.lines[line]]) };
 }
 

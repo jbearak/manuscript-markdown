@@ -51,9 +51,6 @@ export interface MarkdownRegions {
 	 *  from the start of the first to the start of the line after the last,
 	 *  sorted */
 	inlineBlocks: CodeRegion[];
-	/** The link definitions the block parse read, by label, as markdown-it's
-	 *  link rule reads them from its env, or undefined where there are none */
-	references: Record<string, unknown> | undefined;
 }
 
 export interface MarkdownRegionOptions {
@@ -367,7 +364,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	// retain its line-ending semantics (including bare CR documents), which
 	// lineStarts counts the same way.
 	const normalizedBlockText = normalizeNewlines(text);
-	const env: { quoteEnds?: number[]; references?: Record<string, unknown> } = {};
+	const env: { quoteEnds?: number[] } = {};
 	if (exportQuotes && normalizedBlockText.includes('>')) {
 		// Each line with text after a quote's line, or a line export keeps on
 		// its paragraph, that doesn't start as one, but one export keeps on it
@@ -456,7 +453,6 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		inlineHtmlRegions,
 		// In the order of the tokens, which is the text's
 		inlineBlocks,
-		references: env.references,
 	};
 }
 

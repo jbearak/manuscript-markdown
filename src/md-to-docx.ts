@@ -25,7 +25,6 @@ import { holdsXmlElement, otherXmlAttributes, replaceXmlElements, withXmlAttribu
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
-import { findClosingHighlightMarker, highlightCloseAt } from './highlight-syntax';
 import { commentsEnd, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
 import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
@@ -632,11 +631,140 @@ function criticMarkupRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
+/** Whether the == at `at` is a {=='s, whose { no backslash escapes, as
+ *  import writes Word's { before a highlight's closing == */
+function opensCriticHighlight(src: string, at: number): boolean {
+  if (at === 0 || src[at - 1] !== '{') return false;
+  let slashes = 0;
+  while (src[at - 2 - slashes] === '\\') slashes++;
+  return slashes % 2 === 0;
+}
+
+/**
+ * Where the critic highlight that the {== at `at` (its ==) opens in a
+ * format highlight ends: just past the ==} that closes it, once each {== in
+ * it is closed in turn, or -1 if none does before `max`. Each {=='s end is
+ * kept in `ends`, for the text and `max`, so a search from each == before
+ * a {== that never closes doesn't read the rest of the text again.
+ */
+function criticHighlightEnd(src: string, at: number, max: number, ends: Map<number, number>): number {
+  const known = ends.get(at);
+  if (known !== undefined) return known;
+  // The {=='s still open, innermost last
+  const open = [at];
+  let pos = at + 2;
+  while (open.length > 0) {
+    if (pos >= max - 1) {
+      // None closes, nor any that holds it
+      for (const opener of open) ends.set(opener, -1);
+      return -1;
+    }
+    if (src[pos] === '=' && src[pos + 1] === '=') {
+      if (opensCriticHighlight(src, pos)) {
+        const end = ends.get(pos);
+        if (end === undefined) {
+          open.push(pos);
+          pos += 2;
+        } else {
+          pos = end === -1 ? max : end;
+        }
+        continue;
+      }
+      // Its closing ==}
+      if (pos + 2 < max && src[pos + 2] === '}') {
+        ends.set(open.pop()!, pos + 3);
+        pos += 3;
+        continue;
+      }
+    }
+    pos++;
+  }
+  return ends.get(at)!;
+}
+
+/** The offsets of the ==s in `src` that a format highlight's search for its
+ *  closing == stops at (see findClosingHighlightMarker): each but one with a
+ *  } right after it, though one that opens a critic highlight stops it */
+function unbracedEquals(src: string): number[] {
+  const at: number[] = [];
+  for (let k = src.indexOf('=='); k !== -1; k = src.indexOf('==', k + 1)) {
+    if (src[k + 2] !== '}' || opensCriticHighlight(src, k)) at.push(k);
+  }
+  return at;
+}
+
+/** The first == at or after `from` that a format highlight's search for its
+ *  closing == stops at, of `unbraced` (see unbracedEquals), or one right
+ *  before `max`, whose } is past it, or `max` if none is */
+function nextUnbracedEquals(src: string, from: number, max: number, unbraced: number[]): number {
+  let lo = 0;
+  let hi = unbraced.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (unbraced[mid] < from) lo = mid + 1;
+    else hi = mid;
+  }
+  let next = lo < unbraced.length && unbraced[lo] + 1 < max ? unbraced[lo] : max;
+  const last = max - 2;
+  if (last >= from && last < next && src[last] === '=' && src[last + 1] === '=') next = last;
+  return next;
+}
+
+/** The closing == of a format highlight whose text starts at `from`: the
+ *  first == outside the critic highlights in it, each {== opening one that
+ *  its ==} closes (see criticHighlightEnd), or -1 if none is before `max`.
+ *  An == right before a } closes none, as the preview and the editor read
+ *  it, so \{==x==} is text, its { escaped: the search goes on to the next
+ *  == (see nextUnbracedEquals), which `unbraced` gives, found once for the
+ *  text, as reading on past each ==} read the rest of the text again for
+ *  each == before it, as in ==} repeated. Import writes a } right after a
+ *  highlight's closing == as \}. */
+function findClosingHighlightMarker(src: string, from: number, max: number, ends = new Map<number, number>(), unbraced?: () => number[]): number {
+  let pos = from;
+  while (pos < max - 1) {
+    if (src[pos] === '=' && src[pos + 1] === '=') {
+      if (!opensCriticHighlight(src, pos)) {
+        if (pos + 2 >= max || src[pos + 2] !== '}') return pos;
+        pos = nextUnbracedEquals(src, pos + 2, max, unbraced ? unbraced() : unbracedEquals(src));
+        continue;
+      }
+      pos = criticHighlightEnd(src, pos, max, ends);
+      if (pos === -1) return -1;
+      continue;
+    }
+    pos++;
+  }
+  return -1;
+}
+
+const criticHighlightEnds = new WeakMap<StateInline, { src: string; byMax: Map<number, Map<number, number>> }>();
+const unbracedEqualsMemo = new WeakMap<StateInline, { src: string; at: number[] }>();
+
+/** The ==s of a state's text that a format highlight's search for its
+ *  closing == stops at (see unbracedEquals), found once for the text */
+function unbracedEqualsOf(state: StateInline): number[] {
+  let memo = unbracedEqualsMemo.get(state);
+  if (!memo || memo.src !== state.src) unbracedEqualsMemo.set(state, memo = { src: state.src, at: unbracedEquals(state.src) });
+  return memo.at;
+}
+
+/** The ends of the critic highlights in a state's text found so far, for
+ *  its posMax (see criticHighlightEnd), kept for each == the rule meets */
+function criticHighlightEndsOf(state: StateInline): Map<number, number> {
+  let memo = criticHighlightEnds.get(state);
+  if (!memo || memo.src !== state.src) criticHighlightEnds.set(state, memo = { src: state.src, byMax: new Map() });
+  let ends = memo.byMax.get(state.posMax);
+  if (!ends) memo.byMax.set(state.posMax, ends = new Map());
+  return ends;
+}
+
 function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   
-  const endPos = highlightCloseAt(state, start);
+  if (start + 2 >= max || state.src.slice(start, start + 2) !== '==') return false;
+  
+  const endPos = findClosingHighlightMarker(state.src, start + 2, max, criticHighlightEndsOf(state), () => unbracedEqualsOf(state));
   if (endPos === -1) return false;
   
   let next = endPos + 2;
@@ -2755,14 +2883,12 @@ function startsAdjacentList(item: MdToken, prevTopOrdered: boolean | undefined):
  *  `text` was wrapped in as display math (`meta.wrappedLatex`), which the
  *  block's text can't tell from dollar signs the Markdown has: by the lines
  *  of `text` wrapped with a mark at the start of each, which are the parsed
- *  text's (`lineCount` of them), or else by any line that starts as one.
- *  Its reference links resolve with `linkDefinitions` after its own, as
- *  the parse's do (see parseMd) */
-function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number, linkDefinitions?: Record<string, unknown>): void {
+ *  text's (`lineCount` of them), or else by any line that starts as one */
+function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number): void {
   let code = 0xF8FF;
   while (text.includes(String.fromCharCode(code))) code--;
   const mark = String.fromCharCode(code);
-  const lines = preprocessCriticMarkup(wrapBareLatexEnvironments(text, mark, linkDefinitions)).split('\n');
+  const lines = preprocessCriticMarkup(wrapBareLatexEnvironments(text, mark)).split('\n');
   for (const token of tokens) {
     if (token.type !== 'html_block' || !token.map) continue;
     const wraps = lines.length === lineCount ? lines.slice(token.map[0], token.map[1]).some(line => line.includes(mark))
@@ -2795,21 +2921,21 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
   const md = createMarkdownIt();
   // Grid tables, quotes without lazy continuation, and bare LaTeX
   // environments, as the orientation scan reads them too
-  const blocks = preprocessBlocks(markdown, linkDefinitions);
+  const blocks = preprocessBlocks(markdown);
   const { deLazified, output: wrapped } = blocks;
   const critic = preprocessCriticMarkupWithLines(wrapped);
   const processed = critic.output;
   const env: { references?: Record<string, unknown>; documentLinkDefinitions?: Record<string, unknown> } =
     linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {};
   const tokens = md.parse(processed, env);
-  if (wrapped !== deLazified) markWrappedLatexBlocks(tokens, deLazified, processed.split('\n').length, linkDefinitions);
+  if (wrapped !== deLazified) markWrappedLatexBlocks(tokens, deLazified, processed.split('\n').length);
 
   const processedLines = processed.split('\n');
   // Number formatting can widen a table's cells past their padding, so
   // whether a table's columns line up reads its lines from before it,
   // `unformatted`, which differ from these in cell text alone
   const unformattedLines = unformatted === undefined ? undefined
-    : preprocessCriticMarkup(preprocessBlocks(unformatted, linkDefinitions).output).split('\n');
+    : preprocessCriticMarkup(preprocessBlocks(unformatted).output).split('\n');
   const sourceLines = unformattedLines?.length === processedLines.length ? unformattedLines : processedLines;
   const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, sourceLines)));
   annotateBlockquoteBoundaries(result);

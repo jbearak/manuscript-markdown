@@ -69,21 +69,17 @@ function withCriticMarkup(source: string): { parsed: string; starts: number[] } 
  * a comment, nor one in a CriticMarkup span, which is the span's text. In a
  * note's body, `inNote`, one at its top level is the note's, which has no
  * sections. `lineOffset` gives the offset in the scanned text of a line of
- * `source`, from which the directive is found. With the link definitions
- * the parse reads, which a note's body, `linkDefinitions` the body's,
- * resolves its reference links with after its own, as export's does, and
- * so the read of its equations (see preprocessBlocks).
+ * `source`, from which the directive is found.
  */
-function blockDirectives(source: string, text: string, lineOffset: (line: number) => number, inNote: boolean, linkDefinitions?: Record<string, unknown>): { directives: Directive[]; references: Record<string, unknown> | undefined } {
+function blockDirectives(source: string, text: string, lineOffset: (line: number) => number, inNote: boolean): Directive[] {
   const tokens: Token[] = [];
   // The block parser alone over the lines export reads, after its grid
   // tables, quotes and LaTeX environments, as a grid table's placeholder,
   // which ends a list it was indented in, with the line of `source` each
   // comes from. `source`'s line ends are \n, as directivesOf gives them.
-  const blocks = preprocessBlocks(source, linkDefinitions);
+  const blocks = preprocessBlocks(source);
   const { parsed, starts } = withCriticMarkup(blocks.output);
-  const env: { references?: Record<string, unknown> } = {};
-  blockParser.block.parse(parsed, blockParser, env, tokens);
+  blockParser.block.parse(parsed, blockParser, {}, tokens);
   const directives: Directive[] = [];
   // The open list items and quotes, an item with whether a block that ends
   // its text, or one after it, came yet (see extractListItems in md-to-docx.ts)
@@ -120,7 +116,7 @@ function blockDirectives(source: string, text: string, lineOffset: (line: number
       where: top ? 'list-item' : inNote ? 'note' : 'top',
     });
   }
-  return { directives, references: env.references };
+  return directives;
 }
 
 /**
@@ -181,10 +177,10 @@ function directivesOf(text: string): Directive[] {
   const noteLines = new Set(notes.flat().map(noteLine => noteLine.line));
   // The body, its notes' lines left blank, so that its lines keep their numbers
   const body = noteLines.size === 0 ? normalized : lines.map((line, k) => noteLines.has(k) ? '' : line).join('\n');
-  const { directives, references } = blockDirectives(body, text, line => lineStarts[line] ?? text.length, false);
+  const directives = blockDirectives(body, text, line => lineStarts[line] ?? text.length, false);
   for (const noteBody of notes) {
     const source = noteBody.map(({ line, skip }) => lines[line].slice(skip)).join('\n');
-    pushAll(directives, blockDirectives(source, text, k => (lineStarts[noteBody[k].line] ?? text.length) + noteBody[k].skip, true, references).directives);
+    pushAll(directives, blockDirectives(source, text, k => (lineStarts[noteBody[k].line] ?? text.length) + noteBody[k].skip, true));
   }
   return directives;
 }
