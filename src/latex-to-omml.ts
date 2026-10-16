@@ -105,6 +105,57 @@ const TEXT_ESCAPES: Map<string, string> = new Map([
   ['\\textbackslash', '\\'], ['\\textasciitilde', '~'], ['\\textasciicircum', '^'],
 ]);
 
+/** The escapes of TEXT_ESCAPES that export writes as their character in math
+ *  too, where the others export as written, backslash included: \{ and \}
+ *  but where the equation's Word text holds LaTeX (see bracesAsText) */
+const MATH_ESCAPES: ReadonlySet<string> = new Set(['\\$', '\\{', '\\}']);
+
+/** Whether each equation written now writes \{ and \} as written, as
+ *  withEquationBraces decided for them all, or undefined, for each to find
+ *  for itself (see bracesAsText) */
+let equationBracesAsText: boolean | undefined;
+
+/**
+ * `write()`, whose equations write \{ and \} as written if Word's text for
+ * any of `views`, with its \tag as Word's number where `numbered`, holds
+ * LaTeX (see bracesAsText), as one equation: a tracked change's accepted
+ * and rejected equations, which Word holds in one, in place or replaced,
+ * and import reads as one.
+ */
+export function withEquationBraces<T>(views: readonly string[], write: () => T, numbered = false): T {
+  const outer = equationBracesAsText;
+  equationBracesAsText = undefined;
+  const asText = views.some(view => /\\[{}]/.test(view)) ? views.some(view => {
+    const parser = new Parser(tokenize(view));
+    parser.numbered = numbered;
+    return parser.bracesAsText();
+  }) : undefined;
+  equationBracesAsText = asText;
+  try {
+    return write();
+  } finally {
+    equationBracesAsText = outer;
+  }
+}
+
+/**
+ * Whether Word's text for an equation, `omml`, holds LaTeX: a \ or a % in a
+ * run of no style or alphabet, as the \begin{array}{cc} or \foo that
+ * export writes as text, and \%. Import reads such an equation's braces as
+ * LaTeX, as before, where it writes another's as \{ and \} (see
+ * holdsLatexText in omml.ts). That one reads Word's m:nor as runStyleOf
+ * does, with its m:val; this one takes any m:nor as a style, since export
+ * writes one only on a comment's runs, which neither counts.
+ */
+function holdsLatexText(omml: string): boolean {
+  for (const [, run] of omml.matchAll(/<m:r>([\s\S]*?)<\/m:r>/g)) {
+    const rPr = /<m:rPr>[\s\S]*?<\/m:rPr>/.exec(run)?.[0] ?? '';
+    const text = [...run.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1]).join('');
+    if (/[\\%]/.test(text) && !/<m:(?:sty|scr|nor)\b/.test(rPr)) return true;
+  }
+  return false;
+}
+
 /** The environments parseEnvironment gives an OMML form; keep in step with its cases. */
 const SUPPORTED_ENVIRONMENTS: ReadonlySet<string> = new Set([
   'matrix', 'smallmatrix', 'pmatrix', 'bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix', 'cases',
@@ -149,6 +200,10 @@ function unescapeXmlChars(text: string): string {
     .replace(/&lt;/g, '<')
     .replace(/&amp;/g, '&');
 }
+
+/** OMML whose first text but spaces starts with a ^ or a _, as a script
+ *  with no base writes it, which TeX's spaces before it don't change */
+const SCRIPT_TEXT_FIRST_RE = /^(?:(?!<m:t[ >])[\s\S]|<m:t(?: [^>]*)?>\s*<\/m:t>)*<m:t(?: [^>]*)?>\s*[\^_]/;
 
 function makeRun(text: string): string {
   return '<m:r><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
@@ -432,6 +487,23 @@ class Parser {
   numbersBlank = false;
   /** The last \tag read and not yet written as a row's number */
   private tag?: EquationTag;
+  /** Whether the last group parseGroup read in braces had its closing one,
+   *  or read one past, which may be its own (see closersReadPast) */
+  private groupClosed = true;
+  /** The groups parseGroup is reading, in braces, around where it is now */
+  private openGroups = 0;
+  /** The closing braces read past while a group was open (see parseToken) */
+  private closersReadPast = 0;
+  /**
+   * Whether \{ and \} export as written, backslash included, as before, in
+   * the equation: where Word's text for it holds LaTeX anyway (see
+   * holdsLatexText), whose braces import keeps as they are, as LaTeX's, so
+   * that Word's { and } there would come back as a group's. Found once,
+   * where a \{ or \} needs it, by writing the equation with them as braces,
+   * from its tokens as they were, which parsing may splice; a parser of a
+   * part of the equation asks the equation's.
+   */
+  bracesAsText: () => boolean;
 
   constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, mode: ParseMode = 'math', track?: TrackChange) {
     this.tokens = tokens;
@@ -439,6 +511,18 @@ class Parser {
     this.onUnknownCommand = onUnknownCommand;
     this.mode = mode;
     this.track = track;
+    const source = tokens.slice();
+    let asText = equationBracesAsText;
+    this.bracesAsText = () => {
+      if (asText === undefined) {
+        const trial = new Parser(source, undefined, 'math', track && ((element, omml) => '<' + element + '>' + omml + '</' + element + '>'));
+        trial.bracesAsText = () => false;
+        // With the number Word holds for its \tag, whose \% is a bare %
+        trial.numbered = this.numbered;
+        asText = holdsLatexText(trial.numberedEquation(trial.parseExpression(false)));
+      }
+      return asText;
+    };
   }
 
   /** Text as Word shows it: outside text mode, ' is a prime, as Word's own autocorrect makes it. */
@@ -518,9 +602,16 @@ class Parser {
     const token = this.peek();
     if (token?.type === 'lbrace') {
       this.consume(); // consume '{'
+      this.openGroups++;
+      const readPast = this.closersReadPast;
       const content = this.parseExpression();
+      this.openGroups--;
       const close = this.peek();
-      if (close?.type === 'rbrace') {
+      // A group whose closing brace may have been read past inside it, as
+      // where \sum_i^2 takes an environment's \end, is read as closed, as
+      // before
+      this.groupClosed = close?.type === 'rbrace' || this.closersReadPast > readPast;
+      if (this.groupClosed) {
         this.consume(); // consume '}'
       }
       return content;
@@ -557,6 +648,16 @@ class Parser {
         case 'ampersand':
         case 'backslash':
           return makeRun(token.value);
+        // A closing brace no group is open for, as in x } y, read as an
+        // atom: the character, which import writes back as \}. It was
+        // dropped, as LaTeX's error recovery drops it, so Word lost it. One
+        // read where a group is open, which closes that group but is read
+        // past, as by \sum_i^2 taking an environment's \end, is dropped,
+        // as before
+        case 'rbrace':
+          if (this.openGroups === 0) return makeRun('}');
+          this.closersReadPast++;
+          return '';
         case 'comment':
           return makeHiddenCommentRun(token.value);
         case 'line_continuation':
@@ -631,9 +732,11 @@ class Parser {
       return onlyWhitespace ? change.replace(/^<w:(?:ins|del)\b/, open => open + WHITESPACE_CHANGE_MARK) : change;
     }
 
-    // In math, \$ alone, which is how import writes Word's $ there (see
-    // escapeDollars in omml.ts); the others export as written, as before
-    const escaped = this.mode === 'math' ? (cmd === '\\$' ? '$' : undefined) : TEXT_ESCAPES.get(cmd);
+    // In math, \$, \{ and \} alone, which is how import writes Word's $, {
+    // and } there (see escapeDollars and escapeBraces in omml.ts), as LaTeX
+    // shows them, but \{ and \} where Word's text holds LaTeX (see
+    // bracesAsText); the others export as written, as before
+    const escaped = this.mode !== 'math' || (MATH_ESCAPES.has(cmd) && (cmd === '\\$' || !this.bracesAsText())) ? TEXT_ESCAPES.get(cmd) : undefined;
     if (escaped !== undefined) {
       return makeRun(escaped);
     }
@@ -998,7 +1101,10 @@ class Parser {
           this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
           // A \tag in it numbers the equation, as in a group
           const parser = new Parser(operand, this.onUnknownCommand, this.mode, this.track);
+          parser.bracesAsText = this.bracesAsText;
+          parser.openGroups = this.openGroups;
           const omml = parser.parseExpression(false);
+          this.closersReadPast += parser.closersReadPast;
           this.tag = parser.tag ?? this.tag;
           return omml;
         }
@@ -1152,7 +1258,17 @@ class Parser {
         // a style's group, as \mathrm{{m}/{s}}, it's the characters
         const group = this.parseGroup();
         const slash = this.peek();
-        if (this.mode === 'math' && slash?.type === 'text' && slash.value === '/' && this.tokens[this.pos + 1]?.type === 'lbrace') {
+        if (!this.groupClosed && !SCRIPT_TEXT_FIRST_RE.test(group)) {
+          // An opening brace with no closing one, as in x { y, opens a group
+          // to the equation's end: the character, which import writes back
+          // as \{, and then the group's content. It was dropped, as LaTeX's
+          // error recovery closes the group at the end, so Word lost it. A
+          // command's or a script's group, as \frac{a}{b's or x^{2's, is
+          // still closed there, and so is one whose text starts with a ^ or
+          // a _, as before, as a script with no base, as {^2 or {{^2, where
+          // import's \{ would be its base
+          atoms.push(makeRun('{'), group);
+        } else if (this.mode === 'math' && slash?.type === 'text' && slash.value === '/' && this.tokens[this.pos + 1]?.type === 'lbrace') {
           this.consume(); // consume '/'
           const den = this.parseGroup();
           if (this.scriptFollows()) atoms.push(group, makeRun('/'), den);

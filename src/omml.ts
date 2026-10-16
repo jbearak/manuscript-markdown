@@ -460,7 +460,29 @@ function fallbackPlaceholder(tag: string, children: XmlNode[]): string {
 function translateRun(children: XmlNode[]): string {
   if (!Array.isArray(children)) return '';
 
-  // Check m:rPr for m:sty style, m:scr script and m:nor, Word's Normal Text
+  const { style: runStyle, script, bare } = runStyleOf(children);
+
+  // Extract text from m:t nodes, and w:sym's characters
+  const pieces = runPieces(children);
+  const text = pieces.map(piece => piece.text).join('');
+  if (!text) return '';
+  if (isCommentRun(children, text)) return hiddenCommentLatex(text);
+  const preserved = children.some(child => child['m:t'] !== undefined && (child[':@'] as Record<string, string> | undefined)?.['@_xml:space'] === 'preserve');
+  // A reserved character a w:sym shows goes in \text{}, as one typed in an
+  // upright run does, where a bare run would write it as LaTeX syntax. A
+  // group escapes it already
+  if (bare && pieces.some(piece => piece.reserved)) {
+    return pieces.map(piece => runTextLatex(piece.text, piece.reserved ? 'p' : runStyle, script, 'math', preserved)).join('');
+  }
+  return runTextLatex(text, runStyle, script, 'math', preserved);
+}
+
+/**
+ * The style and script runTextLatex reads a math run in, from the m:sty,
+ * m:scr and m:nor, Word's Normal Text, of its m:rPr, and whether the run is
+ * bare, of no style or alphabet that runTextLatex writes a group for.
+ */
+function runStyleOf(children: XmlNode[]): { style: string; script: string; bare: boolean } {
   let style = '';
   let script = '';
   let normal = false;
@@ -482,25 +504,10 @@ function translateRun(children: XmlNode[]): string {
       }
     }
   }
-
-  // Extract text from m:t nodes, and w:sym's characters
-  const pieces = runPieces(children);
-  const text = pieces.map(piece => piece.text).join('');
-  if (!text) return '';
-  if (isCommentRun(children, text)) return hiddenCommentLatex(text);
-  const preserved = children.some(child => child['m:t'] !== undefined && (child[':@'] as Record<string, string> | undefined)?.['@_xml:space'] === 'preserve');
   // Normal Text is text, as an upright run's is, but in the style or
   // alphabet a run gives with it, as before
   const runStyle = normal && !style && !script ? 'p' : style;
-  // A reserved character a w:sym shows goes in \text{}, as one typed in an
-  // upright run does, where a bare run, of no style or alphabet that
-  // runTextLatex writes a group for, would write it as LaTeX syntax. A
-  // group escapes it already
-  const bare = runStyle !== 'p' && !SCRIPT_ALPHABETS.has(script) && !STYLE_ALPHABETS.has(runStyle);
-  if (bare && pieces.some(piece => piece.reserved)) {
-    return pieces.map(piece => runTextLatex(piece.text, piece.reserved ? 'p' : runStyle, script, 'math', preserved)).join('');
-  }
-  return runTextLatex(text, runStyle, script, 'math', preserved);
+  return { style: runStyle, script, bare: runStyle !== 'p' && !SCRIPT_ALPHABETS.has(script) && !STYLE_ALPHABETS.has(runStyle) };
 }
 
 /** Where a run's text goes: into the equation, or into an \operatorname name. */
@@ -515,7 +522,8 @@ type RunContext = 'math' | 'name';
  * - A bare run is math: symbols become commands, and ′ is ' at the base level
  *   and \prime in a script or limit (a raw ′ breaks pdflatex). Reserved
  *   characters stay as they are, since the export keeps math escapes such as
- *   \% and unknown commands as literal text.
+ *   \% and unknown commands as literal text, but for { and }, which take a
+ *   backslash where the equation holds no LaTeX (see escapeBraces).
  * - An upright run with spaces, apostrophes, or reserved characters is text
  *   (see textModeLatex): \mathrm{} drops spaces and reads ' as a prime.
  * - Any other styled run is math in a group, \mathrm{} or an alphabet such
@@ -539,7 +547,7 @@ function runTextLatex(text: string, style: string, script: string, context: RunC
     unicodeToLatex(source, scriptDepth > 0, separator).replace(/′/g, "'");
   const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
   const group = alphabet ?? (style === 'p' ? '\\mathrm' : '');
-  if (!group) return mathLatex(text, ' ');
+  if (!group) return mathLatex(escapeBraces(text), ' ');
   if (!alphabet && TEXT_MODE_CHARACTERS.test(text)) return textModeLatex(text);
   // Word drops a space at an edge without xml:space="preserve", and keeps one
   // with it, which goes in \text{}, as \text{} keeps it, beside the math
@@ -549,6 +557,42 @@ function runTextLatex(text: string, style: string, script: string, context: RunC
   if (!preserved || !(lead || trail)) return group + '{' + apartFromMarkup(math(text)) + '}';
   const kept = (space: string) => space ? '\\text{' + space + '}' : '';
   return group + '{' + apartFromMarkup(kept(lead) + math(core) + kept(trail)) + '}';
+}
+
+/** Whether import escapes the braces of the equation it reads now, as
+ *  ommlToLatex decides for each (see holdsLatexText) */
+let escapingBraces = false;
+
+/**
+ * A bare run's `text` with each { and } escaped, as \{ and \}, which export
+ * writes as Word's { and } (see parseCommand in latex-to-omml.ts), in an
+ * equation whose Word text holds no LaTeX. As they were, export read Word's
+ * characters as a group's braces and dropped them: {x} came back as a
+ * group, and x{y as one that x{y's export dropped. With no backslash in the
+ * equation's text, no brace there is escaped already, or a command's
+ * argument, and with no %, none is a comment's.
+ */
+function escapeBraces(text: string): string {
+  return escapingBraces ? text.replace(/[{}]/g, brace => '\\' + brace) : text;
+}
+
+/**
+ * Whether the text of an equation's bare runs, `nodes` and all in them,
+ * holds LaTeX: a \ or a %, as the \begin{array}{cc} or \foo that export
+ * writes as text does. Import keeps such an equation's braces as they are,
+ * as before, as which of them are LaTeX's, as an argument's, and which
+ * Word's is LaTeX's reading of the text, across runs Word may split it
+ * into; export writes its \{ and \} as written to match (see
+ * holdsLatexText in latex-to-omml.ts). A comment's run is no bare run.
+ */
+function holdsLatexText(nodes: XmlNode[]): boolean {
+  return nodes.some(node => Object.keys(node).some(key => {
+    if (key === ':@') return false;
+    const children = asXmlNodes(node[key]);
+    if (key !== 'm:r') return holdsLatexText(children);
+    const text = runPieces(children).map(piece => piece.text).join('');
+    return /[\\%]/.test(text) && runStyleOf(children).bare && !isCommentRun(children, text);
+  }));
 }
 
 /** A hidden comment run (text after a \u200B marker) as its LaTeX comment. */
@@ -1600,10 +1644,14 @@ let displayEquation = false;
  */
 export function ommlToLatex(children: XmlNode[], display = false): string {
   const outerDisplay = displayEquation;
+  const outerEscaping = escapingBraces;
   // An equation highlighted whole is in a highlight, which converter.ts
   // writes around it (see mathHighlight there), not in {==...==} in it
   const whole = partDepth === 0 && highlightedWhole(children);
-  if (partDepth === 0) displayEquation = display;
+  if (partDepth === 0) {
+    displayEquation = display;
+    escapingBraces = !holdsLatexText(children);
+  }
   if (whole) highlightDepth++;
   partDepth++;
   try {
@@ -1613,6 +1661,7 @@ export function ommlToLatex(children: XmlNode[], display = false): string {
     partDepth--;
     if (whole) highlightDepth--;
     displayEquation = outerDisplay;
+    escapingBraces = outerEscaping;
   }
 }
 

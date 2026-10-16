@@ -1,5 +1,5 @@
 import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText } from './bibtex-parser';
-import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, type TrackChange } from './latex-to-omml';
+import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, withEquationBraces, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 import { decodeHtmlCharacterReferences } from './html-entities';
@@ -1403,16 +1403,30 @@ function tracksInPlace(latex: string, parts: CriticMathPart[], numbered: boolean
  * leaves.
  */
 export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings?: string[], display = false): string {
+  // Its \{ and \} export as written, or not, alike in each view and in the
+  // equation Word holds (see bracesAsText in latex-to-omml.ts)
+  const views = [true, false].map(accepted => equationViewLatex(parts, accepted));
+  const numbered = display && tagsNumbered(parts);
+  return withEquationBraces(views, () => trackedMathXml(parts, track, warnings, display, numbered), numbered);
+}
+
+/**
+ * Whether display math with CriticMarkup inside numbers its rows by their
+ * \tag. A \tag in CriticMarkup, or with CriticMarkup in it, is dropped, as
+ * before: Word's number is the end of a row, which an edit in it can't add
+ * or remove.
+ */
+function tagsNumbered(parts: CriticMathPart[]): boolean {
+  const tags = (accepted: boolean) => (equationViewLatex(parts, accepted).match(/\\tag(?![A-Za-z])\*?\s*\{[^{}]*\}/g) ?? []).join();
+  return tags(true) === tags(false) &&
+    !parts.some(part => part.type !== 'math' && /\\tag(?![A-Za-z])/.test(part.type === 'substitution' ? part.oldContent + part.newContent : part.content));
+}
+
+function trackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings: string[] | undefined, display: boolean, numbered: boolean): string {
   if (display) {
     parts = parts.map((part, k) => part.type === 'math' ? { ...part, content: withinFences(part.content, k === 0, k === parts.length - 1) } : part);
   }
   const equation = (omml: string) => display ? '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>' : '<m:oMath>' + omml + '</m:oMath>';
-  // A \tag in CriticMarkup, or with CriticMarkup in it, is dropped, as
-  // before: Word's number is the end of a row, which an edit in it can't
-  // add or remove
-  const tags = (accepted: boolean) => (equationViewLatex(parts, accepted).match(/\\tag(?![A-Za-z])\*?\s*\{[^{}]*\}/g) ?? []).join();
-  const numbered = display && tags(true) === tags(false) &&
-    !parts.some(part => part.type !== 'math' && /\\tag(?![A-Za-z])/.test(part.type === 'substitution' ? part.oldContent + part.newContent : part.content));
   const latex = trackedEquationLatex(parts);
   if (latex !== undefined && tracksInPlace(latex, parts, numbered)) {
     return equation(trackedLatexToOmml(latex, track, unknownCommandWarning(warnings), numbered));
