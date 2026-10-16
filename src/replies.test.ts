@@ -421,6 +421,136 @@ describe('Consecutive reply format preservation', () => {
   });
 });
 
+/** Word's comments, each as its text, an * where its range holds nothing,
+ *  and after a < the text of the comment it replies to */
+async function wordThreads(docx: Uint8Array): Promise<string[]> {
+  const zip = await JSZip.loadAsync(docx);
+  const commentsXml = await zip.file('word/comments.xml')!.async('string');
+  const extXml = (await zip.file('word/commentsExtended.xml')?.async('string')) ?? '';
+  let ranges = '';
+  for (const part of ['word/document.xml', 'word/footnotes.xml']) ranges += (await zip.file(part)?.async('string')) ?? '';
+  const comments = [...commentsXml.matchAll(/<w:comment w:id="(\d+)"[^>]*>(?:(?!<\/w:comment>)[^])*?w14:paraId="(\w+)"(?:(?!<\/w:comment>)[^])*?<w:t>([^<]*)<\/w:t>/g)]
+    .map(([, id, paraId, text]) => ({ id, paraId, text }));
+  const parents = new Map([...extXml.matchAll(/w15:paraId="(\w+)" w15:paraIdParent="(\w+)"/g)].map(([, paraId, parent]) => [paraId, parent]));
+  return comments.map(c => {
+    const parent = comments.find(p => p.paraId === parents.get(c.paraId));
+    const empty = ranges.includes('<w:commentRangeStart w:id="' + c.id + '"/><w:commentRangeEnd w:id="' + c.id + '"/>');
+    return c.text + (empty ? '*' : '') + (parent ? ' < ' + parent.text : '');
+  }).sort();
+}
+
+describe('A comment on no text right after a range', () => {
+  // Import wrote its body right after the range's, as
+  // {==t==}{>>one<<}{>>two<<}, which export reads as a comment and its reply
+  const one = '{#c1>>@A (2024-01-15 10:30) | one<<}';
+  const two = '{>>@B (2024-01-15 11:30) | two<<}';
+
+  test.each([
+    ['a paragraph', 'P {#c1}t{/c1}' + two + ' Q\n\n' + one],
+    ['a note', 'T.[^1]\n\n[^1]: P {#c1}t{/c1}' + two + ' Q\n    ' + one],
+    ['a table cell', '| h |\n| --- |\n| P {#c1}t{/c1}' + two.replace('|', '\\|') + ' Q |\n\n' + one],
+    ['an alert', '> [!NOTE]\n> P {#c1}t{/c1}' + two + ' Q\n\n' + one],
+    ['an equation', 'P {#c1}$x${/c1}' + two + ' Q\n\n' + one],
+    ['emphasis', 'P {#c1}**t**{/c1}' + two + ' Q\n\n' + one],
+  ])('keeps it a comment of its own in %s', async (_name, md) => {
+    const first = await convertMdToDocx(md);
+    expect(await wordThreads(first.docx)).toEqual(['one', 'two*']);
+    const imported = (await convertDocx(first.docx)).markdown;
+    const second = await convertMdToDocx(imported);
+    expect(await wordThreads(second.docx)).toEqual(['one', 'two*']);
+    expect((await convertDocx(second.docx)).markdown).toBe(imported);
+  });
+
+  test('writes them in ID syntax, each body after the paragraph', async () => {
+    const md = 'P {#c1}t{/c1}' + two + ' Q\n\n' + one;
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown)
+      .toBe('P {#c1}t{/c1}{#1}{/1} Q\n{#1>>@B (2024-01-15 11:30) | two<<}\n' + one + '\n');
+  });
+
+  /** Export's document for `md`, with the space between the two comments out
+   *  of the part that holds it, as Word has a comment on no text right at
+   *  the end of another's range, and with `edit` */
+  async function wordWithout(md: string, part: string, edit = (xml: string) => xml): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file(part)!.async('string');
+    const space = /(<w:commentReference w:id="\d+"\/><\/w:r>)<w:r><w:t xml:space="preserve"> <\/w:t><\/w:r>(<w:commentRangeStart)/;
+    expect(xml).toMatch(space);
+    zip.file(part, edit(xml.replace(space, (_m, reference: string, start: string) => reference + start)));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  test.each([
+    ['a paragraph', 'P {==t==}{>>@A (2024-01-15 10:30) | one<<} ' + two + ' Q', 'word/document.xml'],
+    ['a note', 'T.[^1]\n\n[^1]: P {==t==}{>>@A (2024-01-15 10:30) | one<<} ' + two + ' Q', 'word/footnotes.xml'],
+    ['a table cell', '| h |\n| --- |\n| P {==t==}{>>@A (2024-01-15 10:30) \\| one<<} ' + two.replace('|', '\\|') + ' Q |', 'word/document.xml'],
+    ['an alert', '> [!NOTE]\n> P {==t==}{>>@A (2024-01-15 10:30) | one<<} ' + two + ' Q', 'word/document.xml'],
+    ['an equation', 'P {==$x$==}{>>@A (2024-01-15 10:30) | one<<} ' + two + ' Q', 'word/document.xml'],
+  ])('keeps Word\'s comment on no text at a range\'s end a comment of its own in %s', async (_name, md, part) => {
+    const word = await wordWithout(md, part);
+    expect(await wordThreads(word)).toEqual(['one', 'two*']);
+    const imported = (await convertDocx(word)).markdown;
+    const second = await convertMdToDocx(imported);
+    expect(await wordThreads(second.docx)).toEqual(['one', 'two*']);
+    expect((await convertDocx(second.docx)).markdown).toBe(imported);
+  });
+
+  /** `xml` with `pattern` replaced by `to`, where it's found */
+  const edited = (pattern: RegExp | string, to: string) => (xml: string) => {
+    expect(xml).toMatch(pattern);
+    return xml.replace(pattern, to);
+  };
+  // The header row's two cells as one, which only an HTML table holds
+  const merged = edited(/(<w:tc><w:tcPr>)((?:(?!<\/w:tc>)[^])*?<\/w:tc>)<w:tc>(?:(?!<\/w:tc>)[^])*?<\/w:tc>/, '$1<w:gridSpan w:val="2"/>$2');
+  // The X a paragraph starts with out, which then starts with an HTML comment
+  const withoutX = edited('<w:r><w:t>X</w:t></w:r>', '');
+  const ranged = '{==t==}{>>@A (2024-01-15 10:30) | one<<}';
+
+  test.each([
+    ['an HTML table\'s cell', '| h | i |\n| --- | --- |\n| P ' + ranged.replace('|', '\\|') + ' ' + two.replace('|', '\\|') + ' Q | z |', 'word/document.xml', merged],
+    ['a paragraph that starts with an HTML comment', 'X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/document.xml', withoutX],
+    ['a list item that starts with an HTML comment', '- X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/document.xml', withoutX],
+    ['a quote that starts with an HTML comment', '> X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/document.xml', withoutX],
+    ['a note that starts with an HTML comment', 'T.[^1]\n\n[^1]: X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/footnotes.xml', withoutX],
+    // Whose fence import puts right before the comment, with no paragraph
+    // between them
+    ['a landscape section\'s first paragraph that starts with an HTML comment', '<!-- landscape -->\n\nX<!-- h -->P ' + ranged + ' ' + two + ' Q\n\nR\n\n<!-- /landscape -->\n\nS', 'word/document.xml', withoutX],
+    ['a portrait section\'s first paragraph that starts with an HTML comment', '<!-- portrait -->\n\nX<!-- h -->P ' + ranged + ' ' + two + ' Q\n\nR\n\n<!-- /portrait -->\n\nS', 'word/document.xml', withoutX],
+    ['a landscape section\'s only paragraph that starts with an HTML comment', '<!-- landscape -->\n\nX<!-- h -->P ' + ranged + ' ' + two + ' Q\n\n<!-- /landscape -->', 'word/document.xml', withoutX],
+  ])('writes Word\'s comment on no text at a range\'s end in %s as before, where export reads ID syntax as text', async (_name, md, part, edit) => {
+    // ID syntax there went to Word as text, and the bodies after the table
+    // or the paragraph, with no range, were lost on the next trip
+    const imported = (await convertDocx(await wordWithout(md, part, edit))).markdown;
+    expect(imported).toContain(ranged + two);
+    expect(imported).not.toContain('{#');
+    expect((await convertDocx((await convertMdToDocx(imported)).docx)).markdown).toBe(imported);
+  });
+
+  test('keeps the replies Word has on each', async () => {
+    const md = 'P {==t==}{>>@A (2024-01-15 10:30) | one\n  {>>@C (2024-01-15 12:30) | r1<<}\n<<} '
+      + '{>>@B (2024-01-15 11:30) | two\n  {>>@D (2024-01-15 13:30) | r2<<}\n<<} Q';
+    const word = await wordWithout(md, 'word/document.xml');
+    expect(await wordThreads(word)).toEqual(['one', 'r1 < one', 'r2 < two', 'two']);
+    const imported = (await convertDocx(word)).markdown;
+    const second = await convertMdToDocx(imported);
+    expect(await wordThreads(second.docx)).toEqual(['one', 'r1 < one', 'r2 < two', 'two']);
+    expect((await convertDocx(second.docx)).markdown).toBe(imported);
+  });
+
+  test.each([
+    ['a reply', 'P {==t==}{>>@A (2024-01-15 10:30) | one<<}' + two + ' Q', ['one', 'two < one']],
+    ['a nested reply', 'P {==t==}{>>@A (2024-01-15 10:30) | one\n  ' + two + '\n<<} Q', ['one', 'two < one']],
+    ['a space between', 'P {==t==}{>>@A (2024-01-15 10:30) | one<<} ' + two + ' Q', ['one', 'two*']],
+    ['a comment on no text alone', 'P ' + two + ' Q', ['two*']],
+    ['two comments on no text', 'P {>>@A (2024-01-15 10:30) | one<<}' + two + ' Q', ['one*', 'two*']],
+    ['ranges that touch', 'P {==t==}{>>@A (2024-01-15 10:30) | one<<}{==u==}' + two + ' Q', ['one', 'two']],
+    ['a comment on no text before a range', 'P ' + two + '{==t==}{>>@A (2024-01-15 10:30) | one<<} Q', ['one', 'two*']],
+  ])('leaves %s as it was', async (_name, md, threads) => {
+    const { docx } = await convertMdToDocx(md);
+    expect(await wordThreads(docx)).toEqual(threads);
+    expect((await convertDocx(docx)).markdown).toBe(md + '\n');
+  });
+});
+
 describe('Multi-level reply chain flattening', () => {
   test('deep reply chains are flattened to root parent', () => {
     const comments = new Map<string, Comment>([

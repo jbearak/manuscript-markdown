@@ -8797,12 +8797,15 @@ describe('A page or column break Word puts in a paragraph', () => {
   });
 
   // A comment on one alone at a paragraph's end, in the range of another
-  // that ends first, comes back as before. The empty item it leaves has the
-  // comments open where its range ends, as endComment's has. An earlier
-  // draft's had the other's too, which then went on over it
+  // that ends first, comes back as a comment on no text after the other's
+  // range. The empty item it leaves has the comments open where its range
+  // ends, as endComment's has. An earlier draft's had the other's too, which
+  // then went on over it. It takes ID syntax, as written inline its body
+  // went right after the other's, which export read as that one's reply
+  // (see pointsAfterRanges)
   test.each([
-    ['in the body', '{#1}one {#2}two{/1}{/2}\n\n{#1>>@A | outer<<}\n{#2>>@A | inner<<}\n', 'word/document.xml', '{==one ==}{>>@A | outer<<}{>>@A | inner<<}\n'],
-    ['in a note', 'a[^1]\n\n[^1]: {#1}one {#2}two{/1}{/2}\n\n    {#1>>@A | outer<<}\n    {#2>>@A | inner<<}\n', 'word/footnotes.xml', 'a[^1]\n\n[^1]: {==one ==}{>>@A | outer<<}{>>@A | inner<<}\n'],
+    ['in the body', '{#1}one {#2}two{/1}{/2}\n\n{#1>>@A | outer<<}\n{#2>>@A | inner<<}\n', 'word/document.xml', '{#1}one {/1}{#2}{/2}\n{#1>>@A | outer<<}\n{#2>>@A | inner<<}\n'],
+    ['in a note', 'a[^1]\n\n[^1]: {#1}one {#2}two{/1}{/2}\n\n    {#1>>@A | outer<<}\n    {#2>>@A | inner<<}\n', 'word/footnotes.xml', 'a[^1]\n\n[^1]: {#1}one {/1}{#2}{/2}\n    {#1>>@A | outer<<}\n    {#2>>@A | inner<<}\n'],
   ])('keeps a comment on one alone in another comment\'s range %s', async (_name, md, part, expected) => {
     const markdown = await imported(md, '<w:t>two</w:t>', PAGE, part);
     expect(strip(markdown)).toBe(expected);

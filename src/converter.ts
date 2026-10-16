@@ -9958,6 +9958,80 @@ export function globallyOverlappingComments(items: ContentItem[]): Set<string> {
   return overlappingCommentRanges(commentRangesAcross(items));
 }
 
+/** The comments on no text right after the last run of another comment's
+ *  range, in `items` and their tables' cells, which take ID syntax. Without
+ *  it, import wrote the comment's body right after the range's, as
+ *  {==t==}{>>a<<}{>>c<<}, which export reads as a comment and its reply, as
+ *  it reads each {>>...<<} right after a {==...==} anchor's body. With it,
+ *  the paragraph goes as {#1}t{/1}{#2}{/2}, each body after it. Not where
+ *  anything is between them, as a space, which goes between the bodies, nor
+ *  after a comment on no text, as {>>a<<}{>>c<<}, which export reads as two
+ *  comments, nor after an HTML comment's comment, whose body follows it with
+ *  no anchor, nor after a display equation's, which takes ID syntax outside
+ *  a table, nor after a run that holds no ID markers (see
+ *  holdsCommentMarkers), as code's. Runs of no text and no comment write
+ *  nothing, so they're skipped.
+ *
+ *  Nor where export reads ID markers as text, where they stay inline as
+ *  before: in the cells of a table that can't hold a range, by its index
+ *  from `firstIndex` among those buildMarkdown renders (`takesNoRanges`,
+ *  see cellsTakeNoRanges), or of a table in one's cell, whose HTML shows the
+ *  markers as text, and whose bodies, after the table, have no range; nor
+ *  in an inline range that starts with an HTML comment, which is an HTML
+ *  block that shows them as text too, with its bodies after it (see
+ *  beginsHtmlBlock), but in a cell, or in a heading of the body (`headings`),
+ *  whose flag buildMarkdown passes, as a note's parts don't. An inline range
+ *  starts where buildMarkdown starts one, at the content's start and after
+ *  each item that ends one (see endsInlineRange), as a section's fence with
+ *  no paragraph after it, before a first paragraph that starts with an HTML
+ *  comment (see endSection). Not after a display equation, after whose
+ *  closing fence the paragraph goes on, on its line. The range starts with
+ *  the comment where only runs of spaces and tabs come before it, whatever
+ *  their changes, which may write nothing; after a tracked paragraph mark
+ *  joinTrackedParagraphBreaks put in the text, the next paragraph's text
+ *  goes on after the span's closer, on its line. After a section's fence or
+ *  the like, the paragraph is no heading, as one would start with a para
+ *  item. */
+function pointsAfterRanges(items: ContentItem[], takesNoRanges: (table: TableItem, index: number) => boolean, firstIndex = 0, headings = false): string[] {
+  const points: string[] = [];
+  let index = firstIndex;
+  const visit = (list: ContentItem[], inTable: boolean, noRanges: boolean) => {
+    let before: ContentItem | undefined;
+    let inCodeBlock = false;
+    let heading = false;
+    // Whether the inline range has written nothing yet but whitespace, and
+    // whether it starts with an HTML comment, as an HTML block
+    let atStart = true;
+    let block = false;
+    for (const item of list) {
+      if (endsInlineRange(item)) {
+        heading = item.type === 'para' && !!item.headingLevel;
+        if (item.type === 'para') inCodeBlock = !!item.isCodeBlock;
+        atStart = true;
+        block = false;
+        before = undefined;
+        if (item.type !== 'table') continue;
+        const html = inTable ? noRanges || !gridHoldsTableShape(item.rows) : takesNoRanges(item, index++);
+        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true, html);
+        continue;
+      }
+      if (atStart) {
+        if (item.type === 'html_comment') block = beginsHtmlBlock('', 0, { heading: headings && heading, cell: inTable });
+        if (!(item.type === 'text' && item.commentIds.size === 0 && /^[ \t]*$/.test(item.text))) atStart = false;
+      }
+      if (item.type === 'text' && item.text === '' && !item.revision && item.commentIds.size === 0) continue;
+      const ranged = before && 'commentIds' in before && before.type !== 'html_comment' && !(before.type === 'math' && before.display)
+        && !(before.type === 'text' && before.text === '') && holdsCommentMarkers(before, inCodeBlock, inTable) ? before.commentIds : undefined;
+      if (!noRanges && !block && item.type === 'text' && isCommentPoint(item) && ranged?.size && ![...item.commentIds].some(id => ranged.has(id))) {
+        pushAll(points, item.commentIds);
+      }
+      before = item;
+    }
+  };
+  visit(items, false, false);
+  return points;
+}
+
 function formatDateSuffix(date: string | undefined, timezone?: string): string {
   if (!date) return '';
   try {
@@ -15365,6 +15439,14 @@ function buildMarkdownOnce(
   // document, or in a note
   for (const items of [mergedContent, ...noteEntries.map(entry => entry.body)]) {
     for (const id of globallyOverlappingComments(items)) forceIdCommentIds.add(id);
+  }
+  // A comment on no text right after another's range, whose body would
+  // follow the range's as its reply (see pointsAfterRanges), in the runs
+  // as they render
+  let tablesBefore = 0;
+  for (const items of [mergedContent, ...noteBodies.values()]) {
+    for (const id of pointsAfterRanges(items, takesNoRanges, tablesBefore, items === mergedContent)) forceIdCommentIds.add(id);
+    for (const item of items) if (item.type === 'table') tablesBefore++;
   }
   // Over an HTML comment, a range takes ID syntax, as {#1}<!-- a -->{/1},
   // where the paragraph that holds it, as written, reads back as one
