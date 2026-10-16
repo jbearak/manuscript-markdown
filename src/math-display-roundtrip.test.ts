@@ -294,20 +294,64 @@ describe('display math in a heading', () => {
     expect(await paragraphs(await roundTrip(next))).toEqual(await paragraphs(back));
   });
 
-  // Main's form for an equation after text, whose space the next import
-  // trims at the heading's end. Beside the text, <a title= $$a>b$$ would
-  // read as an HTML tag, and the next export would write the fences as text
+  // Export writes the space before an equation after text in the heading's
+  // paragraph, at the end of the heading's line, where Word shows nothing
+  // for it. Import wrote it at the end of the heading, as # a and a space,
+  // which the next export trimmed, as Markdown trims a heading's text, so
+  // the Markdown changed on the second trip. It goes, as do the spaces and
+  // tabs before it, whitespace that's all of the heading's text before the
+  // equation, and the space at the end of text after one equation before
+  // the next, which goes after it too. Beside the text, <a title= with the
+  // equation's fences after it would read as an HTML tag, and the next
+  // export would write the fences as text
+  const display = fence + 'x' + fence;
   it.each([
-    ['after text', () => roundTrip('## a ' + fence + 'x' + fence + ' b\n'), '## a ', '\n\n' + fence + '\nx\n' + fence + '&#32;b\n'],
-    ['after text that opens an HTML tag', () => fromWord('# &lt;a title= **XX**\n', xml => xml.replace(bold, () => equation.replace('>x<', '>a&gt;b<'))), '# <a title= ', '\n\n' + fence + '\na>b\n' + fence + '\n'],
-  ])('writes an equation %s after the heading, as on main', async (_name, imported, heading, rest) => {
+    ['after text', () => roundTrip('## a ' + display + ' b\n'), '## a\n\n' + fence + '\nx\n' + fence + '&#32;b\n', 'Heading2: a'],
+    ['after text that opens an HTML tag', () => fromWord('# &lt;a title= **XX**\n', xml => xml.replace(bold, () => equation.replace('>x<', '>a&gt;b<'))), '# <a title=\n\n' + fence + '\na>b\n' + fence + '\n', 'Heading1: &lt;a title='],
+    ['after two spaces', () => roundTrip('# Model  ' + display + '\n'), '# Model\n\n' + after, 'Heading1: Model'],
+    ['after a tab', () => fromWord('# Model**XX**\n', xml => xml.replace(bold, () => '<w:r><w:tab/></w:r>' + equation)), '# Model\n\n' + after, 'Heading1: Model'],
+    ['after a bold word and its space', () => fromWord('# **XX**\n', xml => xml.replace(bold, () => '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Model </w:t></w:r>' + equation)), '# **Model**\n\n' + after, 'Heading1: Model'],
+    ['after code', () => roundTrip('# `Model ` ' + display + '\n'), '# `Model `\n\n' + after, 'Heading1: Model '],
+    ['after a comment', () => roundTrip('# Model {>>c<<} ' + display + '\n'), '# Model {>>c<<}\n\n' + after, 'Heading1: Model '],
+    ['after a tracked change', () => roundTrip('# Model {++new++} ' + display + '\n'), '# Model {++new++}\n\n' + after, 'Heading1: Model new'],
+    ['after a backslash', () => roundTrip('# Model \\\\ ' + display + '\n'), '# Model \\\\\n\n' + after, 'Heading1: Model \\'],
+    ['in a setext heading', () => roundTrip('Model ' + display + '\n===\n'), '# Model\n\n' + after, 'Heading1: Model'],
+    ['in a heading with closing #s', () => roundTrip('# Model ' + display + ' ##\n'), '# Model\n\n' + after, 'Heading1: Model'],
+    ['after an HTML comment that starts the heading', () => roundTrip('# <!-- c --> ' + display + '\n'), '# <!-- c -->\n\n' + after, 'Heading1: \u200b&lt;!-- c --&gt;'],
+    ['after spaces alone', () => roundTrip('# &#32;&#32;' + display + '\n'), '# \n\n' + after, 'Heading1: '],
+    ['before another, after text after the first', () => roundTrip('# Model ' + display + ' and ' + fence + 'y' + fence + '\n'), '# Model\n\n' + fence + '\nx\n' + fence + '&#32;and\n\n' + fence + '\ny\n' + fence + '\n', 'Heading1: Model'],
+  ])('writes an equation %s after the heading, without the space before it', async (_name, imported, expected, heading) => {
     const back = await imported();
-    expect(back).toBe(heading + rest);
-    const next = await roundTrip(back);
-    expect(next).toBe(heading.trimEnd() + rest);
-    expect(await roundTrip(next)).toBe(next);
-    expect(await paragraphs(next)).toEqual(await paragraphs(back));
-    expect(await paragraphs(await roundTrip(next))).toEqual(await paragraphs(back));
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+    // Word's heading, as the next trip gives it too
+    const word = await paragraphs(back);
+    expect(word[0]).toBe(heading);
+    expect(await paragraphs(await roundTrip(back))).toEqual(word);
+  });
+
+  // As on main: a space Word shows, as a tracked change's, a no-break
+  // space's or an underline's; the space after an equation that starts the
+  // heading, or between two, after its closing fence, which Markdown keeps;
+  // and spaces in a quote or a paragraph, where the equation goes on in it.
+  // A heading that ends in a comment or a deletion after its space, with no
+  // equation, keeps it as Markdown writes it too
+  it.each([
+    ['an inserted space', '# Model{++ ++}' + display + '\n', '# Model{++ ++}\n\n' + after],
+    ['a deleted one', '# Model {--old --}' + display + '\n', '# Model {--old --}\n\n' + after],
+    ['a no-break space', '# Model&nbsp;' + display + '\n', '# Model&nbsp;\n\n' + after],
+    ['an underlined space', '# <u>Model </u>' + display + '\n', '# <u>Model </u>\n\n' + after],
+    ['the space after an equation that starts the heading', '# ' + display + ' Model\n', '# \n\n' + fence + '\nx\n' + fence + '&#32;Model\n'],
+    ['the space between two equations', '# ' + display + ' ' + fence + 'y' + fence + '\n', '# \n\n' + fence + '\nx\n' + fence + '&#32;\n\n' + fence + '\ny\n' + fence + '\n'],
+    ['spaces in a quote', '> # Model  ' + display + '\n', '> Model&#32;\n> ' + fence + '\n> x\n> ' + fence + '\n'],
+    ['spaces in a paragraph', 'Model  ' + display + '\n', 'Model&#32;\n' + after],
+    ['a comment after the space', '# Model {>>c<<}\n', '# Model {>>c<<}\n'],
+    ['a deletion after the space', '# Model {--x--}\n', '# Model {--x--}\n'],
+  ])('keeps %s as on main', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+    expect(await paragraphs(await roundTrip(back))).toEqual(await paragraphs(back));
   });
 });
 
