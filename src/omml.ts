@@ -963,7 +963,7 @@ function translateDelimiter(children: XmlNode[]): string {
       }
 
       // Reuse already-computed innerLatex for default path
-      return delimitedLatex(begChr, beforeCloser(innerLatex), endChr);
+      return delimitedLatex(begChr, beforeCloser(bareBracketPart(innerLatex)), endChr);
     }
   }
 
@@ -982,7 +982,17 @@ function translateDelimiter(children: XmlNode[]): string {
     const inner = parts.reduce((latex, part) => appendLatex(appendLatex(latex, '\\middle' + middle), part));
     return appendLatex('\\left' + left, inner) + '\\right' + right;
   }
-  return delimitedLatex(begChr, parts.join(sepChr), endChr);
+  const bare = !delimiterCommand(begChr) && !delimiterCommand(endChr);
+  return delimitedLatex(begChr, (bare ? parts.map(bareBracketPart) : parts).join(sepChr), endChr);
+}
+
+/** A part of brackets that import writes bare, as (x), with spacing alone,
+ *  which a part's trim writes as its commands (see trimPart), as its
+ *  characters, as import writes them within an equation: export reads the
+ *  brackets as text, so (\quad) came back as ( ) with an em space */
+function bareBracketPart(latex: string): string {
+  if (!/^(?:\\(?:qquad|quad|[,;:]))+$/.test(latex)) return latex;
+  return latex.replace(/\\(qquad|quad|[,;:])/g, command => command === '\\qquad' ? '\u2003\u2003' : SPACE_CHARACTERS.get(command)!);
 }
 
 /** The delimiters \left, \middle and \right take, as delimiterCommand
@@ -1649,11 +1659,14 @@ function apartFromMarkup(latex: string, text = false): string {
  *  each space there that export writes for a spacing command written as
  *  that command, as \quad for an em space, since Word shows it. Its
  *  character would end an inline equation there: $2 and an em space reads
- *  as currency. Within the part, import writes the character. Nothing for
- *  spaces alone, as before, which export reads as no equation. */
+ *  as currency. Within the part, import writes the character. Spaces
+ *  alone are their commands too, as \quad for an equation, a row or a
+ *  script of an em space, which Word shows, and which came back as nothing:
+ *  no equation, an empty row or x^{}. Nothing for other spaces alone, as
+ *  before, which export reads as no equation. */
 function trimPart(latex: string): string {
   const body = latex.trim();
-  if (!body) return '';
+  if (!body) return spaceCommands(latex);
   const before = spaceCommands(latex.slice(0, latex.length - latex.trimStart().length));
   let trailing = latex.slice(latex.trimEnd().length);
   // A comment's spaces, to its line end, are its text, trimmed as before
@@ -1718,6 +1731,9 @@ function spacesInRunsAfter(number: string, children: XmlNode[]): number {
 const SPACE_COMMANDS: ReadonlyMap<string, string> = new Map([
   ['\u2003', '\\quad'], ['\u2004', '\\;'], ['\u205F', '\\:'], ['\u2009', '\\,'],
 ]);
+
+/** Each of SPACE_COMMANDS' commands and its space */
+const SPACE_CHARACTERS: ReadonlyMap<string, string> = new Map([...SPACE_COMMANDS].map(([space, command]) => [command, space]));
 
 /** The spacing commands for `spaces`, two em spaces as \qquad, and nothing
  *  for a space that has none */
