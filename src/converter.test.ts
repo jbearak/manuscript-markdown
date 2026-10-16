@@ -25620,6 +25620,9 @@ describe('a citation right after a hidden HTML comment', () => {
     // Word's text here leaves out what's deleted
     ['a comment, before a substitution\'s citation', 'a <!-- h -->{~~x~>[@doe2020]~~} b.'],
     ['a comment, before a substitution of more than one run', 'a <!-- h -->{~~x y~>[@doe2020] z~~} b.', 'a (Doe, 2020) z b.'],
+    // Whose text goes after the # or |, so the comment starts no line
+    ['a comment at a heading\'s start', '# <!-- h -->[@doe2020] b.', '(Doe, 2020) b.'],
+    ['a comment at a table cell\'s start', '| h |\n| --- |\n| <!-- h -->[@doe2020] b. |', '(Doe, 2020) b.'],
   ])('writes no space after %s', async (_name, md, text = 'a (Doe, 2020) b.') => {
     const { views, markdowns } = await trips(md + '\n');
     expect(markdowns[0]).toBe(md + '\n');

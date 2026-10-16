@@ -9072,7 +9072,9 @@ function criticSpanStart(text: string, opener: string, closer: string, from: num
  *  more are noted. `plain` is where the Markdown ends while all of it came
  *  from Word's text and the comments noted, and `lineStart` whether it ends
  *  at a line's start, the paragraph's or one after a line end, past spaces
- *  and tabs alone. */
+ *  and tabs alone. A heading's or a table cell's start is none, as its text
+ *  goes after its # or |, and it holds only inline Markdown (see
+ *  beginsHtmlBlock). */
 interface HiddenComments { starts: Map<number, number>; plain: number; lineStart: boolean; open?: { start: number; end: number; text: string; tail: string }; mixed?: true }
 
 /** Notes in `hidden` that the Markdown from `from` to `to`, `piece`, was
@@ -10882,7 +10884,7 @@ function renderInlineRange(
   let lastSpan: RevisionSpan | undefined;
   // The hidden comments the Markdown holds, which a citation's space reads
   // past (see citationSeparator)
-  const hidden: HiddenComments = { starts: new Map(), plain: 0, lineStart: true };
+  const hidden: HiddenComments = { starts: new Map(), plain: 0, lineStart: !opts?.heading && !opts?.cell };
 
   while (i < segment.length) {
     const item = segment[i];
@@ -11259,7 +11261,7 @@ function renderInlineRangeWithIds(
   let lastSpan: RevisionSpan | undefined;
   // The hidden comments the Markdown holds, which a citation's space reads
   // past (see citationSeparator)
-  const hidden: HiddenComments = { starts: new Map(), plain: 0, lineStart: true };
+  const hidden: HiddenComments = { starts: new Map(), plain: 0, lineStart: !opts?.heading && !opts?.cell };
   // A comment that spans paragraphs stays open from the one before
   let prevCommentIds = new Set<string>(openIdComments);
   const collectedBodies = new Set<string>();
