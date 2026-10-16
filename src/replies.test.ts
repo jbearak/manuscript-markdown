@@ -469,13 +469,13 @@ describe('A comment on no text right after a range', () => {
 
   /** Export's document for `md`, with the space between the two comments out
    *  of the part that holds it, as Word has a comment on no text right at
-   *  the end of another's range */
-  async function wordWithout(md: string, part: string): Promise<Uint8Array> {
+   *  the end of another's range, and with `edit` */
+  async function wordWithout(md: string, part: string, edit = (xml: string) => xml): Promise<Uint8Array> {
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
     const xml = await zip.file(part)!.async('string');
     const space = /(<w:commentReference w:id="\d+"\/><\/w:r>)<w:r><w:t xml:space="preserve"> <\/w:t><\/w:r>(<w:commentRangeStart)/;
     expect(xml).toMatch(space);
-    zip.file(part, xml.replace(space, (_m, reference: string, start: string) => reference + start));
+    zip.file(part, edit(xml.replace(space, (_m, reference: string, start: string) => reference + start)));
     return zip.generateAsync({ type: 'uint8array' });
   }
 
@@ -492,6 +492,32 @@ describe('A comment on no text right after a range', () => {
     const second = await convertMdToDocx(imported);
     expect(await wordThreads(second.docx)).toEqual(['one', 'two*']);
     expect((await convertDocx(second.docx)).markdown).toBe(imported);
+  });
+
+  /** `xml` with `pattern` replaced by `to`, where it's found */
+  const edited = (pattern: RegExp | string, to: string) => (xml: string) => {
+    expect(xml).toMatch(pattern);
+    return xml.replace(pattern, to);
+  };
+  // The header row's two cells as one, which only an HTML table holds
+  const merged = edited(/(<w:tc><w:tcPr>)((?:(?!<\/w:tc>)[^])*?<\/w:tc>)<w:tc>(?:(?!<\/w:tc>)[^])*?<\/w:tc>/, '$1<w:gridSpan w:val="2"/>$2');
+  // The X a paragraph starts with out, which then starts with an HTML comment
+  const withoutX = edited('<w:r><w:t>X</w:t></w:r>', '');
+  const ranged = '{==t==}{>>@A (2024-01-15 10:30) | one<<}';
+
+  test.each([
+    ['an HTML table\'s cell', '| h | i |\n| --- | --- |\n| P ' + ranged.replace('|', '\\|') + ' ' + two.replace('|', '\\|') + ' Q | z |', 'word/document.xml', merged],
+    ['a paragraph that starts with an HTML comment', 'X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/document.xml', withoutX],
+    ['a list item that starts with an HTML comment', '- X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/document.xml', withoutX],
+    ['a quote that starts with an HTML comment', '> X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/document.xml', withoutX],
+    ['a note that starts with an HTML comment', 'T.[^1]\n\n[^1]: X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/footnotes.xml', withoutX],
+  ])('writes Word\'s comment on no text at a range\'s end in %s as before, where export reads ID syntax as text', async (_name, md, part, edit) => {
+    // ID syntax there went to Word as text, and the bodies after the table
+    // or the paragraph, with no range, were lost on the next trip
+    const imported = (await convertDocx(await wordWithout(md, part, edit))).markdown;
+    expect(imported).toContain(ranged + two);
+    expect(imported).not.toContain('{#');
+    expect((await convertDocx((await convertMdToDocx(imported)).docx)).markdown).toBe(imported);
   });
 
   test('keeps the replies Word has on each', async () => {

@@ -9968,25 +9968,59 @@ export function globallyOverlappingComments(items: ContentItem[]): Set<string> {
  *  after a comment on no text, as {>>a<<}{>>c<<}, which export reads as two
  *  comments, nor after an HTML comment's comment, whose body follows it with
  *  no anchor, nor after a display equation's, which takes ID syntax outside
- *  a table. Runs of no text and no comment write nothing, so they're
- *  skipped. */
-function pointsAfterRanges(items: ContentItem[]): string[] {
+ *  a table, nor after a run that holds no ID markers (see
+ *  holdsCommentMarkers), as code's. Runs of no text and no comment write
+ *  nothing, so they're skipped.
+ *
+ *  Nor where export reads ID markers as text, where they stay inline as
+ *  before: in the cells of a table that can't hold a range, by its index
+ *  from `firstIndex` among those buildMarkdown renders (`takesNoRanges`,
+ *  see cellsTakeNoRanges), or of a table in one's cell, whose HTML shows the
+ *  markers as text, and whose bodies, after the table, have no range; nor
+ *  in a paragraph that starts with an HTML comment, but for a heading's or
+ *  a cell's, which is an HTML block that shows them as text too (see
+ *  beginsHtmlBlock), with its bodies after it. */
+function pointsAfterRanges(items: ContentItem[], takesNoRanges: (table: TableItem, index: number) => boolean, firstIndex = 0): string[] {
   const points: string[] = [];
-  let before: ContentItem | undefined;
-  for (const item of items) {
-    if (item.type === 'table') {
-      for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) pushAll(points, pointsAfterRanges(para));
+  let index = firstIndex;
+  const visit = (list: ContentItem[], inTable: boolean, noRanges: boolean) => {
+    let before: ContentItem | undefined;
+    let inCodeBlock = false;
+    let heading = false;
+    // Whether the paragraph has written nothing yet but whitespace, and
+    // whether it starts with an HTML comment, as an HTML block
+    let atStart = true;
+    let block = false;
+    for (const item of list) {
+      if (item.type === 'para') {
+        inCodeBlock = !!item.isCodeBlock;
+        heading = !!item.headingLevel;
+        atStart = true;
+        block = false;
+        before = undefined;
+        continue;
+      }
+      if (item.type === 'table') {
+        const html = inTable ? noRanges || !gridHoldsTableShape(item.rows) : takesNoRanges(item, index++);
+        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true, html);
+        before = item;
+        atStart = false;
+        continue;
+      }
+      if (atStart) {
+        if (item.type === 'html_comment') block = !heading && !inTable;
+        if (!(item.type === 'text' && !item.revision && item.commentIds.size === 0 && /^[ \t]*$/.test(item.text))) atStart = false;
+      }
+      if (item.type === 'text' && item.text === '' && !item.revision && item.commentIds.size === 0) continue;
+      const ranged = before && 'commentIds' in before && before.type !== 'html_comment' && !(before.type === 'math' && before.display)
+        && !(before.type === 'text' && before.text === '') && holdsCommentMarkers(before, inCodeBlock, inTable) ? before.commentIds : undefined;
+      if (!noRanges && !block && item.type === 'text' && isCommentPoint(item) && ranged?.size && ![...item.commentIds].some(id => ranged.has(id))) {
+        pushAll(points, item.commentIds);
+      }
       before = item;
-      continue;
     }
-    if (item.type === 'text' && item.text === '' && !item.revision && item.commentIds.size === 0) continue;
-    const ranged = before && 'commentIds' in before && before.type !== 'html_comment' && !(before.type === 'math' && before.display)
-      && !(before.type === 'text' && before.text === '') ? before.commentIds : undefined;
-    if (item.type === 'text' && isCommentPoint(item) && ranged?.size && ![...item.commentIds].some(id => ranged.has(id))) {
-      pushAll(points, item.commentIds);
-    }
-    before = item;
-  }
+  };
+  visit(items, false, false);
   return points;
 }
 
@@ -15401,8 +15435,10 @@ function buildMarkdownOnce(
   // A comment on no text right after another's range, whose body would
   // follow the range's as its reply (see pointsAfterRanges), in the runs
   // as they render
+  let tablesBefore = 0;
   for (const items of [mergedContent, ...noteBodies.values()]) {
-    for (const id of pointsAfterRanges(items)) forceIdCommentIds.add(id);
+    for (const id of pointsAfterRanges(items, takesNoRanges, tablesBefore)) forceIdCommentIds.add(id);
+    for (const item of items) if (item.type === 'table') tablesBefore++;
   }
   // Over an HTML comment, a range takes ID syntax, as {#1}<!-- a -->{/1},
   // where the paragraph that holds it, as written, reads back as one
