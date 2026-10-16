@@ -1555,7 +1555,9 @@ describe('equation numbers', () => {
   test.each([
     ['in a fraction in a row', array('<m:f><m:num>' + run('a#') + '</m:num><m:den>' + run('b') + '</m:den></m:f>'), fence + '\n\\begin{gathered}\n\\frac{a#}{b}\n\\end{gathered}\n' + fence],
     ['before a superscript', array(run('a#') + squared), fence + '\n\\begin{gathered}\na#c^2\n\\end{gathered}\n' + fence],
-    ['outside an equation array', run('a#') + parens(run('1')), fence + '\na#(1)\n' + fence],
+    // Outside an equation array, Word's character, as \#, which export
+    // writes as Word's #
+    ['outside an equation array', run('a#') + parens(run('1')), fence + '\na\\#(1)\n' + fence],
     ['with nothing before it to number', array(run('#') + parens(run('1'))), fence + '\n\\begin{gathered}\n#(1)\n\\end{gathered}\n' + fence],
     // Escaped by a \ that ends the run of math before it, as Word may split
     // x\#(1), which import joins as \#
@@ -2869,11 +2871,12 @@ describe('a brace in an equation', () => {
     // equation's end, as LaTeX's error recovery does
     ['a fraction\'s unclosed group', inline('\\frac{a}{b'), inline('\\frac{a}{b}'), 'ab'],
     ['a script\'s unclosed group', inline('x^{2'), inline('x^2'), 'x2'],
-    // Its script has no base, as where it's closed
+    // Its script has no base, as where it's closed, whose _ Word shows,
+    // which comes back as \_
     ['an unclosed group a superscript starts', inline('{^2'), inline('^2'), '^2'],
-    ['an unclosed group a subscript starts, after a space', inline('{ _i'), inline('_i'), '_i'],
+    ['an unclosed group a subscript starts, after a space', inline('{ _i'), inline('\\_i'), '_i'],
     ['an unclosed group in one a superscript starts', inline('{{^2'), inline('^2'), '^2'],
-    ['an unclosed group in one a subscript starts', inline('{{_i'), inline('_i'), '_i'],
+    ['an unclosed group in one a subscript starts', inline('{{_i'), inline('\\_i'), '_i'],
     ['an unclosed group before a closed one a script starts', inline('{{^2} x'), inline('^2 x'), '^2 x'],
     // Word gets the comment as hidden text, after a zero-width space
     ['a brace in a comment', display('x % {\ny'), display('x % {\ny'), 'x\u200B % {\ny'],
@@ -3023,5 +3026,175 @@ describe('a brace in an equation', () => {
     ['a closing brace', inline('\\foo } x'), '\\foo } x'],
   ])('%s that nothing matches, in an equation whose Word text holds LaTeX, exports as the character, and comes back, and again', async (_name, markdown, text) => {
     await expectTrips(markdown, text);
+  });
+});
+
+describe('an underscore, a # or an & in an equation', () => {
+  const inline = (latex: string) => 'c $' + latex + '$ b.\n';
+  const display = (latex: string) => '$'.repeat(2) + '\n' + latex + '\n' + '$'.repeat(2) + '\n';
+  const matrix = (...cells: string[]) => '<m:m><m:mr>' + cells.map(cell => '<m:e>' + cell + '</m:e>').join('') + '</m:mr></m:m>';
+  const array = (...rows: string[]) => '<m:eqArr>' + rows.map(row => '<m:e>' + row + '</m:e>').join('') + '</m:eqArr>';
+  const parens = (omml: string) => '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>' + omml + '</m:e></m:d>';
+
+  /** A document from Word with `markdown`'s first equation as `omml` */
+  async function wordDocx(omml: string, markdown: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** The equations Word gets for `markdown` */
+  async function equations(markdown: string): Promise<string[]> {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]);
+  }
+
+  /** The text of an equation's runs */
+  const shown = (omml: string) => [...omml.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1]).join('');
+
+  /** `markdown`'s equations are `text` in Word, and the next trip gives the
+   *  same Markdown and the same equations */
+  async function expectTrips(markdown: string, text: string): Promise<void> {
+    const once = await equations(markdown);
+    expect(once.map(shown).join('')).toBe(text);
+    const twice = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(twice).toBe(markdown);
+    expect(await equations(twice)).toEqual(once);
+  }
+
+  // Export read Word's _ as a subscript's, and an & in a matrix's cell as
+  // the cell's end. A bare # or & elsewhere isn't valid LaTeX
+  test.each([
+    ['_ in a run', run('a_b'), inline('a\\_b')],
+    ['_ alone', run('_'), inline('\\_')],
+    ['_ at the start', run('_x'), inline('\\_x')],
+    ['_ twice', run('a__b'), inline('a\\_\\_b')],
+    ['_ in a run of its own', run('a') + run('_') + run('b'), inline('a\\_b')],
+    ['_ at the end of a run', run('a_') + run('b'), inline('a\\_b')],
+    ['_ after a dollar sign', run('$_'), inline('\\$\\_')],
+    ['_ before braces', run('_{x}'), inline('\\_\\{x\\}')],
+    ['_ in a subscript', '<m:sSub><m:e>' + run('x') + '</m:e><m:sub>' + run('_') + '</m:sub></m:sSub>', inline('x_{\\_}')],
+    ['_ in a fraction', '<m:f><m:num>' + run('a_') + '</m:num><m:den>' + run('b') + '</m:den></m:f>', inline('\\frac{a\\_}{b}')],
+    ['_ in an insertion', run('a') + '<w:ins w:id="1" w:author="A">' + run('_b') + '</w:ins>', inline('a{++\\_b++}')],
+    ['# in a run', run('a#b'), inline('a\\#b')],
+    ['& in a run', run('a&amp;b'), inline('a\\&b')],
+    ['& in a fraction', '<m:f><m:num>' + run('a&amp;') + '</m:num><m:den>' + run('b') + '</m:den></m:f>', inline('\\frac{a\\&}{b}')],
+  ])('%s of an inline equation, from Word, is escaped, which export writes as the character, and again', async (_name, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
+    await expectTrips(markdown, shown(omml));
+  });
+
+  test.each([
+    ['_', run('a_b'), display('a\\_b')],
+    ['#', run('a#b'), display('a\\#b')],
+    ['&', run('a&amp;b'), display('a\\&b')],
+    // Not a number, outside an equation array
+    ['# before (1)', run('a#(1)'), display('a\\#(1)')],
+  ])('%s in display math, from Word, is escaped, which export writes as the character, and again', async (_name, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, display('y')))).markdown).toBe(markdown);
+    await expectTrips(markdown, shown(omml));
+  });
+
+  // With the spaces around & that export writes, as on main
+  test.each([
+    ['&', matrix(run('a&amp;b'), run('x')), inline('\\begin{matrix} a\\&b & x \\end{matrix}'), ' a&amp;b  x '],
+    ['& alone', matrix(run('&amp;'), run('x')), inline('\\begin{matrix} \\& & x \\end{matrix}'), ' &amp;  x '],
+    ['_', matrix(run('a_b'), run('x')), inline('\\begin{matrix} a\\_b & x \\end{matrix}'), ' a_b  x '],
+    ['& in a row of an equation array', array(matrix(run('a&amp;b'), run('d')), run('x')), inline('\\begin{aligned} \\begin{matrix} a\\&b & d \\end{matrix} \\\\ x \\end{aligned}'), '  a&amp;b  d   x '],
+  ])('%s in a matrix\'s cell, from Word, is escaped, which export writes as the character, and again', async (_name, omml, markdown, text) => {
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
+    await expectTrips(markdown, text);
+  });
+
+  test('_ in an aligned row, from Word, is \\_, which export writes as the character, and again', async () => {
+    const omml = array(run('x&amp;=a_b'), run('&amp;=c'));
+    const markdown = display('\\begin{aligned}\nx&=a\\_b \\\\\n&=c\n\\end{aligned}');
+    expect((await convertDocx(await wordDocx(omml, display('y')))).markdown).toBe(markdown);
+    expect((await equations(markdown)).map(shown).join('')).toBe('\nx&amp;=a_b \n&amp;=c\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // Export wrote them with their backslash, which Word showed
+  test.each([
+    ['\\_ in inline math', inline('a\\_b'), 'a_b'],
+    ['\\# in inline math', inline('a\\#b'), 'a#b'],
+    ['\\& in inline math', inline('a\\&b'), 'a&amp;b'],
+    ['\\_ in display math', display('a\\_b'), 'a_b'],
+    ['\\_ in a subscript', inline('x_{\\_}'), 'x_'],
+    ['\\& in a matrix', inline('\\begin{matrix} a\\&b & c \\end{matrix}'), ' a&amp;b  c '],
+    ['\\# in a matrix', inline('\\begin{pmatrix} \\# & c \\end{pmatrix}'), ' #  c '],
+    ['\\_ before a \\tag', display('a\\_b \\tag{1}'), 'a_b #1'],
+    ['\\_ in an insertion', inline('a {++\\_++} b'), 'a _ b'],
+    ['\\# in a deletion', inline('a {--\\#--} b'), 'a # b'],
+  ])('%s exports as the character, and comes back, and again', async (_name, markdown, text) => {
+    await expectTrips(markdown, text);
+  });
+
+  test('\\_ beside an insertion is tracked in place', async () => {
+    const [omml] = await equations(inline('a\\_b {++c++}'));
+    expect(omml).toMatch(/^(?:(?!<w:ins)[\s\S])*<m:t>_<\/m:t>(?:(?!<w:ins)[\s\S])*<w:ins /);
+    expect(omml).not.toContain('<w:del ');
+  });
+
+  // Word reads a # in a row of an equation array as the row's number and an
+  // & as its alignment, as LaTeX does, so they stay as they are there, as on
+  // main
+  test.each([
+    ['& aligning rows', array(run('x&amp;=a'), run('&amp;=b')), display('y'), display('\\begin{aligned}\nx&=a \\\\\n&=b\n\\end{aligned}')],
+    ['# numbering a row', array(run('x#') + parens(run('1'))), display('y'), display('x \\tag{1}')],
+    ['# in a row of inline math', array(run('a#b'), run('c')), inline('y'), inline('\\begin{gathered} a#b \\\\ c \\end{gathered}')],
+    ['# in a row with another #', array(run('a#b#') + parens(run('1'))), display('y'), display('\\begin{gathered}\na#b#(1)\n\\end{gathered}')],
+    ['& in a row of cases', '<m:d><m:dPr><m:begChr m:val="{"/><m:endChr m:val=""/></m:dPr><m:e>' + array(run('a&amp;b'), run('c&amp;d')) + '</m:e></m:d>', inline('y'), inline('\\begin{cases} a&b \\\\ c&d \\end{cases}')],
+    ['& in a fraction in a row', array('<m:f><m:num>' + run('a&amp;') + '</m:num><m:den>' + run('b') + '</m:den></m:f>', run('x')), inline('y'), inline('\\begin{aligned} \\frac{a&}{b} \\\\ x \\end{aligned}')],
+  ])('%s, from Word, comes back as on main, and again', async (_name, omml, template, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, template))).markdown).toBe(markdown);
+    const once = await equations(markdown);
+    const twice = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(twice).toBe(markdown);
+    expect(await equations(twice)).toEqual(once);
+  });
+
+  // So \# and \& there export as written, as on main, which Word would read
+  // as a number or an alignment point as the character
+  test.each([
+    ['\\& in a row of gathered', inline('\\begin{gathered} a\\&b \\\\ c \\end{gathered}'), ' a\\&amp;b  c '],
+    ['\\# in a row of gathered', inline('\\begin{gathered} a\\#(1) \\\\ c \\end{gathered}'), ' a\\#(1)  c '],
+    ['\\& in a row of cases', inline('\\begin{cases} a\\&b & c \\\\ d & e \\end{cases}'), ' a\\&amp;b &amp; c  d &amp; e '],
+    ['\\# before a \\tag', display('a\\#b \\tag{1}'), 'a\\#b #1'],
+    ['\\& before a \\tag', display('a\\&b \\tag{1}'), 'a\\&amp;b #1'],
+    ['\\# in a numbered row', display('\\begin{gather*}\na\\#b \\tag{1} \\\\\nc\n\\end{gather*}'), '\na\\#b  #1\nc\n'],
+  ])('%s exports as written, as on main, and comes back, and again', async (_name, markdown, text) => {
+    await expectTrips(markdown, text);
+  });
+
+  // An equation whose Word text holds LaTeX, a \ or a %, keeps its _, # and
+  // & as they are, as on main, and exports its \_, \# and \& as written
+  test.each([
+    ['after a command export writes as text', inline('\\foo a\\_b'), '\\foo a\\_b'],
+    ['after \\%', inline('\\% a\\#b'), '\\% a\\#b'],
+    ['in an environment export writes as text', inline('\\begin{array}{cc} a\\&b & c \\end{array}'), '\\begin{array}{cc} a\\&amp;b &amp; c \\end{array}'],
+    // Alike in the equation and each view, so the change is tracked in place
+    ['beside an insertion of a command export writes as text', inline('a\\_b {++\\foo++}'), 'a\\_b \\foo'],
+  ])('\\_, \\# and \\& %s come back as on main, and again', async (_name, markdown, text) => {
+    await expectTrips(markdown, text);
+  });
+
+  test('\\_ beside an insertion of a command export writes as text is tracked in place, as on main', async () => {
+    const [omml] = await equations(inline('a\\_b {++\\foo++}'));
+    expect(omml).toMatch(/^(?:(?!<w:ins)[\s\S])*\\_(?:(?!<w:ins)[\s\S])*<w:ins /);
+    expect(omml).not.toContain('<w:del ');
+  });
+
+  test.each([
+    // Typed in Word: LaTeX, as on main
+    ['\\alpha and _', run('\\alpha_b'), inline('\\alpha_b')],
+    ['a \\ and #', run('a\\#b'), inline('a\\#b')],
+    ['a % and &', run('50%&amp;'), inline('50%&')],
+    ['upright', '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>a_b</m:t></m:r>', inline('\\text{a\\_b}')],
+    ['in a bold group', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>a_b</m:t></m:r>', inline('\\mathbf{a\\_b}')],
+    ['in a comment', run('a') + '<m:r><m:rPr><m:nor/></m:rPr><w:rPr><w:vanish/></w:rPr><m:t xml:space="preserve">\u200B % a_b#c&amp;d\n</m:t></m:r>' + run('c'), inline('a % a_b#c&d\nc')],
+  ])('%s, from Word, comes back as on main', async (_name, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
   });
 });

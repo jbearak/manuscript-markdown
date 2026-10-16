@@ -106,46 +106,54 @@ const TEXT_ESCAPES: Map<string, string> = new Map([
 ]);
 
 /** The escapes of TEXT_ESCAPES that export writes as their character in math
- *  too, where the others export as written, backslash included: \{ and \}
- *  but where the equation's Word text holds LaTeX (see bracesAsText) */
-const MATH_ESCAPES: ReadonlySet<string> = new Set(['\\$', '\\{', '\\}']);
+ *  too, where the others export as written, backslash included: \$, and
+ *  the others but where the equation's Word text holds LaTeX (see
+ *  escapesAsText), and those of ROW_ESCAPES in a row of an equation array
+ *  too (see inEquationArray) */
+const MATH_ESCAPES: ReadonlySet<string> = new Set(['\\$', '\\{', '\\}', '\\_', '\\#', '\\&']);
 
-/** Whether each equation written now writes \{ and \} as written, as
- *  withEquationBraces decided for them all, or undefined, for each to find
- *  for itself (see bracesAsText) */
-let equationBracesAsText: boolean | undefined;
+/** The escapes of MATH_ESCAPES whose character Word reads in a row of an
+ *  equation array as syntax, # as the row's number and & as its alignment
+ *  point, which import writes as they are there (see escapeReserved in
+ *  omml.ts) */
+const ROW_ESCAPES: ReadonlySet<string> = new Set(['\\#', '\\&']);
+
+/** Whether each equation written now writes the escapes of MATH_ESCAPES
+ *  but \$ as written, as withEquationEscapes decided for them all, or
+ *  undefined, for each to find for itself (see escapesAsText) */
+let equationEscapesAsText: boolean | undefined;
 
 /**
- * `write()`, whose equations write \{ and \} as written if Word's text for
- * any of `views`, with its \tag as Word's number where `numbered`, holds
- * LaTeX (see bracesAsText), as one equation: a tracked change's accepted
- * and rejected equations, which Word holds in one, in place or replaced,
- * and import reads as one.
+ * `write()`, whose equations write the escapes of MATH_ESCAPES but \$ as
+ * written if Word's text for any of `views`, with its \tag as Word's number
+ * where `numbered`, holds LaTeX (see escapesAsText), as one equation: a
+ * tracked change's accepted and rejected equations, which Word holds in
+ * one, in place or replaced, and import reads as one.
  */
-export function withEquationBraces<T>(views: readonly string[], write: () => T, numbered = false): T {
-  const outer = equationBracesAsText;
-  equationBracesAsText = undefined;
-  const asText = views.some(view => /\\[{}]/.test(view)) ? views.some(view => {
+export function withEquationEscapes<T>(views: readonly string[], write: () => T, numbered = false): T {
+  const outer = equationEscapesAsText;
+  equationEscapesAsText = undefined;
+  const asText = views.some(view => /\\[{}_#&]/.test(view)) ? views.some(view => {
     const parser = new Parser(tokenize(view));
     parser.numbered = numbered;
-    return parser.bracesAsText();
+    return parser.escapesAsText();
   }) : undefined;
-  equationBracesAsText = asText;
+  equationEscapesAsText = asText;
   try {
     return write();
   } finally {
-    equationBracesAsText = outer;
+    equationEscapesAsText = outer;
   }
 }
 
 /**
  * Whether Word's text for an equation, `omml`, holds LaTeX: a \ or a % in a
  * run of no style or alphabet, as the \begin{array}{cc} or \foo that
- * export writes as text, and \%. Import reads such an equation's braces as
- * LaTeX, as before, where it writes another's as \{ and \} (see
- * holdsLatexText in omml.ts). That one reads Word's m:nor as runStyleOf
- * does, with its m:val; this one takes any m:nor as a style, since export
- * writes one only on a comment's runs, which neither counts.
+ * export writes as text, and \%. Import reads such an equation's braces,
+ * _, # and & as LaTeX, as before, where it writes another's as \{, \}, \_,
+ * \# and \& (see holdsLatexText in omml.ts). That one reads Word's m:nor
+ * as runStyleOf does, with its m:val; this one takes any m:nor as a style,
+ * since export writes one only on a comment's runs, which neither counts.
  */
 function holdsLatexText(omml: string): boolean {
   for (const [, run] of omml.matchAll(/<m:r>([\s\S]*?)<\/m:r>/g)) {
@@ -495,15 +503,27 @@ class Parser {
   /** The closing braces read past while a group was open (see parseToken) */
   private closersReadPast = 0;
   /**
-   * Whether \{ and \} export as written, backslash included, as before, in
-   * the equation: where Word's text for it holds LaTeX anyway (see
-   * holdsLatexText), whose braces import keeps as they are, as LaTeX's, so
-   * that Word's { and } there would come back as a group's. Found once,
-   * where a \{ or \} needs it, by writing the equation with them as braces,
-   * from its tokens as they were, which parsing may splice; a parser of a
-   * part of the equation asks the equation's.
+   * Whether the escapes of MATH_ESCAPES but \$ export as written, backslash
+   * included, as before, in the equation: where Word's text for it holds
+   * LaTeX anyway (see holdsLatexText), whose braces, _, # and & import
+   * keeps as they are, as LaTeX's, so that Word's { and } there would come
+   * back as a group's, and its _ as a subscript's. Found once, where an
+   * escape needs it, by writing the equation with them as their
+   * characters, from its tokens as they were, which parsing may splice; a
+   * parser of a part of the equation asks the equation's.
    */
-  bracesAsText: () => boolean;
+  escapesAsText: () => boolean;
+  /**
+   * Whether what's read now goes in a row of an equation array in Word, as
+   * of aligned or cases, true, or in a matrix's cell, false, or undefined,
+   * at the equation's own level, which Word holds as such a row where
+   * display math numbers it by its \tag (see inEquationArray)
+   */
+  equationArray?: boolean;
+  /** The equation's tokens as they were, which parsing may splice */
+  private readonly source: Token[];
+  /** Whether `source` holds a \tag, found once (see inEquationArray) */
+  private tagged?: boolean;
 
   constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, mode: ParseMode = 'math', track?: TrackChange) {
     this.tokens = tokens;
@@ -512,17 +532,41 @@ class Parser {
     this.mode = mode;
     this.track = track;
     const source = tokens.slice();
-    let asText = equationBracesAsText;
-    this.bracesAsText = () => {
+    this.source = source;
+    let asText = equationEscapesAsText;
+    this.escapesAsText = () => {
       if (asText === undefined) {
         const trial = new Parser(source, undefined, 'math', track && ((element, omml) => '<' + element + '>' + omml + '</' + element + '>'));
-        trial.bracesAsText = () => false;
+        trial.escapesAsText = () => false;
         // With the number Word holds for its \tag, whose \% is a bare %
         trial.numbered = this.numbered;
         asText = holdsLatexText(trial.numberedEquation(trial.parseExpression(false)));
       }
       return asText;
     };
+  }
+
+  /**
+   * Whether what's read now goes in a row of an equation array in Word (see
+   * equationArray), where Word reads # as the row's number and & as its
+   * alignment point, and import writes them as they are (see
+   * escapeReserved in omml.ts), so \# and \& there export as written, as
+   * before. At the equation's own level, that's where display math has a
+   * \tag, which Word holds as such a row where it numbers the equation, and
+   * as before where it doesn't, as for a \tag of a row of align.
+   */
+  private inEquationArray(): boolean {
+    if (this.equationArray !== undefined) return this.equationArray;
+    this.tagged ??= this.source.some(token => token.type === 'command' && token.value === '\\tag');
+    return this.numbered && this.tagged;
+  }
+
+  /** Whether `cmd`, an escape, exports in math as its character (see
+   *  MATH_ESCAPES), or as written, backslash included */
+  private escapeAsCharacter(cmd: string): boolean {
+    if (!MATH_ESCAPES.has(cmd)) return false;
+    if (cmd === '\\$') return true;
+    return !(ROW_ESCAPES.has(cmd) && this.inEquationArray()) && !this.escapesAsText();
   }
 
   /** Text as Word shows it: outside text mode, ' is a prime, as Word's own autocorrect makes it. */
@@ -732,11 +776,12 @@ class Parser {
       return onlyWhitespace ? change.replace(/^<w:(?:ins|del)\b/, open => open + WHITESPACE_CHANGE_MARK) : change;
     }
 
-    // In math, \$, \{ and \} alone, which is how import writes Word's $, {
-    // and } there (see escapeDollars and escapeBraces in omml.ts), as LaTeX
-    // shows them, but \{ and \} where Word's text holds LaTeX (see
-    // bracesAsText); the others export as written, as before
-    const escaped = this.mode !== 'math' || (MATH_ESCAPES.has(cmd) && (cmd === '\\$' || !this.bracesAsText())) ? TEXT_ESCAPES.get(cmd) : undefined;
+    // In math, \$, \{, \}, \_, \# and \& alone, which is how import writes
+    // Word's characters there (see escapeDollars and escapeReserved in
+    // omml.ts), as LaTeX shows them, but where Word's text holds LaTeX (see
+    // escapesAsText) and, for \# and \&, in a row of an equation array (see
+    // inEquationArray); the others export as written, as before
+    const escaped = this.mode !== 'math' || this.escapeAsCharacter(cmd) ? TEXT_ESCAPES.get(cmd) : undefined;
     if (escaped !== undefined) {
       return makeRun(escaped);
     }
@@ -1002,8 +1047,9 @@ class Parser {
 
       default:
         // Unsupported command - fallback. An escaped reserved character in
-        // math (\%, \_) stays literal so it reads back unchanged; it is valid
-        // LaTeX, so it is not reported.
+        // math (\%, or \_ where the equation's Word text holds LaTeX) stays
+        // literal so it reads back unchanged; it is valid LaTeX, so it is not
+        // reported.
         if (!(cmd.length === 2 && TEXT_ESCAPES.has(cmd))) this.onUnknownCommand?.(cmd);
         return makeRun(cmd);
     }
@@ -1101,7 +1147,8 @@ class Parser {
           this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
           // A \tag in it numbers the equation, as in a group
           const parser = new Parser(operand, this.onUnknownCommand, this.mode, this.track);
-          parser.bracesAsText = this.bracesAsText;
+          parser.escapesAsText = this.escapesAsText;
+          parser.equationArray = this.inEquationArray();
           parser.openGroups = this.openGroups;
           const omml = parser.parseExpression(false);
           this.closersReadPast += parser.closersReadPast;
@@ -1481,6 +1528,22 @@ class Parser {
   }
 
   private parseMatrixContent(): string {
+    return this.inArray(false, () => this.parseMatrixCells());
+  }
+
+  /** `parse()` with equationArray as `inArray`, as in an equation array's
+   *  rows or a matrix's cells */
+  private inArray<T>(inArray: boolean, parse: () => T): T {
+    const outer = this.equationArray;
+    this.equationArray = inArray;
+    try {
+      return parse();
+    } finally {
+      this.equationArray = outer;
+    }
+  }
+
+  private parseMatrixCells(): string {
     let rows = '';
     let currentRowCells = '';
 
@@ -1519,6 +1582,10 @@ class Parser {
    * otherwise, as in aligned or cases, it stays the equation's.
    */
   private parseEqArrayContent(numberRows = false): string {
+    return this.inArray(true, () => this.parseEqArrayRows(numberRows));
+  }
+
+  private parseEqArrayRows(numberRows: boolean): string {
     const rows: string[] = [];
 
     const remaining = this.parseAtoms(
