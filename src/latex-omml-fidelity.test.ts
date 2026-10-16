@@ -2829,12 +2829,20 @@ describe('a brace in an equation', () => {
     // Its script has no base, as where it's closed
     ['an unclosed group a superscript starts', inline('{^2'), inline('^2'), '^2'],
     ['an unclosed group a subscript starts, after a space', inline('{ _i'), inline('_i'), '_i'],
+    ['an unclosed group in one a superscript starts', inline('{{^2'), inline('^2'), '^2'],
+    ['an unclosed group in one a subscript starts', inline('{{_i'), inline('_i'), '_i'],
+    ['an unclosed group before a closed one a script starts', inline('{{^2} x'), inline('^2 x'), '^2 x'],
     // Word gets the comment as hidden text, after a zero-width space
     ['a brace in a comment', display('x % {\ny'), display('x % {\ny'), 'x\u200B % {\ny'],
   ])('%s comes back as on main, and again', async (_name, markdown, back, text) => {
     expect((await equations(markdown)).map(shown).join('')).toBe(text);
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(back);
     await expectTrips(back, text);
+  });
+
+  // Word gets the space too, which the next export drops, as on main
+  test('an unclosed group with a space before one a script starts comes back as on main', async () => {
+    expect((await convertDocx((await convertMdToDocx(inline('{ {^2'))).docx)).markdown).toBe(inline('^2'));
   });
 
   // A backslash before it in Word's text, as export wrote for \{ before, or

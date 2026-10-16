@@ -201,6 +201,10 @@ function unescapeXmlChars(text: string): string {
     .replace(/&amp;/g, '&');
 }
 
+/** OMML whose first text but spaces starts with a ^ or a _, as a script
+ *  with no base writes it, which TeX's spaces before it don't change */
+const SCRIPT_TEXT_FIRST_RE = /^(?:(?!<m:t[ >])[\s\S]|<m:t(?: [^>]*)?>\s*<\/m:t>)*<m:t(?: [^>]*)?>\s*[\^_]/;
+
 function makeRun(text: string): string {
   return '<m:r><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
@@ -1231,19 +1235,17 @@ class Parser {
         // {a}/{b} is Word's linear fraction, as import writes it, in math,
         // but where a script follows, which takes the {b} alone. In text or
         // a style's group, as \mathrm{{m}/{s}}, it's the characters
-        let first = this.pos + 1;
-        while (this.tokens[first]?.type === 'text' && this.tokens[first].value.trim() === '') first++;
-        const scriptFirst = this.tokens[first]?.type === 'caret' || this.tokens[first]?.type === 'underscore';
         const group = this.parseGroup();
         const slash = this.peek();
-        if (!this.groupClosed && !scriptFirst) {
+        if (!this.groupClosed && !SCRIPT_TEXT_FIRST_RE.test(group)) {
           // An opening brace with no closing one, as in x { y, opens a group
           // to the equation's end: the character, which import writes back
           // as \{, and then the group's content. It was dropped, as LaTeX's
           // error recovery closes the group at the end, so Word lost it. A
           // command's or a script's group, as \frac{a}{b's or x^{2's, is
-          // still closed there, and so is one a script starts, as {^2, as
-          // before, whose script has no base, where import's \{ would be one
+          // still closed there, and so is one whose text starts with a ^ or
+          // a _, as before, as a script with no base, as {^2 or {{^2, where
+          // import's \{ would be its base
           atoms.push(makeRun('{'), group);
         } else if (this.mode === 'math' && slash?.type === 'text' && slash.value === '/' && this.tokens[this.pos + 1]?.type === 'lbrace') {
           this.consume(); // consume '/'
