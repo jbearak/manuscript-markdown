@@ -673,22 +673,24 @@ describe('inline math right after a display equation', () => {
   // Without its frontmatter, but where a line end is a line break
   const readBack = (md: string) => md.startsWith(breaks) ? md : stripFrontmatter(md);
   const roundTrip = async (md: string) => readBack((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
-  // Each of Word's paragraphs, by its style and its text, with each display
-  // equation as [equation], each inline one as [math] and each line break
-  // as <br>
-  const paragraphs = async (md: string) => {
-    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+  // Each of Word's paragraphs in `part`, by its style and its text, with
+  // each display equation as [equation], each inline one as [math] and each
+  // line break as <br>
+  const paragraphs = async (md: string, part = 'word/document.xml') => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file(part)!.async('string');
     return (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).map(p => {
       const marked = p.replace(/<m:oMathPara>[\s\S]*?<\/m:oMathPara>/g, '<w:t>[equation]</w:t>').replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '<w:t>[math]</w:t>');
       return (/<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? '') + ': ' + [...marked.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:br\/>/g)].map(m => m[1] ?? '<br>').join('');
     });
   };
   /** The Markdown import writes for a document from Word, `md`'s with its
-   *  bold run's place taken by `runs` */
-  const fromWord = async (md: string, runs: string) => {
+   *  bold run's place, in `part`, taken by `runs` */
+  const fromWord = async (md: string, runs: string, part = 'word/document.xml') => {
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
-    const xml = await zip.file('word/document.xml')!.async('string');
-    zip.file('word/document.xml', xml.replace(/<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*XX<\/w:t><\/w:r>/, () => runs));
+    const xml = await zip.file(part)!.async('string');
+    const bold = /<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*XX<\/w:t><\/w:r>/;
+    expect(xml).toMatch(bold);
+    zip.file(part, xml.replace(bold, () => runs));
     return readBack((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
   };
   const display = (latex: string) => '<m:oMathPara><m:oMath><m:r><m:t>' + latex + '</m:t></m:r></m:oMath></m:oMathPara>';
@@ -699,13 +701,13 @@ describe('inline math right after a display equation', () => {
   const x = fence + '\nx\n' + fence;
   const z = fence + '\nz\n' + fence;
 
-  const back = async (md: string, runs: string, expected: string, paras: string[]) => {
-    const once = await fromWord(md, runs);
+  const back = async (md: string, runs: string, expected: string, paras: string[], part?: string) => {
+    const once = await fromWord(md, runs, part);
     expect(once).toBe(expected);
-    expect(await paragraphs(once)).toEqual(paras);
+    expect(await paragraphs(once, part)).toEqual(paras);
     const twice = await roundTrip(once);
     expect(twice).toBe(once);
-    expect(await paragraphs(twice)).toEqual(paras);
+    expect(await paragraphs(twice, part)).toEqual(paras);
     expect(await roundTrip(twice)).toBe(twice);
   };
 
@@ -766,5 +768,50 @@ describe('inline math right after a display equation', () => {
       [': ', 'GitHubBlockquote: a [equation]c[math] b.', ': ']],
   ])('writes %s as on main', async (_name, md, runs, expected, paras) => {
     await back(md, runs, expected, paras);
+  });
+
+  // In a note too, whose lines take its indent
+  const notes = 'word/footnotes.xml';
+  /** A note's Markdown, `body`, in the block form import writes */
+  const note = (body: string) => 'Text.[^1]\n\n[^1]:\n\n' + body.replace(/^(?=.)/gm, '    ');
+  const separators = [': ', ': '];
+  it.each([
+    ['in a note', '[^1]: a **XX** b.\n', display('x') + inline('y'), note('a\n' + x + '\n$y$ b.\n'), ['FootnoteText:  a [equation] [math] b.']],
+    ['alone with it in a note', '[^1]: **XX**\n', display('x') + inline('y'), note(x + '\n$y$\n'), ['FootnoteText:  [equation] [math]']],
+    ['between two display equations in a note', '[^1]: a **XX** b.\n', display('x') + inline('y') + display('z'),
+      note('a\n' + x + '\n$y$\n' + z + '&#32;b.\n'), ['FootnoteText:  a [equation] [math] [equation] b.']],
+    ['after a space in a note', '[^1]: a **XX** b.\n', display('x') + text(' ') + inline('y'), note('a\n' + x + '\n$y$ b.\n'),
+      ['FootnoteText:  a [equation] [math] b.']],
+    // Its second paragraph, whose lines import indents with the first's
+    ["in a note's second paragraph", '[^1]: First.\n\n    a **XX** b.\n', display('x') + inline('y'),
+      'Text.[^1]\n\n[^1]: First.\n\n' + ('a\n' + x + '\n$y$ b.\n').replace(/^(?=.)/gm, '    '), ['FootnoteText:  First.', 'FootnoteText: a [equation] [math] b.']],
+  ])('keeps inline math %s', async (_name, md, runs, expected, paras) => {
+    await back('Text.[^1]\n\n' + md, runs, expected, [...separators, ...paras], notes);
+  });
+
+  it('keeps inline math after a space in a note where a line end is a line break', async () => {
+    await back(breaks + 'Text.[^1]\n\n[^1]: **XX** b.\n', display('x') + text(' ') + inline('y'), breaks + note(x + '&#32;$y$ b.\n'),
+      [...separators, 'FootnoteText:  [equation] [math] b.'], notes);
+  });
+
+  it.each([
+    ['inline math before it in a note', '[^1]: a **XX**b.\n', inline('y') + display('x'), note('a $y$\n' + x + 'b.\n'), ['FootnoteText:  a [math] [equation]b.']],
+    ['text between them in a note', '[^1]: a **XX** b.\n', display('x') + text('c') + inline('y'), note('a\n' + x + '&#99;$y$ b.\n'),
+      ['FootnoteText:  a [equation]c[math] b.']],
+    ['a dollar sign after it in a note', '[^1]: a **XX** b.\n', display('x') + text('$y$'), note('a\n' + x + '\\$y$ b.\n'), ['FootnoteText:  a [equation]$y$ b.']],
+  ])('writes %s as on main', async (_name, md, runs, expected, paras) => {
+    await back('Text.[^1]\n\n' + md, runs, expected, [...separators, ...paras], notes);
+  });
+
+  // A grid table's cell reads a line end as a line break, so inline math
+  // after a space there stays on the fence's line, as on main
+  it('keeps inline math after a space in a grid table cell', async () => {
+    const table = (rows: string[]) => {
+      const width = Math.max(...rows.map(row => row.length));
+      const line = (c: string) => '+' + c.repeat(width + 2) + '+\n';
+      return line('-') + rows.map((row, r) => '| ' + row.padEnd(width) + ' |\n' + (r === 0 ? line('=') : '')).join('') + line('-');
+    };
+    await back(table(['h', '**XX**']), text('a') + display('x') + text(' ') + inline('y') + text(' b.'),
+      table(['h', 'a' + fence, 'x', fence + ' $y$ b.']), ['TableParagraph: h', 'TableParagraph: a[equation] [math] b.']);
   });
 });
