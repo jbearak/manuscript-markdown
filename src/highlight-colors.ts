@@ -1,5 +1,6 @@
 import { criticCloserSearch, findMatchingClose } from './critic-markup';
 import { overlapsCodeRegion, type CodeRegion } from './code-regions';
+import { isEscapedAt } from './math-delimiters';
 
 // --- Implementation notes ---
 // - ==text=={color} is unambiguous with CriticMarkup {==text==} (brace is before ==, not after)
@@ -10,6 +11,9 @@ import { overlapsCodeRegion, type CodeRegion } from './code-regions';
 // - Comment styling: no explicit foreground; background + italic only
 // - TextMate inline highlight regex: exclude = inside ==...== captures ([^}=]+) for
 //   multi-span tokenization
+// - An == after an odd run of backslashes opens no format highlight, as export and
+//   the preview read it; a closing == has no such check. Keep hlRe and
+//   isBlockedPredecessor in step with combinedPattern in changes.ts and the grammar
 // - extractCriticDelimiterRanges(): skip comment/highlight delimiters so decoration
 //   doesn't override TextMate scopes
 // - Typed delimiter arrays (additionDelimiters, deletionDelimiters, substitutionDelimiters)
@@ -229,8 +233,10 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
     }
   }
 
-  // Colored highlights ==text=={color} and default highlights ==text==
-  const hlRe = /(?<![{=])==([^}=]+)==(?![}=])(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
+  // Colored highlights ==text=={color} and default highlights ==text==, none
+  // whose opening == an odd run of backslashes escapes (see combinedPattern
+  // in changes.ts)
+  const hlRe = /(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
   const formatIn = (part: string, offset: number) => {
     hlRe.lastIndex = 0;
     let m;
@@ -426,10 +432,12 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     if (!highlights.has(key)) highlights.set(key, []);
     highlights.get(key)!.push({ start, end });
   };
+  // An == after { or =, or after an odd run of backslashes, whose last
+  // escapes its first = (see hlRe), opens no format highlight
   const isBlockedPredecessor = (index: number, boundEnd: number): boolean =>
     index > 0 &&
     index < boundEnd &&
-    (text.charCodeAt(index - 1) === 0x7B || text.charCodeAt(index - 1) === 0x3D);
+    (text.charCodeAt(index - 1) === 0x7B || text.charCodeAt(index - 1) === 0x3D || isEscapedAt(text, index));
   const isBlockedSuccessor = (indexAfterClose: number, boundEnd: number): boolean => {
     if (indexAfterClose >= boundEnd) return false;
     const ch = text.charCodeAt(indexAfterClose);
@@ -446,9 +454,10 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     while (j < regionEnd - 3) { // need at least ==X== (4 chars from j)
       // Look for == that is NOT preceded by { at j-1 in the original text
       if (text.charCodeAt(j) === 0x3D && j + 1 < regionEnd && text.charCodeAt(j + 1) === 0x3D) {
-        // Check negative lookbehind: not preceded by { or =, but for the
-        // = of the span's opener before the region, as in {====a====},
-        // which the preview reads as a highlight in the span
+        // Check negative lookbehind: not preceded by { or = or an escaping
+        // backslash, but for the = of the span's opener before the region,
+        // as in {====a====}, which the preview reads as a highlight in the
+        // span
         if (j > regionStart && isBlockedPredecessor(j, regionEnd)) {
           j++;
           continue;
@@ -618,7 +627,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     // A CriticMarkup span reads as one run of text, so a format highlight can
     // hold whole spans but can't close in one.
     if (text.charCodeAt(i) === 0x3D && i + 1 < len && text.charCodeAt(i + 1) === 0x3D) {
-      // Check negative lookbehind: not preceded by { or =
+      // Check negative lookbehind: not preceded by { or = or an escaping backslash
       if (!isBlockedPredecessor(i, len)) {
         // Scan forward for content, skipping CriticMarkup spans.
         // A span passes [^}=]+ whole, whatever its text; other chars must match it.

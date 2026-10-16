@@ -463,3 +463,68 @@ describe('Syntax grammar citation keys', () => {
     );
   });
 });
+
+describe('Syntax grammar format highlights', () => {
+  const grammar = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json'), 'utf-8'));
+  const HIGHLIGHT_SCOPES = ['markup.highlight.colored.manuscript-markdown', 'markup.highlight.manuscript-markdown'];
+  type MatchRule = { match: string; name?: string; captures?: Record<string, { name?: string }> };
+  // Its two format highlight patterns, in the order its patterns list them,
+  // as JS regexes: Oniguruma's possessive quantifiers as greedy ones, which
+  // match the same here
+  const rules = ['colored_format_highlight', 'format_highlight'].map(key => {
+    const rule = grammar.repository[key] as MatchRule;
+    return { rule, regex: new RegExp(rule.match.replace(/([+*?])\+/g, '$1'), 'gd') };
+  });
+
+  /** The text the grammar scopes as a format highlight in `line`: at each
+   *  step the earliest match of either pattern, the first listed where they
+   *  tie, from where the last ended, as vscode-textmate scans, other
+   *  patterns aside */
+  const highlighted = (line: string): string[] => {
+    const found: string[] = [];
+    for (let at = 0; at < line.length;) {
+      let best: RegExpExecArray | null = null;
+      let bestRule: MatchRule | undefined;
+      for (const { rule, regex } of rules) {
+        regex.lastIndex = at;
+        const match = regex.exec(line);
+        if (match && (!best || match.index < best.index)) {
+          best = match;
+          bestRule = rule;
+        }
+      }
+      if (!best || !bestRule) break;
+      const groups = Object.entries(bestRule.captures ?? {})
+        .filter(([, capture]) => HIGHLIGHT_SCOPES.includes(capture.name ?? ''))
+        .map(([group]) => Number(group));
+      if (HIGHLIGHT_SCOPES.includes(bestRule.name ?? '')) groups.push(0);
+      for (const group of groups) {
+        const [start, end] = best.indices![group];
+        found.push(line.slice(start, end));
+      }
+      at = Math.max(best.index + best[0].length, at + 1);
+    }
+    return found;
+  };
+
+  // An == after an odd run of backslashes opens no highlight, as export and
+  // the preview read it: the last backslash escapes its first =. One before
+  // a closing == escapes nothing, as in export.
+  it.each<[string, string, string[]]>([
+    ['an escaped opener before a highlight', 'a \\== b ==c==', ['==c==']],
+    ['an escaped opener', '\\==x==', []],
+    ['an opener after three backslashes', '\\\\\\==x== y', []],
+    ['an escaped opener of a colored highlight', 'x \\==a=={red} y', []],
+    ['the opener after an escaped one', '\\==a==b==', ['==b==']],
+    ['an escaped opener right after a highlight', '==a\\==\\==b==', ['==a\\==']],
+    ['a highlight', 'a ==x== b', ['==x==']],
+    ['a colored highlight', 'a ==x=={red} b', ['==x=={red}']],
+    ['a critic highlight, which another rule reads', 'a {==x==} b', []],
+    ['a highlight after an escaped backslash', 'a \\\\==x== b', ['==x==']],
+    ['a highlight after two escaped backslashes', 'a \\\\\\\\==x== b', ['==x==']],
+    ['a colored highlight after an escaped backslash', '\\\\==x=={red}', ['==x=={red}']],
+    ['a backslash before the closer, which escapes none', '==a\\== b', ['==a\\==']],
+  ])('scopes %s as export reads it', (_name, line, expected) => {
+    expect(highlighted(line)).toEqual(expected);
+  });
+});

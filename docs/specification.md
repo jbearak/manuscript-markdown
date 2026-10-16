@@ -821,6 +821,8 @@ Standard Markdown highlight syntax with an optional color suffix:
 ==highlighted text=={blue}    (blue highlight)
 ```
 
+A backslash before the opening `==` escapes it, as in Markdown: `\==text==` is the text `==text==`, which export, the preview and the editor don't highlight. One before the closing `==` escapes nothing: `==a\==` highlights `a\`.
+
 #### Available Colors
 
 14 colors matching the MS Word highlight palette:
