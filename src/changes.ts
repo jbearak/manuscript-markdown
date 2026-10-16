@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
+import { navigationMatches } from './navigation-matches';
 
 // Combined pattern for all Manuscript Markdown syntax in a single regex
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
@@ -27,6 +28,10 @@ import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 // with the lookbehind after it, so it runs only where a { is. The grammar's
 // escaped_brace and extractAllDecorationRanges in highlight-colors.ts read
 // the same.
+// getAllMatches finds its matches with navigationMatches, which steps past
+// an opener with no closer after it, as each searched the rest of the text.
+// An alternative added here that starts with a { or a < and runs to the
+// first of a closer after it needs a check there.
 const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Version-keyed cache for navigation match results (single-document cache)
@@ -47,11 +52,8 @@ export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
 	const codeRegions = computeCodeRegions(text);
 	const rawRanges: Array<{ range: vscode.Range; offset: number; length: number }> = [];
 
-	let match;
-	while ((match = combinedPattern.exec(text)) !== null) {
-		const startPos = document.positionAt(match.index);
-		const endPos = document.positionAt(match.index + match[0].length);
-		rawRanges.push({ range: new vscode.Range(startPos, endPos), offset: match.index, length: match[0].length });
+	for (const { start, end } of navigationMatches(combinedPattern, text)) {
+		rawRanges.push({ range: new vscode.Range(document.positionAt(start), document.positionAt(end)), offset: start, length: end - start });
 	}
 
 	// Filter out matches inside code regions

@@ -1,4 +1,4 @@
-import { criticCloserSearch, findMatchingClose } from './critic-markup';
+import { criticCloserSearch, type CriticCloserSearch } from './critic-markup';
 import { overlapsCodeRegion, type CodeRegion } from './code-regions';
 import { isEscapedAt } from './math-delimiters';
 
@@ -151,8 +151,11 @@ interface CriticSpan { start: number; contentStart: number; contentEnd: number; 
  * is text:
  *   {== ==}, {++ ++}, {-- --}, {~~ ~~}  with the first closer after it
  *   {>> <<}, {#id>> <<}                  with findMatchingClose (depth-aware)
+ * Each closer comes from `closers`, the text's (see criticCloserSearch), as
+ * a search of the rest of the text from each opener with no closer took
+ * time in their number times the text's length.
  */
-function criticSpans(text: string): CriticSpan[] {
+function criticSpans(text: string, closers: CriticCloserSearch): CriticSpan[] {
   const spans: CriticSpan[] = [];
   const len = text.length;
   let i = 0;
@@ -164,13 +167,13 @@ function criticSpans(text: string): CriticSpan[] {
       let ci = -1;
       if (c2 === 0x3E && c3 === 0x3E) { // {>>
         contentStart = i + 3;
-        ci = findMatchingClose(text, contentStart);
+        ci = closers.matching(contentStart);
       } else if (c2 === 0x23) { // {# — possible {#id>>
         contentStart = detectCommentIdOpener(text, i, len);
-        if (contentStart !== -1) ci = findMatchingClose(text, contentStart);
+        if (contentStart !== -1) ci = closers.matching(contentStart);
       } else if (c2 === c3 && (c2 === 0x3D || c2 === 0x2B || c2 === 0x2D || c2 === 0x7E)) { // {== {++ {-- {~~
         contentStart = i + 3;
-        ci = text.indexOf(String.fromCharCode(c2, c2) + '}', contentStart);
+        ci = closers.next(String.fromCharCode(c2, c2) + '}', contentStart);
       }
       if (ci !== -1) {
         spans.push({ start: i, contentStart, contentEnd: ci, marker: c2 });
@@ -211,19 +214,24 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
     if (!result.has(key)) { result.set(key, []); }
     result.get(key)!.push({ start, end });
   };
-  const spans = criticSpans(text);
+  const closers = criticCloserSearch(text);
+  const spans = criticSpans(text, closers);
 
   // CriticMarkup highlights {==text==} — content only (skip delimiters)
   const criticIn = (from: number, to: number) => {
-    // Each opener's { after no escaping backslash, which the part's start,
-    // after an opener, never has
-    const criticRe = /\{(?<!(?<!\\)(?:\\\\)*\\\{)==([\s\S]*?)==\}/g;
     const part = text.slice(from, to);
     // None in text that holds another opener (see extractAllDecorationRanges)
     if (/\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+|--|~~|>>|#[0-9A-Za-z_-]+>>)/.test(part)) return;
-    let c;
-    while ((c = criticRe.exec(part)) !== null) {
-      push('critic', from + c.index + 3, from + c.index + c[0].length - 3);
+    // Each {== after no escaping backslash, which the part's start, after an
+    // opener, never has, to the first ==} after it in the part, as a lazy
+    // regex over the part matches. One with none has none after any later
+    // {== either.
+    for (let at = part.indexOf('{=='); at !== -1; at = part.indexOf('{==', at + 1)) {
+      if (isEscapedAt(text, from + at)) continue;
+      const ci = closers.next('==}', from + at + 3);
+      if (ci === -1 || ci + 3 > to) return;
+      push('critic', from + at + 3, ci);
+      at = ci + 2 - from;
     }
   };
   for (const span of spans) {
@@ -276,6 +284,9 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
  */
 export function extractCommentRanges(text: string): Array<{ start: number; end: number }> {
   const ranges: Array<{ start: number; end: number }> = [];
+  // Each comment's matching <<}, found for all at once, as each unclosed
+  // one searched the rest of the text
+  const closers = criticCloserSearch(text);
   const len = text.length;
   let i = 0;
   while (i < len - 2) {
@@ -283,7 +294,7 @@ export function extractCommentRanges(text: string): Array<{ start: number; end: 
       const c2 = text.charCodeAt(i + 1);
       if (c2 === 0x3E && i + 2 < len && text.charCodeAt(i + 2) === 0x3E) { // {>>
         const contentStart = i + 3;
-        const ci = findMatchingClose(text, contentStart);
+        const ci = closers.matching(contentStart);
         if (ci !== -1) {
           ranges.push({ start: contentStart, end: ci });
           i = ci + 3; continue;
@@ -291,7 +302,7 @@ export function extractCommentRanges(text: string): Array<{ start: number; end: 
       } else if (c2 === 0x23) { // {# — possible {#id>>
         const contentStart = detectCommentIdOpener(text, i, len);
         if (contentStart !== -1) {
-          const ci = findMatchingClose(text, contentStart);
+          const ci = closers.matching(contentStart);
           if (ci !== -1) {
             ranges.push({ start: contentStart, end: ci });
             i = ci + 3; continue;

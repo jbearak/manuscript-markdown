@@ -160,6 +160,32 @@ describe('Editor decorations for CriticMarkup without its closers', () => {
   }, 60000);
 });
 
+// Each opener with no closer after it, and each {== in a span's text with
+// no ==} after it there, searched the rest of the text, or of the span's
+describe('Highlight and comment ranges for CriticMarkup without its closers', () => {
+  it.each(['{>>', '{++', '{--', '{~~', '{==', '{#c1>>'])('finds the highlights in a text of many %s with no closer in linear time', (opener) => {
+    const text = '{==a==} ' + ('word ' + opener + ' more text here\n').repeat(100_000) + '==b==';
+    let found = new Map<string, Array<{ start: number; end: number }>>();
+    // Quadratic searching took seconds here; linear takes milliseconds
+    expect(fastestRun(() => { found = extractHighlightRanges(text, 'yellow'); })).toBeLessThan(1000);
+    expect(found).toEqual(new Map([['critic', [{ start: 3, end: 4 }]], ['yellow', [{ start: text.length - 5, end: text.length }]]]));
+  }, 60000);
+
+  it('finds the highlights in an insertion of many {== with no closer in linear time', () => {
+    const text = '{++{==a==} ' + 'word {== more text here\n'.repeat(20_000) + '++}';
+    let found = new Map<string, Array<{ start: number; end: number }>>();
+    expect(fastestRun(() => { found = extractHighlightRanges(text, 'yellow'); })).toBeLessThan(1000);
+    expect(found).toEqual(new Map([['critic', [{ start: 6, end: 7 }]]]));
+  }, 60000);
+
+  it.each(['{>>', '{#c1>>'])('finds the comments in a text of many %s with no closer in linear time', (opener) => {
+    const text = '{>>a<<} ' + ('word ' + opener + ' more text here\n').repeat(100_000);
+    let found: Array<{ start: number; end: number }> = [];
+    expect(fastestRun(() => { found = extractCommentRanges(text); })).toBeLessThan(1000);
+    expect(found).toEqual([{ start: 3, end: 4 }]);
+  }, 60000);
+});
+
 // A { after an odd run of backslashes opens no CriticMarkup, as export and
 // the preview read it: the last backslash escapes it
 describe('Editor decorations skip an escaped CriticMarkup opener', () => {

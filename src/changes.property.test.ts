@@ -2,6 +2,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
+import { navigationMatches } from './navigation-matches';
 
 // **Validates: Requirements 5.2, 5.3**
 
@@ -22,12 +23,7 @@ const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([
 function freshScan(text: string): string[] {
 	// Filter contained ranges (same logic as production getAllMatches)
 	const filtered: string[] = [];
-	const re = new RegExp(combinedPattern.source, combinedPattern.flags);
-	const offsets: Array<{ start: number; end: number; text: string }> = [];
-	let m;
-	while ((m = re.exec(text)) !== null) {
-		offsets.push({ start: m.index, end: m.index + m[0].length, text: m[0] });
-	}
+	const offsets = navigationMatches(combinedPattern, text).map(({ start, end }) => ({ start, end, text: text.slice(start, end) }));
 	let lastKept: { start: number; end: number } | undefined;
 	for (const o of offsets) {
 		if (!lastKept || !(lastKept.start <= o.start && o.end <= lastKept.end)) {
