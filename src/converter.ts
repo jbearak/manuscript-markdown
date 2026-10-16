@@ -17209,13 +17209,25 @@ function buildMarkdownOnce(
       // which an equation in the paragraph goes on in, on the next line, and
       // text after one from its closing fence, as in the document
       let paragraphPart: number | undefined;
+      // The text from partStart. Inline math right after an equation's
+      // closing fence goes on the next line, as in the body, and the note's
+      // indent goes on it with the part's other lines
       const pushInline = (text: string) => {
         if (paragraphPart === undefined) {
           bodyParts.push(text);
           paragraphPart = bodyParts.length - 1;
-        } else {
-          bodyParts[paragraphPart] += text;
+          return;
         }
+        const fenceBefore = bodyMerged[partStart - 1];
+        if (!options?.breaks && fenceBefore?.type === 'math' && fenceBefore.display && bodyParts[paragraphPart].endsWith(MATH_FENCE)) {
+          const first = bodyMerged[partStart];
+          const space = first?.type === 'text' && first.text === ' ' ? 1 : 0;
+          const math = bodyMerged[partStart + space];
+          if (math?.type === 'math' && !math.display && text.startsWith(space ? '&#32;$' : '$')) {
+            text = '\n' + text.slice(space ? 5 : 0);
+          }
+        }
+        bodyParts[paragraphPart] += text;
       };
       // The note's code blocks, in order, each in the numbering export gave
       // it, one that goes as paragraphs too (see demoteNoteCodeBlocks): on
