@@ -1,6 +1,4 @@
 import { codeOverlapTest } from './code-regions';
-import { criticCloserSearch, type CriticCloserSearch } from './critic-markup';
-import { isEscapedAt } from './math-delimiters';
 import { editorBlocks, type EditorBlocks } from './editor-blocks';
 
 /** Whether `ch` is a character of a comment's ID, [a-zA-Z0-9_-] */
@@ -28,22 +26,19 @@ function isIdChar(ch: number): boolean {
  * still searches the rest of the text, but only the last two ~~ of the text
  * can have none.
  *
- * With `blocks` (see editorBlocks in editor-blocks.ts), no CriticMarkup
- * span's, format highlight's or HTML comment's match starts in code, as
- * export reads none there. A span wholly in code is passed whole, as
- * before, and the ~~} of a {~~ in code whose span ends past it starts
- * nothing, as that span's match took it before. A bare ~~'s match still
- * starts in code, but at a {~~'s ~~, as before: one took the next ~~ after
- * the code, which a bare ~~ after it would take, as one before a {~~, whose
- * ~~ the pattern reads as its closer. And a format highlight's match that
- * runs past its paragraph's text (see limitAt there), as past a blank
- * line, is none: the scan goes on at the character after its opener's
- * first, as where the pattern doesn't match. A match from an opener before
- * code still reads the code's text for its closer, as export's search does.
- * A comment's match runs to its matching <<}, as export's comment does, and
- * one with none is none.
+ * With `blocks` (see editorBlocks in editor-blocks.ts), a format
+ * highlight's match that runs past its paragraph's text (see limitAt
+ * there), as past a blank line, is none: the scan goes on at the character
+ * after its opener's first, as where the pattern doesn't match. Where that
+ * text holds an == that export may read as text (see inertMarks there), a
+ * highlight's match is one the scan read before, as a match from an opener
+ * that export may read as text is (see inertOpener there): a highlight's
+ * match that the scan read before may have taken it. And where a
+ * highlight's opener or closer is in what export may read in other blocks
+ * (see unsure there), its match is one the scan read before, wherever it
+ * ends.
  */
-export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<EditorBlocks, 'inCode' | 'codeEnd' | 'limitAt' | 'unsure' | 'unsureMarks'>): Array<{ start: number; end: number }> {
+export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<EditorBlocks, 'limitAt' | 'unsure' | 'inertMarks' | 'inertOpener'>): Array<{ start: number; end: number }> {
   const sticky = new RegExp(pattern.source, pattern.flags.replace('g', '') + 'y');
   const lastAddition = text.lastIndexOf('++}');
   const lastDeletion = text.lastIndexOf('--}');
@@ -70,63 +65,6 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
     while (isIdChar(text.charCodeAt(end))) end++;
     return end > at + 2 && text.charCodeAt(end) === 0x3E && text.charCodeAt(end + 1) === 0x3E && lastComment < end + 2;
   };
-  // Whether the ~ at `at` is one of a {~~'s, whose { no backslash escapes
-  const isSubstitutionMarker = (at: number): boolean => {
-    const open = text.charCodeAt(at - 1) === 0x7B ? at - 1 : text.charCodeAt(at - 1) === 0x7E && text.charCodeAt(at - 2) === 0x7B ? at - 2 : -1;
-    return open !== -1 && text.charCodeAt(open + 1) === 0x7E && text.charCodeAt(open + 2) === 0x7E && !isEscapedAt(text, open);
-  };
-  // Each closer's offsets, for spans in code
-  let closers: CriticCloserSearch | undefined;
-  // The end of the pattern's match from the { at `at`: a span's, from its
-  // opener to the first closer of its kind after it, or a comment range's
-  // marker's, as {#id}, or -1 for none
-  const matchEnd = (at: number): number => {
-    const marker = text.charCodeAt(at + 1);
-    let closer: string | undefined;
-    let from = at + 3;
-    if (marker === text.charCodeAt(at + 2)) {
-      closer = marker === 0x2B ? '++}' : marker === 0x2D ? '--}' : marker === 0x7E ? '~~}' : marker === 0x3D ? '==}' : marker === 0x3E ? '<<}' : undefined;
-    } else if (marker === 0x23 || marker === 0x2F) { // {#id>>, {#id} or {/id}
-      let end = at + 2;
-      while (isIdChar(text.charCodeAt(end))) end++;
-      if (end === at + 2) return -1;
-      if (text.charCodeAt(end) === 0x7D) return end + 1;
-      if (marker !== 0x23 || text.charCodeAt(end) !== 0x3E || text.charCodeAt(end + 1) !== 0x3E) return -1;
-      closer = '<<}';
-      from = end + 2;
-    }
-    if (!closer) return -1;
-    closers ??= criticCloserSearch(text);
-    const closeAt = closers.next(closer, from);
-    return closeAt === -1 ? -1 : closeAt + 3;
-  };
-  // The end of the {>> or {#id>> at `at`, or -1 where it starts neither
-  const commentContentStart = (at: number): number => {
-    if (text.charCodeAt(at + 1) === 0x3E) return text.charCodeAt(at + 2) === 0x3E ? at + 3 : -1;
-    if (text.charCodeAt(at + 1) !== 0x23) return -1;
-    let end = at + 2;
-    while (isIdChar(text.charCodeAt(end))) end++;
-    return end > at + 2 && text.charCodeAt(end) === 0x3E && text.charCodeAt(end + 1) === 0x3E ? end + 2 : -1;
-  };
-  // The first --> at or after the last offset asked for, as they only go up
-  let commentClose = -1;
-  // The end of the match from the <!-- at `at` to the first --> after it,
-  // or -1 where `at` starts none
-  const commentEnd = (at: number): number => {
-    if (!text.startsWith('<!--', at)) return -1;
-    if (commentClose !== -1 && commentClose < at + 4) commentClose = -1;
-    if (commentClose === -1) commentClose = text.indexOf('-->', at + 4);
-    return commentClose === -1 ? -1 : commentClose + 3;
-  };
-  // The ~~} of each {~~ in code whose span ends past the code, whose ~~
-  // the {~~'s match took, so starts no bare ~~'s, as before
-  const passedClosers = new Set<number>();
-  // Whether a match from `at` to `end` starts or ends in what export may
-  // read otherwise, or, from code, holds an opener or an == there, which
-  // it hid, so the scan reads as before there (see unsure and unsureMarks
-  // in EditorBlocks)
-  const readsAsBefore = (at: number, end: number, fromCode: boolean): boolean => blocks !== undefined
-    && (blocks.unsure(at, at + 1) || blocks.unsure(end - 1, end) || (fromCode && blocks.unsureMarks(at, end)));
   // The end of each match the scan read before, by its start, found once
   // where the scan first reads as before
   let before: Map<number, number> | undefined;
@@ -143,70 +81,19 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
     const ch = text.charCodeAt(at);
     if (ch !== 0x7B && ch !== 0x3D && ch !== 0x7E && ch !== 0x3C) continue; // { = ~ <
     if ((ch === 0x7B || ch === 0x3C) && unclosed(at)) continue;
-    if (ch === 0x7E && (passedClosers.has(at) || passedClosers.has(at - 1))) continue;
-    // Nothing opens in code (see blocks), nor a {~~'s ~~ there. A span
-    // wholly in code is passed whole, as before, so that no bare ~~ in it
-    // opens. Another bare ~~ there still does, as before
-    if (blocks && (ch !== 0x7E || isSubstitutionMarker(at)) && blocks.inCode(at)) {
-      if (ch === 0x7E || (ch === 0x7B && isEscapedAt(text, at))) continue;
-      // The end of the pattern's match from here
-      let end: number;
-      if (ch === 0x7B) end = matchEnd(at);
-      else if (ch === 0x3C) end = commentEnd(at);
-      else {
-        sticky.lastIndex = at;
-        const highlight = sticky.exec(text);
-        end = highlight === null ? -1 : at + highlight[0].length;
-      }
-      if (end === -1) continue;
-      // As before, where the scan read that match before (see readsAsBefore)
-      if (readsAsBefore(at, end, true) && readBefore(at, end)) {
-        matches.push({ start: at, end });
-        at = end - 1;
-        continue;
-      }
-      if (ch !== 0x7B) continue;
-      if (end > blocks.codeEnd(at)) {
-        if (text.charCodeAt(at + 1) === 0x7E && text.charCodeAt(at + 2) === 0x7E) passedClosers.add(end - 3);
-        continue;
-      }
-      sticky.lastIndex = at;
-      const span = sticky.exec(text);
-      if (span !== null) at += span[0].length - 1;
-      continue;
-    }
-    // A comment's match runs to the first <<} after it, where export and the
-    // decorations read one whose text holds another comment's opener to its
-    // own <<}, each closing the innermost open, and one with none as text.
-    // But as before where its opener or either closer is in what export may
-    // read otherwise. Each is found before the pattern runs, whose search
-    // for a closer read on where no match was
-    if (ch === 0x7B && blocks && !isEscapedAt(text, at)) {
-      const contentStart = commentContentStart(at);
-      if (contentStart !== -1) {
-        closers ??= criticCloserSearch(text);
-        const first = matchEnd(at);
-        const closeAt = closers.matching(contentStart);
-        const nested = closeAt === -1 ? -1 : closeAt + 3;
-        if (first !== -1 && nested !== first) {
-          const end = readsAsBefore(at, first, false) || (nested !== -1 && readsAsBefore(at, nested, false))
-            ? (readBefore(at, first) ? first : -1)
-            : nested;
-          if (end === -1) continue;
-          matches.push({ start: at, end });
-          at = end - 1;
-          continue;
-        }
-      }
-    }
     sticky.lastIndex = at;
     const match = sticky.exec(text);
     if (match === null) continue;
     const end = at + match[0].length;
     // A format highlight's match, the only one that starts with an =, runs
-    // in its paragraph's text, but as before where it starts or ends in what
-    // export may read otherwise
-    if (ch === 0x3D && blocks && !(readsAsBefore(at, end, false) ? readBefore(at, end) : end <= blocks.limitAt(at))) continue;
+    // in its paragraph's text, and is one the scan read before where that
+    // holds an == that export may read as text, as a match from an opener
+    // that export may read as text is (see blocks)
+    if (blocks) {
+      if (ch === 0x3D && (blocks.unsure(at, at + 1) || blocks.unsure(end - 1, end))) {
+        if (!readBefore(at, end)) continue;
+      } else if (ch === 0x3D ? end > blocks.limitAt(at) || (blocks.inertMarks(at) && !readBefore(at, end)) : blocks.inertOpener(at) && !readBefore(at, end)) continue;
+    }
     matches.push({ start: at, end });
     // Each alternative matches at least its opener and closer
     at = end - 1;
@@ -217,9 +104,8 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
 /**
  * The ranges navigation stops at in `text`, as getAllMatches in changes.ts
  * finds them with `pattern`, its combinedPattern: navigationMatches's with
- * no match starting in code and each format highlight held to its
- * paragraph's text (see editorBlocks), without those that hold code, nor
- * one in the last kept.
+ * each format highlight held to its paragraph's text (see editorBlocks),
+ * without those that hold code, nor one in the last kept.
  */
 export function navigationRanges(pattern: RegExp, text: string): Array<{ start: number; end: number }> {
   const blocks = editorBlocks(text);

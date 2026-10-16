@@ -1,13 +1,12 @@
 /**
  * How the editor's decorations and navigation read a document's blocks:
- * where code is, which nothing opens in, and where the text a format
- * highlight may hold ends.
+ * where the text a format highlight may hold ends, and where they read a
+ * highlight as they did before.
  */
 
 import { type CodeRegion, codeOverlapTest, computeLineStarts, computeMarkdownRegions, formatHighlightLimit, mergeRegions } from './code-regions';
 import { preprocessBlocks } from './block-preprocess';
 import { preprocessCriticMarkupWithLines } from './critic-markup';
-import { pushAll } from './arrays';
 import { normalizeNewlines } from './newlines';
 
 /** How the editor's decorations and navigation read a document's blocks
@@ -16,41 +15,36 @@ export interface EditorBlocks {
 	/** The code spans and blocks, as computeCodeRegions finds them, where
 	 *  the editor shows nothing (see dropRangesInCode) */
 	codeRegions: CodeRegion[];
-	/** Whether code holds `offset`. Nothing opens there: an == or a
-	 *  CriticMarkup opener in code pairs with nothing, as export and the
-	 *  preview read none in code. A search from an opener before the code
-	 *  for its closer still reads the code's text, as theirs does. */
-	inCode(offset: number): boolean;
-	/** The end of the run of code from `offset`, or `offset` where code
-	 *  doesn't hold it */
-	codeEnd(offset: number): number;
 	/** Where the text that a format highlight opening at `offset` may hold
 	 *  ends (see editorBlocks) */
 	limitAt(offset: number): number;
-	/** Whether [start, end) holds what export may read otherwise than the
-	 *  text's parse does: an HTML block, which export reads as HTML, a line
-	 *  that may be a link's definition, to the next blank line, or a code
-	 *  span whose backticks the parse pairs across blocks, with the text of
-	 *  the paragraphs or other blocks it starts and ends in, whose code
-	 *  spans export pairs in each block's text alone, or a line export's
-	 *  block preprocessing rewrites, as a quote's lazy line, which it ends
-	 *  the quote before (see editorBlocks) */
+	/** Whether [start, end) holds what export may read in other blocks than
+	 *  the text's parse does: an HTML block, which export reads as HTML, a
+	 *  line that may be a link's definition, to the next blank line, or a
+	 *  line export's block preprocessing rewrites, as a quote's lazy line,
+	 *  which it ends the quote before (see editorBlocks) */
 	unsure(start: number, end: number): boolean;
-	/** Whether [start, end) holds what unsure reads that holds a
-	 *  CriticMarkup opener or an ==, which the editor read before where a
-	 *  span or a highlight from code didn't hide it */
-	unsureMarks(start: number, end: number): boolean;
+	/** Whether the paragraph's text that holds `offset`, which ends where
+	 *  its line's limitAt does, holds an == that export may read as text:
+	 *  one in code, or in what may be inline HTML, an autolink, a link's text
+	 *  or destination, or math (see inertMarks), or whether it is the text
+	 *  of a block that a code span whose backticks the parse pairs across
+	 *  blocks starts or ends in, whose code spans export pairs in that block
+	 *  alone (see editorBlocks) */
+	inertMarks(offset: number): boolean;
+	/** Whether `offset` starts a CriticMarkup opener, an HTML comment's or
+	 *  a ~~ that export may read as text, as inertMarks reads an == */
+	inertOpener(offset: number): boolean;
 }
 
 /**
- * The code and the paragraphs of `text` for the editor's decorations and
- * navigation. A lone == that one read as a highlight's opener, as x == y in
- * a paragraph or keep if foreign == 1 in a Stata block, took the next
- * highlight's opener as its closer, and so on through the document, as an
- * opener in code took the next closer of its kind; export and the preview
- * read each highlight in its paragraph's text alone, and nothing in code.
+ * The paragraphs of `text` for the editor's decorations and navigation. A
+ * lone == that one read as a highlight's opener, as x == y in a paragraph
+ * or keep if foreign == 1 in a Stata block, took the next highlight's
+ * opener as its closer, and so on through the document; export and the
+ * preview read each highlight in its paragraph's text alone, and in a
+ * table's cell's.
  *
- * Code is what the text's parse reads, as the editor drops what holds it.
  * A highlight's text ends where a block does in both the text's parse and
  * export's, which reads the blocks after preprocessCriticMarkup joins each
  * span's lines: a span over a line end can take the lines after it into its
@@ -58,85 +52,146 @@ export interface EditorBlocks {
  * paragraph, with c and d highlighted, where the text's parse reads a
  * heading and a paragraph. Where the two differ, a highlight reads on to
  * the next end both share, as the editor read one before. A span across a
- * table's rows, which preprocessing leaves as it is, ends at its row's end
+ * table's rows, which preprocessing leaves as it is, ends at its cell's end
  * to export, so a highlight before it reads its opener as text.
  *
- * Where the editor reads an opener in code or a highlight otherwise than it
- * did before, and the opener, or the closer either reading takes, is in
- * what export may read otherwise than the text's parse (see unsure), it
- * reads it as before. So does an opener in code whose span or highlight
- * before held an opener or an == there (see unsureMarks): it hid them, and
- * where they are in an HTML block, export doesn't read them either. As
- * before is what the editor read before over the whole text, read once:
- * the span or highlight it read from that opener, or none, where it read
- * that opener as text or as another's closer. A lone == before an HTML
- * block still pairs with nothing, where before it took a highlight's
- * opener past the block (see extractAllDecorationRanges and
- * navigationMatches).
+ * Code is read as before: an == or an opener there pairs as any other, and
+ * the editor drops what holds code. So a paragraph's text is read as
+ * before, but from its own start, as export reads it, but where it holds an
+ * == that export may read as text, as one in code or in inline HTML (see
+ * inertMarks). There a highlight is one the editor read before, which may
+ * have read on from a paragraph before, where it stays in this paragraph's
+ * text. Navigation reads a match from an opener that export may read as
+ * text as before too (see inertOpener): a highlight's match it read before
+ * may have taken that opener. Where the editor reads a highlight otherwise
+ * than it did before, and its opener, or the closer either reading takes,
+ * is in what export may read in other blocks (see unsure), it reads it as
+ * before, wherever that ends. As before is what the editor read before over
+ * the whole text, read once: the highlight or match it read from that
+ * opener, or none, where it read that == as text or as another's closer
+ * (see extractAllDecorationRanges and navigationMatches).
  */
 export function editorBlocks(text: string): EditorBlocks {
-	const { codeRegions, blockCodeRegions, inlineBlocks } = computeMarkdownRegions(text, { inlineBlocks: true });
+	const { codeRegions, blockCodeRegions, inlineBlocks, tableRegions } = computeMarkdownRegions(text, { inlineBlocks: true, includeTables: true });
 	const lineStarts = computeLineStarts(text);
-	const code = new Uint8Array(text.length);
-	for (const { start, end } of codeRegions) code.fill(1, start, end);
-	// For each offset, the end of the run of code from it, found once
-	let runEnds: Int32Array | undefined;
-	const unsure = unsureRegions(text, lineStarts, codeRegions, blockCodeRegions, inlineBlocks);
+	const htmlRegions = text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions : [];
+	const unsure = mergeRegions([...htmlRegions, ...definitionRegions(text, lineStarts), ...blockRewrites(text, lineStarts)]);
+	const { limitAt, paragraphAt } = sharedLimit(text, lineStarts, inlineBlocks, tableRegions);
+	const { paragraphs: inert, openers } = inertMarks(text, lineStarts, codeRegions, paragraphAt);
+	// The paragraphs a code span whose backticks pair across blocks starts
+	// and ends in
+	for (const region of codeRegions) {
+		if (!acrossBlocks(region, text, lineStarts, blockCodeRegions, inlineBlocks)) continue;
+		inert[paragraphAt(region.start)] = 1;
+		inert[paragraphAt(region.end - 1)] = 1;
+	}
 	return {
 		codeRegions,
-		inCode: offset => code[offset] === 1,
-		codeEnd: offset => {
-			if (!runEnds) {
-				runEnds = new Int32Array(text.length + 1);
-				runEnds[text.length] = text.length;
-				for (let at = text.length - 1; at >= 0; at--) runEnds[at] = code[at] === 0 ? at : runEnds[at + 1];
-			}
-			return runEnds[offset];
-		},
-		limitAt: sharedLimit(text, lineStarts, inlineBlocks),
+		limitAt,
 		unsure: codeOverlapTest(unsure),
-		// Each region is read once, as none overlaps another
-		unsureMarks: codeOverlapTest(unsure.filter(({ start, end }) => MARK_RE.test(text.slice(start, end)))),
+		inertMarks: offset => inert[paragraphAt(offset)] === 1,
+		inertOpener: offset => openers[offset] === 1,
 	};
 }
 
-/** A CriticMarkup opener or an == */
-const MARK_RE = /\{(?:\+\+|--|~~|==|>>|#)|==/;
+/**
+ * The marks of `text` that export may read as text: each in code, of
+ * `codeRegions`, or after an unescaped <, as in inline HTML or an
+ * autolink, or after a tag, which the preview pairs no highlight across
+ * where export does, after a [ with no ] after it, as in a link's text,
+ * after a ]( with no ) after it, as in a link's destination, or after an
+ * unescaped $, as in math, each outside code and in that mark's paragraph.
+ * For each paragraph, by its paragraphAt (see sharedLimit), whether it
+ * holds such an ==, and for each offset, whether it starts such an opener
+ * of a CriticMarkup span or an HTML comment, or such a ~~ (see isOpener).
+ * Each character is read once.
+ */
+function inertMarks(text: string, lineStarts: readonly number[], codeRegions: readonly CodeRegion[], paragraphAt: (offset: number) => number): { paragraphs: Uint8Array; openers: Uint8Array } {
+	const paragraphs = new Uint8Array(lineStarts.length + 1);
+	const openers = new Uint8Array(text.length);
+	const code = new Uint8Array(text.length);
+	for (const { start, end } of codeRegions) code.fill(1, start, end);
+	let paragraph = -1;
+	let html = false;
+	let bracket = false;
+	let destination = false;
+	let math = false;
+	// The backslashes just before
+	let backslashes = 0;
+	for (let line = 0; line < lineStarts.length; line++) {
+		const at = lineStarts[line];
+		if (paragraphAt(at) !== paragraph) {
+			paragraph = paragraphAt(at);
+			html = bracket = destination = math = false;
+		}
+		const lineEnd = lineStarts[line + 1] ?? text.length;
+		for (let k = at; k < lineEnd; k++) {
+			const ch = text.charCodeAt(k);
+			if (code[k] === 1 || code[k + 1] === 1 || html || bracket || destination || math) {
+				if (ch === 0x3D && text.charCodeAt(k + 1) === 0x3D) paragraphs[paragraph] = 1;
+				else if (isOpener(text, k)) openers[k] = 1;
+			}
+			if (code[k] === 1) {
+				backslashes = 0;
+				continue;
+			}
+			const escaped = backslashes % 2 === 1;
+			backslashes = ch === 0x5C ? backslashes + 1 : 0;
+			if (escaped) continue;
+			if (ch === 0x3C) html = true; // <
+			else if (ch === 0x5B) bracket = true; // [
+			else if (ch === 0x5D) { // ]
+				bracket = false;
+				if (text.charCodeAt(k + 1) === 0x28) destination = true; // (
+			} else if (ch === 0x29) destination = false; // )
+			else if (ch === 0x24) math = true; // $
+		}
+	}
+	return { paragraphs, openers };
+}
 
-/** The HTML blocks of `text`, whose lines start at `lineStarts`, the lines
- *  from one that may be a link's definition to the next blank line, and
- *  each of `codeRegions` that is in no code block, of `blockCodeRegions`,
- *  nor in one paragraph's or other block's text, of `inlineBlocks`, nor on
- *  one line, from the start of the text of the one of `inlineBlocks` it
- *  starts in to the end of the one it ends in, sorted and merged (see unsure
- *  in EditorBlocks) */
-function unsureRegions(text: string, lineStarts: readonly number[], codeRegions: readonly CodeRegion[], blockCodeRegions: readonly CodeRegion[], inlineBlocks: readonly CodeRegion[]): CodeRegion[] {
-	const regions = text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions : [];
+/** Whether `text` has at `at` a ~~, or the opener of a CriticMarkup span or
+ *  an HTML comment */
+function isOpener(text: string, at: number): boolean {
+	const ch = text.charCodeAt(at);
+	const next = text.charCodeAt(at + 1);
+	if (ch === 0x7E) return next === ch; // ~~
+	if (ch === 0x3C) return text.startsWith('!--', at + 1); // <!--
+	if (ch !== 0x7B) return false; // {
+	return next === 0x23 || next === 0x2F || (next === text.charCodeAt(at + 2) && (next === 0x2B || next === 0x2D || next === 0x7E || next === 0x3D || next === 0x3E));
+}
+
+/** Whether `region`, a code region of `text`, whose lines start at
+ *  `lineStarts`, is in no code block, of `blockCodeRegions`, nor in one
+ *  paragraph's or other block's text, of `inlineBlocks`, nor on one line:
+ *  a code span whose backticks the parse pairs across blocks */
+function acrossBlocks(region: CodeRegion, text: string, lineStarts: readonly number[], blockCodeRegions: readonly CodeRegion[], inlineBlocks: readonly CodeRegion[]): boolean {
+	const within = (outer: CodeRegion | undefined) => outer !== undefined && region.end <= outer.end;
+	if (within(blockCodeRegions[before(blockCodeRegions, region.start, r => r.start)]) || within(inlineBlocks[before(inlineBlocks, region.start, r => r.start)])) return false;
+	// The start of the line after the region's first
+	const next = lineStarts[before(lineStarts, region.start, start => start) + 1] ?? text.length;
+	return region.end > next;
+}
+
+/** The lines of `text`, whose lines start at `lineStarts`, from each that
+ *  may be a link's definition to the next blank line, sorted. Each line is
+ *  read on its own (see DEFINITION_RE) */
+function definitionRegions(text: string, lineStarts: readonly number[]): CodeRegion[] {
+	const regions: CodeRegion[] = [];
+	const definition = new RegExp(DEFINITION_RE.source, 'y');
 	const blank = new RegExp(BLANK_LINE_RE.source, 'g');
 	// The end of the last definition's lines, which hold any after it
 	let definitionsEnd = 0;
-	for (const match of text.matchAll(DEFINITION_RE)) {
-		if (match.index < definitionsEnd) continue;
-		blank.lastIndex = match.index;
+	for (const start of lineStarts) {
+		if (start < definitionsEnd) continue;
+		definition.lastIndex = start;
+		if (!definition.test(text)) continue;
+		blank.lastIndex = start;
 		const end = blank.exec(text);
 		definitionsEnd = end ? end.index + 1 : text.length;
-		regions.push({ start: match.index, end: definitionsEnd });
+		regions.push({ start, end: definitionsEnd });
 	}
-	pushAll(regions, blockRewrites(text, lineStarts));
-	for (const region of codeRegions) {
-		const within = (outer: CodeRegion | undefined) => outer !== undefined && region.end <= outer.end;
-		const startBlock = inlineBlocks[before(inlineBlocks, region.start, r => r.start)];
-		if (within(blockCodeRegions[before(blockCodeRegions, region.start, r => r.start)]) || within(startBlock)) continue;
-		// The start of the line after the region's first
-		const next = lineStarts[before(lineStarts, region.start, start => start) + 1] ?? text.length;
-		if (region.end <= next) continue;
-		const endBlock = inlineBlocks[before(inlineBlocks, region.end - 1, r => r.start)];
-		regions.push({
-			start: startBlock !== undefined && startBlock.end > region.start ? startBlock.start : region.start,
-			end: endBlock !== undefined && endBlock.end >= region.end ? endBlock.end : region.end,
-		});
-	}
-	return mergeRegions(regions);
+	return regions;
 }
 
 /** The lines of `text`, whose lines start at `lineStarts`, that export's
@@ -180,11 +235,13 @@ function before<T>(sorted: readonly T[], offset: number, start: (item: T) => num
 }
 
 /** A line that may be a link's definition, as [1]: https://example.com,
- *  past a quote's and a list item's markers, or a note's. The spaces after
- *  a list item's marker and the quote markers after them are read by
+ *  past a quote's and a list item's markers, or a note's, read from a
+ *  line's start. No part of it reads past the line's end, a line feed or a
+ *  carriage return, so each line is read in time linear in it. The spaces
+ *  after a list item's marker and the quote markers after them are read by
  *  repetitions that don't overlap, so a line that isn't one is rejected in
  *  time linear in it */
-const DEFINITION_RE = /^[ \t>]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+(?:>[ \t>]*)?)?\[[^\]\n]*\]:/gm;
+const DEFINITION_RE = /[ \t>]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+(?:>[ \t>]*)?)?\[[^\]\n\r]*\]:/;
 /** A blank line, from the line end before it */
 const BLANK_LINE_RE = /\n[ \t>]*(?:\r?\n|$)/;
 
@@ -193,23 +250,42 @@ const BLANK_LINE_RE = /\n[ \t>]*(?:\r?\n|$)/;
  * the first line after its line before which a block ends both in the
  * text's parse, of `inlineBlocks`, and in the parse of what
  * preprocessCriticMarkup writes for it, as export reads it, at the line it
- * comes from (see preprocessCriticMarkupWithLines), or the text's end. Each
- * block ends as formatHighlightLimit reads it. Each line's is found once,
- * and each offset's line by binary search.
+ * comes from (see preprocessCriticMarkupWithLines), or the text's end: its
+ * limitAt. On a table's row, of `tableRegions`, that both parses read, and
+ * preprocessing writes as it is, the end of its cell, at the next | that no
+ * backslash comes just before, as markdown-it splits a row, as export reads
+ * each cell's text alone. And its paragraphAt, which is the line its line's
+ * limit is at, or the number of lines. Each block ends as
+ * formatHighlightLimit reads it. Each line's is found once, each cell's end
+ * once, and each offset's line by binary search.
  */
-function sharedLimit(text: string, lineStarts: readonly number[], inlineBlocks: readonly CodeRegion[]): (offset: number) => number {
+function sharedLimit(text: string, lineStarts: readonly number[], inlineBlocks: readonly CodeRegion[], tableRegions: readonly CodeRegion[]): { limitAt(offset: number): number; paragraphAt(offset: number): number } {
 	const lineCount = lineStarts.length;
+	const lineOf = (offset: number) => Math.max(before(lineStarts, offset, start => start), 0);
 	const ends = blockEnds(text, lineStarts, formatHighlightLimit(text, inlineBlocks));
+	const rows = tableLines(lineStarts, tableRegions);
 	const normalized = normalizeNewlines(text);
 	const joined = preprocessCriticMarkupWithLines(normalized);
 	if (joined.output !== normalized) {
 		const joinedStarts = computeLineStarts(joined.output);
-		const joinedBlocks = computeMarkdownRegions(joined.output, { includeCode: false, inlineBlocks: true }).inlineBlocks;
-		const joinedEnds = blockEnds(joined.output, joinedStarts, formatHighlightLimit(joined.output, joinedBlocks));
+		const joinedRegions = computeMarkdownRegions(joined.output, { includeCode: false, inlineBlocks: true, includeTables: true });
+		const joinedEnds = blockEnds(joined.output, joinedStarts, formatHighlightLimit(joined.output, joinedRegions.inlineBlocks));
 		// The lines of `text` before which a block ends in what it writes
 		const shared = new Uint8Array(lineCount + 1);
 		for (let line = 0; line < joinedEnds.length; line++) if (joinedEnds[line] === 1) shared[joined.lines[line]] = 1;
 		for (let line = 0; line < lineCount; line++) ends[line] &= shared[line];
+		// The rows it writes as they are, once, in a table
+		const joinedRows = tableLines(joinedStarts, joinedRegions.tableRegions);
+		const lines = normalized.split('\n');
+		const outLines = joined.output.split('\n');
+		const written = new Uint32Array(lineCount);
+		const kept = new Uint8Array(lineCount);
+		for (let line = 0; line < outLines.length; line++) {
+			const source = joined.lines[line];
+			written[source]++;
+			if (joinedRows[line] === 1 && outLines[line] === lines[source]) kept[source] = 1;
+		}
+		for (let line = 0; line < lineCount; line++) rows[line] &= written[line] === 1 ? kept[line] : 0;
 	}
 	// For each line, the first line after it before which a block ends
 	const next = new Int32Array(lineCount);
@@ -218,10 +294,41 @@ function sharedLimit(text: string, lineStarts: readonly number[], inlineBlocks: 
 		next[line] = nearest;
 		if (ends[line] === 1) nearest = line;
 	}
-	return offset => {
-		const end = next[Math.max(before(lineStarts, offset, start => start), 0)];
-		return end < lineCount ? lineStarts[end] : text.length;
+	// For each offset on a row, the end of its cell, found once
+	let cellEnds: Int32Array | undefined;
+	const cellEnd = (offset: number): number => {
+		if (!cellEnds) {
+			cellEnds = new Int32Array(text.length + 1);
+			for (let line = 0; line < lineCount; line++) {
+				if (rows[line] === 0) continue;
+				let end = lineStarts[line + 1] ?? text.length;
+				for (let at = end - 1; at >= lineStarts[line]; at--) {
+					if (text.charCodeAt(at) === 0x7C && text.charCodeAt(at - 1) !== 0x5C) end = at;
+					cellEnds[at] = end;
+				}
+			}
+		}
+		return cellEnds[offset];
 	};
+	const paragraphAt = (offset: number) => next[lineOf(offset)];
+	return {
+		limitAt: offset => {
+			const line = lineOf(offset);
+			const end = next[line] < lineCount ? lineStarts[next[line]] : text.length;
+			return rows[line] === 1 ? Math.min(end, cellEnd(offset)) : end;
+		},
+		paragraphAt,
+	};
+}
+
+/** For each line, whose starts are `lineStarts`, whether one of
+ *  `tableRegions`, which start at lines' starts, holds it */
+function tableLines(lineStarts: readonly number[], tableRegions: readonly CodeRegion[]): Uint8Array {
+	const rows = new Uint8Array(lineStarts.length);
+	for (const { start, end } of tableRegions) {
+		for (let line = before(lineStarts, start, at => at); line < lineStarts.length && lineStarts[line] < end; line++) rows[line] = 1;
+	}
+	return rows;
 }
 
 /** For each line of `text`, whose starts are `lineStarts`, and one past its

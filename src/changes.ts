@@ -40,12 +40,11 @@ import { navigationRanges } from './navigation-matches';
 // an opener with no closer after it, as each searched the rest of the text.
 // An alternative added here that starts with a { or a < and runs to the
 // first of a closer after it needs a check there.
-// It starts no match in code, and holds a plain or colored highlight's
-// match, the only one that starts with an =, to its paragraph's text, as
-// export and the preview read one (see navigationRanges), so a lone == in
-// code or in another paragraph pairs with no highlight's ==. The grammar
-// reads one line at a time, and nothing in a code span or a fenced block,
-// as VS Code's Markdown grammar scopes them, so its patterns need neither.
+// Navigation holds a plain or colored highlight's match, the only one that
+// starts with an =, to its paragraph's text, as export and the preview read
+// one (see navigationRanges), so a lone == in another paragraph or in a
+// code block pairs with no highlight's ==. The grammar reads one line at a
+// time, so its patterns need no such limit.
 const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Version-keyed cache for navigation match results (single-document cache)

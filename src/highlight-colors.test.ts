@@ -487,11 +487,10 @@ describe('Editor decorations read no highlight that a {==\'s == would close', ()
 // One == the editor read as a format highlight's opener, as x == y in a
 // paragraph or keep if foreign == 1 in a Stata block, took the next
 // highlight's opener as its closer, and so on through the document: its scan
-// read past a paragraph's end and through code, and dropped what overlapped
-// code only after. Export and the preview read each highlight in its
-// paragraph's text alone, and nothing in code. A CriticMarkup opener in code
-// took the next closer of its kind the same way.
-describe('Editor decorations pair no == or opener in code, nor a highlight past its paragraph', () => {
+// read past a paragraph's end, and dropped what overlapped code only after.
+// Export and the preview read each highlight in its paragraph's text alone,
+// and in a table's cell's.
+describe('Editor decorations pair no highlight past its paragraph', () => {
   type Range = { start: number; end: number };
   /** What the editor paints, in document order: each highlight's text after
    *  its key, each span's text after what it is */
@@ -514,7 +513,6 @@ describe('Editor decorations pair no == or opener in code, nor a highlight past 
   it.each<[string, string, string[]]>([
     ['an == in a paragraph before one with highlights', 'If x == y then.\n\nSee ==a== and ==b==.', ab],
     ['an == in a code span before a paragraph with highlights', 'A `x == y` b.\n\nSee ==a== and ==b==.', ab],
-    ['an == in a code span before highlights in its paragraph', 'A `x == y` b ==a== and ==b==.', ab],
     ['an == in a code span before one highlight', 'A `x == y` b.\n\nSee ==a==.', ['yellow: ==a==']],
     ['an == in a fenced block', '```stata\nkeep if foreign == 1\n```\n\nSee ==a== and ==b==.', ab],
     ['an == in an indented block', '    keep if foreign == 1\n\nSee ==a== and ==b==.', ab],
@@ -525,12 +523,12 @@ describe('Editor decorations pair no == or opener in code, nor a highlight past 
     ['an == in a table\'s row before the next', '| x == y |\n|---|\n| ==a== and ==b== |', ab],
     ['an opener and a closer a blank line apart', '==a\n\nb==', []],
     ['an opener and a closer a fenced block apart', '==a\n```\nx\n```\nb== and ==c==', ['yellow: == and ==']],
-    ['an insertion\'s opener in a code span', 'A `{++` b.\n\nSee {++a++} and {++b++}.', ['addition: a', 'addition: b']],
-    ['a deletion\'s opener in a code span', 'A `{--` b.\n\nSee {--a--} and {--b--}.', ['deletion: a', 'deletion: b']],
-    ['a substitution\'s opener in a code span', 'A `{~~` b.\n\nSee {~~a~>c~~} and {~~b~>d~~}.', ['old: a', 'new: c', 'old: b', 'new: d']],
-    ['a critic highlight\'s opener in a code span', 'A `{==` b.\n\nSee {==a==} and {==b==}.', ['critic: a', 'critic: b']],
-    ['an insertion\'s opener in a fenced block', '```\n{++\n```\n\nSee {++a++} and {++b++}.', ['addition: a', 'addition: b']],
-    ['a critic highlight\'s opener in a fenced block', '```\n{==\n```\n\nSee {==a==} and {==b==}.', ['critic: a', 'critic: b']],
+    ['an opener and a closer in a table\'s cells', '| a | b |\n|---|---|\n| ==x | y== |', []],
+    ['an == before a paragraph with highlights and a code span', 'x == y\n\n`code` ==a== and ==b==', ab],
+    // Its paragraph's == that export reads as text closed it before
+    ['an == before an equation that holds one', 'x == y\n\n$a == b$ ==real==', ['yellow: ==real==']],
+    ['an == before a link whose destination holds one', 'x == y\n\n[l](u==v) ==real==', ['yellow: ==real==']],
+    ['an == before an HTML comment that holds one', 'x == y\n\na <!-- == --> ==real==', ['yellow: ==real==']],
   ])('reads %s as export does', (_name, text, expected) => {
     expect(painted(text)).toEqual(expected);
   });
@@ -551,7 +549,21 @@ describe('Editor decorations pair no == or opener in code, nor a highlight past 
     ['a highlight that holds a code span', '==a `b` c==', []],
     ['an insertion that holds a code span', '{++a `b` c++}', []],
     ['an insertion whose closer is in a code span', '{++a `x++}` b++} {++c++}', ['addition: c']],
+    // Where a paragraph holds an == that export reads as text, as one in
+    // code, the highlights the editor read before, in that paragraph
+    ['an == in code before an HTML comment that holds one', '`x == y` <!-- == --> ==real==', ['yellow: ==real==']],
+    ['an == before a paragraph that holds one in code', 'x == y\n\n`==` ==real==', ['yellow: ==real==']],
+    ['an insertion and a comment after an == in code', 'a `c== ` {>> `==a` {++b++} {>>b<<} c', ['addition: b', 'comment: b']],
   ])('reads %s as before', (_name, text, expected) => {
+    expect(painted(text)).toEqual(expected);
+  });
+
+  // An == or an opener in code still pairs as before, so export and the
+  // preview read a and b in each, where the editor reads as before
+  it.each<[string, string, string[]]>([
+    ['an == in a code span before highlights in its paragraph', 'A `x == y` b ==a== and ==b==.', ['yellow: == and ==']],
+    ['an insertion\'s opener in a code span', 'A `{++` b.\n\nSee {++a++} and {++b++}.', ['addition: b']],
+  ])('still reads %s as before', (_name, text, expected) => {
     expect(painted(text)).toEqual(expected);
   });
 
@@ -564,6 +576,9 @@ describe('Editor decorations pair no == or opener in code, nor a highlight past 
     ['many code spans holding ==, each before a highlight', n => 'A `x == y` b ==a==.\n'.repeat(n)],
     ['many code spans before many highlights', n => '`x` '.repeat(n) + '\n\n' + '==a== '.repeat(n)],
     ['many CriticMarkup openers with no closer in code', n => 'a `{++` `{--` `{~~` `{==` `{>>` b\n'.repeat(n) + '{++c++}'],
+    ['many table rows with highlights across cells', n => '| a | b |\n|---|---|\n' + '| ==x | y== and ==z== |\n'.repeat(n)],
+    ['many paragraphs that hold an == in code, each after a lone ==', n => 'x == y\n\n`==` ==a==\n\n'.repeat(n)],
+    ['many paragraphs that hold an == after a <, a [ or a $', n => 'x == y\n\na <b ==c [d ==e] $f == g\n\n'.repeat(n)],
   ])('decorates %s in linear time', (_name, input) => {
     const text = input(100_000);
     expect(fastestRun(() => editorDecorationRanges(text, 'yellow'))).toBeLessThan(1000);
@@ -571,12 +586,15 @@ describe('Editor decorations pair no == or opener in code, nor a highlight past 
 
   it('reads what those texts hold', () => {
     expect(painted('If x == y then.\n\n'.repeat(3) + 'See ==a==.')).toEqual(['yellow: ==a==']);
-    expect(painted('A `x == y` b ==a==.\n'.repeat(2))).toEqual(['yellow: ==a==', 'yellow: ==a==']);
-    expect(painted('a `{++` `{--` `{~~` `{==` `{>>` b\n'.repeat(2) + '{++c++}')).toEqual(['addition: c']);
+    expect(painted('A `x == y` b ==a==.\n'.repeat(2))).toEqual(['yellow: ==a==']);
+    expect(painted('a `{++` `{--` `{~~` `{==` `{>>` b\n'.repeat(2) + '{++c++}')).toEqual([]);
+    expect(painted('| a | b |\n|---|---|\n' + '| ==x | y== and ==z== |\n'.repeat(2))).toEqual(['yellow: == and ==', 'yellow: == and ==']);
+    expect(painted('x == y\n\n`==` ==a==\n\n'.repeat(2))).toEqual(['yellow: ==a==', 'yellow: ==a==']);
+    expect(painted('x == y\n\na <b ==c [d ==e] $f == g\n\n'.repeat(2))).toEqual(['yellow: ==e] $f ==', 'yellow: ==e] $f ==']);
   });
 });
 
-describe('Editor decorations read the blocks a span over lines joins, and pass a span in code in a highlight', () => {
+describe('Editor decorations read the blocks a span over lines joins', () => {
   type Range = { start: number; end: number };
   /** What the editor paints, in document order (see the describe above) */
   const painted = (text: string) => {
@@ -598,7 +616,7 @@ describe('Editor decorations read the blocks a span over lines joins, and pass a
   // so the lines after it go on in its paragraph, where a parse of the text
   // reads a heading or a table. A span in code in a highlight is text to
   // them, whose closer comes after it; read as text to its }, the
-  // highlight's scan ended there, and its closing == opened the next
+  // highlight's scan would end there, and its closing == open the next
   it.each<[string, string, string[]]>([
     ['a highlight after an insertion over a heading\'s line', '{++a\n# b++} ==c\nd==', ['addition: a\n# b', 'yellow: ==c\nd==']],
     ['a highlight after a comment over a heading\'s line', '{>>a\n# b<<} ==c\nd==', ['comment: a\n# b', 'yellow: ==c\nd==']],
@@ -612,9 +630,6 @@ describe('Editor decorations read the blocks a span over lines joins, and pass a
     ['the highlight after one that holds an opener in code whose span ends past it', '==a `{++b` c++} d== ==e==', ['yellow: ==e==']],
     ['an insertion in an HTML block after an opener in code', '```{++```\n<!--{++b++}', []],
     ['a critic highlight in a link\'s definition after an opener in code', '[1]:`{==`{==c==}', []],
-    // As export reads them, where before an opener in code took the closer
-    ['the highlight after one whose == comes before an opener\'s span ends in code', '==a `{++` b== c ++} ==d==', ['yellow: ==d==']],
-    ['the highlight after one that holds an == in code', '==a `{++b==c++}` d== e ==f==', ['yellow: == e ==']],
   ])('reads %s as export does', (_name, text, expected) => {
     expect(painted(text)).toEqual(expected);
   });
@@ -649,7 +664,7 @@ describe('Editor decorations read the blocks a span over lines joins, and pass a
   });
 });
 
-describe('Editor decorations read as before where export may read the text otherwise', () => {
+describe('Editor decorations read as before where export may read the blocks otherwise', () => {
   type Range = { start: number; end: number };
   /** What the editor paints, in document order (see the describe above) */
   const painted = (text: string) => {
@@ -672,7 +687,7 @@ describe('Editor decorations read as before where export may read the text other
   // across an HTML block, which export reads, and a highlight before a span
   // across a table's rows, which preprocessing leaves as it is, so export
   // reads each row on its own. And a span after code spans whose backticks
-  // the parse pairs across blocks, which a comment from code hid before
+  // the parse pairs across blocks
   it.each<[string, string, string[]]>([
     ['an insertion on a note\'s definition\'s later line', 'See[^1].\n\n[^1]: https://example.com\n    "{++added++}"', ['addition: added']],
     ['an insertion after a backtick a code span\'s parse pairs across an HTML block', 'Before `\n<div>\n</div>\n\n` {++added++}\n# After `', ['addition: added']],
@@ -681,11 +696,10 @@ describe('Editor decorations read as before where export may read the text other
     expect(painted(text)).toEqual(expected);
   });
 
-  // Where neither what the editor reads nor what it read before starts or
-  // ends in such a block, but what it read before held one
+  // Where neither the opener nor the closer either reading takes is in such
+  // a block, though what the editor read before held one
   it.each<[string, string, string[]]>([
     ['an == in a paragraph before an HTML comment\'s block and a paragraph with highlights', 'If x == y.\n\n<!-- note -->\n\nSee ==a== and ==b==.', ['yellow: ==a==', 'yellow: ==b==']],
-    ['an insertion\'s opener in a code span before an HTML comment\'s block', '`{++`\n\n<!-- note -->\n\nSee {++a++}.', ['addition: a']],
     ['an opener and a closer an HTML block apart', '==b\n\n<div>\n\nc== d', []],
   ])('reads %s as export does', (_name, text, expected) => {
     expect(painted(text)).toEqual(expected);
@@ -712,13 +726,10 @@ describe('Editor decorations read as before where export may read the text other
     expect(painted('x == y\n\n==a==\n\n<div>\n==\n</div>\n\n==b==')).toEqual(['yellow: ==a==', 'yellow: ==b==']);
   });
 
-  // Where the span or the highlight that an opener in code or a lone ==
-  // took before ends in an HTML block, or, from code, holds one with an
-  // opener or an == in it, which export reads as HTML, as what it hid,
-  // export doesn't read either. And the highlights in a span's text that
-  // holds a code span whose backticks the parse pairs over a blank line, and
-  // a highlight that ends on a quote's lazy line, before which export ends
-  // the quote
+  // Where the highlight that a lone == took before ends in an HTML block,
+  // which export reads as HTML, or on a quote's lazy line, before which
+  // export ends the quote. And spans from code, and the highlights in a
+  // span's text, which the editor reads as before
   it.each<[string, string, string[]]>([
     ['an insertion in an HTML block after an opener in code', '`{++`\n\n<div>\n{++b++}\n</div>', []],
     ['a highlight in an HTML block after an == in code', '`x == y`\n\n<div>\n==h==\n</div>', []],
@@ -730,8 +741,8 @@ describe('Editor decorations read as before where export may read the text other
     expect(painted(text)).toEqual(expected);
   });
 
-  // Each opener is read as before once at most, and each unsure region's
-  // overlap found by binary search
+  // What the editor read before is read once at most, and each unsure
+  // region's overlap found by binary search
   it.each<[string, number, (n: number) => string]>([
     ['many openers in code before HTML blocks', 50_000, n => '`{++`\n\n<div>\n{++b++}\n</div>\n\n'.repeat(n)],
     ['many == in code before HTML blocks', 50_000, n => '`x == y`\n\n<div>\n==h==\n</div>\n\n'.repeat(n)],
