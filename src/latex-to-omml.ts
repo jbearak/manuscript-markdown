@@ -484,10 +484,13 @@ class Parser {
   numbered = false;
   /** The last \tag read and not yet written as a row's number */
   private tag?: EquationTag;
-  /** Whether the last group parseGroup read in braces had its closing one */
+  /** Whether the last group parseGroup read in braces had its closing one,
+   *  or read one past, which may be its own (see closersReadPast) */
   private groupClosed = true;
   /** The groups parseGroup is reading, in braces, around where it is now */
   private openGroups = 0;
+  /** The closing braces read past while a group was open (see parseToken) */
+  private closersReadPast = 0;
   /**
    * Whether \{ and \} export as written, backslash included, as before, in
    * the equation: where Word's text for it holds LaTeX anyway (see
@@ -597,10 +600,14 @@ class Parser {
     if (token?.type === 'lbrace') {
       this.consume(); // consume '{'
       this.openGroups++;
+      const readPast = this.closersReadPast;
       const content = this.parseExpression();
       this.openGroups--;
       const close = this.peek();
-      this.groupClosed = close?.type === 'rbrace';
+      // A group whose closing brace may have been read past inside it, as
+      // where \sum_i^2 takes an environment's \end, is read as closed, as
+      // before
+      this.groupClosed = close?.type === 'rbrace' || this.closersReadPast > readPast;
       if (this.groupClosed) {
         this.consume(); // consume '}'
       }
@@ -645,7 +652,9 @@ class Parser {
         // past, as by \sum_i^2 taking an environment's \end, is dropped,
         // as before
         case 'rbrace':
-          return this.openGroups > 0 ? '' : makeRun('}');
+          if (this.openGroups === 0) return makeRun('}');
+          this.closersReadPast++;
+          return '';
         case 'comment':
           return makeHiddenCommentRun(token.value);
         case 'line_continuation':
@@ -1092,6 +1101,7 @@ class Parser {
           parser.bracesAsText = this.bracesAsText;
           parser.openGroups = this.openGroups;
           const omml = parser.parseExpression(false);
+          this.closersReadPast += parser.closersReadPast;
           this.tag = parser.tag ?? this.tag;
           return omml;
         }

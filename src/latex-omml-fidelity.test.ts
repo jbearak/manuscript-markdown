@@ -2847,15 +2847,17 @@ describe('a brace in an equation', () => {
 
   // A group's own closing brace, read past while the group is open, as
   // where \sum_i^2 takes the environment's \end for its body, is dropped,
-  // as on main
+  // and the group is read as closed, as on main
   test.each([
     ['\\boxed{\\begin{matrix}\\sum_i^2\\end{matrix}}', '\\boxed{\\begin{matrix} \\sum_i^2 \\end{matrix}}'],
     ['\\boxed{\\begin{matrix}\\sum_i^2{}\\end{matrix}}', '\\boxed{\\begin{matrix} \\sum_i^2 \\end{matrix}}'],
     ['{\\left( x } \\right)}', '(x)'],
-  ])('a closing brace read past in an open group, in %s, is dropped, as on main', async (latex, back) => {
-    expect((await equations(inline(latex))).map(shown).join('')).not.toContain('}');
+    ['{\\begin{matrix}\\sum_i^2\\end{matrix}}', '\\begin{matrix} \\sum_i^2 \\end{matrix}'],
+    ['{ {\\begin{matrix}\\sum_i^2\\end{matrix}}', '\\begin{matrix} \\sum_i^2 \\end{matrix}'],
+  ])('a closing brace read past in an open group, in %s, shows no brace, as on main', async (latex, back) => {
+    expect((await equations(inline(latex))).map(shown).join('')).not.toMatch(/[{}]/);
     expect((await convertDocx((await convertMdToDocx(inline(latex))).docx)).markdown).toBe(inline(back));
-    expect((await equations(inline(back))).map(shown).join('')).not.toContain('}');
+    expect((await equations(inline(back))).map(shown).join('')).not.toMatch(/[{}]/);
   });
 
   // A backslash before it in Word's text, as export wrote for \{ before, or
