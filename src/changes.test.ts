@@ -695,7 +695,6 @@ describe('Navigation pairs no == or opener in code, nor a highlight past its par
     ['a comment\'s opener in a code span', 'A `{>>` b.\n\nSee {>>a<<} and {>>b<<}.', ['{>>a<<}', '{>>b<<}']],
     ['a comment with an ID\'s opener in a code span', 'A `{#c1>>` b.\n\nSee {#c1>>a<<} and {#c2>>b<<}.', ['{#c1>>a<<}', '{#c2>>b<<}']],
     ['an HTML comment\'s opener in a code span', 'A `<!--` b.\n\nSee <!-- a --> and <!-- b -->.', ['<!-- a -->', '<!-- b -->']],
-    ['a strikethrough\'s ~~ in a code span', 'A `~~` b.\n\nSee ~~a~~ and ~~b~~.', ['~~a~~', '~~b~~']],
     ['an insertion\'s opener in a fenced block', '```\n{++\n```\n\nSee {++a++} and {++b++}.', ['{++a++}', '{++b++}']],
     ['a critic highlight\'s opener in a fenced block', '```\n{==\n```\n\nSee {==a==} and {==b==}.', ['{==a==}', '{==b==}']],
   ])('reads %s as export does', (_name, text, expected) => {
@@ -738,5 +737,62 @@ describe('Navigation pairs no == or opener in code, nor a highlight past its par
     expect(stops('If x == y then.\n\n'.repeat(3) + 'See ==a==.')).toEqual(['==a==']);
     expect(stops('A `x == y` b ==a==.\n'.repeat(2))).toEqual(['==a==', '==a==']);
     expect(stops('a `{++` `{--` `{~~` `{==` `{>>` `{#c1>>` `<!--` b\n'.repeat(2) + '{++c++}')).toEqual(['{++c++}']);
+  });
+});
+
+describe('Navigation reads the blocks a span over lines joins, and a span in code as before', () => {
+  /** The text of each range navigation stops at, as getAllMatches finds them */
+  const stops = (text: string) => navigationRanges(combinedPattern, text).map(({ start, end }) => text.slice(start, end));
+
+  // Export and the preview join a span's lines before they read the blocks,
+  // so the lines after it go on in its paragraph, where a parse of the text
+  // reads a heading or a table. A bare ~~ after a code span or block that
+  // holds a ~~ or a {~~ took the ~~ of a {~~ after it as its closer, where
+  // the match from the code took it before
+  it.each<[string, string, string[]]>([
+    ['a highlight after an insertion over a heading\'s line', '{++a\n# b++} ==c\nd==', ['{++a\n# b++}', '==c\nd==']],
+    ['a highlight after a comment over a heading\'s line', '{>>a\n# b<<} ==c\nd==', ['{>>a\n# b<<}', '==c\nd==']],
+    ['a highlight after an insertion over a table\'s rows', '{++a\n| b |\n| - |\n++} ==c\nd==', ['{++a\n| b |\n| - |\n++}', '==c\nd==']],
+    ['a highlight after an insertion over a heading\'s line, with \\r\\n', '{++a\r\n# b++} ==c\r\nd==', ['{++a\r\n# b++}', '==c\r\nd==']],
+    ['a substitution after a bare ~~ in code', '    ~~\n~~{~~~>n~~}', ['{~~~>n~~}']],
+    ['a substitution after a {~~ in code whose span ends past it', '    {~~\n~~}{~~~>n~~}', ['{~~~>n~~}']],
+    ['an insertion in an HTML block after an opener in code', '```{++```\n<!--{++b++}', []],
+    ['a critic highlight in a link\'s definition after an opener in code', '[1]:`{==`{==c==}', []],
+    // As export reads them, where before a span or a highlight in a block
+    // of no Markdown was a stop
+    ['an insertion and a highlight in an HTML block', '<div>\n{++a++} ==b==\n</div>', []],
+    ['an insertion in a link\'s definition', '[1]: {++a++}', []],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  // As before
+  it.each<[string, string, string[]]>([
+    ['a highlight after an insertion over a list item\'s line', '{++a\n- b++} ==c\nd==', ['{++a\n- b++}', '==c\nd==']],
+    ['a bare ~~ in a code span, which takes the next ~~', 'A `~~` b.\n\nSee ~~a~~ and ~~b~~.', ['~~ and ~~']],
+    ['a substitution wholly in a code span', '`{~~~~}`{~~~>n~~}', ['{~~~>n~~}']],
+    ['an HTML comment\'s block', '<!--\n{++a++}\n-->', ['<!--\n{++a++}\n-->']],
+    ['an insertion in a note\'s definition, which export reads in the note', '[^1]: {++a++}', ['{++a++}']],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  // The blocks are read from what preprocessing writes, by offsets it maps
+  // once, and each span in code from its closer, found by binary search
+  it.each<[string, number, (n: number) => string]>([
+    ['many substitutions\' openers in code whose spans end past it', 100_000, n => 'a `{~~` b\n'.repeat(n) + '~~}'],
+    ['many spans wholly in code', 100_000, n => '`{~~a~~}` '.repeat(n)],
+    ['many spans over lines', 50_000, n => '{++a\n# b++} ==c\nd==\n\n'.repeat(n)],
+    ['many HTML blocks and links\' definitions', 50_000, n => '<div>\n==a== {++b++}\n</div>\n\n[l]: u\n\n'.repeat(n)],
+  ])('finds the stops in %s in linear time', (_name, n, input) => {
+    const text = input(n);
+    expect(fastestRun(() => navigationRanges(combinedPattern, text))).toBeLessThan(1000);
+  }, 120000);
+
+  it('reads what those texts hold', () => {
+    expect(stops('a `{~~` b\n'.repeat(2) + '~~}')).toEqual([]);
+    expect(stops('`{~~a~~}` '.repeat(2))).toEqual([]);
+    expect(stops('{++a\n# b++} ==c\nd==\n\n'.repeat(2))).toEqual(['{++a\n# b++}', '==c\nd==', '{++a\n# b++}', '==c\nd==']);
+    expect(stops('<div>\n==a== {++b++}\n</div>\n\n[l]: u\n\n'.repeat(2))).toEqual([]);
   });
 });

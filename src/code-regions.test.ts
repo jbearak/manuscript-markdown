@@ -6,7 +6,6 @@ import {
 	codeOverlapTest,
 	computeCodeRegions,
 	computeMarkdownRegions,
-	editorBlocks,
 	formatHighlightLimit,
 	isInsideCodeRegion,
 	overlapsCodeRegion,
@@ -238,23 +237,6 @@ describe('codeOverlapTest', () => {
 	});
 });
 
-describe('editorBlocks', () => {
-	test('reads code where computeCodeRegions finds it', () => {
-		const text = 'a `x == y` b\r\n\r\n```\n{++\n```\n\n    keep if x == 1\n';
-		const blocks = editorBlocks(text);
-		expect(blocks.codeRegions).toEqual(computeCodeRegions(text));
-		const code = [...text].map((_, offset) => blocks.inCode(offset) ? text[offset] : '.').join('');
-		expect(code).toBe('..`x == y`......```\n{++\n```..    keep if x == 1.');
-	});
-
-	test('reads a paragraph\'s end where formatHighlightLimit does', () => {
-		const text = '# a\nb ==\nc\n\n- d\n';
-		const blocks = editorBlocks(text);
-		const limitAt = formatHighlightLimit(text, computeMarkdownRegions(text, { inlineBlocks: true }).inlineBlocks);
-		for (let offset = 0; offset <= text.length; offset++) expect(blocks.limitAt(offset)).toBe(limitAt(offset));
-	});
-});
-
 describe('formatHighlightLimit', () => {
 	/** The text from each offset to the limit at it */
 	const reach = (text: string) => {
@@ -315,6 +297,28 @@ describe('computeMarkdownRegions with tables', () => {
 		const { tableRegions } = computeMarkdownRegions(text, { includeTables: true });
 		expect(tableRegions.map(region => text.slice(region.start, region.end)))
 			.toEqual(['a | b\n--- | ---\nc | d\n', '> x | y\n> --- | ---\n> z | w']);
+	});
+});
+
+describe('computeMarkdownRegions with definitions', () => {
+	const definitions = (text: string, linkCheck?: (url: string) => boolean) => computeMarkdownRegions(text, { definitions: true, linkCheck }).definitionRegions
+		.map(region => text.slice(region.start, region.end));
+
+	test('holds each line no block holds, as a link\'s definition, in a quote and a list item too', () => {
+		expect(definitions('[a]: u\n[b]: v "t"\n\nText\n\n> [c]: w\n\n- [d]: x\n- y\n')).toEqual(['[a]: u\n', '[b]: v "t"\n', '> [c]: w\n', '- [d]: x\n']);
+		expect(computeMarkdownRegions('[a]: u\n').definitionRegions).toEqual([]);
+	});
+
+	test('holds no paragraph, heading, table, code, HTML block or rule, nor a blank line', () => {
+		expect(definitions('a\n[b]: u\n\n# h\n\n| t |\n|---|\n\n    code\n\n```\nf\n```\n\n---\n\n  \t\n')).toEqual([]);
+		expect(computeMarkdownRegions('<div>\n</div>\n', { html: 'all', definitions: true }).definitionRegions).toEqual([]);
+	});
+
+	test('reads a URL that linkCheck rejects as no link\'s', () => {
+		expect(definitions('[a]: u!x\n', url => !url.includes('!'))).toEqual([]);
+		expect(definitions('[a]: u!x\n', () => true)).toEqual(['[a]: u!x\n']);
+		// And leaves the parser's own check as it was
+		expect(definitions('[a]: u!x\n')).toEqual(['[a]: u!x\n']);
 	});
 });
 

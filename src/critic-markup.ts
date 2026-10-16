@@ -13,6 +13,17 @@ export const PARA_PLACEHOLDER = CRITIC_BREAK_SENTINEL + 'PARA' + CRITIC_BREAK_SE
 export const LINE_PLACEHOLDER = CRITIC_BREAK_SENTINEL + 'LINE' + CRITIC_BREAK_SENTINEL;
 const CRITIC_BREAK_PLACEHOLDER_RE = new RegExp(CRITIC_BREAK_SENTINEL + '(?:PARA|LINE)' + CRITIC_BREAK_SENTINEL, 'g');
 
+/** A placeholder, as it is or as normalizeLink encodes it before
+ *  validateLink reads it, but not the sentinel alone, which a URL may hold */
+const PLACEHOLDER_IN_LINK_RE = new RegExp([CRITIC_BREAK_SENTINEL, encodeURI(CRITIC_BREAK_SENTINEL)]
+  .map(sentinel => sentinel + '(?:PARA|LINE)' + sentinel).join('|'));
+
+/** Whether a link's URL holds a placeholder preprocessCriticMarkup wrote,
+ *  which no link's does (see criticBreaksEndLinks) */
+export function linkHoldsCriticBreak(url: string): boolean {
+  return PLACEHOLDER_IN_LINK_RE.test(url);
+}
+
 /** End a link linkify finds at a break preprocessCriticMarkup wrote as a
  * placeholder, as at the line end it stands for. Its letters, as any but a
  * space, went on a URL before it, so https://e.com{++a, a line break and
@@ -30,12 +41,8 @@ export function criticBreaksEndLinks(md: MarkdownIt): void {
   linkify.test = text => test.call(linkify, spaced(text));
   linkify.match = text => match.call(linkify, spaced(text));
   linkify.matchAtStart = text => matchAtStart.call(linkify, spaced(text));
-  // A placeholder, as it is or as normalizeLink encodes it before
-  // validateLink reads it, but not the sentinel alone, which a URL may hold
-  const placeholderIn = new RegExp([CRITIC_BREAK_SENTINEL, encodeURI(CRITIC_BREAK_SENTINEL)]
-    .map(sentinel => sentinel + '(?:PARA|LINE)' + sentinel).join('|'));
   const validateLink = md.validateLink;
-  md.validateLink = url => !placeholderIn.test(url) && validateLink.call(md, url);
+  md.validateLink = url => !linkHoldsCriticBreak(url) && validateLink.call(md, url);
   const restoreTitles = (tokens: readonly Token[]) => {
     for (const token of tokens) {
       const title = token.type === 'link_open' || token.type === 'image' ? token.attrGet('title') : null;
@@ -834,6 +841,108 @@ export function preprocessCriticMarkupWithLines(markdown: string, moveLeadingBre
   const { output, moved, edits } = criticPreprocessed(markdown, moveLeadingBreaks);
   if (!moved) return { output, lines: edits.length > 0 ? linesAfterEdits(markdown, edits) : sameLines(lineCount(markdown)) };
   return { output, lines: throughLines(linesAfterEdits(moved.source, edits), linesAfterEdits(markdown, moved.edits)) };
+}
+
+/** The Markdown as preprocessCriticMarkup writes it, and for each of its
+ *  offsets, and one past its end, the offset of `markdown` it comes from,
+ *  in order, or none where it writes `markdown` as it is. A copied
+ *  character comes from its own offset. A placeholder comes from the line
+ *  end it stands for, the first of a blank line's, and a blank line put in
+ *  before an opener moved past its line's end from the opener. So a block
+ *  markdown-it reads in it can be read in `markdown`: the editor reads
+ *  highlights and code where export and the preview do (see editorBlocks in
+ *  editor-blocks.ts). In linear time. */
+export function preprocessCriticMarkupWithOffsets(markdown: string): { output: string; offsets?: Int32Array } {
+  const { output, moved, edits } = criticPreprocessed(markdown, true);
+  if (!moved && edits.length === 0) return { output };
+  const source = moved?.source ?? markdown;
+  const offsets = offsetsAfterEdits(source, edits, output.length, edit => spanTextOffsets(source, edit));
+  if (moved) {
+    const movedOffsets = offsetsAfterEdits(markdown, moved.edits, source.length, edit => movedOpenerOffsets(markdown, edit));
+    for (let at = 0; at < offsets.length; at++) offsets[at] = movedOffsets[offsets[at]];
+  }
+  return { output, offsets };
+}
+
+/** For a text made from `input` by `edits`, in order and apart, of
+ *  `length`, the offset of `input` each of its offsets, and one past its
+ *  end, comes from: a copied character's own, and for each character an
+ *  edit writes, the offset in the text it replaces of `inner`'s, in order */
+function offsetsAfterEdits(input: string, edits: readonly LineEdit[], length: number, inner: (edit: LineEdit) => ArrayLike<number>): Int32Array {
+  const offsets = new Int32Array(length + 1);
+  let at = 0;
+  let cursor = 0;
+  for (const edit of edits) {
+    for (; cursor < edit.start; cursor++) offsets[at++] = cursor;
+    const written = inner(edit);
+    for (let k = 0; k < edit.text.length; k++) offsets[at++] = edit.start + written[k];
+    cursor = edit.end;
+  }
+  for (; cursor < input.length; cursor++) offsets[at++] = cursor;
+  offsets[at] = input.length;
+  return offsets;
+}
+
+/** For an opener moveLeadingBreakOutsideCritic moved past its line's end,
+ *  `edit`, the offset in the text it replaces, the opener, its line end and
+ *  the next line's prefix, that each character it writes comes from: the
+ *  line end and prefix put before the opener from the opener, the opener's
+ *  from its own, and the prefix after it from the prefix */
+function movedOpenerOffsets(markdown: string, edit: LineEdit): number[] {
+  const at = edit.text.indexOf(markdown.slice(edit.start, edit.start + 3));
+  const length = edit.end - edit.start;
+  return Array.from(edit.text, (_char, k) => k < at ? 0 : k < at + 3 ? k - at : length - (edit.text.length - k));
+}
+
+/** For a span's text that criticPreprocessed wrote, `edit` of `source`, the
+ *  offset in the span's text that each character it writes comes from (see
+ *  preprocessCriticMarkupWithOffsets), read as it writes them: the quote
+ *  markers of each line but the first taken off, as
+ *  stripQuoteContinuationPrefixes does, then each line end in a
+ *  placeholder, as protectLineBreaks writes one. Where those differ from
+ *  what it wrote, which they shouldn't, each comes from its share of it. */
+function spanTextOffsets(source: string, edit: LineEdit): number[] {
+  const content = source.slice(edit.start, edit.end);
+  const depth = quoteDepthAt(source, edit.start);
+  // The offsets of the characters the markers leave
+  const kept: number[] = [];
+  let at = 0;
+  while (at < content.length && content.charCodeAt(at) !== 0x0A) kept.push(at++);
+  const isSpaceOrTab = (k: number, end: number) => k < end && (content.charCodeAt(k) === 0x20 || content.charCodeAt(k) === 0x09);
+  while (at < content.length) {
+    kept.push(at++);
+    let end = content.indexOf('\n', at);
+    if (end === -1) end = content.length;
+    // Each of `depth` markers, /^[ \t]*>[ \t]?/, or none where one is missing
+    let from = at;
+    for (let level = 0; level < depth; level++) {
+      let k = from;
+      while (isSpaceOrTab(k, end)) k++;
+      if (k >= end || content.charCodeAt(k) !== 0x3E) { from = at; break; }
+      from = isSpaceOrTab(k + 1, end) ? k + 2 : k + 1;
+    }
+    for (let k = from; k < end; k++) kept.push(k);
+    at = end;
+  }
+  const offsets: number[] = [];
+  let text = '';
+  for (let k = 0; k < kept.length; k++) {
+    if (content.charCodeAt(kept[k]) !== 0x0A) {
+      text += content[kept[k]];
+      offsets.push(kept[k]);
+      continue;
+    }
+    // A blank line, /\n[ \t]*\n/, or a line end
+    let next = k + 1;
+    while (next < kept.length && (content.charCodeAt(kept[next]) === 0x20 || content.charCodeAt(kept[next]) === 0x09)) next++;
+    const blank = next < kept.length && content.charCodeAt(kept[next]) === 0x0A;
+    const placeholder = blank ? PARA_PLACEHOLDER : LINE_PLACEHOLDER;
+    text += placeholder;
+    for (let p = 0; p < placeholder.length; p++) offsets.push(kept[k]);
+    if (blank) k = next;
+  }
+  if (text === edit.text) return offsets;
+  return Array.from(edit.text, (_char, k) => Math.floor(k * content.length / edit.text.length));
 }
 
 /** The Markdown as preprocessCriticMarkup writes it, from the Markdown with

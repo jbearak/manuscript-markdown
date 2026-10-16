@@ -575,3 +575,80 @@ describe('Editor decorations pair no == or opener in code, nor a highlight past 
     expect(painted('a `{++` `{--` `{~~` `{==` `{>>` b\n'.repeat(2) + '{++c++}')).toEqual(['addition: c']);
   });
 });
+
+describe('Editor decorations read the blocks a span over lines joins, and pass a span in code in a highlight', () => {
+  type Range = { start: number; end: number };
+  /** What the editor paints, in document order (see the describe above) */
+  const painted = (text: string) => {
+    const all = editorDecorationRanges(text, 'yellow');
+    const named: Array<[string, Range]> = [
+      ...[...all.highlights].flatMap(([key, list]) => list.map(range => [key, range] as [string, Range])),
+      ...all.additions.map(range => ['addition', range] as [string, Range]),
+      ...all.deletions.map(range => ['deletion', range] as [string, Range]),
+      ...all.substitutionOld.map(range => ['old', range] as [string, Range]),
+      ...all.substitutionNew.map(range => ['new', range] as [string, Range]),
+      ...all.comments.map(range => ['comment', range] as [string, Range]),
+    ];
+    return named
+      .sort((a, b) => a[1].start - b[1].start || b[1].end - a[1].end)
+      .map(([name, range]) => name + ': ' + text.slice(range.start, range.end));
+  };
+
+  // Export and the preview join a span's lines before they read the blocks,
+  // so the lines after it go on in its paragraph, where a parse of the text
+  // reads a heading or a table. A span in code in a highlight is text to
+  // them, whose closer comes after it; read as text to its }, the
+  // highlight's scan ended there, and its closing == opened the next
+  it.each<[string, string, string[]]>([
+    ['a highlight after an insertion over a heading\'s line', '{++a\n# b++} ==c\nd==', ['addition: a\n# b', 'yellow: ==c\nd==']],
+    ['a highlight after a comment over a heading\'s line', '{>>a\n# b<<} ==c\nd==', ['comment: a\n# b', 'yellow: ==c\nd==']],
+    ['a highlight after an insertion over a table\'s rows', '{++a\n| b |\n| - |\n++} ==c\nd==', ['addition: a\n| b |\n| - |\n', 'yellow: ==c\nd==']],
+    ['a highlight after an insertion over a heading\'s line, with \\r\\n', '{++a\r\n# b++} ==c\r\nd==', ['addition: a\r\n# b', 'yellow: ==c\r\nd==']],
+    ['the highlight after one that holds an insertion in code', '==a `{++b++}` c==. Next ==d==.', ['yellow: ==d==']],
+    ['the highlight after one that holds a deletion in code', '==a `{--b--}` c== ==d==', ['yellow: ==d==']],
+    ['the highlight after one that holds a substitution in code', '==a `{~~b~>c~~}` d== ==e==', ['yellow: ==e==']],
+    ['the highlight after one that holds a comment in code', '==a `{>>b<<}` c== ==d==', ['yellow: ==d==']],
+    ['the highlight after one that holds a comment with an ID in code', '==a `{#x>>b<<}` c== ==d==', ['yellow: ==d==']],
+    ['the highlight after one that holds an opener in code whose span ends past it', '==a `{++b` c++} d== ==e==', ['yellow: ==e==']],
+    ['an insertion in an HTML block after an opener in code', '```{++```\n<!--{++b++}', []],
+    ['a critic highlight in a link\'s definition after an opener in code', '[1]:`{==`{==c==}', []],
+    // As export reads them, where before an opener in code took the closer,
+    // and a span or a highlight in a block of no Markdown was painted
+    ['the highlight after one whose == comes before an opener\'s span ends in code', '==a `{++` b== c ++} ==d==', ['yellow: ==d==']],
+    ['a highlight before an opener moved past its line\'s end', '==a x {++\nb++} c==', ['addition: \nb']],
+    ['an insertion and a highlight in an HTML block', '<div>\n{++a++} ==b==\n</div>', []],
+    ['an insertion in a link\'s definition', '[1]: {++a++}', []],
+    ['the highlight after one that holds an == in code', '==a `{++b==c++}` d== e ==f==', ['yellow: == e ==']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(painted(text)).toEqual(expected);
+  });
+
+  // As before, and as export and the preview read them
+  it.each<[string, string, string[]]>([
+    ['a highlight after an insertion over a list item\'s line', '{++a\n- b++} ==c\nd==', ['addition: a\n- b', 'yellow: ==c\nd==']],
+    ['a highlight after a fenced block a span\'s fence line opens', '==\n\n{--a\n--}\n```\n==\n```\n==l==', ['deletion: a\n', 'yellow: ==l==']],
+    ['a highlight after a code span after a span over lines', '==\n\n{--a\n--} `==`==l==', ['deletion: a\n', 'yellow: ==l==']],
+    ['an insertion in a note\'s definition, which export reads in the note', '[^1]: {++a++}', ['addition: a']],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(painted(text)).toEqual(expected);
+  });
+
+  // The blocks are read from what preprocessing writes, by offsets it maps
+  // once, and each span in code from its closer, found by binary search
+  it.each<[string, number, (n: number) => string]>([
+    ['many code spans holding spans in highlights', 100_000, n => '==a `{++b++}` c== '.repeat(n)],
+    ['many openers in code whose spans end past it, in highlights', 100_000, n => '==a `{++b` c '.repeat(n) + '++}'],
+    ['many spans over lines', 50_000, n => '{++a\n# b++} ==c\nd==\n\n'.repeat(n)],
+    ['many HTML blocks and links\' definitions', 50_000, n => '<div>\n==a== {++b++}\n</div>\n\n[l]: u\n\n'.repeat(n)],
+  ])('decorates %s in linear time', (_name, n, input) => {
+    const text = input(n);
+    expect(fastestRun(() => editorDecorationRanges(text, 'yellow'))).toBeLessThan(1000);
+  }, 120000);
+
+  it('reads what those texts hold', () => {
+    expect(painted('==a `{++b++}` c== '.repeat(2))).toEqual([]);
+    expect(painted('==a `{++b` c '.repeat(2) + '++}')).toEqual([]);
+    expect(painted('{++a\n# b++} ==c\nd==\n\n'.repeat(2))).toEqual(['addition: a\n# b', 'yellow: ==c\nd==', 'addition: a\n# b', 'yellow: ==c\nd==']);
+    expect(painted('<div>\n==a== {++b++}\n</div>\n\n[l]: u\n\n'.repeat(2))).toEqual([]);
+  });
+});

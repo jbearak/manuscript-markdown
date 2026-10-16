@@ -1,5 +1,6 @@
 import { criticCloserSearch, type CriticCloserSearch } from './critic-markup';
-import { codeOverlapTest, editorBlocks, type CodeRegion, type EditorBlocks } from './code-regions';
+import { codeOverlapTest, type CodeRegion } from './code-regions';
+import { editorBlocks, type EditorBlocks } from './editor-blocks';
 import { isEscapedAt } from './math-delimiters';
 
 // --- Implementation notes ---
@@ -31,10 +32,12 @@ import { isEscapedAt } from './math-delimiters';
 //   one side of a substitution, where export and the preview show it
 // - Comment token scope: use meta.comment* not comment.block* — comment.block suppresses
 //   editor features (bracket matching, auto-complete, snippets)
-// - editorDecorationRanges(): nothing opens in code, and a format highlight stays in its
-//   paragraph's text (see editorBlocks in code-regions.ts), as export and the preview
-//   read them. Keep it in step with navigationRanges in navigation-matches.ts. The
-//   grammar reads one line at a time, and no code span or fenced block
+// - editorDecorationRanges(): nothing opens in code, an HTML block or a link's
+//   definition, and a format highlight stays in its paragraph's text, as export and
+//   the preview read the blocks after CriticMarkup joins a span's lines (see
+//   editorBlocks in editor-blocks.ts). Keep it in step with navigationRanges in
+//   navigation-matches.ts. The grammar reads one line at a time, and no code span or
+//   fenced block
 
 /** Canonical color name → hex value mapping for Word highlight colors */
 export const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -440,18 +443,20 @@ export interface AllDecorationRanges {
 
 /**
  * The ranges to decorate in `text`. With `blocks` (see editorBlocks in
- * code-regions.ts), nothing opens in code: no CriticMarkup span, no format
- * highlight, and in a format highlight's text, no span but a critic
- * highlight, as export's search for its closing == reads a {== there and
- * no other opener. A format highlight outside CriticMarkup holds no text
- * past its paragraph's (see limitAt there), but for a span's, which reads
+ * editor-blocks.ts), nothing opens in code, nor in an HTML block or a
+ * link's definition, which hold no Markdown: no CriticMarkup span, no format
+ * highlight, and in a format highlight's text, a critic highlight, as
+ * export's search for its closing == reads a {== there, and another span
+ * only where reading it as text would end the scan short of export's
+ * closer (see readsCodeAsText). A format highlight outside CriticMarkup
+ * holds no text past its paragraph's (see limitAt there), but for a span's, which reads
  * as one run of text, whose end goes on in the paragraph there, as export
  * and the preview read a span over a blank line. One in a span's text reads
  * past it, as they read one there. Without `blocks`, as for
  * extractHighlightRanges, an opener in code opens, and a format highlight
  * reads to its closing == wherever that is.
  */
-export function extractAllDecorationRanges(text: string, defaultColor: string, blocks?: Pick<EditorBlocks, 'inCode' | 'limitAt'>): AllDecorationRanges {
+export function extractAllDecorationRanges(text: string, defaultColor: string, blocks?: Pick<EditorBlocks, 'inert' | 'limitAt'>): AllDecorationRanges {
   const resolvedDefault = VALID_COLOR_IDS.includes(defaultColor) ? defaultColor : 'yellow';
   // Each opener's closer, from one search of the text for each closer, as
   // each unclosed opener searched the rest of it
@@ -484,12 +489,42 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
     index > 0 &&
     index < boundEnd &&
     (opensCriticHighlight(index) || text.charCodeAt(index - 1) === 0x3D || isEscapedAt(text, index));
-  // Whether code holds `index`, where nothing opens (see blocks)
-  const inCode = (index: number): boolean => blocks !== undefined && blocks.inCode(index);
+  // Whether code, an HTML block or a link's definition holds `index`, where
+  // nothing opens (see blocks)
+  const inCode = (index: number): boolean => blocks !== undefined && blocks.inert(index);
   const isBlockedSuccessor = (indexAfterClose: number, boundEnd: number): boolean => {
     if (indexAfterClose >= boundEnd) return false;
     const ch = text.charCodeAt(indexAfterClose);
     return ch === 0x3D || ch === 0x7D;
+  };
+  /**
+   * Whether a format highlight's scan for its closer, which reads to
+   * `limit`, reads the { at `at` in code, whose next two characters are
+   * `d2` and `d3`, as text, as export reads it, rather than as the opener
+   * of a span it reads past whole, as before. Export's search reads code
+   * as text, to the first == in it or after it. The scan reads text up to
+   * a } or a lone =, where export's reads on, so a span in code is read as
+   * text only where that reaches the closing == first, as in
+   * ==a `{++` b== c ++}: where the first {, } or = after the opener is a
+   * closing == before the span's closer. Or where the span runs past the
+   * highlight's paragraph, which a span in code doesn't join. Otherwise,
+   * as for ==a `{++b++}` c==, the scan reads past the span, and the code's
+   * }, to c's ==, which export reads as the closer too.
+   */
+  const readsCodeAsText = (at: number, d2: number, d3: number, limit: number): boolean => {
+    let contentStart = at + 3;
+    let ci: number;
+    if (d2 === 0x2B && d3 === 0x2B) ci = closers.next('++}', contentStart);
+    else if (d2 === 0x2D && d3 === 0x2D) ci = closers.next('--}', contentStart);
+    else if (d2 === 0x7E && d3 === 0x7E) ci = closers.next('~~}', contentStart);
+    else if (d2 === 0x3E && d3 === 0x3E) ci = closers.matching(contentStart);
+    else if (d2 === 0x23 && (contentStart = detectCommentIdOpener(text, at, text.length)) !== -1) ci = closers.matching(contentStart);
+    else return true;
+    if (ci === -1 || ci + 3 > limit) return true;
+    // The first {, } or = after the opener, no further than the closer
+    let e = contentStart;
+    while (e < ci && text.charCodeAt(e) !== 0x7B && text.charCodeAt(e) !== 0x7D && text.charCodeAt(e) !== 0x3D) e++;
+    return e < ci && text.charCodeAt(e) === 0x3D && text.charCodeAt(e + 1) === 0x3D && !isBlockedSuccessor(e + 2, text.length);
   };
 
   /**
@@ -736,8 +771,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
               // One with no ==} after it is text, but its == closes no
               // highlight (see opensCriticHighlight), and its = ends [^}=]+
               break;
-            } else if (inCode(k)) {
-              // No other opens in code (see blocks)
+            } else if (inCode(k) && readsCodeAsText(k, d2, d3, limit)) {
+              // Text, as export reads code (see blocks)
             } else if (d2 === 0x3E && d3 === 0x3E) { // {>>
               const ci = closers.matching(k + 3);
               if (ci !== -1) {

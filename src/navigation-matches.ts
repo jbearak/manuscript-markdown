@@ -1,4 +1,7 @@
-import { codeOverlapTest, editorBlocks, type EditorBlocks } from './code-regions';
+import { codeOverlapTest } from './code-regions';
+import { criticCloserSearch, type CriticCloserSearch } from './critic-markup';
+import { isEscapedAt } from './math-delimiters';
+import { editorBlocks, type EditorBlocks } from './editor-blocks';
 
 /** Whether `ch` is a character of a comment's ID, [a-zA-Z0-9_-] */
 function isIdChar(ch: number): boolean {
@@ -25,14 +28,21 @@ function isIdChar(ch: number): boolean {
  * still searches the rest of the text, but only the last two ~~ of the text
  * can have none.
  *
- * With `blocks` (see editorBlocks in code-regions.ts), no match starts in
- * code, and a format highlight's match that runs past its paragraph's text
- * (see limitAt there), as past a blank line, is none: the scan goes on at
- * the character after its opener's first, as where the pattern doesn't
- * match. A match from an opener before code still reads the code's text
- * for its closer, as export's search does.
+ * With `blocks` (see editorBlocks in editor-blocks.ts), no CriticMarkup
+ * span's or format highlight's match starts in code, an HTML block or a
+ * link's definition, as export reads none there, nor an HTML comment's in
+ * code. A span wholly in code is passed whole, as before, and the ~~} of a
+ * {~~ in code whose span ends past it starts nothing, as that span's match
+ * took it before. A bare ~~'s match still starts in code, but at a {~~'s
+ * ~~, as before: one took the next ~~ after the code, which a bare ~~ after
+ * it would take, as one before a {~~, whose ~~ the pattern reads as its
+ * closer. And a format highlight's match that runs past its paragraph's
+ * text (see limitAt there), as past a blank line, is none: the scan goes on
+ * at the character after its opener's first, as where the pattern doesn't
+ * match. A match from an opener before code still reads the code's text for
+ * its closer, as export's search does.
  */
-export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<EditorBlocks, 'inCode' | 'limitAt'>): Array<{ start: number; end: number }> {
+export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<EditorBlocks, 'inCode' | 'inert' | 'inertEnd' | 'limitAt'>): Array<{ start: number; end: number }> {
   const sticky = new RegExp(pattern.source, pattern.flags.replace('g', '') + 'y');
   const lastAddition = text.lastIndexOf('++}');
   const lastDeletion = text.lastIndexOf('--}');
@@ -59,12 +69,63 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
     while (isIdChar(text.charCodeAt(end))) end++;
     return end > at + 2 && text.charCodeAt(end) === 0x3E && text.charCodeAt(end + 1) === 0x3E && lastComment < end + 2;
   };
+  // Whether the ~ at `at` is one of a {~~'s, whose { no backslash escapes
+  const isSubstitutionMarker = (at: number): boolean => {
+    const open = text.charCodeAt(at - 1) === 0x7B ? at - 1 : text.charCodeAt(at - 1) === 0x7E && text.charCodeAt(at - 2) === 0x7B ? at - 2 : -1;
+    return open !== -1 && text.charCodeAt(open + 1) === 0x7E && text.charCodeAt(open + 2) === 0x7E && !isEscapedAt(text, open);
+  };
+  // Each closer's offsets, for spans in code
+  let closers: CriticCloserSearch | undefined;
+  // The end of the pattern's match from the { at `at`: a span's, from its
+  // opener to the first closer of its kind after it, or a comment range's
+  // marker's, as {#id}, or -1 for none
+  const matchEnd = (at: number): number => {
+    const marker = text.charCodeAt(at + 1);
+    let closer: string | undefined;
+    let from = at + 3;
+    if (marker === text.charCodeAt(at + 2)) {
+      closer = marker === 0x2B ? '++}' : marker === 0x2D ? '--}' : marker === 0x7E ? '~~}' : marker === 0x3D ? '==}' : marker === 0x3E ? '<<}' : undefined;
+    } else if (marker === 0x23 || marker === 0x2F) { // {#id>>, {#id} or {/id}
+      let end = at + 2;
+      while (isIdChar(text.charCodeAt(end))) end++;
+      if (end === at + 2) return -1;
+      if (text.charCodeAt(end) === 0x7D) return end + 1;
+      if (marker !== 0x23 || text.charCodeAt(end) !== 0x3E || text.charCodeAt(end + 1) !== 0x3E) return -1;
+      closer = '<<}';
+      from = end + 2;
+    }
+    if (!closer) return -1;
+    closers ??= criticCloserSearch(text);
+    const closeAt = closers.next(closer, from);
+    return closeAt === -1 ? -1 : closeAt + 3;
+  };
+  // The ~~} of each {~~ in code whose span ends past the code, whose ~~
+  // the {~~'s match took, so starts no bare ~~'s, as before
+  const passedClosers = new Set<number>();
   const matches: Array<{ start: number; end: number }> = [];
   for (let at = 0; at < text.length; at++) {
     const ch = text.charCodeAt(at);
     if (ch !== 0x7B && ch !== 0x3D && ch !== 0x7E && ch !== 0x3C) continue; // { = ~ <
     if ((ch === 0x7B || ch === 0x3C) && unclosed(at)) continue;
-    if (blocks && blocks.inCode(at)) continue;
+    if (ch === 0x7E && (passedClosers.has(at) || passedClosers.has(at - 1))) continue;
+    // Nothing opens in code, an HTML block or a link's definition (see
+    // blocks), nor a {~~'s ~~ there, nor an HTML comment in code. A span
+    // wholly in code is passed whole, as before, so that no bare ~~ in it
+    // opens. Another bare ~~ there still does, as before
+    if (blocks && (ch === 0x7E ? isSubstitutionMarker(at) && blocks.inert(at)
+      : ch === 0x3C ? blocks.inCode(at) : blocks.inert(at))) {
+      if (ch !== 0x7B || isEscapedAt(text, at)) continue;
+      const end = matchEnd(at);
+      if (end === -1) continue;
+      if (end > blocks.inertEnd(at)) {
+        if (text.charCodeAt(at + 1) === 0x7E && text.charCodeAt(at + 2) === 0x7E) passedClosers.add(end - 3);
+        continue;
+      }
+      sticky.lastIndex = at;
+      const span = sticky.exec(text);
+      if (span !== null) at += span[0].length - 1;
+      continue;
+    }
     sticky.lastIndex = at;
     const match = sticky.exec(text);
     if (match === null) continue;
