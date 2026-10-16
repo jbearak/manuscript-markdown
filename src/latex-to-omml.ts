@@ -117,16 +117,17 @@ let equationBracesAsText: boolean | undefined;
 
 /**
  * `write()`, whose equations write \{ and \} as written if Word's text for
- * any of `views`, numbered in `display` math, holds LaTeX (see bracesAsText), as one equation: a tracked
- * change's accepted and rejected equations, which Word holds in one, in
- * place or replaced, and import reads as one.
+ * any of `views`, with its \tag as Word's number where `numbered`, holds
+ * LaTeX (see bracesAsText), as one equation: a tracked change's accepted
+ * and rejected equations, which Word holds in one, in place or replaced,
+ * and import reads as one.
  */
-export function withEquationBraces<T>(views: readonly string[], write: () => T, display = false): T {
+export function withEquationBraces<T>(views: readonly string[], write: () => T, numbered = false): T {
   const outer = equationBracesAsText;
   equationBracesAsText = undefined;
   const asText = views.some(view => /\\[{}]/.test(view)) ? views.some(view => {
     const parser = new Parser(tokenize(view));
-    parser.numbered = display;
+    parser.numbered = numbered;
     return parser.bracesAsText();
   }) : undefined;
   equationBracesAsText = asText;
@@ -1230,15 +1231,19 @@ class Parser {
         // {a}/{b} is Word's linear fraction, as import writes it, in math,
         // but where a script follows, which takes the {b} alone. In text or
         // a style's group, as \mathrm{{m}/{s}}, it's the characters
+        let first = this.pos + 1;
+        while (this.tokens[first]?.type === 'text' && this.tokens[first].value.trim() === '') first++;
+        const scriptFirst = this.tokens[first]?.type === 'caret' || this.tokens[first]?.type === 'underscore';
         const group = this.parseGroup();
         const slash = this.peek();
-        if (!this.groupClosed) {
+        if (!this.groupClosed && !scriptFirst) {
           // An opening brace with no closing one, as in x { y, opens a group
           // to the equation's end: the character, which import writes back
           // as \{, and then the group's content. It was dropped, as LaTeX's
           // error recovery closes the group at the end, so Word lost it. A
           // command's or a script's group, as \frac{a}{b's or x^{2's, is
-          // still closed there
+          // still closed there, and so is one a script starts, as {^2, as
+          // before, whose script has no base, where import's \{ would be one
           atoms.push(makeRun('{'), group);
         } else if (this.mode === 'math' && slash?.type === 'text' && slash.value === '/' && this.tokens[this.pos + 1]?.type === 'lbrace') {
           this.consume(); // consume '/'

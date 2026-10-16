@@ -2826,6 +2826,9 @@ describe('a brace in an equation', () => {
     // equation's end, as LaTeX's error recovery does
     ['a fraction\'s unclosed group', inline('\\frac{a}{b'), inline('\\frac{a}{b}'), 'ab'],
     ['a script\'s unclosed group', inline('x^{2'), inline('x^2'), 'x2'],
+    // Its script has no base, as where it's closed
+    ['an unclosed group a superscript starts', inline('{^2'), inline('^2'), '^2'],
+    ['an unclosed group a subscript starts, after a space', inline('{ _i'), inline('_i'), '_i'],
     // Word gets the comment as hidden text, after a zero-width space
     ['a brace in a comment', display('x % {\ny'), display('x % {\ny'), 'x\u200B % {\ny'],
   ])('%s comes back as on main, and again', async (_name, markdown, back, text) => {
@@ -2926,11 +2929,19 @@ describe('a brace in an equation', () => {
     ['display math', display('\\{x\\} \\tag{50\\%}')],
     ['a row of gather*', display('\\begin{gather*}\n\\{x\\} \\tag{50\\%} \\\\\ny\n\\end{gather*}')],
     ['a tracked change', display('{++a++} \\{x\\} \\tag{50\\%}')],
-  ])('\\{ and \\} before an equation number holding \\% in %s come back as on main, and again', async (_name, markdown) => {
+  ])('\\{ and \\} before an equation number holding \\%% in %s come back as on main, and again', async (_name, markdown) => {
     const once = await equations(markdown);
     const twice = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
     expect(twice).toBe(markdown);
     expect(await equations(twice)).toEqual(once);
+  });
+
+  // Word gets no number for a \tag in a change, so its \% doesn't count
+  test.each([
+    ['an insertion', display('\\{x\\} {++\\tag{50\\%}++}'), '{x} '],
+    ['a deletion', display('\\{x\\} {--\\tag{50\\%}--}'), '{x} '],
+  ])('\\{ and \\} before a \\tag holding \\%% in %s export as the brace', async (_name, markdown, text) => {
+    expect((await equations(markdown)).map(shown).join('')).toBe(text);
   });
 
   test('\\{ and \\} beside an insertion of a command export writes as text are tracked in place, as on main', async () => {
