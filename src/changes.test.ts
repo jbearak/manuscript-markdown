@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // We'll test the regex pattern directly since we can't import vscode in tests
 // This is the same pattern used in changes.ts
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
-const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<![{=])==([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Helper function to find all pattern matches in text
 function findAllPatterns(text: string): Array<{ start: number; end: number; matched: string }> {
@@ -467,6 +469,35 @@ describe('Property 7: Navigation regex matches colored highlights', () => {
     const doc = 'some ==text=== more';
     const matches = findAllPatterns(doc);
     expect(matches.length).toBe(0);
+  });
+});
+
+// An == after an odd run of backslashes opens no highlight, as export and
+// the preview read it: the last backslash escapes its first =. One before a
+// closing == escapes nothing, as in export.
+describe('Navigation regex skips an escaped highlight opener', () => {
+  it.each<[string, string, string[]]>([
+    ['an escaped opener before a highlight', 'a \\== b ==c==', ['==c==']],
+    ['an escaped opener', '\\==x==', []],
+    ['an opener after three backslashes', '\\\\\\==x== y', []],
+    ['an escaped opener of a colored highlight', 'x \\==a=={red} y', []],
+    ['the opener after an escaped one', '\\==a==b==', ['==b==']],
+    ['an escaped opener right after a highlight', '==a\\==\\==b==', ['==a\\==']],
+    ['a highlight', 'a ==x== b', ['==x==']],
+    ['a colored highlight', 'a ==x=={red} b', ['==x=={red}']],
+    ['a critic highlight', 'a {==x==} b', ['{==x==}']],
+    ['a highlight after an escaped backslash', 'a \\\\==x== b', ['==x==']],
+    ['a highlight after two escaped backslashes', 'a \\\\\\\\==x== b', ['==x==']],
+    ['a colored highlight after an escaped backslash', '\\\\==x=={red}', ['==x=={red}']],
+    ['a backslash before the closer, which escapes none', '==a\\== b', ['==a\\==']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(findAllPatterns(text).map(m => m.matched)).toEqual(expected);
+  });
+
+  it('is the pattern changes.ts scans with, as each other test copy is', () => {
+    for (const file of ['changes.ts', 'changes.property.test.ts', 'code-regions.test.ts', 'code-regions.property.test.ts']) {
+      expect(fs.readFileSync(path.join(__dirname, file), 'utf-8')).toContain(combinedPattern.toString());
+    }
   });
 });
 

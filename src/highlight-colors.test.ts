@@ -296,3 +296,44 @@ describe('Comment-with-ID {#id>>...<<} handling', () => {
     expect(text.slice(result.comments[0].start, result.comments[0].end)).toBe('comment');
   });
 });
+
+// An == after an odd run of backslashes opens no highlight, as export and the
+// preview read it: the last backslash escapes its first =. One before a
+// closing == escapes nothing, as in export.
+describe('Editor decorations skip an escaped highlight opener', () => {
+  /** The text of each format highlight, not critic, in document order */
+  const formatHighlights = (text: string, ranges: Map<string, Array<{ start: number; end: number }>>) =>
+    [...ranges.entries()]
+      .filter(([key]) => key !== 'critic')
+      .flatMap(([, list]) => list)
+      .sort((a, b) => a.start - b.start)
+      .map(range => text.slice(range.start, range.end));
+
+  it.each<[string, string, string[]]>([
+    ['an escaped opener before a highlight', 'a \\== b ==c==', ['==c==']],
+    ['an escaped opener', '\\==x==', []],
+    ['an opener after three backslashes', '\\\\\\==x== y', []],
+    ['an escaped opener of a colored highlight', 'x \\==a=={red} y', []],
+    ['the opener after an escaped one', '\\==a==b==', ['==b==']],
+    ['an escaped opener right after a highlight', '==a\\==\\==b==', ['==a\\==']],
+    ['an escaped opener in an insertion', '{++a \\==x== b++}', []],
+    ['an escaped opener around a comment', 'a \\==x {>>c<<} y== b', []],
+    ['a highlight', 'a ==x== b', ['==x==']],
+    ['a colored highlight', 'a ==x=={red} b', ['==x=={red}']],
+    ['a critic highlight', 'a {==x==} b', []],
+    ['a highlight after an escaped backslash', 'a \\\\==x== b', ['==x==']],
+    ['a highlight after two escaped backslashes', 'a \\\\\\\\==x== b', ['==x==']],
+    ['a colored highlight after an escaped backslash', '\\\\==x=={red}', ['==x=={red}']],
+    ['a highlight after an escaped backslash in an insertion', '{++\\\\==x==++}', ['==x==']],
+    ['a backslash before the closer, which escapes none', '==a\\== b', ['==a\\==']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(formatHighlights(text, extractHighlightRanges(text, 'yellow'))).toEqual(expected);
+    expect(formatHighlights(text, extractAllDecorationRanges(text, 'yellow').highlights)).toEqual(expected);
+  });
+
+  it('keeps a critic highlight\'s text', () => {
+    const text = 'a {==x==} \\==y== b';
+    expect((extractHighlightRanges(text, 'yellow').get('critic') ?? []).map(r => text.slice(r.start, r.end))).toEqual(['x']);
+    expect((extractAllDecorationRanges(text, 'yellow').highlights.get('critic') ?? []).map(r => text.slice(r.start, r.end))).toEqual(['x']);
+  });
+});

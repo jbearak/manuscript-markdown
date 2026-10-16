@@ -4,10 +4,19 @@ import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 // Combined pattern for all Manuscript Markdown syntax in a single regex
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
 // Colored format highlights ==text=={color} must come before plain ==text== to match greedily
-// Keep plain-highlight lookahead in sync with syntaxes/manuscript-markdown.json.
+// Keep plain-highlight lookarounds in sync with syntaxes/manuscript-markdown.json
+// and highlight-colors.ts (hlRe, isBlockedPredecessor). The test copies of this
+// pattern must equal it (see changes.test.ts).
 // AGENTS.md invariant: multi-line patterns may start mid-line for navigation;
 // preview requires line-start, so navigation intentionally remains more permissive.
-const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<![{=])==([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+// A plain highlight's == opens none after an odd run of backslashes, whose
+// last escapes its first =, as export and the preview read it (markdown-it's
+// escape rule): \==a== is text, \\==a== a highlight. Its closing == has no
+// such check, as export's has none. The lookbehind comes after the ==, so it
+// runs only where an == is. The grammar's patterns match the run of
+// backslashes instead: Oniguruma's lookbehind of no fixed length steps back to
+// the line's start at each == after an even run.
+const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Version-keyed cache for navigation match results (single-document cache)
 let cachedUri: string | undefined;
