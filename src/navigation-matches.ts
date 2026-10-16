@@ -1,3 +1,6 @@
+import { codeOverlapTest } from './code-regions';
+import { editorBlocks, type EditorBlocks } from './editor-blocks';
+
 /** Whether `ch` is a character of a comment's ID, [a-zA-Z0-9_-] */
 function isIdChar(ch: number): boolean {
   return (ch >= 0x30 && ch <= 0x39) || (ch >= 0x41 && ch <= 0x5A) || (ch >= 0x61 && ch <= 0x7A) || ch === 0x5F || ch === 0x2D;
@@ -22,8 +25,20 @@ function isIdChar(ch: number): boolean {
  * from its end, as the global exec's does. A bare ~~ with no ~~ after it
  * still searches the rest of the text, but only the last two ~~ of the text
  * can have none.
+ *
+ * With `blocks` (see editorBlocks in editor-blocks.ts), a format
+ * highlight's match that runs past its paragraph's text (see limitAt
+ * there), as past a blank line, is none: the scan goes on at the character
+ * after its opener's first, as where the pattern doesn't match. Where that
+ * text holds an == that export may read as text (see inertMarks there), a
+ * highlight's match is one the scan read before, as a match from an opener
+ * that export may read as text is (see inertOpener there): a highlight's
+ * match that the scan read before may have taken it. And where a
+ * highlight's opener or closer is in what export may read in other blocks
+ * (see unsure there), its match is one the scan read before, wherever it
+ * ends.
  */
-export function navigationMatches(pattern: RegExp, text: string): Array<{ start: number; end: number }> {
+export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<EditorBlocks, 'limitAt' | 'unsure' | 'inertMarks' | 'inertOpener'>): Array<{ start: number; end: number }> {
   const sticky = new RegExp(pattern.source, pattern.flags.replace('g', '') + 'y');
   const lastAddition = text.lastIndexOf('++}');
   const lastDeletion = text.lastIndexOf('--}');
@@ -50,17 +65,63 @@ export function navigationMatches(pattern: RegExp, text: string): Array<{ start:
     while (isIdChar(text.charCodeAt(end))) end++;
     return end > at + 2 && text.charCodeAt(end) === 0x3E && text.charCodeAt(end + 1) === 0x3E && lastComment < end + 2;
   };
+  // The end of each match the scan read before, by its start, found once
+  // where the scan first reads as before
+  let before: Map<number, number> | undefined;
+  // Whether the scan read the match from `at` to `end` before, or with no
+  // `end`, one from `at`
+  const readBefore = (at: number, end?: number): boolean => {
+    if (!before) {
+      before = new Map();
+      for (const match of navigationMatches(pattern, text)) before.set(match.start, match.end);
+    }
+    return end === undefined ? before.has(at) : before.get(at) === end;
+  };
   const matches: Array<{ start: number; end: number }> = [];
   for (let at = 0; at < text.length; at++) {
     const ch = text.charCodeAt(at);
     if (ch !== 0x7B && ch !== 0x3D && ch !== 0x7E && ch !== 0x3C) continue; // { = ~ <
     if ((ch === 0x7B || ch === 0x3C) && unclosed(at)) continue;
+    // A match that must be one the scan read before, from where it read
+    // none, is none, before the pattern runs on to a closer far off, as
+    // past many openers in code to the one closer after them (see blocks)
+    if (blocks && (ch === 0x3D ? blocks.inertMarks(at) || blocks.unsure(at, at + 1) : blocks.inertOpener(at)) && !readBefore(at)) continue;
     sticky.lastIndex = at;
     const match = sticky.exec(text);
     if (match === null) continue;
-    matches.push({ start: at, end: at + match[0].length });
+    const end = at + match[0].length;
+    // A format highlight's match, the only one that starts with an =, runs
+    // in its paragraph's text, and is one the scan read before where that
+    // holds an == that export may read as text, as a match from an opener
+    // that export may read as text is (see blocks)
+    if (blocks) {
+      if (ch === 0x3D && (blocks.unsure(at, at + 1) || blocks.unsure(end - 1, end))) {
+        if (!readBefore(at, end)) continue;
+      } else if (ch === 0x3D ? end > blocks.limitAt(at) || (blocks.inertMarks(at) && !readBefore(at, end)) : blocks.inertOpener(at) && !readBefore(at, end)) continue;
+    }
+    matches.push({ start: at, end });
     // Each alternative matches at least its opener and closer
-    at += match[0].length - 1;
+    at = end - 1;
   }
   return matches;
+}
+
+/**
+ * The ranges navigation stops at in `text`, as getAllMatches in changes.ts
+ * finds them with `pattern`, its combinedPattern: navigationMatches's with
+ * each format highlight held to its paragraph's text (see editorBlocks),
+ * without those that hold code, nor one in the last kept.
+ */
+export function navigationRanges(pattern: RegExp, text: string): Array<{ start: number; end: number }> {
+  const blocks = editorBlocks(text);
+  const holdsCode = codeOverlapTest(blocks.codeRegions);
+  const ranges: Array<{ start: number; end: number }> = [];
+  let lastKept: { start: number; end: number } | undefined;
+  for (const range of navigationMatches(pattern, text, blocks)) {
+    if (holdsCode(range.start, range.end)) continue;
+    if (lastKept && lastKept.start <= range.start && range.end <= lastKept.end) continue;
+    ranges.push(range);
+    lastKept = range;
+  }
+  return ranges;
 }

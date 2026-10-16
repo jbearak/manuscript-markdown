@@ -668,3 +668,63 @@ export function overlapsCodeRegion(start: number, end: number, regions: readonly
 	}
 	return false;
 }
+
+/**
+ * Whether a range [start, end) overlaps any of `regions`, sorted by start,
+ * as overlapsCodeRegion reads it, in time logarithmic in their number. A
+ * document's many ranges each stepped through every region before their
+ * end in overlapsCodeRegion, which took time in their number times the
+ * regions'.
+ */
+export function codeOverlapTest(regions: readonly CodeRegion[]): (start: number, end: number) => boolean {
+	// The largest end of each region and those before it, as a code span may
+	// hold a code block (see computeInlineCodeRegions)
+	const reach: number[] = [];
+	let max = -Infinity;
+	for (const r of regions) reach.push(max = Math.max(max, r.end));
+	return (start, end) => {
+		// The number of regions that start before the range's end
+		let lo = 0;
+		let hi = regions.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (regions[mid].start < end) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo > 0 && reach[lo - 1] > start;
+	};
+}
+
+/**
+ * For an offset of `text`, where the text that a format highlight opening
+ * there may hold ends: the end of the paragraph's, heading's or list item
+ * paragraph's text that holds the offset, of `inlineBlocks` (see
+ * computeMarkdownRegions), or outside them, as in a table's row, the end of
+ * the offset's line. Export and the preview read a highlight in that text
+ * alone, so none runs past a blank line, into a list's next item or out of
+ * a heading. Each is found by binary search.
+ */
+export function formatHighlightLimit(text: string, inlineBlocks: readonly CodeRegion[]): (offset: number) => number {
+	let lineStarts: number[] | undefined;
+	return offset => {
+		// The blocks that start at or before the offset
+		let lo = 0;
+		let hi = inlineBlocks.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (inlineBlocks[mid].start <= offset) lo = mid + 1;
+			else hi = mid;
+		}
+		if (lo > 0 && offset < inlineBlocks[lo - 1].end) return inlineBlocks[lo - 1].end;
+		lineStarts ??= computeLineStarts(text);
+		// The start of the line after the offset's
+		lo = 0;
+		hi = lineStarts.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (lineStarts[mid] <= offset) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo < lineStarts.length ? lineStarts[lo] : text.length;
+	};
+}

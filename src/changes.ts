@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
-import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
-import { navigationMatches } from './navigation-matches';
+import { navigationRanges } from './navigation-matches';
 
 // Combined pattern for all Manuscript Markdown syntax in a single regex
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
@@ -41,6 +40,11 @@ import { navigationMatches } from './navigation-matches';
 // an opener with no closer after it, as each searched the rest of the text.
 // An alternative added here that starts with a { or a < and runs to the
 // first of a closer after it needs a check there.
+// Navigation holds a plain or colored highlight's match, the only one that
+// starts with an =, to its paragraph's text, as export and the preview read
+// one (see navigationRanges), so a lone == in another paragraph or in a
+// code block pairs with no highlight's ==. The grammar reads one line at a
+// time, so its patterns need no such limit.
 const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Version-keyed cache for navigation match results (single-document cache)
@@ -57,30 +61,9 @@ export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
 		return cachedRanges;
 	}
 
-	const text = document.getText();
-	const codeRegions = computeCodeRegions(text);
-	const rawRanges: Array<{ range: vscode.Range; offset: number; length: number }> = [];
-
-	for (const { start, end } of navigationMatches(combinedPattern, text)) {
-		rawRanges.push({ range: new vscode.Range(document.positionAt(start), document.positionAt(end)), offset: start, length: end - start });
-	}
-
-	// Filter out matches inside code regions
-	const ranges = rawRanges
-		.filter(r => !overlapsCodeRegion(r.offset, r.offset + r.length, codeRegions))
-		.map(r => r.range);
-
-	// Ranges are already in document order from single-pass regex
-	// Filter out contained ranges (O(N) pass)
-	const filteredRanges: vscode.Range[] = [];
-	let lastKept: vscode.Range | undefined;
-
-	for (const range of ranges) {
-		if (!lastKept || !lastKept.contains(range)) {
-			filteredRanges.push(range);
-			lastKept = range;
-		}
-	}
+	// In document order, none in code, nor in another (see navigationRanges)
+	const filteredRanges = navigationRanges(combinedPattern, document.getText())
+		.map(({ start, end }) => new vscode.Range(document.positionAt(start), document.positionAt(end)));
 
 	// Cache results for this document version
 	cachedUri = uri;

@@ -1,13 +1,14 @@
 // Bugfix: code-region-inert-zones, Property 1: Code Region Inertness
-// Verifies that the call-site filtering pattern (extractAllDecorationRanges +
-// computeCodeRegions + overlapsCodeRegion) produces no decoration ranges overlapping
-// code regions. extractAllDecorationRanges itself is code-region-agnostic; callers
-// are responsible for filtering (see extension.ts updateHighlightDecorations).
+// Verifies that the editor's decorations (editorDecorationRanges, which
+// extension.ts paints) and navigation's stops (navigationRanges, which
+// changes.ts finds) hold no code. extractAllDecorationRanges itself is
+// code-region-agnostic; editorDecorationRanges opens nothing in code and
+// drops what holds code.
 
 import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
-import { extractAllDecorationRanges } from './highlight-colors';
-import { navigationMatches } from './navigation-matches';
+import { editorDecorationRanges, extractAllDecorationRanges } from './highlight-colors';
+import { navigationRanges } from './navigation-matches';
 import { scanCitationUsages } from './lsp/citekey-language';
 
 // **Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.10**
@@ -189,23 +190,9 @@ const documentWithCodeRegions = fc
 const combinedPattern =
 	/\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
+/** The ranges getAllMatches in changes.ts finds */
 function scanNavigation(text: string): Array<{ start: number; end: number }> {
-	const codeRegions = computeCodeRegionsForTest(text);
-	const matches = navigationMatches(combinedPattern, text);
-	// Filter out matches inside code regions
-	const nonCodeMatches = matches.filter(
-		match => !overlapsCodeRegion(match.start, match.end, codeRegions)
-	);
-	// Filter contained ranges (same as production)
-	const filtered: Array<{ start: number; end: number }> = [];
-	let lastKept: { start: number; end: number } | undefined;
-	for (const o of nonCodeMatches) {
-		if (!lastKept || !(lastKept.start <= o.start && o.end <= lastKept.end)) {
-			filtered.push(o);
-			lastKept = o;
-		}
-	}
-	return filtered;
+	return navigationRanges(combinedPattern, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,16 +200,15 @@ function scanNavigation(text: string): Array<{ start: number; end: number }> {
 // ---------------------------------------------------------------------------
 
 describe('Property 1: Code Region Inertness', () => {
-	test('call-site filtering produces no decoration ranges overlapping code regions', () => {
+	test('the editor\'s decorations overlap no code region', () => {
 		fc.assert(
 			fc.property(documentWithCodeRegions, (text) => {
 				const regions = computeCodeRegionsForTest(text);
 				if (regions.length === 0) return; // skip texts with no code regions
 
-				// Two-step pattern used by call sites (mirrors extension.ts):
-				const raw = extractAllDecorationRanges(text, 'yellow');
-				const keep = (r: { start: number; end: number }) =>
-					!overlapsCodeRegion(r.start, r.end, regions);
+				// As extension.ts paints them, which drops what holds code itself
+				const raw = editorDecorationRanges(text, 'yellow');
+				const keep = () => true;
 
 				// Collect filtered decoration ranges
 				const allRanges: Array<{ start: number; end: number; label: string }> = [];
@@ -395,6 +381,15 @@ describe('Property 2: Preservation — Non-Code-Region Behavior Unchanged', () =
 
 				const usages = scanCitationUsages(text);
 				expect(usages.length).toBeGreaterThan(0);
+			}),
+			{ numRuns: 300 }
+		);
+	});
+
+	test('the editor\'s decorations of a paragraph without code are extractAllDecorationRanges\'s', () => {
+		fc.assert(
+			fc.property(documentWithoutCodeRegions, (text) => {
+				expect(editorDecorationRanges(text, 'yellow')).toEqual(extractAllDecorationRanges(text, 'yellow'));
 			}),
 			{ numRuns: 300 }
 		);

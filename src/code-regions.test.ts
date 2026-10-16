@@ -3,13 +3,15 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
+	codeOverlapTest,
 	computeCodeRegions,
 	computeMarkdownRegions,
+	formatHighlightLimit,
 	isInsideCodeRegion,
 	overlapsCodeRegion,
 } from './code-regions';
-import { extractAllDecorationRanges } from './highlight-colors';
-import { navigationMatches } from './navigation-matches';
+import { editorDecorationRanges } from './highlight-colors';
+import { navigationRanges } from './navigation-matches';
 
 // ---------------------------------------------------------------------------
 // Task 3.2: Unit tests for computeCodeRegions() and isInsideCodeRegion()
@@ -213,43 +215,71 @@ describe('overlapsCodeRegion', () => {
 	});
 });
 
+describe('codeOverlapTest', () => {
+	test('reads each range as overlapsCodeRegion does', () => {
+		const text = 'ab `cd` ef\n\n```\nx\n```\n\ng `h` i';
+		const regions = computeCodeRegions(text);
+		const overlaps = codeOverlapTest(regions);
+		for (let start = 0; start <= text.length; start++) {
+			for (let end = start; end <= text.length; end++) {
+				expect(overlaps(start, end)).toBe(overlapsCodeRegion(start, end, regions));
+			}
+		}
+	});
+
+	test('reads a region that a code span before it holds', () => {
+		// A code span the scan for its closer reads past a block to, as
+		// computeInlineCodeRegions does
+		const overlaps = codeOverlapTest([{ start: 0, end: 20 }, { start: 5, end: 8 }, { start: 22, end: 25 }]);
+		expect(overlaps(10, 12)).toBe(true);
+		expect(overlaps(20, 22)).toBe(false);
+		expect(overlaps(21, 23)).toBe(true);
+	});
+});
+
+describe('formatHighlightLimit', () => {
+	/** The text from each offset to the limit at it */
+	const reach = (text: string) => {
+		const limitAt = formatHighlightLimit(text, computeMarkdownRegions(text, { inlineBlocks: true }).inlineBlocks);
+		return (offset: number) => text.slice(offset, limitAt(offset));
+	};
+
+	test('ends at a paragraph\'s end, not at a line end in it', () => {
+		const at = reach('a ==b\nc\n\nd\n');
+		expect(at(2)).toBe('==b\nc\n');
+		expect(at(9)).toBe('d\n');
+	});
+
+	test('ends at a list item\'s, a heading\'s and a quote\'s paragraph\'s end', () => {
+		expect(reach('- a ==\n  b\n- c\n')(4)).toBe('==\n  b\n');
+		expect(reach('# a ==\nb\n')(4)).toBe('==\n');
+		expect(reach('> a ==\n>\n> b\n')(4)).toBe('==\n');
+	});
+
+	test('ends at a line\'s end outside a paragraph, as in a table\'s row', () => {
+		const text = '| a == |\n|---|\n| b |\n';
+		expect(reach(text)(4)).toBe('== |\n');
+		expect(reach('| a == |')(4)).toBe('== |');
+	});
+
+	test('reads a line end of either kind', () => {
+		expect(reach('a ==\r\nb\r\n\r\nc')(2)).toBe('==\r\nb\r\n');
+		expect(reach('| a == |\r\n|---|\r\n')(4)).toBe('== |\r\n');
+	});
+});
+
 // ---------------------------------------------------------------------------
-// Task 4.2: Unit tests for decoration skipping (call-site filtering pattern)
+// Task 4.2: Unit tests for decoration skipping
 //
 // extractAllDecorationRanges() is code-region-agnostic to preserve parity with
-// standalone extraction functions. Code-region filtering is applied by callers
-// using computeCodeRegions() + overlapsCodeRegion(). These tests verify the
-// two-step pattern that call sites (e.g. the decorator in extension.ts) must use.
+// standalone extraction functions. editorDecorationRanges(), which the
+// decorator in extension.ts calls, opens nothing in code (editorBlocks) and
+// drops what holds code (dropRangesInCode).
 // ---------------------------------------------------------------------------
 
-/** Helper that mirrors the filtering pattern used at call sites. */
+/** The ranges the decorator in extension.ts paints */
 function filterDecorations(text: string, defaultColor: string) {
-	const all = extractAllDecorationRanges(text, defaultColor);
-	const codeRegions = computeCodeRegions(text);
-	if (codeRegions.length === 0) return all;
-
-	const keep = (r: { start: number; end: number }) =>
-		!overlapsCodeRegion(r.start, r.end, codeRegions);
-
-	for (const [key, ranges] of all.highlights) {
-		const filtered = ranges.filter(keep);
-		if (filtered.length === 0) {
-			all.highlights.delete(key);
-		} else if (filtered.length !== ranges.length) {
-			all.highlights.set(key, filtered);
-		}
-	}
-	all.comments.splice(0, all.comments.length, ...all.comments.filter(keep));
-	all.additions.splice(0, all.additions.length, ...all.additions.filter(keep));
-	all.deletions.splice(0, all.deletions.length, ...all.deletions.filter(keep));
-	all.additionDelimiters.splice(0, all.additionDelimiters.length, ...all.additionDelimiters.filter(keep));
-	all.deletionDelimiters.splice(0, all.deletionDelimiters.length, ...all.deletionDelimiters.filter(keep));
-	all.substitutionDelimiters.splice(0, all.substitutionDelimiters.length, ...all.substitutionDelimiters.filter(keep));
-	all.substitutionOld.splice(0, all.substitutionOld.length, ...all.substitutionOld.filter(keep));
-	all.substitutionNew.splice(0, all.substitutionNew.length, ...all.substitutionNew.filter(keep));
-	all.highlightDelimiters.splice(0, all.highlightDelimiters.length, ...all.highlightDelimiters.filter(keep));
-	all.commentDelimiters.splice(0, all.commentDelimiters.length, ...all.commentDelimiters.filter(keep));
-	return all;
+	return editorDecorationRanges(text, defaultColor);
 }
 
 describe('computeMarkdownRegions with tables', () => {
@@ -394,23 +424,9 @@ describe('call-site code-region filtering skips code regions', () => {
 const combinedPattern =
 	/\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
+/** The ranges getAllMatches in changes.ts finds */
 function scanNavigation(text: string): Array<{ start: number; end: number }> {
-	const codeRegions = computeCodeRegions(text);
-	const matches = navigationMatches(combinedPattern, text);
-	// Filter out matches inside code regions
-	const nonCodeMatches = matches.filter(
-		match => !overlapsCodeRegion(match.start, match.end, codeRegions)
-	);
-	// Filter contained ranges (same as production)
-	const filtered: Array<{ start: number; end: number }> = [];
-	let lastKept: { start: number; end: number } | undefined;
-	for (const o of nonCodeMatches) {
-		if (!lastKept || !(lastKept.start <= o.start && o.end <= lastKept.end)) {
-			filtered.push(o);
-			lastKept = o;
-		}
-	}
-	return filtered;
+	return navigationRanges(combinedPattern, text);
 }
 
 describe('navigation scanner skips code regions', () => {

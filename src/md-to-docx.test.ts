@@ -7397,6 +7397,51 @@ describe('Links linkify finds in long text', () => {
   }, 60000);
 });
 
+describe('The URLs that markdown-it\'s own linkify rule links', () => {
+  // The editor reads an == or an opener in one as text, as export does (see
+  // inertMarks in editor-blocks.ts)
+  it('finds the text that rule takes for each, from its scheme\'s start', async () => {
+    const { linkifiedUrls } = await import('./md-to-docx');
+    const { default: linkifyRule } = await import('markdown-it/lib/rules_inline/linkify.mjs');
+    const md = new MarkdownIt({ html: true, linkify: true });
+    md.linkify.set({ fuzzyLink: false });
+    md.linkify.add('//', null);
+    // Where the rule takes a URL, from the start of the scheme it reads
+    let taken: Array<{ start: number; end: number }> = [];
+    md.inline.ruler.at('linkify', (state, silent) => {
+      const from = state.pos;
+      const scheme = /(?:^|[^a-z0-9.+-])([a-z][a-z0-9.+-]*)$/i.exec(state.pending)?.[1] ?? '';
+      const found = linkifyRule(state, silent);
+      if (found && !silent) taken.push({ start: from - scheme.length, end: state.pos });
+      return found;
+    });
+    const urls = (text: string) => linkifiedUrls(text).map(({ start, end }) => text.slice(start, end));
+    expect(urls('a https://example.com/?q==yes== b')).toEqual(['https://example.com/?q==yes==']);
+    expect(urls('a_https://e.com/{++x} HTTPS://E.COM/a==b x\\hhttps://e.com/c *https://e.com/d* ftp://e.com/e)==f')).toEqual(['https://e.com/{++x}', 'HTTPS://E.COM/a==b', 'https://e.com/c', 'https://e.com/d', 'ftp://e.com/e']);
+    expect(urls('mailto:a@b.cd //e.com x://y.z')).toEqual([]);
+    // No [, ` nor <, in whose link, code or HTML that rule reads no URL
+    const part = fc.constantFrom('https://a.com', 'http://e.co/x', 'ftp://f.org', 'HTTPS://B.ORG/', 'x://y.z', '://', 'mailto:a@b.cd',
+      ' ', '(', ')', '.', ',', ';', '!', '?', '"', '\'', '-', '_', '*', '~', ':', '/', '\\', '@', '=', '==', '{++', '}', '>',
+      '&amp;', '%20', '#', 'é', 'a', 'h', '1', ':80', '.com');
+    fc.assert(fc.property(fc.array(part, { maxLength: 40 }).map(parts => parts.join('').trim()), text => {
+      taken = [];
+      md.parseInline(text, {});
+      expect(linkifiedUrls(text)).toEqual(taken);
+    }), { numRuns: 3000 });
+  });
+
+  it.each<[string, (n: number) => string]>([
+    ['URLs with no space between them', n => 'https://a.co>'.repeat(n)],
+    ['a URL whose path holds many schemes', n => 'https://a.co/' + 'x://'.repeat(n)],
+    ['schemes with no URL', n => 'http://'.repeat(n)],
+    ['schemes after long runs of a scheme\'s characters', n => ('a.b-c+d'.repeat(20) + '://').repeat(n)],
+  ])('finds those in %s in linear time', async (_name, input) => {
+    const { linkifiedUrls } = await import('./md-to-docx');
+    const text = input(50_000);
+    expect(fastestRun(() => linkifiedUrls(text))).toBeLessThan(1000);
+  }, 120000);
+});
+
 describe('Character references in HTML', () => {
   // A table's body cell's text in Word, and in the preview, as markdown-it
   // writes a Markdown table

@@ -12,8 +12,7 @@ import { parseTable } from './formatting';
 import { scanOrientationDirectives } from './orientation-scan';
 import { formatTableNumbers } from './table-number-format';
 import { manuscriptMarkdownPlugin } from './preview/manuscript-markdown-plugin';
-import { computeCodeRegions } from './code-regions';
-import { dropRangesInCode, extractAllDecorationRanges } from './highlight-colors';
+import { editorDecorationRanges } from './highlight-colors';
 
 const repeat = (n: number, item: (i: number) => string, separator = '') => Array.from({ length: n }, (_, i) => item(i)).join(separator);
 const count = (text: string, re: RegExp) => (text.match(re) ?? []).length;
@@ -124,9 +123,7 @@ export const SPREAD_LIMIT_CASES: Record<string, (n: number) => Promise<string> |
   'a table\'s rows to reflow': n => String(parseTable('| a |\n|---|\n' + '| b |\n'.repeat(n))?.rows.length),
   'the ranges outside code to decorate': n => {
     const text = '`x`\n\n' + '{++a++} '.repeat(n) + '\n';
-    const all = extractAllDecorationRanges(text, 'yellow');
-    dropRangesInCode(all, computeCodeRegions(text));
-    return String(all.additions.length);
+    return String(editorDecorationRanges(text, 'yellow').additions.length);
   },
   'the directives in a note': n => String(scanOrientationDirectives('T.[^1]\n\n[^1]: N.\n\n' + '    <!-- landscape -->\n\n'.repeat(n)).length),
   'the numbers in an HTML table\'s cell': n =>
