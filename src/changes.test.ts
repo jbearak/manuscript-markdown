@@ -758,10 +758,6 @@ describe('Navigation reads the blocks a span over lines joins, and a span in cod
     ['a substitution after a {~~ in code whose span ends past it', '    {~~\n~~}{~~~>n~~}', ['{~~~>n~~}']],
     ['an insertion in an HTML block after an opener in code', '```{++```\n<!--{++b++}', []],
     ['a critic highlight in a link\'s definition after an opener in code', '[1]:`{==`{==c==}', []],
-    // As export reads them, where before a span or a highlight in a block
-    // of no Markdown was a stop
-    ['an insertion and a highlight in an HTML block', '<div>\n{++a++} ==b==\n</div>', []],
-    ['an insertion in a link\'s definition', '[1]: {++a++}', []],
   ])('reads %s as export does', (_name, text, expected) => {
     expect(stops(text)).toEqual(expected);
   });
@@ -793,6 +789,66 @@ describe('Navigation reads the blocks a span over lines joins, and a span in cod
     expect(stops('a `{~~` b\n'.repeat(2) + '~~}')).toEqual([]);
     expect(stops('`{~~a~~}` '.repeat(2))).toEqual([]);
     expect(stops('{++a\n# b++} ==c\nd==\n\n'.repeat(2))).toEqual(['{++a\n# b++}', '==c\nd==', '{++a\n# b++}', '==c\nd==']);
-    expect(stops('<div>\n==a== {++b++}\n</div>\n\n[l]: u\n\n'.repeat(2))).toEqual([]);
+    expect(stops('<div>\n==a== {++b++}\n</div>\n\n[l]: u\n\n'.repeat(2))).toEqual(['==a==', '{++b++}', '==a==', '{++b++}']);
+  });
+});
+
+describe('Navigation reads as before where export may read the text otherwise', () => {
+  /** The text of each range navigation stops at, as getAllMatches finds them */
+  const stops = (text: string) => navigationRanges(combinedPattern, text).map(({ start, end }) => text.slice(start, end));
+
+  // A note's definition's later line, which a parse reads as a link's
+  // title, and a span after a backtick that the parse of code spans pairs
+  // across an HTML block, which export reads. And a span after code spans
+  // whose backticks the parse pairs across blocks, which a comment from
+  // code hid before
+  it.each<[string, string, string[]]>([
+    ['an insertion on a note\'s definition\'s later line', 'See[^1].\n\n[^1]: https://example.com\n    "{++added++}"', ['{++added++}']],
+    ['an insertion after a backtick a code span\'s parse pairs across an HTML block', 'Before `\n<div>\n</div>\n\n` {++added++}\n# After `', ['{++added++}']],
+    ['a deletion after code spans whose backticks pair across blocks', '- `{>>` x ` b\n\n- `{--` y\n\n# `<<}`\n\n{--d--}', ['{--d--}']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  // Where the span or the highlight that an opener in code or a lone ==
+  // took before holds an HTML block, which export reads as HTML, as what it
+  // hid, export doesn't read either
+  it.each<[string, string, string[]]>([
+    ['an insertion in an HTML block after an opener in code', '`{++`\n\n<div>\n{++b++}\n</div>', []],
+    ['a highlight in an HTML block after an == in code', '`x == y`\n\n<div>\n==h==\n</div>', []],
+    ['an HTML comment\'s block after a lone == in a list item', '- a == `b`\n\n<!--\n==h==\n-->', []],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  it('reads the highlight after one before a span across a table\'s rows, as before', () => {
+    // Its opener's scan read past the row's end
+    expect(stops('| x == y |\n|---|\n| ==b {++c |\n| d++} ==e== |')).toContain('==e==');
+  });
+
+  it('reads the rows of a table with a span across them as export does', () => {
+    // Before, the first row's lone == took the second's opener
+    expect(stops('| x == y |\n|---|\n| ==b {++c |\n| d++} ==e== |')).toEqual(['{++c |\n| d++}', '==e==']);
+  });
+
+  // Each opener is read as before once at most, and each unsure region's
+  // overlap found by binary search
+  it.each<[string, number, (n: number) => string]>([
+    ['many openers in code before HTML blocks', 50_000, n => '`{++`\n\n<div>\n{++b++}\n</div>\n\n'.repeat(n)],
+    ['many == in code before HTML blocks', 50_000, n => '`x == y`\n\n<div>\n==h==\n</div>\n\n'.repeat(n)],
+    ['many lone == before an HTML block', 100_000, n => 'x == y\n\n'.repeat(n) + '<div>\n==h==\n</div>'],
+    ['many code spans whose backticks pair across blocks', 100_000, n => '`{>>` x ` b\n\n'.repeat(n) + '<<}'],
+    ['many HTML comments\' openers in code before HTML blocks', 50_000, n => '`<!--`\n\n<div>\n-->\n</div>\n\n'.repeat(n)],
+  ])('finds the stops in %s in linear time', (_name, n, input) => {
+    const text = input(n);
+    expect(fastestRun(() => navigationRanges(combinedPattern, text))).toBeLessThan(1000);
+  }, 120000);
+
+  it('reads what those texts hold', () => {
+    expect(stops('`{++`\n\n<div>\n{++b++}\n</div>\n\n'.repeat(2))).toEqual([]);
+    expect(stops('`x == y`\n\n<div>\n==h==\n</div>\n\n'.repeat(2))).toEqual(['==h==']);
+    expect(stops('x == y\n\n'.repeat(2) + '<div>\n==h==\n</div>')).toEqual(['==h==']);
+    expect(stops('`{>>` x ` b\n\n'.repeat(2) + '<<}')).toEqual([]);
+    expect(stops('`<!--`\n\n<div>\n-->\n</div>\n\n'.repeat(2))).toEqual([]);
   });
 });

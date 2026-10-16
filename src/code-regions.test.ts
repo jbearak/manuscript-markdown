@@ -300,28 +300,6 @@ describe('computeMarkdownRegions with tables', () => {
 	});
 });
 
-describe('computeMarkdownRegions with definitions', () => {
-	const definitions = (text: string, linkCheck?: (url: string) => boolean) => computeMarkdownRegions(text, { definitions: true, linkCheck }).definitionRegions
-		.map(region => text.slice(region.start, region.end));
-
-	test('holds each line no block holds, as a link\'s definition, in a quote and a list item too', () => {
-		expect(definitions('[a]: u\n[b]: v "t"\n\nText\n\n> [c]: w\n\n- [d]: x\n- y\n')).toEqual(['[a]: u\n', '[b]: v "t"\n', '> [c]: w\n', '- [d]: x\n']);
-		expect(computeMarkdownRegions('[a]: u\n').definitionRegions).toEqual([]);
-	});
-
-	test('holds no paragraph, heading, table, code, HTML block or rule, nor a blank line', () => {
-		expect(definitions('a\n[b]: u\n\n# h\n\n| t |\n|---|\n\n    code\n\n```\nf\n```\n\n---\n\n  \t\n')).toEqual([]);
-		expect(computeMarkdownRegions('<div>\n</div>\n', { html: 'all', definitions: true }).definitionRegions).toEqual([]);
-	});
-
-	test('reads a URL that linkCheck rejects as no link\'s', () => {
-		expect(definitions('[a]: u!x\n', url => !url.includes('!'))).toEqual([]);
-		expect(definitions('[a]: u!x\n', () => true)).toEqual(['[a]: u!x\n']);
-		// And leaves the parser's own check as it was
-		expect(definitions('[a]: u!x\n')).toEqual(['[a]: u!x\n']);
-	});
-});
-
 describe('computeMarkdownRegions with inline HTML', () => {
 	const inlineHtml = (text: string) => computeMarkdownRegions(text, { html: 'all', inlineHtml: true }).inlineHtmlRegions
 		.map(region => text.slice(region.start, region.end));

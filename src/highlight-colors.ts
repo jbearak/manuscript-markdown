@@ -32,10 +32,9 @@ import { isEscapedAt } from './math-delimiters';
 //   one side of a substitution, where export and the preview show it
 // - Comment token scope: use meta.comment* not comment.block* — comment.block suppresses
 //   editor features (bracket matching, auto-complete, snippets)
-// - editorDecorationRanges(): nothing opens in code, an HTML block or a link's
-//   definition, and a format highlight stays in its paragraph's text, as export and
-//   the preview read the blocks after CriticMarkup joins a span's lines (see
-//   editorBlocks in editor-blocks.ts). Keep it in step with navigationRanges in
+// - editorDecorationRanges(): nothing opens in code, and a format highlight stays in
+//   its paragraph's text where the text's parse and export's agree on where that ends
+//   (see editorBlocks in editor-blocks.ts). Keep it in step with navigationRanges in
 //   navigation-matches.ts. The grammar reads one line at a time, and no code span or
 //   fenced block
 
@@ -443,20 +442,19 @@ export interface AllDecorationRanges {
 
 /**
  * The ranges to decorate in `text`. With `blocks` (see editorBlocks in
- * editor-blocks.ts), nothing opens in code, nor in an HTML block or a
- * link's definition, which hold no Markdown: no CriticMarkup span, no format
+ * editor-blocks.ts), nothing opens in code: no CriticMarkup span, no format
  * highlight, and in a format highlight's text, a critic highlight, as
  * export's search for its closing == reads a {== there, and another span
  * only where reading it as text would end the scan short of export's
  * closer (see readsCodeAsText). A format highlight outside CriticMarkup
- * holds no text past its paragraph's (see limitAt there), but for a span's, which reads
- * as one run of text, whose end goes on in the paragraph there, as export
- * and the preview read a span over a blank line. One in a span's text reads
- * past it, as they read one there. Without `blocks`, as for
+ * holds no text past its paragraph's (see limitAt there), and no span that
+ * ends past it, which preprocessing left as it is, as one across a table's
+ * rows: its opener is text, as to export. One in a span's text reads past
+ * it, as they read one there. Without `blocks`, as for
  * extractHighlightRanges, an opener in code opens, and a format highlight
  * reads to its closing == wherever that is.
  */
-export function extractAllDecorationRanges(text: string, defaultColor: string, blocks?: Pick<EditorBlocks, 'inert' | 'limitAt'>): AllDecorationRanges {
+export function extractAllDecorationRanges(text: string, defaultColor: string, blocks?: Pick<EditorBlocks, 'inCode' | 'limitAt' | 'unsure'>): AllDecorationRanges {
   const resolvedDefault = VALID_COLOR_IDS.includes(defaultColor) ? defaultColor : 'yellow';
   // Each opener's closer, from one search of the text for each closer, as
   // each unclosed opener searched the rest of it
@@ -489,9 +487,24 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
     index > 0 &&
     index < boundEnd &&
     (opensCriticHighlight(index) || text.charCodeAt(index - 1) === 0x3D || isEscapedAt(text, index));
-  // Whether code, an HTML block or a link's definition holds `index`, where
-  // nothing opens (see blocks)
-  const inCode = (index: number): boolean => blocks !== undefined && blocks.inert(index);
+  // Whether an opener in code opens nothing, as before, while it reads one
+  // that does (see unsure in EditorBlocks)
+  let readsAsBefore = false;
+  // Whether code holds `index`, where nothing opens (see blocks)
+  const inCode = (index: number): boolean => blocks !== undefined && !readsAsBefore && blocks.inCode(index);
+  // The end of the span from the { at `at` to its closer, as before, or -1
+  const spanEnd = (at: number): number => {
+    const c2 = text.charCodeAt(at + 1);
+    const c3 = text.charCodeAt(at + 2);
+    let ci = -1;
+    if (c2 === c3 && (c2 === 0x2B || c2 === 0x2D || c2 === 0x7E || c2 === 0x3D)) ci = closers.next(c2 === 0x2B ? '++}' : c2 === 0x2D ? '--}' : c2 === 0x7E ? '~~}' : '==}', at + 3);
+    else if (c2 === 0x3E && c3 === 0x3E) ci = closers.matching(at + 3);
+    else if (c2 === 0x23) {
+      const contentStart = detectCommentIdOpener(text, at, text.length);
+      if (contentStart !== -1) ci = closers.matching(contentStart);
+    }
+    return ci === -1 ? -1 : ci + 3;
+  };
   const isBlockedSuccessor = (indexAfterClose: number, boundEnd: number): boolean => {
     if (indexAfterClose >= boundEnd) return false;
     const ch = text.charCodeAt(indexAfterClose);
@@ -530,9 +543,13 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
   /**
    * Scan a region of text for format highlights ==...== and ==...=={color}.
    * This is called on CriticMarkup span content to detect nested format highlights.
-   * The region is [regionStart, regionEnd) in the original text.
+   * The region is [regionStart, regionEnd) in the original text. An == in
+   * code there reads as before where the region holds what export may read
+   * otherwise (see unsure in EditorBlocks), as the span's own text.
    */
   const scanFormatHighlights = (regionStart: number, regionEnd: number) => {
+    const wasAsBefore = readsAsBefore;
+    if (blocks?.unsure(regionStart, regionEnd)) readsAsBefore = true;
     let j = regionStart;
     while (j < regionEnd - 3) { // need at least ==X== (4 chars from j)
       // Look for == that is NOT preceded by { at j-1 in the original text
@@ -592,6 +609,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
       }
       j++;
     }
+    readsAsBefore = wasAsBefore;
   };
 
   /**
@@ -602,9 +620,16 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
    * in a comment is. A region that holds another CriticMarkup opener, as
    * {>> or {~~, records none, as before: a {== in a comment there, or one
    * across a substitution's ~>, is text to them. An opener in code is
-   * neither (see blocks).
+   * neither (see blocks), but where the region holds what export may read
+   * otherwise, as for scanFormatHighlights.
    */
   const scanCriticHighlights = (regionStart: number, regionEnd: number) => {
+    const wasAsBefore = readsAsBefore;
+    if (blocks?.unsure(regionStart, regionEnd)) readsAsBefore = true;
+    readCriticHighlights(regionStart, regionEnd);
+    readsAsBefore = wasAsBefore;
+  };
+  const readCriticHighlights = (regionStart: number, regionEnd: number) => {
     for (let p = regionStart; p + 3 <= regionEnd; p++) {
       if (text.charCodeAt(p) !== 0x7B || isEscapedAt(text, p) || inCode(p)) continue;
       const c2 = text.charCodeAt(p + 1);
@@ -625,11 +650,25 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
 
   const len = text.length;
   let i = 0;
+  // The end of the last span from an opener in code that the editor read
+  // before, where none read in it was, and the closing == of each
+  // highlight it read before that it doesn't, which didn't open one (see
+  // the format highlights below)
+  let hiddenEnd = 0;
+  const beforeClosers = new Set<number>();
   while (i < len) {
-    // Nothing opens in code (see blocks)
-    if ((text.charCodeAt(i) === 0x7B || text.charCodeAt(i) === 0x3D) && inCode(i)) {
-      i++;
-      continue;
+    readsAsBefore = false;
+    // Nothing opens in code (see blocks), but for an opener whose span to
+    // its closer, as before, holds what export may read otherwise, which
+    // reads as before (see unsure there). An == there is read below
+    if (text.charCodeAt(i) === 0x7B && inCode(i) && !isEscapedAt(text, i)) {
+      const end = spanEnd(i);
+      if (end === -1 || i < hiddenEnd || !blocks!.unsure(i, end)) {
+        if (end !== -1 && i >= hiddenEnd) hiddenEnd = end;
+        i++;
+        continue;
+      }
+      readsAsBefore = true;
     }
     // A { an odd run of backslashes escapes opens nothing (see criticSpans)
     if (text.charCodeAt(i) === 0x7B && i + 2 < len && !isEscapedAt(text, i)) {
@@ -742,117 +781,168 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
         for (const [key, arr] of highlights) snapHighlightSizes.set(key, arr.length);
 
         const contentStart = i + 2;
-        let k = contentStart;
-        let hasContent = false; // at least 1 non-delimiter char
-        let found = false;
-        // Where the text it may hold ends, which a span it holds moves to
-        // where that text ends at the span's end
-        let limit = blocks ? blocks.limitAt(i) : len;
-        // Reads past a span it holds, which ends before `to`
-        const skipSpan = (to: number) => {
-          hasContent = true;
-          k = to;
-          if (blocks && k >= limit) limit = blocks.limitAt(k);
+        // Takes back what a scan pushed
+        const rollBack = () => {
+          comments.length = snapComments;
+          additions.length = snapAdditions;
+          deletions.length = snapDeletions;
+          additionDelimiters.length = snapAddDelim;
+          deletionDelimiters.length = snapDelDelim;
+          substitutionDelimiters.length = snapSubDelim;
+          substitutionOld.length = snapSubOld;
+          substitutionNew.length = snapSubNew;
+          highlightDelimiters.length = snapHlDelim;
+          commentDelimiters.length = snapCmDelim;
+          for (const [key, arr] of highlights) {
+            const snap = snapHighlightSizes.get(key);
+            if (snap !== undefined) arr.length = snap;
+            // Keys added during the scan (not in snapshot) must be removed entirely
+          }
+          for (const key of [...highlights.keys()]) {
+            if (!snapHighlightSizes.has(key)) highlights.delete(key);
+          }
         };
-        while (k < limit) {
-          // Check for CriticMarkup opening delimiters — process and skip entire spans
-          if (text.charCodeAt(k) === 0x7B && k + 2 < len && !isEscapedAt(text, k)) {
-            const d2 = text.charCodeAt(k + 1);
-            const d3 = text.charCodeAt(k + 2);
-            if (d2 === 0x3D && d3 === 0x3D) { // {==
-              const ci = closers.next('==}', k + 3);
-              if (ci !== -1) {
-                highlightDelimiters.push({ start: k, end: k + 3 });
-                pushHighlight('critic', k + 3, ci);
-                highlightDelimiters.push({ start: ci, end: ci + 3 });
-                scanFormatHighlights(k + 3, ci);
-                skipSpan(ci + 3); continue;
-              }
-              // One with no ==} after it is text, but its == closes no
-              // highlight (see opensCriticHighlight), and its = ends [^}=]+
-              break;
-            } else if (inCode(k) && readsCodeAsText(k, d2, d3, limit)) {
-              // Text, as export reads code (see blocks)
-            } else if (d2 === 0x3E && d3 === 0x3E) { // {>>
-              const ci = closers.matching(k + 3);
-              if (ci !== -1) {
-                commentDelimiters.push({ start: k, end: k + 3 });
-                comments.push({ start: k + 3, end: ci });
-                commentDelimiters.push({ start: ci, end: ci + 3 });
-                scanFormatHighlights(k + 3, ci);
-                skipSpan(ci + 3); continue;
-              }
-            } else if (d2 === 0x23) { // {# — possible {#id>>
-              const innerContentStart = detectCommentIdOpener(text, k, len);
-              if (innerContentStart !== -1) {
-                const ci = closers.matching(innerContentStart);
-                if (ci !== -1) {
-                  commentDelimiters.push({ start: k, end: innerContentStart });
-                  comments.push({ start: innerContentStart, end: ci });
+        /**
+         * The offset of the closing == the scan from the opener reads, or
+         * -1, reading an opener in code as one, as before, where `asBefore`,
+         * and no text past `limit`.
+         */
+        const scan = (asBefore: boolean, limit: number): number => {
+          readsAsBefore = asBefore;
+          let k = contentStart;
+          let hasContent = false; // at least 1 non-delimiter char
+          let found = false;
+          // Reads past a span it holds, which ends at `to`
+          const skipSpan = (to: number) => {
+            hasContent = true;
+            k = to;
+          };
+          while (k < limit) {
+            // Check for CriticMarkup opening delimiters — process and skip entire spans
+            if (text.charCodeAt(k) === 0x7B && k + 2 < len && !isEscapedAt(text, k)) {
+              const d2 = text.charCodeAt(k + 1);
+              const d3 = text.charCodeAt(k + 2);
+              if (d2 === 0x3D && d3 === 0x3D) { // {==
+                const ci = closers.next('==}', k + 3);
+                if (ci !== -1 && ci + 3 <= limit) {
+                  highlightDelimiters.push({ start: k, end: k + 3 });
+                  pushHighlight('critic', k + 3, ci);
+                  highlightDelimiters.push({ start: ci, end: ci + 3 });
+                  scanFormatHighlights(k + 3, ci);
+                  skipSpan(ci + 3); continue;
+                }
+                // One with no ==} after it in the text it may hold is text, but
+                // its == closes no highlight (see opensCriticHighlight), and its
+                // = ends [^}=]+
+                break;
+              } else if (inCode(k) && readsCodeAsText(k, d2, d3, limit)) {
+                // Text, as export reads code (see blocks)
+              } else if (d2 === 0x3E && d3 === 0x3E) { // {>>
+                const ci = closers.matching(k + 3);
+                if (ci !== -1 && ci + 3 <= limit) {
+                  commentDelimiters.push({ start: k, end: k + 3 });
+                  comments.push({ start: k + 3, end: ci });
                   commentDelimiters.push({ start: ci, end: ci + 3 });
-                  scanFormatHighlights(innerContentStart, ci);
+                  scanFormatHighlights(k + 3, ci);
+                  skipSpan(ci + 3); continue;
+                }
+              } else if (d2 === 0x23) { // {# — possible {#id>>
+                const innerContentStart = detectCommentIdOpener(text, k, len);
+                if (innerContentStart !== -1) {
+                  const ci = closers.matching(innerContentStart);
+                  if (ci !== -1 && ci + 3 <= limit) {
+                    commentDelimiters.push({ start: k, end: innerContentStart });
+                    comments.push({ start: innerContentStart, end: ci });
+                    commentDelimiters.push({ start: ci, end: ci + 3 });
+                    scanFormatHighlights(innerContentStart, ci);
+                    skipSpan(ci + 3); continue;
+                  }
+                }
+              } else if (d2 === 0x2B && d3 === 0x2B) { // {++
+                const ci = closers.next('++}', k + 3);
+                if (ci !== -1 && ci + 3 <= limit) {
+                  additionDelimiters.push({ start: k, end: k + 3 });
+                  if (ci > k + 3) additions.push({ start: k + 3, end: ci });
+                  additionDelimiters.push({ start: ci, end: ci + 3 });
+                  scanFormatHighlights(k + 3, ci);
+                  scanCriticHighlights(k + 3, ci);
+                  skipSpan(ci + 3); continue;
+                }
+              } else if (d2 === 0x2D && d3 === 0x2D) { // {--
+                const ci = closers.next('--}', k + 3);
+                if (ci !== -1 && ci + 3 <= limit) {
+                  deletionDelimiters.push({ start: k, end: k + 3 });
+                  if (ci > k + 3) deletions.push({ start: k + 3, end: ci });
+                  deletionDelimiters.push({ start: ci, end: ci + 3 });
+                  scanFormatHighlights(k + 3, ci);
+                  scanCriticHighlights(k + 3, ci);
+                  skipSpan(ci + 3); continue;
+                }
+              } else if (d2 === 0x7E && d3 === 0x7E) { // {~~
+                const ci = closers.next('~~}', k + 3);
+                if (ci !== -1 && ci + 3 <= limit) {
+                  substitutionDelimiters.push({ start: k, end: k + 3 });
+                  const subContent = text.slice(k + 3, ci);
+                  const cai = subContent.indexOf('~>');
+                  if (cai !== -1) {
+                    substitutionDelimiters.push({ start: k + 3 + cai, end: k + 3 + cai + 2 });
+                    const subOldEnd = k + 3 + cai;
+                    if (subOldEnd > k + 3) substitutionOld.push({ start: k + 3, end: subOldEnd });
+                    const newStart = k + 3 + cai + 2;
+                    if (ci > newStart) substitutionNew.push({ start: newStart, end: ci });
+                  }
+                  substitutionDelimiters.push({ start: ci, end: ci + 3 });
+                  scanFormatHighlights(k + 3, ci);
+                  if (cai === -1) scanCriticHighlights(k + 3, ci);
+                  else { scanCriticHighlights(k + 3, k + 3 + cai); scanCriticHighlights(k + 3 + cai + 2, ci); }
                   skipSpan(ci + 3); continue;
                 }
               }
-            } else if (d2 === 0x2B && d3 === 0x2B) { // {++
-              const ci = closers.next('++}', k + 3);
-              if (ci !== -1) {
-                additionDelimiters.push({ start: k, end: k + 3 });
-                if (ci > k + 3) additions.push({ start: k + 3, end: ci });
-                additionDelimiters.push({ start: ci, end: ci + 3 });
-                scanFormatHighlights(k + 3, ci);
-                scanCriticHighlights(k + 3, ci);
-                skipSpan(ci + 3); continue;
-              }
-            } else if (d2 === 0x2D && d3 === 0x2D) { // {--
-              const ci = closers.next('--}', k + 3);
-              if (ci !== -1) {
-                deletionDelimiters.push({ start: k, end: k + 3 });
-                if (ci > k + 3) deletions.push({ start: k + 3, end: ci });
-                deletionDelimiters.push({ start: ci, end: ci + 3 });
-                scanFormatHighlights(k + 3, ci);
-                scanCriticHighlights(k + 3, ci);
-                skipSpan(ci + 3); continue;
-              }
-            } else if (d2 === 0x7E && d3 === 0x7E) { // {~~
-              const ci = closers.next('~~}', k + 3);
-              if (ci !== -1) {
-                substitutionDelimiters.push({ start: k, end: k + 3 });
-                const subContent = text.slice(k + 3, ci);
-                const cai = subContent.indexOf('~>');
-                if (cai !== -1) {
-                  substitutionDelimiters.push({ start: k + 3 + cai, end: k + 3 + cai + 2 });
-                  const subOldEnd = k + 3 + cai;
-                  if (subOldEnd > k + 3) substitutionOld.push({ start: k + 3, end: subOldEnd });
-                  const newStart = k + 3 + cai + 2;
-                  if (ci > newStart) substitutionNew.push({ start: newStart, end: ci });
-                }
-                substitutionDelimiters.push({ start: ci, end: ci + 3 });
-                scanFormatHighlights(k + 3, ci);
-                if (cai === -1) scanCriticHighlights(k + 3, ci);
-                else { scanCriticHighlights(k + 3, k + 3 + cai); scanCriticHighlights(k + 3 + cai + 2, ci); }
-                skipSpan(ci + 3); continue;
-              }
             }
-          }
-          const ch = text.charCodeAt(k);
-          if (ch === 0x3D) { // =
-            // Check for closing ==
-            if (k + 1 < len && text.charCodeAt(k + 1) === 0x3D) {
-              // Trailing guard: closing == must not be followed by = or }
-              if (isBlockedSuccessor(k + 2, len)) break;
-              if (hasContent) { found = true; }
+            const ch = text.charCodeAt(k);
+            if (ch === 0x3D) { // =
+              // Check for closing ==
+              if (k + 1 < len && text.charCodeAt(k + 1) === 0x3D) {
+                // Trailing guard: closing == must not be followed by = or }
+                if (isBlockedSuccessor(k + 2, len)) break;
+                if (hasContent) { found = true; }
+                break;
+              }
+              // Lone = breaks the [^}=]+ pattern
               break;
             }
-            // Lone = breaks the [^}=]+ pattern
-            break;
+            if (ch === 0x7D) break; // } breaks the [^}=]+ pattern
+            hasContent = true;
+            k++;
           }
-          if (ch === 0x7D) break; // } breaks the [^}=]+ pattern
-          hasContent = true;
-          k++;
+          readsAsBefore = false;
+          return found ? k : -1;
+        };
+        let closeAt: number;
+        if (!blocks) closeAt = scan(false, len);
+        else {
+          // As before, where an opener in code opened, which a span from
+          // code before it didn't hide, nor an == before it take as its
+          // closer, and where what the editor reads and what it read before
+          // differ, and what either takes holds what export may read
+          // otherwise (see unsure there)
+          const unsure = i >= hiddenEnd && blocks.unsure(i, len);
+          let before = -1;
+          if (unsure && !beforeClosers.has(i)) {
+            before = scan(true, len);
+            rollBack();
+          }
+          // Nothing opens in code, and a highlight holds no text past its
+          // paragraph's. A span that ends past that, which preprocessing
+          // left as it is, is text (see blocks)
+          closeAt = blocks.inCode(i) ? -1 : scan(false, blocks.limitAt(i));
+          if (unsure && before !== closeAt && blocks.unsure(i, Math.max(before, closeAt) + 2)) {
+            rollBack();
+            closeAt = before === -1 ? -1 : scan(true, len);
+          } else if (before !== -1 && before !== closeAt) beforeClosers.add(before);
         }
-        if (found) {
-          const closeEnd = k + 2;
+        if (closeAt !== -1) {
+          const closeEnd = closeAt + 2;
           let matchEnd = closeEnd;
           let colorId: string | undefined;
           if (closeEnd < len && text.charCodeAt(closeEnd) === 0x7B) { // {
@@ -878,24 +968,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
         // No valid closing == found. Roll back any CriticMarkup ranges that were
         // pushed during this scan — the main loop will re-encounter and process
         // those spans normally when it reaches them.
-        comments.length = snapComments;
-        additions.length = snapAdditions;
-        deletions.length = snapDeletions;
-        additionDelimiters.length = snapAddDelim;
-        deletionDelimiters.length = snapDelDelim;
-        substitutionDelimiters.length = snapSubDelim;
-        substitutionOld.length = snapSubOld;
-        substitutionNew.length = snapSubNew;
-        highlightDelimiters.length = snapHlDelim;
-        commentDelimiters.length = snapCmDelim;
-        for (const [key, arr] of highlights) {
-          const snap = snapHighlightSizes.get(key);
-          if (snap !== undefined) arr.length = snap;
-          // Keys added during the scan (not in snapshot) must be removed entirely
-        }
-        for (const key of [...highlights.keys()]) {
-          if (!snapHighlightSizes.has(key)) highlights.delete(key);
-        }
+        rollBack();
         i = contentStart;
         continue;
       }

@@ -51,16 +51,7 @@ export interface MarkdownRegions {
 	 *  from the start of the first to the start of the line after the last,
 	 *  sorted */
 	inlineBlocks: CodeRegion[];
-	/** With `definitions`, each line with text that no block holds, as a
-	 *  link's definition, which markdown-it reads as no block, and a line of
-	 *  a quote's or a list item's markers alone, sorted, one for each line */
-	definitionRegions: CodeRegion[];
 }
-
-/** The tokens of the blocks that hold lines of text, of which a line that
- *  none holds is a link's definition, or a quote's or a list item's
- *  markers alone (see definitionRegions) */
-const LINE_BLOCKS = new Set(['paragraph_open', 'heading_open', 'table_open', 'fence', 'code_block', 'html_block', 'hr']);
 
 export interface MarkdownRegionOptions {
 	includeCode?: boolean;
@@ -76,13 +67,6 @@ export interface MarkdownRegionOptions {
 	inlineHtml?: boolean;
 	/** With it, inlineBlocks */
 	inlineBlocks?: boolean;
-	/** With it, definitionRegions */
-	definitions?: boolean;
-	/** Whether a link's definition may go to a URL, as normalizeLink writes
-	 *  it, beside markdown-it's own check, as export's and the preview's
-	 *  parsers read none with a placeholder for a CriticMarkup span's line
-	 *  end in it (see criticBreaksEndLinks in critic-markup.ts) */
-	linkCheck?: (url: string) => boolean;
 	/** With `html`, read a quote as ending before a line with text that
 	 *  doesn't start as a quote's line does, as export does, which puts a
 	 *  blank line before each (see deLazifyBlockquotesWithLines in
@@ -396,18 +380,9 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			else env.quoteEnds.push(line);
 		}
 	}
-	const { validateLink } = parser;
-	const linkCheck = options?.linkCheck;
-	if (linkCheck) parser.validateLink = url => linkCheck(url) && validateLink.call(parser, url);
-	try {
-		parser.block.parse(normalizedBlockText, parser, env, blockTokens);
-	} finally {
-		parser.validateLink = validateLink;
-	}
+	parser.block.parse(normalizedBlockText, parser, env, blockTokens);
 
 	const blockLines = options?.includeLists ? normalizedBlockText.split('\n') : [];
-	// With `definitions`, whether a block holds each line
-	const held = new Uint8Array(options?.definitions ? lineStarts.length : 0);
 	// The lines to the last with text
 	let textEnd = blockLines.length;
 	while (textEnd > 0 && blockLines[textEnd - 1].trim() === '') textEnd--;
@@ -428,7 +403,6 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			} else if (containers[containers.length - 1] === 'item' && token.map && closedByItem(token, blockLines, textEnd)) itemClosedStarts.push(lineStarts[token.map[0]]);
 		}
 		if (!token.map) continue;
-		if (options?.definitions && LINE_BLOCKS.has(token.type)) held.fill(1, token.map[0], token.map[1]);
 		if (options?.inlineBlocks && token.type === 'inline' && lineStarts[token.map[0]] !== inlineBlocks[inlineBlocks.length - 1]?.start) {
 			inlineBlocks.push({ start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length });
 		}
@@ -459,15 +433,6 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		}
 	}
 
-	const definitionRegions: CodeRegion[] = [];
-	for (let line = 0; line < held.length; line++) {
-		if (held[line] === 1) continue;
-		const start = lineStarts[line];
-		const end = line + 1 < lineStarts.length ? lineStarts[line + 1] : text.length;
-		let at = start;
-		while (at < end && (text.charCodeAt(at) === 0x20 || text.charCodeAt(at) === 0x09)) at++;
-		if (at < end && text.charCodeAt(at) !== 0x0A && text.charCodeAt(at) !== 0x0D) definitionRegions.push({ start, end });
-	}
 	const mergedBlockCodeRegions = includeCode ? mergeRegions(blockCodeRegions) : [];
 	const codeRegions = !includeCode ? []
 		: options?.inlineCode === false ? mergedBlockCodeRegions
@@ -488,7 +453,6 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		inlineHtmlRegions,
 		// In the order of the tokens, which is the text's
 		inlineBlocks,
-		definitionRegions,
 	};
 }
 

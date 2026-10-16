@@ -1,75 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import fc from 'fast-check';
 import { computeCodeRegions, computeMarkdownRegions, formatHighlightLimit } from './code-regions';
-import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithOffsets } from './critic-markup';
 import { editorBlocks } from './editor-blocks';
 import { fastestRun } from './test-timing';
-
-describe('preprocessCriticMarkupWithOffsets', () => {
-	/** For each character of the output, the character of `markdown` it comes from */
-	const sources = (markdown: string) => {
-		const { output, offsets } = preprocessCriticMarkupWithOffsets(markdown);
-		return [...output].map((char, at) => [char, markdown[offsets![at]] ?? ''].join(''));
-	};
-
-	test('reads no offsets where preprocessing writes the text as it is', () => {
-		for (const markdown of ['plain', 'a {++b++} c', '`{++a\nb++}`', '']) {
-			expect(preprocessCriticMarkupWithOffsets(markdown)).toEqual({ output: markdown });
-		}
-	});
-
-	test('maps a line end in a span to its placeholder', () => {
-		const { output, offsets } = preprocessCriticMarkupWithOffsets('a {++b\nc++} d');
-		expect(output).toBe('a {++b' + LINE_PLACEHOLDER + 'c++} d');
-		expect([...offsets!]).toEqual([0, 1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 7, 8, 9, 10, 11, 12, 13]);
-	});
-
-	test('maps a blank line in a span to its first line end, past a quote\'s markers', () => {
-		const { output, offsets } = preprocessCriticMarkupWithOffsets('> {++a\n>\n> b++}');
-		expect(output).toBe('> {++a' + PARA_PLACEHOLDER + 'b++}');
-		expect([...offsets!]).toEqual([0, 1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 11, 12, 13, 14, 15]);
-	});
-
-	test('maps the characters of a line after a quote\'s markers', () => {
-		expect(sources('> a {++b\n> c++}').slice(8)).toEqual([...LINE_PLACEHOLDER].map(char => char + '\n').concat(['cc', '++', '++', '}}']));
-	});
-
-	test('maps the blank line put before an opener moved past its line\'s end to the opener', () => {
-		const { output, offsets } = preprocessCriticMarkupWithOffsets('x {++\nb++}');
-		expect(output).toBe('x \n\n{++b++}');
-		expect([...offsets!]).toEqual([0, 1, 2, 2, 2, 3, 4, 6, 7, 8, 9, 10]);
-		// In a quote, with its markers
-		const quoted = preprocessCriticMarkupWithOffsets('> x {++\n> b++}');
-		expect(quoted.output).toBe('> x \n>\n> {++b++}');
-		expect([...quoted.offsets!]).toEqual([0, 1, 2, 3, 4, 4, 4, 4, 4, 4, 5, 6, 10, 11, 12, 13, 14]);
-	});
-
-	test('writes what preprocessCriticMarkup writes, from offsets in order, each copied character from its own', () => {
-		const piece = fc.constantFrom('a', 'b c', '{++i\nj++}', '{++i\n\nj++}', '{--e\n> f--}', '{>>m\n\n    n<<}', '{~~o\n- p~>q~~}',
-			'{==c\n# d==}', 'x {++', '\n', '\n\n', '\n> ', '> ', '- ', '    ', '```\n', '`{++`', '++}', '{#c1>>m\n> n<<}', ' \n \n');
-		fc.assert(fc.property(fc.array(piece, { maxLength: 12 }), pieces => {
-			const markdown = pieces.join('');
-			const { output, offsets } = preprocessCriticMarkupWithOffsets(markdown);
-			expect(output).toBe(preprocessCriticMarkup(markdown));
-			if (!offsets) return;
-			expect(offsets.length).toBe(output.length + 1);
-			expect(offsets[output.length]).toBe(markdown.length);
-			for (let at = 1; at < offsets.length; at++) expect(offsets[at]).toBeGreaterThanOrEqual(offsets[at - 1]);
-			// A character written for another is a placeholder's or a moved
-			// opener's line end or marker
-			const placeholders = output.replace(/(?:LINE|PARA)/g, placeholder => '\0'.repeat(placeholder.length));
-			for (let at = 0; at < output.length; at++) {
-				if (placeholders[at] !== '\0' && output[at] !== markdown[offsets[at]]) expect('\n> \t').toContain(output[at]);
-			}
-		}), { numRuns: 500 });
-	});
-
-	test('maps the spans over lines of a long text in linear time', () => {
-		for (const markdown of ['{++a\nb++} ==c\nd==\n\n'.repeat(50_000), '> {++a\n> b\n>\n> c++} d\n\n'.repeat(50_000), 'x {++\nb++}\n\n'.repeat(50_000)]) {
-			expect(fastestRun(() => preprocessCriticMarkupWithOffsets(markdown))).toBeLessThan(2000);
-		}
-	}, 120000);
-});
 
 describe('editorBlocks', () => {
 	/** The text from each offset to the limit at it */
@@ -80,22 +12,23 @@ describe('editorBlocks', () => {
 	/** The characters of `text` for which `read` holds, others as dots */
 	const marked = (text: string, read: (offset: number) => boolean) => [...text].map((char, at) => read(at) ? char : '.').join('');
 
-	test('reads code where computeCodeRegions finds it', () => {
+	test('reads code where computeCodeRegions finds it, and the end of each run of it', () => {
 		const text = 'a `x == y` b\r\n\r\n```\n{++\n```\n\n    keep if x == 1\n';
 		const blocks = editorBlocks(text);
 		expect(blocks.codeRegions).toEqual(computeCodeRegions(text));
 		expect(marked(text, blocks.inCode)).toBe('..`x == y`......```\n{++\n```..    keep if x == 1.');
+		expect([0, 2, 9, 10, text.indexOf('```')].map(blocks.codeEnd)).toEqual([0, 10, 10, 10, text.indexOf('```\n\n') + 3]);
 	});
 
-	test('reads a paragraph\'s end where formatHighlightLimit does', () => {
-		const text = '# a\nb ==\nc\n\n- d\n';
+	test('reads a paragraph\'s end where formatHighlightLimit does, where preprocessing joins no lines', () => {
+		const text = '# a\nb ==\nc\n\n- d\n\n| e |\n|---|\n| f |\n';
 		const blocks = editorBlocks(text);
 		const limitAt = formatHighlightLimit(text, computeMarkdownRegions(text, { inlineBlocks: true }).inlineBlocks);
 		for (let offset = 0; offset <= text.length; offset++) expect(blocks.limitAt(offset)).toBe(limitAt(offset));
 	});
 
-	test('reads the lines a span over a line end joins as one paragraph, as export does', () => {
-		// The parse of the text reads a heading, then a paragraph
+	test('reads no end of a block where a span\'s lines are joined, as export reads none there', () => {
+		// The text's parse reads a heading, then a paragraph
 		expect(reach('{++a\n# b++} ==c\nd==\n')(12)).toBe('==c\nd==\n');
 		expect(reach('{>>a\n# b<<} ==c\nd==\n\ne')(12)).toBe('==c\nd==\n');
 		expect(reach('{++a\r\n# b++} ==c\r\nd==\r\n')(13)).toBe('==c\r\nd==\r\n');
@@ -103,52 +36,52 @@ describe('editorBlocks', () => {
 		expect(reach('{++a\n| b |\n| - |\n++} ==c\nd==\n')(21)).toBe('==c\nd==\n');
 	});
 
-	test('reads a fence line in a span as text, and the next as opening a block', () => {
+	test('reads the end of a table\'s row that a span across rows, which preprocessing leaves as it is, holds', () => {
+		const text = '| x == y |\n|---|\n| ==b {++c |\n| d++} ==e== |\n';
+		expect(reach(text)(text.indexOf('==b'))).toBe('==b {++c |\n');
+	});
+
+	test('reads the end of a block both parses read, where a span\'s fence line flips the fences after it', () => {
 		const text = '{--a\n```\n--}\n\n==x\n```\n\n==y==\n';
-		const blocks = editorBlocks(text);
-		// The parse of the text reads a fenced block from the span's second
-		// line to ==x's next; export reads one from there to the end
-		expect(marked(text, blocks.inCode)).toBe('.'.repeat(text.indexOf('```\n\n')) + '```\n\n==y==.');
+		// The text's parse reads a fenced block from the span's second line to
+		// ==x's next; export's reads one from there to the end
 		expect(reach(text)(text.indexOf('==x'))).toBe('==x\n');
+		expect(reach(text)(text.indexOf('==y'))).toBe('==y==\n');
 	});
 
-	test('ends the paragraph before an opener moved past its line\'s end, as export does', () => {
+	test('reads no end of a block before an opener moved past its line\'s end, as the text\'s parse reads none', () => {
 		const text = '==a x {++\nb++} c==';
-		expect(reach(text)(0)).toBe('==a x ');
+		expect(reach(text)(0)).toBe(text);
 	});
 
-	test('reads an HTML block and a link\'s definition as holding no Markdown, but not a note\'s', () => {
-		const text = '<div>\n{++a++}\n</div>\n\n[1]: {==b==}\n\n[^1]: {--c--}\n\n`d`\n';
+	test('reads HTML blocks, the lines from a link\'s definition to a blank line, and code spans whose backticks pair across blocks as unsure', () => {
+		const text = '<div>\nx\n</div>\n\n[1]: u\n  "t"\n\n[^2]: n\n\nA `\n\nb `c\n\n`e` f\n\n```\ng\n```\n';
 		const blocks = editorBlocks(text);
-		expect(marked(text, blocks.inert)).toBe('<div>\n{++a++}\n</div>\n.[1]: {==b==}\n' + '.'.repeat(16) + '`d`.');
-		expect(marked(text, blocks.inCode)).toBe('.'.repeat(text.length - 4) + '`d`.');
+		expect(marked(text, offset => blocks.unsure(offset, offset + 1)))
+			.toBe('<div>\nx\n</div>\n.[1]: u\n  "t"\n.[^2]: n\n...`\n\nb `' + '.'.repeat(text.length - text.indexOf('c\n\n`e`')));
+		expect(blocks.unsure(0, text.length)).toBe(true);
+		// A definition before an HTML block
+		expect(editorBlocks('[1]: u\n\n<div>\n</div>\n').unsure(0, 1)).toBe(true);
+		expect(blocks.unsure(text.indexOf('`e`'), text.length)).toBe(false);
 	});
 
-	test('reads a link\'s definition with a placeholder in it as text, as export does', () => {
-		// Joined, its URL holds a placeholder, which no link's does
-		const blocks = editorBlocks('[1]:{++i\nj++}\n');
-		expect(blocks.inert(5)).toBe(false);
-	});
-
-	test('reads the end of each run of code, an HTML block or a link\'s definition', () => {
-		const text = 'a `b` c\n\n<div>\n</div>\n';
-		const blocks = editorBlocks(text);
-		expect([2, 3, 4, 5, 9, 15].map(blocks.inertEnd)).toEqual([5, 5, 5, 5, text.length, text.length]);
-	});
-
-	// Each offset is mapped from arrays made once, and each paragraph's end
-	// found by binary search
+	// Each offset is read from arrays made once, and each block's end, each
+	// line's and each unsure region's by binary search
 	test.each<[string, (n: number) => string]>([
 		['spans over lines', n => '{++a\n# b++} ==c\nd==\n\n'.repeat(n)],
 		['spans over lines in a quote', n => '> {++a\n>\n> b++} ==c\n\n'.repeat(n)],
-		['HTML blocks and links\' definitions', n => '<div>\n==a== {++b++}\n</div>\n\n[l]: u\n\n'.repeat(n)],
+		['HTML blocks and links\' definitions', n => '<div>\n==a== {++b++}\n</div>\n\n[l]: u\n[m]: v\n\n'.repeat(n)],
+		['code spans whose backticks pair across blocks', n => 'a `\n\nb `c` d\n\n'.repeat(n)],
 		['spans over lines with \\r\\n', n => '{++a\r\n# b++} ==c\r\nd==\r\n\r\n'.repeat(n)],
 	])('reads %s in linear time', (_name, input) => {
 		const text = input(50_000);
 		expect(fastestRun(() => {
 			const blocks = editorBlocks(text);
-			for (let offset = 0; offset < text.length; offset += 7) blocks.limitAt(offset);
-			blocks.inertEnd(0);
+			for (let offset = 0; offset < text.length; offset += 7) {
+				blocks.limitAt(offset);
+				blocks.unsure(offset, offset + 7);
+			}
+			blocks.codeEnd(0);
 		})).toBeLessThan(2000);
 	}, 120000);
 });
