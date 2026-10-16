@@ -97,11 +97,25 @@ exportBlockParser.block.ruler.at('blockquote', (state, startLine, endLine, silen
 	}
 	return blockquote(state, startLine, endLine, silent);
 }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
-/** A line that starts as a quote's does, at the top level or in a list item
- *  one level in, as deLazifyBlockquotesWithLines reads one */
-const QUOTE_LINE_RE = /^ {0,3}>/;
-/** A quote's markers at a line's start, as its quote levels' */
-const QUOTE_MARKERS_RE = /^(?: {0,3}> ?)+/;
+/** A top-level bullet item's marker and the one space after it, before a
+ *  quote that starts on the item's marker line, as - > a. The item's lines
+ *  then go on two spaces in, as   > b, which the three spaces a quote's
+ *  line may start after take in, and a bullet item with text interrupts a
+ *  paragraph, so the line always starts the item. Not an ordered item's,
+ *  which doesn't where it starts past 1, nor one in another, nor with more
+ *  spaces after it, whose lines go on further in */
+const ITEM_MARKER = '[-*+] ';
+/** Where a line starts as a quote's does, at the top level or in a list item
+ *  one level in, on a bullet item's marker line too (see ITEM_MARKER) */
+export const QUOTE_START = '(?:' + ITEM_MARKER + '| {0,3})>';
+/** A line that starts as a quote's does (see QUOTE_START), as
+ *  deLazifyBlockquotesWithLines reads one */
+const QUOTE_LINE_RE = new RegExp('^' + QUOTE_START);
+/** A quote's line that starts on a list item's marker line, as its first */
+const ITEM_QUOTE_LINE_RE = new RegExp('^' + ITEM_MARKER + '>');
+/** A quote's markers at a line's start, as its quote levels', with the
+ *  marker of the item it starts in */
+const QUOTE_MARKERS_RE = new RegExp('^(?:' + ITEM_MARKER + ')?(?: {0,3}> ?)+');
 /** A line of plain text, which starts no block, as a list item, a heading,
  *  a fence, a thematic break or HTML, nor a table's row, display math, a
  *  CriticMarkup span or a definition, as a lazy line export keeps in a
@@ -182,6 +196,7 @@ export function keepsLazyLine(lines: readonly string[], at: number, kept: boolea
 		const own = quoteLineText(lines, start);
 		if (own.trim() === '') break;
 		if (holdsNoLineBreak(own)) return false;
+		if (!continuesQuote(lines, start)) break;
 	}
 	let end = at;
 	for (; end < lines.length && isPlainLine(lines[end]); end++) {
@@ -190,12 +205,21 @@ export function keepsLazyLine(lines: readonly string[], at: number, kept: boolea
 	return end === lines.length || lines[end].trim() === '';
 }
 
+/** Whether the quote's line `at` of `lines` goes on the quote of the line
+ *  before it. Not where it starts on an item's marker line, nor where that
+ *  line does and it's out of the item, as > b after - > a, which ends the
+ *  item and starts a quote of its own (see ITEM_MARKER) */
+function continuesQuote(lines: readonly string[], at: number): boolean {
+	if (at === 0 || !QUOTE_LINE_RE.test(lines[at - 1]) || ITEM_QUOTE_LINE_RE.test(lines[at])) return false;
+	return !ITEM_QUOTE_LINE_RE.test(lines[at - 1]) || /^ {2}/.test(lines[at]);
+}
+
 /** A quote's line `at` of `lines` past its markers, and past an alert's
  *  marker where it's the quote's first line, which is no link, and which
  *  export takes as the alert's */
 function quoteLineText(lines: readonly string[], at: number): string {
 	const text = lines[at].replace(QUOTE_MARKERS_RE, '');
-	if (at > 0 && QUOTE_LINE_RE.test(lines[at - 1])) return text;
+	if (continuesQuote(lines, at)) return text;
 	return parseGfmAlertMarker(text)?.rest ?? text;
 }
 

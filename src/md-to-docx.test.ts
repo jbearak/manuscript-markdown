@@ -4157,6 +4157,72 @@ describe('List blockquote round-trip', () => {
     const { warnings } = await convertMdToDocx(md);
     expect(warnings).toEqual([]);
   });
+
+  // A quote on a list item's marker line, as - > a, took the line after it
+  // without a > into its paragraph, as markdown-it reads it lazily, where
+  // export ends a quote at such a line (see deLazifyBlockquotesWithLines),
+  // as it did for - x and then > a on the next line. Export read no quote
+  // line there, as it read only a > in the first four columns
+  describe('a quote on a list item\'s marker line', () => {
+    const fence = '$' + '$';
+    /** Word's paragraphs for `md`, each its style, its list level and text */
+    async function paragraphs(md: string): Promise<string[]> {
+      const JSZip = (await import('jszip')).default;
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      return (xml.match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? []).map(p => (/<w:pStyle w:val="([^"]+)"/.exec(p)?.[1] ?? '') + '|' +
+        (/<w:ilvl w:val="(\d+)"/.exec(p)?.[1] ?? '') + '|' + p.replace(/<w:br\/>/g, '\n').replace(/<m:t>([^<]*)<\/m:t>/g, '$1').replace(/<[^>]+>/g, ''));
+    }
+    /** The text of Word's quote and alert paragraphs for `md` */
+    const quoted = async (md: string) => (await paragraphs(md)).filter(p => /^GitHub(?:Blockquote|Note|Tip|Important|Warning|Caution)\|/.test(p)).map(p => p.split('|')[2]).filter(text => text.trim());
+
+    it.each([
+      ['a line after it in the item', '- > a\n  b', '- \n  > a\n\n  b', ['a']],
+      ['lines after it in the item', '- > a\n  b\n  c', '- \n  > a\n\n  b c', ['a']],
+      ['a line after it out of the item', '- > a\nb', '- \n  > a\n\nb', ['a']],
+      ['display math after it', '- > a\n  ' + fence + '\n  x\n  ' + fence, '- \n  > a\n\n  ' + fence + '\n  x\n  ' + fence, ['a']],
+      ['a * item', '* > a\n  b', '- \n  > a\n\n  b', ['a']],
+      ['a + item', '+ > a\n  b', '- \n  > a\n\n  b', ['a']],
+      ['a quote in a quote', '- > > a\n  b', '- \n  > > a\n\n  b', ['a']],
+    ])('ends at a line without a >, in %s', async (_name, md, back, quote) => {
+      expect(await quoted(md)).toEqual(quote);
+      expect(await roundTripBody(md)).toBe(back);
+      expect(await paragraphs(back)).toEqual(await paragraphs(md));
+      expect(await roundTripBody(back)).toBe(back);
+    });
+
+    // As on main: a quote on the line after the marker's, at the top level,
+    // and a lazy line after a line break, which markdown-it and export both
+    // read on the quote's paragraph, and lines with a > or a list's marker
+    it.each([
+      ['a quote on the line after the item\'s marker', '- x\n  > a\n  b', '- x\n  > a\n\n  b', ['a']],
+      ['a quote at the top level', '> a\nb', '> a\nb', ['a']],
+      ['a lazy line after a \\', '- > a\\\n  b', '- \n  > a\\\n  > b', ['a\nb']],
+      ['a lazy line after two spaces', '- > a  \n  b', '- \n  > a\\\n  > b', ['a\nb']],
+      ['a lazy line after a \\, in an alert', '- > [!NOTE]\n  > a\\\n  b', '- \n  > [!NOTE]\n  > a\\\n  > b', ['\u203B Note\n a\nb']],
+      ['a quote\'s next line', '- > a\n  > b', '- \n  > a b', ['a b']],
+      ['the next item', '- > a\n- b', '- \n  > a\n- b', ['a']],
+      ['the next item, with a quote', '1. > a\n2. > b', '1. \n   > a\n2. \n   > b', ['a', 'b']],
+      // Only a top-level bullet item's, with one space after its marker,
+      // whose lines go on two spaces in. An ordered item's lines go on
+      // further in, as do an item's in another, which a quote's line there
+      // goes on too, and a numbered line after a paragraph's, which starts
+      // no list past 1, is the paragraph's
+      ['a quote\'s next line in a 10. item', '10. > a\n    > b', '10. \n    > a b', ['a b']],
+      ['a quote\'s next line in an item in an item', '- - > a\n    > b', '- \n  - \n    > a b', ['a b']],
+      ['a numbered line after a paragraph\'s', 'Paragraph\n2. > a\nb', 'Paragraph 2. > a b', []],
+      ['a lazy line in a 1. item', '1. > a\n   b', '1. \n   > a b', ['a b']],
+      ['a lazy line in an item in an item', '- - > a\n    b', '- \n  - \n    > a b', ['a b']],
+      ['a lazy line in a nested item', '- a\n  - > b\n    c', '- a\n\n  - \n    > b c', ['b c']],
+      // A quote out of the item, which ends it, starts a quote of its own,
+      // and an alert's marker there is its own
+      ['a lazy line after a \\, in an alert out of the item', '- > a\n> [!NOTE] b\\\nc', '- \n  > a\n> [!NOTE] b\\\n> c', ['a', '\u203B Note\nb\nc']],
+    ])('keeps %s as before', async (_name, md, back, quote) => {
+      expect(await quoted(md)).toEqual(quote);
+      expect(await roundTripBody(md)).toBe(back);
+      expect(await paragraphs(back)).toEqual(await paragraphs(md));
+      expect(await roundTripBody(back)).toBe(back);
+    });
+  });
 });
 
 describe('Quote lines in code and HTML blocks', () => {
