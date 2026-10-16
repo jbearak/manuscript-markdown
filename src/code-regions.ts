@@ -97,11 +97,37 @@ exportBlockParser.block.ruler.at('blockquote', (state, startLine, endLine, silen
 	}
 	return blockquote(state, startLine, endLine, silent);
 }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
-/** A line that starts as a quote's does, at the top level or in a list item
- *  one level in, as deLazifyBlockquotesWithLines reads one */
-const QUOTE_LINE_RE = /^ {0,3}>/;
-/** A quote's markers at a line's start, as its quote levels' */
-const QUOTE_MARKERS_RE = /^(?: {0,3}> ?)+/;
+/** A top-level bullet item's marker and the one space after it, before a
+ *  quote that starts on the item's marker line, as - > a. A bullet item
+ *  with text interrupts a paragraph, so the line always starts the item.
+ *  Not an ordered item's, which doesn't where it starts past 1, nor one in
+ *  another, nor with more spaces after it, whose lines go on further in */
+const ITEM_MARKER = '[-*+] ';
+/** Where a line may start as a quote's does, at the top level or in a list
+ *  item one level in, on a bullet item's marker line too (see isQuoteLine) */
+export const QUOTE_START = '(?:' + ITEM_MARKER + '| {0,3})>';
+/** A line that starts as a quote's does at the top level or in a list item
+ *  one level in */
+const PLAIN_QUOTE_LINE_RE = /^ {0,3}>/;
+/** A quote's line that starts on a list item's marker line, as its first */
+const ITEM_QUOTE_LINE_RE = new RegExp('^' + ITEM_MARKER + '>');
+/** A line that starts with a quote's marker past its spaces */
+const ANY_QUOTE_LINE_RE = /^[ \t]*>/;
+
+/**
+ * Whether line `at` of `lines` starts as a quote's does, as
+ * deLazifyBlockquotesWithLines reads one: at the top level or in a list
+ * item one level in, or on a bullet item's marker line where it's the
+ * quote's only line, as - > a, whose next line starts with no >. A quote
+ * there whose lines go on, as   > b or     > b, which the item's indent
+ * takes in, or which ends the item, as > b, is read as before, as none.
+ */
+export function isQuoteLine(lines: readonly string[], at: number): boolean {
+	return PLAIN_QUOTE_LINE_RE.test(lines[at]) || (ITEM_QUOTE_LINE_RE.test(lines[at]) && !ANY_QUOTE_LINE_RE.test(lines[at + 1] ?? ''));
+}
+/** A quote's markers at a line's start, as its quote levels', with the
+ *  marker of the item it starts in */
+const QUOTE_MARKERS_RE = new RegExp('^(?:' + ITEM_MARKER + ')?(?: {0,3}> ?)+');
 /** A line of plain text, which starts no block, as a list item, a heading,
  *  a fence, a thematic break or HTML, nor a table's row, display math, a
  *  CriticMarkup span or a definition, as a lazy line export keeps in a
@@ -174,14 +200,15 @@ function holdsNoLineBreak(text: string): boolean {
 export function keepsLazyLine(lines: readonly string[], at: number, kept: boolean): boolean {
 	if (!isPlainLine(lines[at])) return false;
 	if (kept) return true;
-	if (at === 0 || !QUOTE_LINE_RE.test(lines[at - 1])) return false;
+	if (at === 0 || !isQuoteLine(lines, at - 1)) return false;
 	const text = quoteLineText(lines, at - 1);
 	if (!isPlainLine(text) || !endsInLineBreak(text)) return false;
 	// Nor where the quote's paragraph, from its first line, may hold one
-	for (let start = at - 1; start >= 0 && QUOTE_LINE_RE.test(lines[start]); start--) {
+	for (let start = at - 1; start >= 0 && isQuoteLine(lines, start); start--) {
 		const own = quoteLineText(lines, start);
 		if (own.trim() === '') break;
 		if (holdsNoLineBreak(own)) return false;
+		if (!continuesQuote(lines, start)) break;
 	}
 	let end = at;
 	for (; end < lines.length && isPlainLine(lines[end]); end++) {
@@ -190,12 +217,19 @@ export function keepsLazyLine(lines: readonly string[], at: number, kept: boolea
 	return end === lines.length || lines[end].trim() === '';
 }
 
+/** Whether the quote's line `at` of `lines` goes on the quote of the line
+ *  before it. Not where it starts on an item's marker line, where it's the
+ *  quote's first (see isQuoteLine) */
+function continuesQuote(lines: readonly string[], at: number): boolean {
+	return at > 0 && isQuoteLine(lines, at - 1) && !ITEM_QUOTE_LINE_RE.test(lines[at]);
+}
+
 /** A quote's line `at` of `lines` past its markers, and past an alert's
  *  marker where it's the quote's first line, which is no link, and which
  *  export takes as the alert's */
 function quoteLineText(lines: readonly string[], at: number): string {
 	const text = lines[at].replace(QUOTE_MARKERS_RE, '');
-	if (at > 0 && QUOTE_LINE_RE.test(lines[at - 1])) return text;
+	if (continuesQuote(lines, at)) return text;
 	return parseGfmAlertMarker(text)?.rest ?? text;
 }
 
@@ -341,7 +375,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		for (let line = 1; line < lines.length; line++) {
 			const after = kept;
 			kept = false;
-			if (!(QUOTE_LINE_RE.test(lines[line - 1]) || after) || QUOTE_LINE_RE.test(lines[line]) || lines[line].trim() === '') continue;
+			if (!(isQuoteLine(lines, line - 1) || after) || isQuoteLine(lines, line) || lines[line].trim() === '') continue;
 			if (keepsLazyLine(lines, line, after)) kept = true;
 			else env.quoteEnds.push(line);
 		}
