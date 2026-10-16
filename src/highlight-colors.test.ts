@@ -446,3 +446,39 @@ describe('Editor decorations read an == after an escaped { as a highlight\'s ope
     expect(highlights(text, extractHighlightRanges(text, 'yellow'))).toEqual([]);
   });
 });
+
+// A closing == right after a { that no odd run of backslashes escapes, a
+// {=='s, closes no highlight, as export and the preview read it, whether or
+// not a ==} closes that {==: a == b {==c==}{>>n<<}, which import writes for
+// Word's a == b before a commented c, is a critic highlight on c. The
+// decorations read a {== that a ==} closes as its own span, but closed a
+// highlight on the == of one that none closes, and on the == of any {== in
+// a CriticMarkup span's text
+describe('Editor decorations read no highlight that a {==\'s == would close', () => {
+  /** Each highlight's text in document order, after its key */
+  const highlights = (text: string, ranges: Map<string, Array<{ start: number; end: number }>>) =>
+    [...ranges.entries()]
+      .flatMap(([key, list]) => list.map(range => ({ key, range })))
+      .sort((a, b) => a.range.start - b.range.start)
+      .map(({ key, range }) => key + ': ' + text.slice(range.start, range.end));
+
+  it.each<[string, string, string[]]>([
+    ['an opener before a {== that no ==} closes', 'P ==a {==c Q', []],
+    ['a colored highlight\'s opener before a {== that no ==} closes', 'P ==a {=={red} Q', []],
+    ['an opener before a critic highlight in an insertion', '{++==a {==c==} b++}', ['critic: c']],
+    ['an opener before a {== that no ==} closes in an insertion', '{++==a {==c b++}', []],
+    // As before
+    ['an == in text before a commented critic highlight', 'P a == b {==c==}{>>n<<} Q', ['critic: c']],
+    ['an opener before a critic highlight', 'P ==a {==c==} Q', ['critic: c']],
+    ['an opener after an escaped one before a critic highlight', 'P \\==a b== {==c==} Q', ['critic: c']],
+    ['a highlight closed after an escaped {', 'P ==a \\{==c Q', ['yellow: ==a \\{==']],
+    ['a colored highlight closed after an escaped {', 'P ==a \\{=={red} Q', ['red: ==a \\{=={red}']],
+    ['a highlight closed after an escaped { in an insertion', '{++==a \\{==c b++}', ['yellow: ==a \\{==']],
+    ['a highlight', '==a==', ['yellow: ==a==']],
+    ['a { in a highlight', '==a {b==', ['yellow: ==a {b==']],
+    ['a highlight around a critic highlight', '==a {==c==} b==', ['yellow: ==a {==c==} b==', 'critic: c']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(highlights(text, extractAllDecorationRanges(text, 'yellow').highlights)).toEqual(expected);
+    expect(highlights(text, extractHighlightRanges(text, 'yellow'))).toEqual(expected);
+  });
+});

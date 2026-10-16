@@ -8,7 +8,7 @@ import { fastestRun } from './test-timing';
 // We'll test the regex pattern directly since we can't import vscode in tests
 // This is the same pattern used in changes.ts
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
-const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Helper function to find all pattern matches in text, as getAllMatches
 // finds them
@@ -582,6 +582,48 @@ describe('Navigation regex reads an == after an escaped { as a highlight\'s open
   // only a search past it for its ==} could tell the two apart
   it('reads no highlight after a {== that no ==} closes, as the preview does', () => {
     expect(findAllPatterns('a {==x== b').map(m => m.matched)).toEqual([]);
+  });
+});
+
+// A closing == right after a { that no odd run of backslashes escapes, a
+// {=='s, closes no highlight, as export, the preview and the decorations
+// read it: a == b {==c==}{>>n<<}, which import writes for Word's a == b
+// before a commented c, is a critic highlight on c and its comment, not a
+// highlight of " b {". One after an escaped { closes one, as before
+describe('Navigation regex reads no highlight that a {==\'s == would close', () => {
+  it.each<[string, string, string[]]>([
+    ['an == in text before a commented critic highlight', 'P a == b {==c==}{>>n<<} Q', ['{==c==}', '{>>n<<}']],
+    ['an opener before a critic highlight', 'P ==a {==c==} Q', ['{==c==}']],
+    ['an opener after an escaped one before a critic highlight', 'P \\==a b== {==c==} Q', ['{==c==}']],
+    ['an opener right before a critic highlight', 'P =={==c==} Q', ['{==c==}']],
+    ['an opener before a critic highlight after an escaped backslash', 'P ==a \\\\{==c==} Q', ['{==c==}']],
+    ['an opener before a {== that no ==} closes', 'P ==a {==c Q', []],
+    ['a colored highlight\'s opener before a {== that no ==} closes', 'P ==a {=={red} Q', []],
+    // As before
+    ['a highlight closed after an escaped {', 'P ==a \\{==c Q', ['==a \\{==']],
+    ['a colored highlight closed after an escaped {', 'P ==a \\{=={red} Q', ['==a \\{=={red}']],
+    ['a highlight closed after three backslashes and a {', 'P ==a \\\\\\{==c Q', ['==a \\\\\\{==']],
+    ['a highlight', '==a==', ['==a==']],
+    ['a critic highlight', '{==a==}', ['{==a==}']],
+    ['an escaped { and } around a highlight', '\\{==a==\\}', ['==a==']],
+    ['a { in a highlight', '==a {b==', ['==a {b==']],
+    ['a { and a backslash in a highlight', '==a\\b {c\\== d', ['==a\\b {c\\==']],
+    ['an == in text', 'a == b', []],
+    ['a highlight whose closing == a } follows', '==a==}', []],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(findAllPatterns(text).map(m => m.matched)).toEqual(expected);
+    expect(navigationMatches(combinedPattern, text)).toEqual(execAll(text));
+  });
+
+  // Limits from before, which this leaves as they were: export reads a
+  // highlight of a in the first, where the preview and the decorations read
+  // one of b, and one of a=b in the second, where the decorations read none
+  it.each<[string, string, string[]]>([
+    ['a critic highlight with no closer before a highlight', '{==a==b==', ['==b==']],
+    ['a highlight with an = in it', '==a=b==', []],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(findAllPatterns(text).map(m => m.matched)).toEqual(expected);
+    expect(navigationMatches(combinedPattern, text)).toEqual(execAll(text));
   });
 });
 
