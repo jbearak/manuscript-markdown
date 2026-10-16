@@ -25,6 +25,8 @@ Inline math right after a display equation in a paragraph, as Word can have it, 
 
 A tracked change, a highlight or a comment around display math alone, as import writes one, keeps the equation in its paragraph, with text before or after it there, as display math in none is kept. Word gets the change, the highlight or the comment on the equation there. A highlight with a comment over it, or with a comment right after it in its paragraph, comes back without the highlight, as before, since `{==...==}{>>...<<}` reads as a comment over the equation. A span with a blank line between its equations still puts each in a paragraph of its own. In a heading, the equation goes in a paragraph of its own after the heading's, as above. Inline math right after such a span stays on the span's closing line, as `++}`, `--}` or `==}` keeps it apart from the fence.
 
+The preview shows text after a display equation's closing fence on the fence's line, as in `$$&#32;b.`, after the equation, as it shows text on the line after the fence, and in one paragraph with the lines after it that go on in the equation's paragraph. VS Code's math extension ends the equation at that fence and would leave the rest of the line out. Word gets that text, and those lines, in the equation's paragraph. A `$` right after the fence shows as text, as export reads it; after a space, it opens inline math.
+
 ### Tracked changes inside inline equations
 
 CriticMarkup can wrap a changed fragment inside an inline equation. Keep each

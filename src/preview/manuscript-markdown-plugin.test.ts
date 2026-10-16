@@ -2467,6 +2467,142 @@ describe('a highlight inside an equation, as import writes it', () => {
   });
 });
 
+// Import writes the text that goes on in a display equation's paragraph
+// after its closing fence, on the fence's line, and export writes it in the
+// equation's Word paragraph. VS Code's math extension's block rule left the
+// rest of that line out of the preview
+describe('text after a display equation\'s closing fence', () => {
+  const fence = '$'.repeat(2);
+  const x = fence + '\nx\n' + fence;
+  const z = fence + '\nz\n' + fence;
+
+  /** VS Code's math extension's rules (markdown-math), as they read these:
+   *  display math in a block from a line that starts with a fence to the
+   *  next line that holds one, leaving out the rest of that line where the
+   *  fence doesn't end it, and inline math, not after a $, a \ or a word
+   *  character */
+  function host(md: MarkdownIt): void {
+    md.block.ruler.after('blockquote', 'math_block', (state: any, startLine: number, endLine: number, silent: boolean) => {
+      const start = state.bMarks[startLine] + state.tShift[startLine];
+      const first = state.src.slice(start, state.eMarks[startLine]);
+      if (!first.startsWith(fence) || first.slice(2).includes(fence)) return false;
+      if (silent) return true;
+      let line = startLine;
+      let last = '';
+      for (let found = false; !found;) {
+        line++;
+        const pos = state.bMarks[line] + state.tShift[line];
+        const max = state.eMarks[line];
+        if (line >= endLine || pos < max && state.tShift[line] < state.blkIndent) break;
+        const text = state.src.slice(pos, max);
+        found = text.includes(fence);
+        if (text.trim().endsWith(fence)) last = text.slice(0, text.lastIndexOf(fence));
+      }
+      state.line = line + 1;
+      const token = state.push('math_block', 'math', 0);
+      token.block = true;
+      token.content = state.getLines(startLine + 1, line, state.tShift[startLine], true) + last;
+      token.map = [startLine, state.line];
+      token.markup = fence;
+      return true;
+    }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
+    md.inline.ruler.after('escape', 'math_inline', (state: any, silent: boolean) => {
+      if (state.src[state.pos] !== '$' || /[$\\\w]/.test(state.src[state.pos - 1] ?? '')) return false;
+      const close = state.src.indexOf('$', state.pos + 1);
+      if (close <= state.pos + 1) return false;
+      if (!silent) state.push('math_inline', 'math', 0).content = state.src.slice(state.pos + 1, close);
+      state.pos = close + 1;
+      return true;
+    });
+    md.renderer.rules.math_block = (tokens, idx) => '<katex-display>' + escapeHtml(tokens[idx].content.trim()) + '</katex-display>\n';
+    md.renderer.rules.math_inline = (tokens, idx) => '<katex>' + escapeHtml(tokens[idx].content) + '</katex>';
+  }
+
+  /** `markdown` in the preview, with the math extension's rules registered
+   *  before this plugin's or after them, as VS Code can load either first,
+   *  without the color scheme's marker and the styles before the document */
+  function render(markdown: string, hostFirst = true): string {
+    const md = new MarkdownIt({ html: true });
+    if (hostFirst) host(md);
+    md.use(manuscriptMarkdownPlugin);
+    if (!hostFirst) host(md);
+    return md.render(markdown).replace(/^<span data-manuscript-color-scheme[^>]*><\/span>\n(<style>\n[\s\S]*?<\/style>\n)*/, '');
+  }
+
+  const comment = '<span class="manuscript-markdown-comment-indicator" data-comment="c"></span>';
+  it.each([
+    ['after &#32;', 'a\n' + x + '&#32;b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p> b.</p>\n'],
+    ['after a space', 'a\n' + x + ' b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p>b.</p>\n'],
+    ['right after it', 'a\n' + x + 'b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p>b.</p>\n'],
+    ['with inline math after &#32;', 'a\n' + x + '&#32;$y$ b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p> <katex>y</katex> b.</p>\n'],
+    // As export reads no inline math right after the fence's $, and as the
+    // next import escapes it
+    ['with a $ right after it', 'a\n' + x + '$y$ b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p>$y$ b.</p>\n'],
+    ['with an escaped $', 'a\n' + x + '\\$y$ b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p>$y$ b.</p>\n'],
+    ['with a comment after it', 'a\n' + x + '{>>c<<} b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p>' + comment + ' b.</p>\n'],
+    ['after a second equation, with inline math between them', 'a\n' + x + '\n$y$\n' + z + '&#32;b.\n',
+      '<p>a</p>\n<katex-display>x</katex-display>\n<p><katex>y</katex></p>\n<katex-display>z</katex-display>\n<p> b.</p>\n'],
+    // In a tight list's item, without a paragraph, as the item's text before
+    ['in a list item', '- a\n  ' + x.replace(/\n/g, '\n  ') + '&#32;b.\n', '<ul>\n<li>a<katex-display>x</katex-display>\n b.</li>\n</ul>\n'],
+    ['in a quote', '> a\n> ' + x.replace(/\n/g, '\n> ') + '&#32;b.\n',
+      '<blockquote>\n<p>a</p>\n<katex-display>x</katex-display>\n<p> b.</p>\n</blockquote>\n'],
+    // A space before a $, which opens inline math there, as export reads it
+    ['with inline math after a space', 'a\n' + x + ' $y$ b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p><katex>y</katex> b.</p>\n'],
+    // With the line after it, which goes on from it in the paragraph, as
+    // export writes them in one Word paragraph: across a soft break, an
+    // emphasis's span and a line break
+    ['with the line after it', 'a\n' + x + ' b\nc\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p>b\nc</p>\n'],
+    ['with the line after it in a list item', '- a\n  ' + x.replace(/\n/g, '\n  ') + ' b\n  c\n',
+      '<ul>\n<li>a<katex-display>x</katex-display>\nb\nc</li>\n</ul>\n'],
+    ['with an emphasis across the line after it', 'a\n' + x + ' *b\nc*\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p><em>b\nc</em></p>\n'],
+    ['with a line break before the line after it', 'a\n' + x + ' b  \nc\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p>b<br>\nc</p>\n'],
+    // A list of equations alone, which has no paragraphs to read its
+    // tightness from, tight as markdown-it reads it, with no blank line
+    // between its items' blocks, or loose
+    ['in a tight list of equations alone', '- ' + x.replace(/\n/g, '\n  ') + ' b\n- ' + z.replace(/\n/g, '\n  ') + ' c\n',
+      '<ul>\n<li>\n<katex-display>x</katex-display>\nb</li>\n<li>\n<katex-display>z</katex-display>\nc</li>\n</ul>\n'],
+    ['in a loose list of equations alone', '- ' + x.replace(/\n/g, '\n  ') + ' b\n\n- ' + z.replace(/\n/g, '\n  ') + ' c\n',
+      '<ul>\n<li>\n<katex-display>x</katex-display>\n<p>b</p>\n</li>\n<li>\n<katex-display>z</katex-display>\n<p>c</p>\n</li>\n</ul>\n'],
+    ['in a list item of an equation alone', '- ' + x.replace(/\n/g, '\n  ') + ' b\n', '<ul>\n<li>\n<katex-display>x</katex-display>\nb</li>\n</ul>\n'],
+  ])('shows the text %s', (_name, markdown, expected) => {
+    expect(render(markdown)).toBe(expected);
+    expect(render(markdown, false)).toBe(expected);
+  });
+
+  // As before: display math alone; text on the line after the closing
+  // fence, as inline math there, which import writes after the fence; a
+  // fence that ends its line, after spaces; text before a fence on its
+  // line, which import doesn't write there; and an equation with no closing
+  // fence, whose rule goes on to the end
+  it.each([
+    ['display math alone', x + '\n', '<katex-display>x</katex-display>\n'],
+    ['text on the next line', 'a\n' + x + '\nb.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p>b.</p>\n'],
+    ['inline math on the next line', 'a\n' + x + '\n$y$ b.\n', '<p>a</p>\n<katex-display>x</katex-display>\n<p><katex>y</katex> b.</p>\n'],
+    ['a fence that ends its line', 'a\n' + x + '  \n', '<p>a</p>\n<katex-display>x</katex-display>\n'],
+    ['text before the closing fence on its line', fence + '\nx\n\na ' + fence + ' b.\n', '<katex-display>x</katex-display>\n'],
+    ['no closing fence', fence + '\nx\n', '<katex-display>x</katex-display>\n'],
+  ])('shows %s as before', (_name, markdown, expected) => {
+    expect(render(markdown)).toBe(expected);
+    expect(render(markdown, false)).toBe(expected);
+  });
+
+  // Each equation's search for its block's paragraphs went back over the
+  // tokens before it, and each paragraph it added moved those after it, so
+  // a document of many equations with text after each took time in the
+  // square of their number
+  it('shows the text after many equations in time linear in their number', () => {
+    const input = (n: number) => (x + ' b\n').repeat(n);
+    expect(render(input(2))).toBe(('<katex-display>x</katex-display>\n<p>b</p>\n').repeat(2));
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => render(text));
+    };
+    time(8000);
+    const small = time(8000);
+    expect(time(32000) / small).toBeLessThan(8);
+  }, 60000);
+});
+
 describe('CriticMarkup inside inline equations', () => {
   it('recognizes a math opener preceded by an even run of backslashes', () => {
     const html = renderWithPlugin('\\\\$a{++b++}$');
