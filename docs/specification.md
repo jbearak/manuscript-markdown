@@ -853,6 +853,7 @@ A backslash before the opening `==` escapes it, as in Markdown: `\==text==` is t
 - The `{color}` suffix is unambiguous because CriticMarkup uses `{` *before* `==`, not after
 - An `==` right before a `}`, as of `{==text==}`, closes no format highlight, so `\{==text==}` is the text `{==text==}`. DOCX import writes a `}` right after a highlight as `\}`, as in `==text==\}`
 - A `{` that a backslash escapes is text, so an `==` right after it opens a format highlight: `\{==text==\}` is a `{`, the highlighted text and a `}`, which is how DOCX import writes Word's literal braces around a highlight
+- The `==` of a `{==` closes no format highlight: `a == b {==c==}{>>note<<}`, which is how DOCX import writes Word's text `a == b` before a commented `c`, is a comment on `c`, not a highlight of ` b {`. After an escaped `{`, as in `==a \{==`, the `==` closes one
 
 #### Markdown in a highlight
 

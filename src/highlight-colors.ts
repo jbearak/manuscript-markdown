@@ -12,10 +12,12 @@ import { isEscapedAt } from './math-delimiters';
 // - TextMate inline highlight regex: exclude = inside ==...== captures ([^}=]+) for
 //   multi-span tokenization
 // - An == after an odd run of backslashes opens no format highlight, as export and
-//   the preview read it; a closing == has no such check. Nor does one right after a
-//   {, but for a { an odd run of backslashes escapes, as in \{==x==\}, which is a {,
-//   the highlighted x and a } to export and the preview. Keep hlRe and
-//   isBlockedPredecessor in step with combinedPattern in changes.ts and the grammar
+//   the preview read it; a closing == has no such check. An == right after a { that
+//   no odd run of backslashes escapes, a {=='s, neither opens nor closes one, whether
+//   or not a ==} closes that {==, so P ==a {==c==} Q is a critic highlight on c. One
+//   after an escaped {, as in \{==x==\}, which is a {, the highlighted x and a } to
+//   export and the preview, can do both. Keep hlRe, isBlockedPredecessor and
+//   opensCriticHighlight in step with combinedPattern in changes.ts and the grammar
 // - A { after an odd run of backslashes, whose last escapes it, opens no CriticMarkup,
 //   as export and the preview read it. Keep criticSpans, criticIn and
 //   extractAllDecorationRanges in step with combinedPattern in changes.ts and the
@@ -252,8 +254,9 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
 
   // Colored highlights ==text=={color} and default highlights ==text==, none
   // whose opening == an odd run of backslashes escapes or that comes right
-  // after a { no odd run escapes (see combinedPattern in changes.ts)
-  const hlRe = /(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?![}=])(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
+  // after a { no odd run escapes, nor any whose closing == does (see
+  // combinedPattern in changes.ts)
+  const hlRe = /(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
   const formatIn = (part: string, offset: number) => {
     hlRe.lastIndex = 0;
     let m;
@@ -452,13 +455,18 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     if (!highlights.has(key)) highlights.set(key, []);
     highlights.get(key)!.push({ start, end });
   };
+  // Whether the == at `index` is a {=='s, whose { no odd run of backslashes
+  // escapes, which neither opens nor closes a format highlight, as export
+  // and the preview read it (opensCriticHighlight there; see hlRe)
+  const opensCriticHighlight = (index: number): boolean =>
+    text.charCodeAt(index - 1) === 0x7B && !isEscapedAt(text, index - 1);
   // An == after a { no odd run of backslashes escapes, or after =, or after
   // an odd run of backslashes, whose last escapes its first = (see hlRe),
   // opens no format highlight
   const isBlockedPredecessor = (index: number, boundEnd: number): boolean =>
     index > 0 &&
     index < boundEnd &&
-    ((text.charCodeAt(index - 1) === 0x7B && !isEscapedAt(text, index - 1)) || text.charCodeAt(index - 1) === 0x3D || isEscapedAt(text, index));
+    (opensCriticHighlight(index) || text.charCodeAt(index - 1) === 0x3D || isEscapedAt(text, index));
   const isBlockedSuccessor = (indexAfterClose: number, boundEnd: number): boolean => {
     if (indexAfterClose >= boundEnd) return false;
     const ch = text.charCodeAt(indexAfterClose);
@@ -495,9 +503,10 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
         // Need at least 1 char of content and closing ==
         if (k > contentStart && k + 1 < regionEnd &&
             text.charCodeAt(k) === 0x3D && text.charCodeAt(k + 1) === 0x3D) {
-          // Trailing guard: closing == must not be followed by = or }
+          // Trailing guard: closing == must not be followed by = or }, nor
+          // be a {=='s
           const afterClose = k + 2;
-          if (isBlockedSuccessor(afterClose, regionEnd)) { j = k; continue; }
+          if (isBlockedSuccessor(afterClose, regionEnd) || opensCriticHighlight(k)) { j = k; continue; }
           // Found closing ==. Check for optional {color} suffix
           const closeEnd = k + 2;
           let matchEnd = closeEnd;
@@ -690,6 +699,9 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 scanFormatHighlights(k + 3, ci);
                 hasContent = true; k = ci + 3; continue;
               }
+              // One with no ==} after it is text, but its == closes no
+              // highlight (see opensCriticHighlight), and its = ends [^}=]+
+              break;
             } else if (d2 === 0x3E && d3 === 0x3E) { // {>>
               const ci = closers.matching(k + 3);
               if (ci !== -1) {

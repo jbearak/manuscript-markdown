@@ -439,6 +439,9 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
     ['a deletion after an escaped backslash in an insertion', '{++a \\\\{--x--} b++}', ['addition', 'deletion']],
     ['an insertion after an escaped backslash', 'a \\\\{++x++} b', ['addition']],
     ['a critic highlight and its comment', 'a {==x==}{>>c<<} b', ['highlight', 'comment']],
+    // An == before a {== closes no format highlight on its ==
+    ['a critic highlight and its comment after an == in text', 'a == b {==x==}{>>c<<} d', ['highlight', 'comment']],
+    ['a critic highlight after an opener', 'a ==b {==x==} c', ['highlight']],
     ['a comment\'s range and body', 'a {#1}x{/1}{#1>>c<<} b', ['comment_range_start', 'comment_range_end', 'comment_with_id']],
   ])('reads %s as export does', (_name, line, expected) => {
     expect(opened(line)).toEqual(expected);
@@ -627,6 +630,46 @@ describe('Syntax grammar format highlights', () => {
     ['a highlight', 'a ==x== b', ['==x==']],
     ['an escaped opener', 'a \\==x== b', []],
   ])('scopes %s as export reads it', (_name, line, expected) => {
+    expect(highlighted(line)).toEqual(expected);
+  });
+
+  // A closing == right after a { that no odd run of backslashes escapes, a
+  // {=='s, closes no highlight, as export, the preview and the decorations
+  // read it: a == b {==c==}{>>n<<}, which import writes for Word's a == b
+  // before a commented c, is a critic highlight on c, which another rule
+  // reads, not a highlight of " b {". Its text reads a backslash and the
+  // character after it as one, so a { is the last of its text only after
+  // an even run. One after an escaped { closes one, as before
+  it.each<[string, string, string[]]>([
+    ['an == in text before a commented critic highlight', 'P a == b {==c==}{>>n<<} Q', []],
+    ['an opener before a critic highlight', 'P ==a {==c==} Q', []],
+    ['an opener after an escaped one before a critic highlight', 'P \\==a b== {==c==} Q', []],
+    ['an opener right before a critic highlight', 'P =={==c==} Q', []],
+    ['an opener before a critic highlight after an escaped backslash', 'P ==a \\\\{==c==} Q', []],
+    ['an opener before a {== that no ==} closes', 'P ==a {==c Q', []],
+    ['a colored highlight\'s opener before a {== that no ==} closes', 'P ==a {=={red} Q', []],
+    // As before
+    ['a highlight closed after an escaped {', 'P ==a \\{==c Q', ['==a \\{==']],
+    ['a colored highlight closed after an escaped {', 'P ==a \\{=={red} Q', ['==a \\{=={red}']],
+    ['a highlight closed after three backslashes and a {', 'P ==a \\\\\\{==c Q', ['==a \\\\\\{==']],
+    ['a highlight', '==a==', ['==a==']],
+    ['a critic highlight, which another rule reads', '{==a==}', []],
+    ['an escaped { and } around a highlight', '\\{==a==\\}', ['==a==']],
+    ['a { in a highlight', '==a {b==', ['==a {b==']],
+    ['a { and a backslash in a highlight', '==a\\b {c\\== d', ['==a\\b {c\\==']],
+    ['an == in text', 'a == b', []],
+    ['a highlight whose closing == a } follows', '==a==}', []],
+  ])('scopes %s as export reads it', (_name, line, expected) => {
+    expect(highlighted(line)).toEqual(expected);
+  });
+
+  // Limits from before, which this leaves as they were: export reads a
+  // highlight of a in the first, where the preview and the decorations read
+  // one of b, and one of a=b in the second, where the decorations read none
+  it.each<[string, string, string[]]>([
+    ['a critic highlight with no closer before a highlight', '{==a==b==', ['==b==']],
+    ['a highlight with an = in it', '==a=b==', []],
+  ])('scopes %s as before', (_name, line, expected) => {
     expect(highlighted(line)).toEqual(expected);
   });
 

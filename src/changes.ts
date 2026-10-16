@@ -22,6 +22,15 @@ import { navigationMatches } from './navigation-matches';
 // the preview: \{==a==\} is a {, the highlighted a and a }, as import writes
 // Word's literal braces around a highlight. The lookbehind for that { comes
 // after the == too.
+// Nor does an == right after such a { close one, as export, the preview and
+// the decorations read it, whether or not a ==} closes its {==: a == b
+// {==c==}{>>n<<}, which import writes for Word's a == b before a commented
+// c, is a critic highlight on c and its comment, not a highlight of " b {".
+// The same lookbehind follows the closing ==, so it runs only where an ==
+// ends the highlight's text, and steps back only over the run of
+// backslashes before the {. The grammar's patterns read a backslash in the
+// text and the character after it as one instead, so a { right before the
+// closing == is a {=='s only after an even run.
 // A { after an odd run of backslashes, whose last escapes it, opens no
 // CriticMarkup, as export and the preview read it (markdown-it's escape
 // rule): \{++a++} is text, \\{++a++} an insertion. The openers share one {,
@@ -32,7 +41,7 @@ import { navigationMatches } from './navigation-matches';
 // an opener with no closer after it, as each searched the rest of the text.
 // An alternative added here that starts with a { or a < and runs to the
 // first of a closer after it needs a check there.
-const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Version-keyed cache for navigation match results (single-document cache)
 let cachedUri: string | undefined;
