@@ -6,6 +6,9 @@ import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
 import { renderWithPlugin } from './test-helpers';
 import { scanOrientationDirectives } from './orientation-scan';
+import MarkdownIt from 'markdown-it';
+import { manuscriptMarkdownPlugin } from './preview/manuscript-markdown-plugin';
+import { vscodeMath } from './preview-math-read';
 
 describe('wrapBareLatexEnvironments', () => {
 	test('wraps a bare equation environment', () => {
@@ -346,18 +349,41 @@ describe('a stray fence of two dollar signs before display math', () => {
 		expect(wrapBareLatexEnvironments(md)).toContain(D + '\\begin{equation}\nx\n\\end{equation}' + D);
 	});
 
-	test('wraps an environment after a blank line in display math, which export reads as text, as that environment\'s equation', async () => {
-		// The paragraph before it holds the fence before the blank line, as
-		// text, and its own the one after it. Before, the two paired. Wrapped,
-		// its paragraph's parse reads the environment as display math (see
-		// decideParagraphs)
-		const md = D + '\nx\n\n' + aligned + '\n' + D + '\n';
-		expect(wrapBareLatexEnvironments(md)).toBe(D + '\nx\n\n' + D + aligned + D + '\n' + D + '\n');
-		const { docx } = await convertMdToDocx(md);
+	// Export reads display math with a blank line before its environment as
+	// two paragraphs and no equation, and VS Code's preview, whose math
+	// extension reads display math from a fence at a line's start over blank
+	// lines, as one equation. Wrapped, the wrap's opening fence closed the
+	// preview's equation, which gave it the environment as text and an empty
+	// equation. Main's pairing of the two fences holds (see mainZoneIsWrong)
+	const blankBefore = D + '\nx\n\n' + aligned + '\n' + D + '\n';
+
+	test('leaves an environment after a blank line in display math as it is, which the preview reads as one equation', () => {
+		expect(wrapBareLatexEnvironments(blankBefore)).toBe(blankBefore);
+		const md = new MarkdownIt({ html: true });
+		vscodeMath(md);
+		md.use(manuscriptMarkdownPlugin);
+		const maths: string[] = [];
+		const texts: string[] = [];
+		const visit = (tokens: ReturnType<MarkdownIt['parse']>) => {
+			for (const token of tokens) {
+				if (token.type.startsWith('math')) maths.push(token.content);
+				else if (token.type === 'text') texts.push(token.content);
+				if (token.children) visit(token.children);
+			}
+		};
+		visit(md.parse(blankBefore, {}));
+		expect(maths).toHaveLength(1);
+		expect(maths[0]).toContain('x');
+		expect(maths[0]).toContain('\\begin{aligned}');
+		expect(texts.join('')).not.toContain('begin{aligned}');
+	});
+
+	test('leaves an environment after a blank line in display math as it is through Word, as on main', async () => {
+		const { docx } = await convertMdToDocx(blankBefore);
 		const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
-		expect(xml).not.toContain('begin{aligned}');
+		// No empty equation, and the next trip gives the same Markdown
+		expect([...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].every(m => /<m:t[^>]*>[^<]*\S/.test(m[1]))).toBe(true);
 		const once = (await convertDocx(docx)).markdown;
-		expect(once).toContain(equation.trimEnd());
 		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
 	});
 });
@@ -524,6 +550,31 @@ describe('a bare environment its paragraph\'s own parse decides otherwise than m
 	])('leaves an environment %s as it is, as before', (_name, md) => {
 		expect(wrapBareLatexEnvironments(md)).toBe(md);
 	});
+
+	// Main paired the code span's fence with the one in the line before the
+	// environment, which opens display math to the fence after it, a dollar
+	// sign in it, for the paragraph's parse. Main's wrap, whose opening fence
+	// is at its line's start, ends the paragraph there for VS Code's preview,
+	// which reads it as its own equation, and the display math around it,
+	// left as it is, as one with the dollar sign. So main's decision holds
+	// (see mainsWrapsInPreview)
+	test('wraps an environment in display math from a fence in a line before it, as main does, which the preview reads as its own equation', () => {
+		const md = 'A `' + D + '` b.\n\nSee ' + D + ' a $\n' + bare + '\nb ' + D + ' c.\n';
+		const wrapped = wrapBareLatexEnvironments(md);
+		expect(wrapped).toBe('A `' + D + '` b.\n\nSee ' + D + ' a $\n' + D + bare + D + '\nb ' + D + ' c.\n');
+		const preview = new MarkdownIt({ html: true });
+		vscodeMath(preview);
+		preview.use(manuscriptMarkdownPlugin);
+		const maths: string[] = [];
+		const visit = (tokens: ReturnType<MarkdownIt['parse']>) => {
+			for (const token of tokens) {
+				if (token.type.startsWith('math')) maths.push(token.content);
+				if (token.children) visit(token.children);
+			}
+		};
+		visit(preview.parse(md, {}));
+		expect(maths).toEqual([bare]);
+	});
 });
 
 describe('a bare environment in a paragraph that is not simple, as main left it', () => {
@@ -606,9 +657,12 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 	// Each fence's search for its closer read on to the text's end. Each
 	// text is read with an environment after it, in its last paragraph,
 	// which so is read on its own, and once more with its wraps where those
-	// differ from main's
+	// differ from main's, and then as the preview reads it. Each row says how
+	// many environments it wraps in two of its texts
 	test.each([
 		['fences in code before display math', '```\nx = ' + D + '\n```\n\n' + D + '\n\\begin{aligned}\na\n\\end{aligned}\n' + D + '\n\n', 0],
+		// Main paired the fences of two, with a blank line between them, which
+		// it left the environment between as, and wraps the other
 		['fences in text before environments', 'A ' + D + ' sign.\n\n' + env, 1],
 		['fences in table cells before environments', '| a ' + D + ' | b |\n| - | - |\n\n' + env, 1],
 		['equations and dollar signs in one paragraph', 'x ' + D + 'y' + D + ' $a$ \\$ $5 $x' + D + 'y$ ', 0],
@@ -620,14 +674,23 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		['a run of backticks', '`'.repeat(16), 0],
 		['tags without their ends in one paragraph', '<a b="$ ', 0],
 		['brackets in one paragraph', '[$ ', 0],
-		['environments with dollar signs in them', '\\begin{equation}\na $ b % $\n\\end{equation}\n\n', 1],
-		['fences in images\' alts before environments in their paragraphs', 'Text ![' + D + '](x.png)\n' + env + 'Text ![' + D + '](x.png)\n' + env, 1],
+		['environments with dollar signs in them', '\\begin{equation}\na $ b % $\n\\end{equation}\n\n', 2],
+		['fences in images\' alts before environments in their paragraphs', 'Text ![' + D + '](x.png)\n' + env + 'Text ![' + D + '](x.png)\n' + env, 2],
 		// Which main's fences leave every other one of, and which the read
 		// of the paragraph with the wraps confirms, in one read of it
-		['fences in code spans before environments in one paragraph', '`' + D + '` x\n\\begin{equation}\nx\n\\end{equation}\n', 1],
+		['fences in code spans before environments in one paragraph', '`' + D + '` x\n\\begin{equation}\nx\n\\end{equation}\n', 2],
+		// Whose decisions, which differ from main's, the preview reads
+		// otherwise: the run of four after each, which export reads as an
+		// empty equation, opens display math to the next line with a fence for
+		// the preview. So each takes main's decision, after one read of all,
+		// and main wraps every other one
+		['paragraphs the preview reads otherwise, after fences in code spans', '`' + D + '` x\n\\begin{equation}\nx\n\\end{equation}\n' + D + D + ' y\n\n', 1],
+		// Whose decisions leave main's wraps, which the preview reads as their
+		// own equations, so each takes main's decision, after one read of all
+		['display math around main\'s wraps the preview reads as their own equations', 'A `' + D + '` b.\n\nSee ' + D + ' a $\n\\begin{equation}\nx\n\\end{equation}\nb ' + D + ' c.\n\n', 1],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		const count = (text: string) => wrapBareLatexEnvironments(text).split(D + '\\begin').length - 1;
-		expect(count(unit.repeat(2))).toBe(wrapped * 2);
+		expect(count(unit.repeat(2))).toBe(wrapped);
 		const time = (n: number) => {
 			const text = unit.repeat(n);
 			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text + '\n' + env));
@@ -688,8 +751,10 @@ describe('a paragraph of many openers around a bare environment, which no rule o
 	const rows = openers.flatMap(([name, make]) => places.map(([where, place]) => [name, where, (n: number) => place(make(n))] as const));
 
 	test.each(rows)('reads a paragraph of many %s %s, through the wrapper and the orientation scan, in linear time', (name, where, text) => {
-		// The dollar signs before it pair with its fences, as on main
-		const wraps = !(name === 'runs of dollar signs' && where.startsWith('before'));
+		// The dollar signs before it pair with its fences, as on main, and
+		// those after it, which the preview reads otherwise than export, keep
+		// main's decision after a fence in a code span
+		const wraps = !(name === 'runs of dollar signs' && !where.startsWith('after an environment in'));
 		expect(wrapBareLatexEnvironments(text(8000)).includes(D + env + D)).toBe(wraps);
 		for (const work of [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives]) {
 			const time = (n: number) => {
