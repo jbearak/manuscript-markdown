@@ -252,3 +252,142 @@ describe('a bare environment after an opener in a code block', () => {
 		expect(wrapBareLatexEnvironments(md)).toBe(md);
 	});
 });
+
+describe('a stray fence of two dollar signs before display math', () => {
+	const D = '$' + '$';
+	const aligned = '\\begin{aligned}\na &= b\n\\end{aligned}';
+	const equation = D + '\n' + aligned + '\n' + D + '\n';
+	// Each fence in the text paired with the next, so one that opens no
+	// equation paired with the opening fence of the display math after it,
+	// whose environment, out of each zone, was wrapped again: Word got an
+	// empty equation, the environment as text, and another empty one
+	const strays: Array<[string, string]> = [
+		['in a fenced code block', '```\nx = ' + D + '\n```\n'],
+		['in a fenced code block of ~', '~~~sh\necho ' + D + '\n~~~\n'],
+		['in an indented code block', '    echo ' + D + '\n'],
+		['in a code span', 'Use `' + D + '` here.\n'],
+		['in an HTML comment', '<!-- ' + D + ' -->\n'],
+		['in an HTML comment in a paragraph', 'Text <!-- ' + D + ' --> more.\n'],
+		['in a line of text', 'A ' + D + ' sign.\n'],
+		['in a heading', '# Cost ' + D + '\n'],
+		['in a list item', '- a ' + D + '\n'],
+		['in a quote', '> a ' + D + '\n'],
+		['in a table\'s cell', '| a ' + D + ' | b |\n| - | - |\n| c | d |\n'],
+		['in an HTML block', '<div>\nx ' + D + '\n</div>\n'],
+		['between two inline equations', '$x' + D + 'y$\n'],
+		['in an insertion', '{++a ' + D + ' b++}\n'],
+		['in a CriticMarkup comment', 'Text{>>a ' + D + '<<}.\n'],
+	];
+
+	test.each(strays)('leaves an environment in it as it is after one %s', (_name, stray) => {
+		const md = stray + '\n' + equation + '\n' + D + '\nx\n' + D + '\n\n' + equation;
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+
+	test.each(strays)('wraps a bare environment after one %s', (_name, stray) => {
+		// Which an unclosed fence's zone, to the text's end, held
+		const md = stray + '\n\\begin{equation}\nx\n\\end{equation}\n';
+		expect(wrapBareLatexEnvironments(md)).toContain(D + '\\begin{equation}\nx\n\\end{equation}' + D);
+	});
+
+	test.each(strays.filter(([name]) => ['in a fenced code block', 'in an indented code block', 'in a code span', 'in an HTML comment', 'in a line of text', 'between two inline equations'].includes(name)))(
+		'exports each equation with an environment after one %s as that equation, which the preview shows', async (_name, stray) => {
+			const md = stray + '\n' + equation + '\nText.\n\n' + equation;
+			const { docx } = await convertMdToDocx(md);
+			const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+			const equations = [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(match => match[1]);
+			// Each display equation's, and the two inline equations' one
+			expect(equations).toHaveLength(stray.startsWith('$x') ? 3 : 2);
+			for (const omml of equations) expect(omml).toMatch(/<m:t[^>]*>[^<]*\S/);
+			expect(xml).not.toContain('begin{aligned}');
+			const once = (await convertDocx(docx)).markdown;
+			expect(once.split(equation).length - 1).toBe(2);
+			expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+			expect(renderWithPlugin(md)).not.toContain(D + '\\begin{aligned}');
+		});
+
+	test('leaves an environment in display math as it is after a run of three dollar signs in a line of text', () => {
+		const md = 'Run ' + D + '$ here.\n\n' + equation;
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+
+	// As on main
+	test.each([
+		['in a list item', '- ' + D + '\n  ' + aligned.replace(/\n/g, '\n  ') + '\n  ' + D + '\n'],
+		['in a quote', '> ' + D + '\n> ' + aligned.replace(/\n/g, '\n> ') + '\n> ' + D + '\n'],
+		['in a note, read as a whole', 'Text[^1].\n\n[^1]: ' + D + '\n    ' + aligned.replace(/\n/g, '\n    ') + '\n    ' + D + '\n'],
+		['in a table\'s cell', '| ' + D + 'x' + D + ' | b |\n| - | - |\n| c | d |\n\n' + equation],
+		['in an HTML block', '<div>\n' + D + '\n' + aligned + '\n' + D + '\n</div>\n'],
+		['with text on its fences\' lines', 'See ' + D + '\n' + aligned + '\n' + D + ' here.\n'],
+		['after display math on one line', D + 'x' + D + '\n\n' + equation],
+		['after escaped dollar signs', 'Costs \\$\\$ here.\n\n' + equation],
+		['with a CriticMarkup span over a blank line in it', D + '\na {++b\n\nc++} d\n' + aligned + '\n' + D + '\n'],
+		['with a blank line in the environment', D + '\n' + aligned.replace('\n\\end', '\n\n\\end') + '\n' + D + '\n'],
+		['without its closing fence, at the text\'s end', 'Text.\n\n' + D + '\n' + aligned + '\n'],
+		['after another', equation + '\n' + equation + '\n' + D + '\nx\n' + D + '\n\n' + equation],
+	])('leaves an environment in display math %s as it is', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+
+	test('reads a fence in a code span after the opening fence of display math as its closer, as export does, as before', () => {
+		// So the fence after the environment opens no equation
+		const md = D + '\na `' + D + '` b\n' + aligned + '\n' + D + '\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(D + '\na `' + D + '` b\n' + D + aligned + D + '\n' + D + '\n');
+	});
+
+	test.each([
+		['after display math', equation + '\n\\begin{equation}\nx\n\\end{equation}\n'],
+		['after a note with display math, read as a whole', 'Text[^1].\n\n[^1]: ' + D + '\n    ' + aligned.replace(/\n/g, '\n    ') + '\n    ' + D + '\n\n\\begin{equation}\nx\n\\end{equation}\n'],
+		['after inline equations', 'Both $a$ and $b$.\n\n\\begin{equation}\nx\n\\end{equation}\n'],
+		['after a table\'s cell with display math', '| ' + D + 'x' + D + ' | b |\n| - | - |\n| c | d |\n\n\\begin{equation}\nx\n\\end{equation}\n'],
+	])('wraps a bare environment %s, as before', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toContain(D + '\\begin{equation}\nx\n\\end{equation}' + D);
+	});
+
+	test('leaves an environment in an inline equation over lines as the equation\'s', async () => {
+		// Whose text, wrapped, held two fences, which Word showed
+		const md = 'The matrix $\n\\begin{pmatrix}\na & b\n\\end{pmatrix}\n$ is invertible.\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+		expect(once).toBe('The matrix $\\begin{pmatrix} a & b \\end{pmatrix}$ is invertible.\n');
+	});
+
+	test('wraps an environment after a blank line in display math, which export reads as text, as that environment\'s equation', async () => {
+		// The paragraph before it holds the fence before the blank line, as
+		// text, and its own the one after it. Before, the two paired
+		const md = D + '\nx\n\n' + aligned + '\n' + D + '\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(D + '\nx\n\n' + D + aligned + D + '\n' + D + '\n');
+		const { docx } = await convertMdToDocx(md);
+		const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+		expect(xml).not.toContain('begin{aligned}');
+		const once = (await convertDocx(docx)).markdown;
+		expect(once).toContain(equation.trimEnd());
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+	});
+});
+
+describe('wrapBareLatexEnvironments with stray fences in time linear in the text', () => {
+	const D = '$' + '$';
+	const env = '\\begin{equation}\nx\n\\end{equation}\n\n';
+	// Each fence's search for its closer read on to the text's end, and a
+	// paragraph's dollar signs are read to its end at most once for each kind
+	// of opener
+	test.each([
+		['fences in code before display math', '```\nx = ' + D + '\n```\n\n' + D + '\n\\begin{aligned}\na\n\\end{aligned}\n' + D + '\n\n', 0],
+		['fences in text before environments', 'A ' + D + ' sign.\n\n' + env, 1],
+		['fences in table cells before environments', '| a ' + D + ' | b |\n| - | - |\n\n' + env, 1],
+		['equations and dollar signs in one paragraph', 'x ' + D + 'y' + D + ' $a$ \\$ $5 $x' + D + 'y$ ', 0],
+		['dollar signs after an opener without its closer in one paragraph', '$ ' + D + 'a' + D + ' \\$ ', 0],
+		['CriticMarkup spans over blank lines in display math', D + '\na {++b\n\nc++} d\n\\begin{aligned}\na\n\\end{aligned}\n' + D + '\n\n', 0],
+	])('wraps a text of %s', (_name, unit, wrapped) => {
+		const count = (text: string) => wrapBareLatexEnvironments(text).split(D + '\\begin').length - 1;
+		expect(count(unit.repeat(2))).toBe(wrapped * 2);
+		const time = (n: number) => {
+			const text = unit.repeat(n);
+			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text + '\n\n' + env));
+		};
+		time(4000);
+		const small = time(4000);
+		expect(time(16000) / small).toBeLessThan(8);
+	}, 60000);
+});

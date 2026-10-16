@@ -6,14 +6,15 @@
  * so it sees markers in their original form.
  *
  * Only recognized display-math environments are wrapped. Code regions, HTML
- * comments, CriticMarkup spans, and existing `$$` blocks are treated as
- * "inert zones" and skipped.
+ * comments, CriticMarkup spans, and the equations export reads, display
+ * math and inline, are treated as "inert zones" and skipped, with the rest
+ * of a paragraph after a fence of two dollar signs export reads as text.
  */
 
 import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { exportsLiterally } from './html-blocks';
 import { criticCloserSearch } from './critic-markup';
-import { isEscapedAt } from './math-delimiters';
+import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt, type DollarMathOptions } from './math-delimiters';
 
 // All environments recognized by the latexToOmml parser as display math.
 export const DISPLAY_MATH_ENVIRONMENTS = new Set([
@@ -34,7 +35,8 @@ interface Zone { start: number; end: number }
 
 /**
  * Compute sorted, merged "inert zones" where bare environments should NOT
- * be recognized: code regions, HTML comments, CriticMarkup, existing $$ blocks.
+ * be recognized: code regions, HTML comments, CriticMarkup, the equations
+ * export reads, and a paragraph's text after a fence export reads as text.
  * Not the HTML blocks export writes as text, which latexReplacements reads
  * past the environments it finds.
  */
@@ -52,7 +54,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	// export writes as text, as a <pre> or a <div>, but not one it reads
 	// tables from, in which it reads an environment as display math (see
 	// markWrappedLatexBlocks in md-to-docx.ts)
-	const { codeRegions, blockCodeRegions, literalHtmlRegions } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally });
+	const { codeRegions, blockCodeRegions, htmlRegions, literalHtmlRegions, inlineBlocks } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally, inlineBlocks: true });
 	for (const r of codeRegions) {
 		zones.push({ start: r.start, end: r.end });
 	}
@@ -83,6 +85,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	// all of them at once, as each unclosed one searched the rest of the text.
 	// Not from an opener in a code block, which is the code's text: its zone
 	// hid an environment up to a later closer (see inCode)
+	const criticFrom = zones.length;
 	const closers = criticCloserSearch(text);
 	const cmMarkers: Array<{ open: string; close: string; nested?: boolean }> = [
 		{ open: '{++', close: '++}' },
@@ -131,43 +134,96 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 		}
 	}
 
-	// 4. Existing $$ ... $$ blocks
-	// Not at a dollar sign a backslash escapes, which opens or closes no
-	// math, as the math rule reads it (see findDollarMathClose in
-	// math-delimiters.ts)
+	// 4. Each equation, display math and inline, whose environments are its
+	// own, as one in inline math over lines, as export's math rule reads it
+	// in the text it reads on its own: a paragraph's or a heading's (see
+	// inlineBlocks in code-regions.ts), with those a CriticMarkup span above
+	// joins, as preprocessCriticMarkup puts its line ends in placeholders, an
+	// HTML block's, or else a line's, as a table row's or a note's first
+	// line's. An equation opens at a dollar sign in none of the zones above,
+	// whose constructs export reads first, and closes at the next that can
+	// close it, in a zone or not, as the rule reads on into a code span or a
+	// comment after its opener, but for one a backslash escapes (see
+	// findDollarMathAt in math-delimiters.ts). A fence of two dollar signs
+	// there that opens no equation, which export writes as text, as in a
+	// line of text, or with a blank line before its closer, holds the rest of
+	// that text, as an environment there, wrapped, would be its equation.
+	// Before, each fence in the text paired with the next, so one in code, a
+	// comment, CriticMarkup, an equation or a line of text paired with the
+	// opening fence of display math after it, and the environment in that
+	// math, out of each zone, was wrapped again, as was each in display math
+	// after it. A search for an opener's closer stops at the first run of
+	// dollar signs that may close it, so one of each kind at most reads to
+	// its text's end, after which none of that kind opens there
 	{
-		const delimiterAt = (at: number) => text[at] === '$' && text[at + 1] === '$' && !isEscapedAt(text, at);
-		let pos = 0;
-		while (pos < text.length - 1) {
-			if (delimiterAt(pos)) {
-				const start = pos;
-				pos += 2;
-				// Find closing $$
-				while (pos < text.length - 1) {
-					if (delimiterAt(pos)) {
-						pos += 2;
-						break;
-					}
-					pos++;
+		const inert = mergeZones(zones);
+		// Apart where they touch, as two list items' paragraphs
+		const units = joinedUnits(inlineBlocks.concat(htmlRegions).sort((a, b) => a.start - b.start), mergeZones(zones.slice(criticFrom)));
+		let zone = 0;
+		let unit = 0;
+		let lineEnd = -1;
+		let options: DollarMathOptions | undefined;
+		for (let at = text.indexOf('$'); at !== -1;) {
+			while (zone < inert.length && inert[zone].end <= at) zone++;
+			if (zone < inert.length && inert[zone].start <= at) {
+				at = text.indexOf('$', inert[zone].end);
+				continue;
+			}
+			while (unit < units.length && units[unit].end <= at) unit++;
+			let end: number;
+			if (unit < units.length && units[unit].start <= at) end = units[unit].end;
+			else {
+				if (at >= lineEnd) {
+					const lineBreak = text.indexOf('\n', at);
+					lineEnd = lineBreak === -1 ? text.length : lineBreak + 1;
 				}
-				zones.push({ start, end: pos });
+				end = lineEnd;
+			}
+			if (options?.end !== end) options = { ...DOCX_DOLLAR_MATH_OPTIONS, end };
+			const math = findDollarMathAt(text, at, options);
+			if (math?.kind === 'math') {
+				zones.push({ start: math.start, end: math.end });
+				at = text.indexOf('$', math.end);
+			} else if (text.charCodeAt(at + 1) === 0x24 && !isEscapedAt(text, at)) {
+				zones.push({ start: at, end });
+				at = text.indexOf('$', end);
 			} else {
-				pos++;
+				at = text.indexOf('$', at + 1);
 			}
 		}
 	}
 
-	// Sort by start, then merge overlapping/adjacent zones
-	zones.sort((a, b) => a.start - b.start);
+	return { zones: mergeZones(zones), literalHtml: literalHtmlRegions };
+}
+
+/** `units`, sorted, none in another, with each that a span of `spans`,
+ *  sorted and merged, reaches from before it joined to the one before it */
+function joinedUnits(units: Zone[], spans: Zone[]): Zone[] {
+	const joined: Zone[] = [];
+	let span = 0;
+	// The furthest end of the spans that start before the unit
+	let reach = -1;
+	for (const u of units) {
+		while (span < spans.length && spans[span].start < u.start) reach = Math.max(reach, spans[span++].end);
+		const last = joined[joined.length - 1];
+		if (last && reach > u.start) last.end = Math.max(last.end, u.end);
+		else joined.push({ start: u.start, end: u.end });
+	}
+	return joined;
+}
+
+/** `zones` sorted by start, with those that overlap or touch merged */
+function mergeZones(zones: Zone[]): Zone[] {
+	const sorted = zones.slice().sort((a, b) => a.start - b.start);
 	const merged: Zone[] = [];
-	for (const z of zones) {
+	for (const z of sorted) {
 		if (merged.length > 0 && z.start <= merged[merged.length - 1].end) {
 			merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, z.end);
 		} else {
 			merged.push({ start: z.start, end: z.end });
 		}
 	}
-	return { zones: merged, literalHtml: literalHtmlRegions };
+	return merged;
 }
 
 /** Whether [start, end) overlaps a zone of `zones`, sorted and merged: the
