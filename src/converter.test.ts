@@ -25756,11 +25756,39 @@ describe('a citation right after a hidden HTML comment', () => {
     expect(buildMarkdown([plain('a '), comment('<!-- a -->'), comment(' <!-- b -->'), citation(), plain(' b')], new Map()).trim()).toBe('a <!-- a --><!-- b -->[@doe2020] b');
   });
 
+  test('writes no space after a hidden comment on the line after a line break, after text', () => {
+    expect(buildMarkdown([plain('a'), plain('\\\n'), plain('b '), comment('<!-- h -->'), citation(), plain(' b')], new Map()).trim()).toBe('a\\\nb <!-- h -->[@doe2020] b');
+  });
+
+  test.each([
+    // Which ends the paragraph, so export shows the rest of the comment
+    ['a blank line in it', [comment('<!-- a\n\nb -->')], 'a <!-- a\n\nb --> [@doe2020] b'],
+    ['a blank line across the pieces Word split it into', [comment('<!-- a\n'), comment('\nb -->')], 'a <!-- a\n\nb --> [@doe2020] b'],
+    ['a blank line in the next one', [comment('<!-- a -->'), comment('<!-- b\n\nc -->')], 'a <!-- a --><!-- b\n\nc --> [@doe2020] b'],
+    // Whose next line could start a block
+    ['a line end in it', [comment('<!-- a\nb -->')], 'a <!-- a\nb --> [@doe2020] b'],
+    ['a line end before a quote\'s marker in it', [comment('<!-- a\n> b -->')], 'a <!-- a\n    > b --> [@doe2020] b'],
+    ['a line end ending a piece Word split it into', [comment('<!-- a\n'), comment('b -->')], 'a <!-- a\nb --> [@doe2020] b'],
+  ])('keeps the space after a hidden comment with %s, as before', (_name, comments, expected) => {
+    expect(buildMarkdown([plain('a '), ...comments, citation(), plain(' b')], new Map()).trim()).toBe(expected);
+  });
+
+  test.each([
+    ['after a line break and spaces', [plain('a'), plain('\\\n'), plain('  '), comment('<!-- h -->')], 'a\\\n&#32;&#32;<!-- h --> [@doe2020] b'],
+    ['after a line break, the spaces in its run', [plain('a'), plain('\\\n'), comment('  <!-- h -->')], 'a\\\n&#32;&#32;<!-- h --> [@doe2020] b'],
+    ['after spaces at the paragraph\'s start', [plain('    '), comment('<!-- h -->')], '&#32;&#32;&#32;&#32;<!-- h --> [@doe2020] b'],
+  ])('keeps the space after a hidden comment at a line\'s start, %s, as before', (_name, items, expected) => {
+    // Where a <!-- would start a block
+    expect(buildMarkdown([...items, citation(), plain(' b')], new Map()).trim()).toBe(expected);
+  });
+
   test.each([
     ['code', '&lt;!-- a --&gt;` &lt;!-- b `x --&gt;', 'a <!-- a -->` <!-- b `x --> [@doe2020] b.'],
     ['an insertion', '&lt;!-- a --&gt;{++&lt;!-- b --&gt;++}', 'a <!-- a -->{++<!-- b -->++} [@doe2020] b.'],
     // Two hidden runs, the code from one to the next
     ['code, split', '&lt;!-- a --&gt;` </w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">\u200B&lt;!-- b `x --&gt;', 'a <!-- a -->` <!-- b `x --> [@doe2020] b.'],
+    // A comment with a blank line in it, which ends the paragraph
+    ['two line breaks in it', '&lt;!-- a</w:t><w:br/><w:br/><w:t xml:space="preserve">b --&gt;', 'a <!-- a\n\nb --> [@doe2020] b.'],
   ])('keeps the space after Word\'s hidden run of a comment and %s, as before', async (_name, hiddenText, expected) => {
     // Export shows what follows the comment, so the citation went right
     // after its >

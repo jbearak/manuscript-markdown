@@ -9070,24 +9070,33 @@ function criticSpanStart(text: string, opener: string, closer: string, from: num
  *  one holds Markdown that isn't a comment, or the paragraph's Markdown
  *  before one holds what notePlainMarkdown wasn't told of (`mixed`), no
  *  more are noted. `plain` is where the Markdown ends while all of it came
- *  from Word's text and the comments noted. */
-interface HiddenComments { starts: Map<number, number>; plain: number; open?: { start: number; end: number; text: string; tail: string }; mixed?: true }
+ *  from Word's text and the comments noted, and `lineStart` whether it ends
+ *  at a line's start, the paragraph's or one after a line end, past spaces
+ *  and tabs alone. */
+interface HiddenComments { starts: Map<number, number>; plain: number; lineStart: boolean; open?: { start: number; end: number; text: string; tail: string }; mixed?: true }
 
-/** Notes in `hidden` that the Markdown from `from` to `to` was just written
- *  for Word's text: its runs, which escapeMarkdownChars escapes for what
- *  comes after them, and their formatting's delimiters, which close in
- *  them, or a line break, with no tracked change or link around it. That's
- *  Markdown that leaves nothing open that a later <!-- would be read in, as
- *  code, a link or CriticMarkup. Any other Markdown before a hidden comment
- *  in the paragraph, as an image's, a field's, math, a note's reference, a
- *  link, CriticMarkup, a comment's range or body, ID syntax or an HTML
- *  block, keeps that comment and those after it from being noted (see
- *  noteHiddenComments), as what's not told of here is. The renderers only
- *  add to the end of their Markdown, but where a comment's line break goes
- *  as <br> (see breakBeforeComment), so where `plain` is the Markdown's
- *  length, nothing else has been written. */
-function notePlainMarkdown(hidden: HiddenComments, from: number, to: number): void {
-  if (hidden.plain === from) hidden.plain = to;
+/** Notes in `hidden` that the Markdown from `from` to `to`, `piece`, was
+ *  just written for Word's text: its runs, which escapeMarkdownChars escapes
+ *  for what comes after them, and their formatting's delimiters, which
+ *  close in them, or a line break, with no tracked change or link around
+ *  it. That's Markdown that leaves nothing open that a later <!-- would be
+ *  read in, as code, a link or CriticMarkup. Any other Markdown before a
+ *  hidden comment in the paragraph, as an image's, a field's, math, a
+ *  note's reference, a link, CriticMarkup, a comment's range or body, ID
+ *  syntax or an HTML block, keeps that comment and those after it from
+ *  being noted (see noteHiddenComments), as what's not told of here is.
+ *  The renderers only add to the end of their Markdown, but where a
+ *  comment's line break goes as <br> (see breakBeforeComment), so where
+ *  `plain` is the Markdown's length, nothing else has been written. Whether
+ *  the piece leaves the Markdown at a line's start, as a line break does,
+ *  is noted too, as a comment there would start a block. A line Word's text
+ *  starts goes on in the paragraph, as import escapes what would start a
+ *  block there, as \> and \<div>. */
+function notePlainMarkdown(hidden: HiddenComments, from: number, to: number, piece: string): void {
+  if (hidden.plain !== from) return;
+  hidden.plain = to;
+  const end = Math.max(piece.lastIndexOf('\n'), piece.lastIndexOf('\r'));
+  hidden.lineStart = (end !== -1 || hidden.lineStart) && /^[ \t]*$/.test(piece.slice(end + 1));
 }
 
 /** Notes in `hidden` the comments in `written`, the Markdown of a hidden
@@ -9098,7 +9107,16 @@ function notePlainMarkdown(hidden: HiddenComments, from: number, to: number): vo
  *  Markdown before it is Word's text and the comments noted (see
  *  notePlainMarkdown), where `before`, its length before this comment's
  *  Markdown, is `plain`, and the hidden comments' Markdown holds nothing
- *  but comments and whitespace, which is all export then reads it as.
+ *  but comments and whitespace, which is all export then reads it as, and
+ *  no line end, each piece of one Word split included. A line end in one
+ *  would let its next line start a block or end the paragraph, as a blank
+ *  line does, which export then shows the rest of. Nor where its Markdown
+ *  starts a line, after a line break or at the paragraph's start, where a
+ *  <!-- starts a block, as where breakBeforeComment kept the break or put
+ *  the comments in blocks of their own (`held`). Where it wrote <br> for
+ *  the break (`at` isn't `before`), the comment goes on the line before,
+ *  after the <br>, which starts no block, as more follows it on its line,
+ *  and breakBeforeComment has read that line as export reads its comments.
  *  Anything else in theirs is text Word hid with them, which shows once
  *  export reads it, as the x of <!-- a -->x<!-- b --> does, and which, as
  *  code, an escape, an autolink, a tag, a link or CriticMarkup, can make a
@@ -9118,10 +9136,11 @@ function notePlainMarkdown(hidden: HiddenComments, from: number, to: number): vo
  *  one's start, as export reads it, so none is noted from there on either.
  *  Only `written` is read, not the paragraph's Markdown, which reading
  *  would join for each comment. */
-function noteHiddenComments(hidden: HiddenComments, written: string, at: number, before: number): void {
-  if (before !== hidden.plain) hidden.mixed = true;
+function noteHiddenComments(hidden: HiddenComments, written: string, at: number, before: number, held: boolean | undefined): void {
+  if (before !== hidden.plain || /[\r\n]/.test(written) || held || at === before && hidden.lineStart) hidden.mixed = true;
   if (hidden.mixed) return;
   hidden.plain = at + written.length;
+  hidden.lineStart &&= /^[ \t]*$/.test(written);
   const commentEnd = (text: string, start: number): number => {
     if (!readsMarkdown) {
       const piece = htmlPieceAt(text, start);
@@ -10863,7 +10882,7 @@ function renderInlineRange(
   let lastSpan: RevisionSpan | undefined;
   // The hidden comments the Markdown holds, which a citation's space reads
   // past (see citationSeparator)
-  const hidden: HiddenComments = { starts: new Map(), plain: 0 };
+  const hidden: HiddenComments = { starts: new Map(), plain: 0, lineStart: true };
 
   while (i < segment.length) {
     const item = segment[i];
@@ -10980,7 +10999,7 @@ function renderInlineRange(
         const markdownBefore = out.length;
         [out, last, held, written] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
           () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment, () => commentBlocks(segment, i, segmentEnd));
-        noteHiddenComments(hidden, written, out.length - written.length, markdownBefore);
+        noteHiddenComments(hidden, written, out.length - written.length, markdownBefore, held);
         // The blocks hold the rest of the paragraph
         if (held) i = last;
         else inlineThrough = Math.max(inlineThrough, last);
@@ -11153,7 +11172,7 @@ function renderInlineRange(
       if (!item.revision) {
         trailingBreak = trailingBreakOf(before, text, out);
         noteHtmlBlock(htmlBlock, text, out.length);
-        if (!item.href) notePlainMarkdown(hidden, before.length, out.length);
+        if (!item.href) notePlainMarkdown(hidden, before.length, out.length, text);
       }
       i++;
       continue;
@@ -11194,7 +11213,7 @@ function renderInlineRange(
       if (!item.revision) {
         trailingBreak = trailingBreakOf(before, text, out);
         noteHtmlBlock(htmlBlock, text, out.length);
-        notePlainMarkdown(hidden, before.length, out.length);
+        notePlainMarkdown(hidden, before.length, out.length, text);
       }
     }
     i++;
@@ -11240,7 +11259,7 @@ function renderInlineRangeWithIds(
   let lastSpan: RevisionSpan | undefined;
   // The hidden comments the Markdown holds, which a citation's space reads
   // past (see citationSeparator)
-  const hidden: HiddenComments = { starts: new Map(), plain: 0 };
+  const hidden: HiddenComments = { starts: new Map(), plain: 0, lineStart: true };
   // A comment that spans paragraphs stays open from the one before
   let prevCommentIds = new Set<string>(openIdComments);
   const collectedBodies = new Set<string>();
@@ -11417,7 +11436,7 @@ function renderInlineRangeWithIds(
         const markdownBefore = out.length;
         [out, last, held, written] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
           () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment, () => commentBlocks(segment, i, segmentEnd));
-        noteHiddenComments(hidden, written, out.length - written.length, markdownBefore);
+        noteHiddenComments(hidden, written, out.length - written.length, markdownBefore, held);
         // The blocks hold the rest of the paragraph
         if (held) i = last;
         else inlineThrough = Math.max(inlineThrough, last);
@@ -11454,7 +11473,7 @@ function renderInlineRangeWithIds(
       if (!item.revision) {
         trailingBreak = trailingBreakOf(before, text, out);
         noteHtmlBlock(htmlBlock, text, out.length);
-        if (!item.href) notePlainMarkdown(hidden, before.length, out.length);
+        if (!item.href) notePlainMarkdown(hidden, before.length, out.length, text);
       }
       i++;
       continue;
@@ -11496,7 +11515,7 @@ function renderInlineRangeWithIds(
       if (!item.revision) {
         trailingBreak = trailingBreakOf(before, text, out);
         noteHtmlBlock(htmlBlock, text, out.length);
-        notePlainMarkdown(hidden, before.length, out.length);
+        notePlainMarkdown(hidden, before.length, out.length, text);
       }
     }
     i++;
