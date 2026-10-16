@@ -6,7 +6,7 @@
  * and typo detection. No LSP types — returns offsets; server converts.
  */
 
-import { normalizeFontStyle, parseColWidths } from '../frontmatter';
+import { SINGLE_VALUE_KEYS, blockListAfter, normalizeFontStyle, parseColWidths } from '../frontmatter';
 import { MAX_TABLE_DIGITS } from '../table-number-format';
 import { getCslFieldInfo } from './csl-language';
 import { BUNDLED_STYLE_LABELS } from '../csl-loader';
@@ -172,7 +172,7 @@ const FONT_STYLE_PARTS: readonly EnumValue[] = [
 
 export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 	{ key: 'title', kind: 'free-text', allowsMultiple: true,
-		description: 'Document title. Repeat the key for subtitle lines.\n\n**Accepted values:** Any string. Multiple `title:` lines are allowed.' },
+		description: 'Document title. Repeat the key for subtitle lines.\n\n**Accepted values:** Any string. Multiple `title:` lines, or a YAML list of titles, are allowed.' },
 	{ key: 'author', kind: 'free-text',
 		description: 'Document author name(s), copied verbatim to Word’s Author property—not BibTeX or Zotero metadata. Put all names in one value, for example: author: Kathryn Janeway, Benjamin Sisko, and Jean-Luc Picard.\n\n**Accepted values:** Any string.' },
 	{ key: 'csl', kind: 'csl',
@@ -457,6 +457,18 @@ interface FmLine {
 	styleName?: string;
 	/** Depth: 0 = top-level, 1 = style name, 2 = sub-property */
 	stylesDepth?: number;
+	/**
+	 * Whether the line is an item of a block list, as `  - One` after
+	 * `title:` (see blockListAfter), its value its text as export reads it.
+	 * `key` is the list's key, and keyStart and keyEnd the item's `-`.
+	 */
+	listItem?: boolean;
+	/** Whether the item is a mapping, as `- name: Jane`, which export doesn't read */
+	mapping?: boolean;
+	/** Whether the item goes on past its line, of which export reads only the line */
+	continued?: boolean;
+	/** For a key with a block list after it, the list's items */
+	items?: FmLine[];
 }
 
 interface ParsedFrontmatter {
@@ -484,14 +496,27 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 	const rawLines = fmBody.split('\n');
 	const lines: FmLine[] = [];
 
-	let pos = bodyStart;
+	// Where each line starts, as a block list reads the lines after its key
+	const lineStarts: number[] = [];
+	for (let k = 0, at = bodyStart; k < rawLines.length; k++) {
+		lineStarts.push(at);
+		at += rawLines[k].length + 1; // +1 for \n
+	}
 	let inStylesBlock = false;
 	let stylesNameIndent = -1;
 	let currentStyleName: string | undefined;
+	// The items of block lists after the keys before, by their lines' indices
+	const listed = new Map<number, FmLine>();
 
-	for (const rawLine of rawLines) {
+	for (let lineIdx = 0; lineIdx < rawLines.length; lineIdx++) {
+		const listedLine = listed.get(lineIdx);
+		if (listedLine) {
+			lines.push(listedLine);
+			continue;
+		}
+		const rawLine = rawLines[lineIdx];
 		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-		const lineStart = pos;
+		const lineStart = lineStarts[lineIdx];
 
 		const indent = line.length - line.trimStart().length;
 		const trimmed = line.trimStart();
@@ -499,7 +524,6 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 
 		// YAML comments do not establish mapping depth or leave a styles block.
 		if (trimmed.startsWith('#')) {
-			pos += rawLine.length + 1;
 			continue;
 		}
 
@@ -559,7 +583,7 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 				}
 			}
 
-			lines.push({
+			const keyLine: FmLine = {
 				key,
 				rawValue: valueRaw,
 				keyStart,
@@ -571,7 +595,50 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 				inStylesBlock: lineInStylesBlock,
 				styleName: lineStyleName,
 				stylesDepth,
-			});
+			};
+			lines.push(keyLine);
+
+			// A block list after the key, as `title:` then `  - One`, whose
+			// items export reads as the key's values (see readBlockLists in
+			// frontmatter.ts), past a comment as the key's value. An item is
+			// its line: the lines after it that go with it are read as
+			// before, as export reads them.
+			const list = key !== 'styles' ? blockListAfter(rawLines, lineIdx) : undefined;
+			if (list) {
+				keyLine.rawValue = '';
+				keyLine.items = [];
+				for (const item of list.items) {
+					const itemStart = lineStarts[item.line];
+					const dash = itemStart + rawLines[item.line].indexOf('-');
+					// To the line's end, as a value after a key, past spaces
+					// after a `-` with no text
+					let start = itemStart + item.start;
+					let end = itemStart + rawLines[item.line].replace(/\r$/, '').length;
+					let quote: '"' | "'" | undefined;
+					const written = text.slice(start, end);
+					if (written.length >= 2 && (written[0] === '"' || written[0] === "'") && written.endsWith(written[0])) {
+						quote = written[0] as '"' | "'";
+						start++;
+						end--;
+					}
+					const itemLine: FmLine = {
+						key,
+						rawValue: item.mapping ? '' : item.text.replace(/^["']|["']$/g, ''),
+						keyStart: dash,
+						keyEnd: dash,
+						valueStart: start,
+						valueEnd: end,
+						valueQuote: quote,
+						indent: dash - itemStart,
+						inStylesBlock: false,
+						listItem: true,
+						mapping: item.mapping,
+						continued: item.continued,
+					};
+					listed.set(item.line, itemLine);
+					keyLine.items.push(itemLine);
+				}
+			}
 		} else if (trimmed.length > 0) {
 			// Non-empty line without colon — track as a key-in-progress
 			const keyStart = lineStart + indent;
@@ -600,8 +667,6 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 				stylesDepth,
 			});
 		}
-
-		pos += rawLine.length + 1; // +1 for \n
 	}
 
 	return { lines, fmStart, fmEnd, bodyStart, closed: !!fmMatch };
@@ -631,6 +696,8 @@ export interface FrontmatterLocation {
 	frontmatterClosed: boolean;
 	/** Whether completion should be suppressed at punctuation outside an array item */
 	suppressCompletions?: boolean;
+	/** Whether the value is a block list's item, which takes only what one item of the key's inline array takes */
+	listItem?: boolean;
 	/** Formatting consumed by an array-item replacement range */
 	completionPrefix?: string;
 	completionSuffix?: string;
@@ -668,7 +735,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	const declaredKeys = new Set<string>();
 	const declaredKeyCounts = new Map<string, number>();
 	for (const line of parsed.lines) {
-		if (!line.inStylesBlock || line.indent === 0) {
+		if (!line.listItem && (!line.inStylesBlock || line.indent === 0)) {
 			const canonical = resolveCanonical(line.key);
 			declaredKeys.add(canonical);
 			declaredKeyCounts.set(canonical, (declaredKeyCounts.get(canonical) ?? 0) + 1);
@@ -766,6 +833,27 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 			// Determine if cursor is in key or value position
 			// The colon separates them; if line has no colon, it's in key position
 			const colonOffset = line.keyEnd; // key ends at colon position
+
+			if (line.listItem) {
+				// A value of the list's key: its item's text, with no
+				// completion on the `-`, or for a mapping or an item that
+				// goes on past its line, which a value on it wouldn't end.
+				// After a `-` with no space, a value needs one. Its values are
+				// those of an item of the key's inline array (listItem).
+				const valueRange = completionValueRange(line);
+				const separator = text[line.valueStart - 1] === '-' ? ' ' : '';
+				return {
+					kind: 'value', key: line.key,
+					keyStart: line.keyStart, keyEnd: line.keyEnd,
+					valueStart: valueRange.start, valueEnd: valueRange.end,
+					declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+					suppressCompletions: valueRange.suppress || line.mapping || line.continued || offset < line.valueStart,
+					listItem: true,
+					completionPrefix: separator + (valueRange.prefix ?? ''),
+					completionSuffix: valueRange.suffix,
+					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
+				};
+			}
 
 			if (line.inStylesBlock) {
 				if (line.stylesDepth === 1) {
@@ -1027,6 +1115,11 @@ export function getFrontmatterCompletionItems(
 	}
 
 	if (location.kind === 'value' || location.kind === 'styles-value') {
+		// A block list's item is one item of the key's inline array, so it
+		// gets what an item of that array gets: values for a key whose array
+		// takes one per item, and none for a key that takes one value or for
+		// table-col-widths, whose equal and auto export reads only alone.
+		if (location.listItem && !lookupDef(location.key)?.arrayField) return [];
 		const items = getValueCompletions(location, platform, cachedCslStyles);
 		if (!location.completionPrefix && !location.completionSuffix) return items;
 		return items.map(item => ({
@@ -1265,6 +1358,10 @@ export async function validateFrontmatter(
 	const seenCanonical = new Map<string, FmLine>(); // canonical → first occurrence
 
 	for (const line of parsed.lines) {
+		if (line.items) validateListItems(line, diagnostics);
+		// A block list's items are values, checked with their key's
+		if (line.listItem) continue;
+
 		// Skip styles sub-properties for duplicate/typo detection at top level
 		if (line.inStylesBlock && line.indent > 0) {
 			// Validate styles sub-property values
@@ -1351,8 +1448,8 @@ export async function validateFrontmatter(
 	}
 
 	// Async validations: CSL and bibliography file existence
-	const decimalLine = seenCanonical.get('table-decimal-mark');
-	const groupingLine = seenCanonical.get('table-digit-grouping');
+	const decimalLine = listValueLine(seenCanonical.get('table-decimal-mark'));
+	const groupingLine = listValueLine(seenCanonical.get('table-digit-grouping'));
 	if (decimalLine && groupingLine) {
 		const decimal = decimalLine.rawValue.toLowerCase();
 		const grouping = groupingLine.rawValue.toLowerCase();
@@ -1365,10 +1462,72 @@ export async function validateFrontmatter(
 	}
 
 	// Async validations: CSL and bibliography file existence
-	await validateCsl(text, callbacks, diagnostics);
+	await validateCsl(text, parsed, callbacks, diagnostics);
 	await validateBibPath(parsed, callbacks, diagnostics);
 
 	return diagnostics;
+}
+
+/**
+ * The line of a key whose value export reads: for a key with a block list
+ * after it, its last item of text, as for the key repeated, or else the
+ * key's line.
+ */
+function listValueLine(line: FmLine | undefined): FmLine | undefined {
+	return line?.items?.filter(item => item.rawValue).at(-1) ?? line;
+}
+
+/**
+ * Check a block list's items as export reads them (see readBlockLists in
+ * frontmatter.ts): each as a value of the list's key, as an item of an
+ * inline array for a key that takes one, and none that's a mapping, which
+ * export doesn't read, or goes on past its line, of which it reads only the
+ * line. A key that takes one value takes one item of the list, as of the
+ * key repeated.
+ */
+function validateListItems(keyLine: FmLine, diagnostics: FrontmatterDiagnostic[]): void {
+	const def = lookupDef(keyLine.key);
+	if (!def || !keyLine.items) return;
+	let values = 0;
+	for (const item of keyLine.items) {
+		if (item.mapping) {
+			diagnostics.push({
+				message: 'Export doesn\'t read a mapping as an item of `' + keyLine.key + '`. Put the item in quotes to read it as text.',
+				severity: 'warning',
+				start: item.keyStart,
+				end: item.valueEnd,
+			});
+			continue;
+		}
+		if (item.continued) {
+			diagnostics.push({
+				message: 'Export reads only this item\'s line, as the item goes on past it or opens a quote that doesn\'t close on it. Write the item on one line, with any quote it opens closed.',
+				severity: 'warning',
+				start: item.keyStart,
+				end: item.valueEnd,
+			});
+		}
+		if (!item.rawValue) continue;
+		values++;
+		if (SINGLE_VALUE_KEYS.has(keyLine.key) && values > 1) {
+			diagnostics.push({
+				message: '`' + keyLine.key + '` takes one value. Export reads this list as the key repeated, so it uses only one item.',
+				severity: 'warning',
+				start: item.keyStart,
+				end: item.valueEnd,
+			});
+		}
+		// Each an item of an inline array, as export reads the list, where
+		// `equal` and `auto` stand for no column's width
+		if (resolveCanonical(keyLine.key) === 'table-col-widths') {
+			if (!parseColWidths('[' + item.rawValue + ']')) {
+				diagnostics.push({ message: 'Expected positive numbers.', severity: 'error', start: item.valueStart, end: item.valueEnd });
+			}
+			continue;
+		}
+		const valueDiag = validateValue(def, item);
+		if (valueDiag) diagnostics.push(valueDiag);
+	}
 }
 
 function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | undefined {
@@ -1487,10 +1646,17 @@ function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | und
 
 async function validateCsl(
 	text: string,
+	parsed: ParsedFrontmatter,
 	callbacks: FrontmatterValidationCallbacks,
 	diagnostics: FrontmatterDiagnostic[],
 ): Promise<void> {
-	const fieldInfo = getCslFieldInfo(text);
+	let fieldInfo = getCslFieldInfo(text);
+	// For `csl:` with a block list after it, the item export reads, the last
+	// of text, as of csl repeated, in place of the key's value, which is
+	// empty or a comment
+	const listed = parsed.lines.find(line => !line.listItem && line.key === 'csl' && line.indent === 0)
+		?.items?.filter(item => !item.mapping).at(-1);
+	if (listed) fieldInfo = { value: listed.rawValue.trim(), valueStart: listed.valueStart, valueEnd: listed.valueEnd };
 	if (!fieldInfo || !fieldInfo.value) return;
 
 	const available = await callbacks.isCslAvailable(fieldInfo.value, {

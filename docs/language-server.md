@@ -68,6 +68,8 @@ Typing `:` after a known key automatically opens its value choices, and the list
 
 For comma-separated and inline-array font fields, accepting a suggestion replaces only the item under the cursor.
 
+An item of a YAML block list, as `  - Georgia` after `header-font:`, gets the same hover and checks as a value written after its key, and the value completions an item of the key's inline array gets: fonts and font styles for `header-font`, `header-font-style`, `title-font` and `title-font-style`, and none under a key that takes one value, or under `table-col-widths`, whose `equal` and `auto` export reads only alone. An item that goes on past its line gets no value completions, and a value completed after a bare `-` gets a space before it. Suggestions open while you type the items of a list with its `-` unindented, as `- Arial` after `header-font:`, before the block's closing `---` is added, as they do for the keys after it.
+
 ### Hover
 
 Hovering on a recognized key shows its description, accepted values, and aliases.
@@ -78,6 +80,9 @@ Hovering on a recognized key shows its description, accepted values, and aliases
 |----------|-----------|
 | Error | Invalid value for a known key (e.g., `line-spacing: triple`) |
 | Warning | Duplicate key (except `title`, which allows repeats) |
+| Warning | An item past the first in a block list under a key that takes one value (`author:` then `- A` and `- B`), of which export uses only one |
+| Warning | An item of a block list that's a mapping (`- name: Jane`), which export doesn't read |
+| Warning | An item of a block list that goes on past its line, or opens a quote it doesn't close there, of which export reads only the line |
 | Warning | CSL style not found locally (the converter will download it automatically) |
 | Warning | Bibliography file not found |
 | Information | Unknown key closely resembling a known one ("Did you mean `font-size`?") |

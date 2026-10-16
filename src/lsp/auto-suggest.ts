@@ -6,6 +6,7 @@
  * because YAML frontmatter is embedded inside a Markdown document.
  */
 
+import { blockListOf } from '../frontmatter';
 import { getCompletionContextAtOffset } from './citekey-language';
 import {
 	getCslCompletionContext,
@@ -85,11 +86,22 @@ function assessUnfinishedFrontmatter(
 	const hasTopLevelMapping =
 		precedingLines.some(isTopLevelMapping) ||
 		isTopLevelMapping(currentLine);
-	const hasBodyLikeContent = precedingLines.some(line => {
+	// The items of block lists, as `- Arial` after `header-font:`, which
+	// are values as export reads them, with their `-` unindented too.
+	// Linear time: a list's lines are read once, and skipped past.
+	const listItems = new Set<number>();
+	for (let k = 0; k < precedingLines.length; k++) {
+		const list = blockListOf(precedingLines, k);
+		if (!list) continue;
+		for (const item of list.items) listItems.add(item.line);
+		k = list.last;
+	}
+	const hasBodyLikeContent = precedingLines.some((line, k) => {
 		const trimmed = line.trim();
 		if (trimmed.length === 0) return false;
 		if (/^[ \t]/.test(line)) return !hasTopLevelMapping;
 		if (trimmed.startsWith('#')) return !hasTopLevelMapping;
+		if (listItems.has(k)) return false;
 		return !mappingPattern.test(trimmed);
 	});
 	return { currentLine, hasTopLevelMapping, hasBodyLikeContent };

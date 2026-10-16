@@ -10,6 +10,8 @@ import {
 	STYLES_SUB_PROPS,
 	type FrontmatterValidationCallbacks,
 } from './frontmatter-language';
+import { ARRAY_KEYS, SINGLE_VALUE_KEYS, parseFrontmatter } from '../frontmatter';
+import { fastestRunAsync } from '../test-timing';
 
 // ---------------------------------------------------------------------------
 // Schema completeness
@@ -1116,5 +1118,186 @@ describe('validateFrontmatter', () => {
 		const diags = await validateFrontmatter(text, stubCallbacks);
 		expect(diags.length).toBe(1);
 		expect(diags[0].severity).toBe('error');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Block lists, as `title:` then `  - One`, which export reads as the key's
+// values (see readBlockLists in frontmatter.ts)
+// ---------------------------------------------------------------------------
+
+describe('block lists', () => {
+	const messages = async (text: string, callbacks = stubCallbacks) =>
+		(await validateFrontmatter(text, callbacks)).map(d => d.severity + ': ' + d.message + ' @ ' + text.slice(d.start, d.end));
+
+	test('the keys export reads lists of are the schema\'s', () => {
+		const schemaKeys = FRONTMATTER_SCHEMA.flatMap(def => [def.key, ...def.aliases ?? []]).sort();
+		expect([...ARRAY_KEYS, ...SINGLE_VALUE_KEYS, 'title', 'styles'].sort()).toEqual(schemaKeys);
+		for (const def of FRONTMATTER_SCHEMA) {
+			if (def.arrayField) expect(ARRAY_KEYS.has(def.key)).toBe(true);
+			if (def.allowsMultiple) expect(def.key).toBe('title');
+		}
+	});
+
+	test('reads no item as a key', async () => {
+		// As `notes`, which `- Notes` was a typo of
+		expect(await messages('---\ntitle:\n  - Notes\n  - Two\n---\n')).toEqual([]);
+		expect(await messages('---\nkeywords:\n  - notes\n---\n')).toEqual([]);
+		expect(await messages('---\nheader-font:\n  - Georgia\n  - Arial\ntable-col-widths:\n  - 2\n  - 1\n---\n')).toEqual([]);
+	});
+
+	test('checks each item as a value of its key', async () => {
+		expect(await messages('---\nheader-font-size:\n  - abc\n  - 20\n---\n')).toEqual(['error: Expected non-negative numbers. @ abc']);
+		expect(await messages('---\nheader-font-style:\n  - bold\n  - "bolder"\n---\n')).toEqual([
+			'error: Invalid font style `bolder`. Use `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, `center`, `normal`, combined with `-`. @ bolder',
+		]);
+		expect(await messages('---\ncolors:\n  - blue\n---\n')).toEqual(['error: Invalid value. Expected one of: `github`, `guttmacher`. @ blue']);
+		// An inline array of widths, as export reads the list, has no `equal`
+		expect(await messages('---\ntable-col-widths:\n  - equal\n---\n')).toEqual(['error: Expected positive numbers. @ equal']);
+		// Not the comment after the key, which export doesn't read
+		expect(await messages('---\nbreaks: # on or off\n  - true\n---\n')).toEqual([]);
+	});
+
+	test('warns of items past one for a key that takes one value', async () => {
+		expect(await messages('---\nauthor:\n  - Jane\n  -\n  - John\n---\n')).toEqual([
+			'warning: `author` takes one value. Export reads this list as the key repeated, so it uses only one item. @ - John',
+		]);
+		expect(await messages('---\nauthor:\n  - Jane\n---\n')).toEqual([]);
+	});
+
+	test('warns of a mapping, which export doesn\'t read', async () => {
+		expect(await messages('---\nauthor:\n  - name: Jane\n    affiliation: X\n---\n')).toEqual([
+			'warning: Export doesn\'t read a mapping as an item of `author`. Put the item in quotes to read it as text. @ - name: Jane',
+		]);
+		expect(await messages('---\ntitle:\n  - "a: b"\n---\n')).toEqual([]);
+		// Its lines after its first as before, each as a key's, as export reads them
+		expect(await messages('---\nkeywords:\n  - name: Jane\n    font-size: big\n---\n')).toEqual(['error: Expected a non-negative number. @ big']);
+	});
+
+	test('checks the bibliography and CSL style export reads from a list', async () => {
+		const checked: string[] = [];
+		const callbacks: FrontmatterValidationCallbacks = {
+			...stubCallbacks,
+			fileExists: async path => { checked.push(path); return false; },
+			isCslAvailable: async name => { checked.push(name); return false; },
+			sourceDir: '/some/dir',
+		};
+		// The first bibliography, and the last style, as of each key repeated
+		const diags = await messages('---\nbibliography:\n  - refs.bib\ncsl:\n  - apa\n  - nosuch\n---\n', callbacks);
+		expect(checked).toEqual(['nosuch', '/some/dir/refs.bib']);
+		// Not a comment after the key
+		checked.length = 0;
+		await messages('---\ncsl: # the style\n  - nature\n---\n', callbacks);
+		expect(checked).toEqual(['nature']);
+		expect(diags.filter(d => !d.includes('takes one value'))).toEqual([
+			'warning: CSL style "nosuch" not found locally. If the style exists online, the converter will download it automatically. @ nosuch',
+			'warning: Bibliography file not found: `refs.bib`. @ refs.bib',
+		]);
+	});
+
+	test('compares the decimal mark export reads from a list with the grouping', async () => {
+		expect(await messages('---\ntable-decimal-mark:\n  - comma\ntable-digit-grouping: comma\n---\n')).toEqual([
+			'error: Decimal mark and digit grouping cannot use the same character. @ comma',
+		]);
+	});
+
+	test('reads the lists of many keys, of many lines, in linear time', async () => {
+		// Each a title, which can be repeated, and many blank lines and
+		// comments after a key with none
+		const text = '---\n' + Array.from({ length: 4000 }, (_, k) => 'title:\n  - T' + k + '\n  # c\n\n  - U' + k).join('\n')
+			+ '\nauthor:\n' + '\n# c\n'.repeat(20000) + 'title: T\n---\n';
+		let diags: Awaited<ReturnType<typeof validateFrontmatter>> = [];
+		// Quadratic reading took seconds here; linear takes milliseconds
+		expect(await fastestRunAsync(async () => { diags = await validateFrontmatter(text, stubCallbacks); })).toBeLessThan(2000);
+		expect(diags).toEqual([]);
+	}, 30000);
+
+	test('warns of an item that goes on past its line, of which export reads only the line', async () => {
+		const warning = 'warning: Export reads only this item\'s line, as the item goes on past it or opens a quote that doesn\'t close on it. Write the item on one line, with any quote it opens closed.';
+		expect(await messages('---\nheader-font:\n  - Times\n    New Roman\n---\n')).toEqual([warning + ' @ - Times']);
+		expect(await messages('---\ntitle:\n  - "Results\n    #1 of 3"\n---\n')).toEqual([warning + ' @ - "Results']);
+		// Its line read as a value, and the lines after it as before
+		expect(await messages('---\nheader-font-size:\n  - big\n    font-size: small\n---\n')).toEqual([
+			warning + ' @ - big',
+			'error: Expected non-negative numbers. @ big',
+			'error: Expected a non-negative number. @ small',
+		]);
+		expect(await messages('---\ntitle:\n  - "One"\n    # 1 of 2\n---\n')).toEqual([]);
+	});
+
+	test('offers no value for an item that goes on past its line, which the value wouldn\'t end', () => {
+		const text = '---\nheader-font:\n  - Times\n    New Roman\n  - "Ar\n    ial"\n---\n';
+		for (const at of [text.indexOf('Times') + 2, text.indexOf('Ar') + 1]) {
+			expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, at), 'darwin')).toEqual([]);
+		}
+	});
+
+	test('completes an empty item after its space, and gives one a space after a bare -', () => {
+		const apply = (text: string, offset: number): string => {
+			const loc = getFrontmatterLocation(text, offset);
+			const item = getFrontmatterCompletionItems(loc, 'darwin').find(i => i.label === 'Georgia');
+			expect(item).toBeDefined();
+			return text.slice(0, loc.valueStart) + item!.insertText + text.slice(loc.valueEnd);
+		};
+		for (const line of ['  - ', '  -', '  -   ', '- ', '-']) {
+			const text = '---\nheader-font:\n' + line + '\n---\n';
+			const written = apply(text, text.indexOf('\n---\n', 4));
+			expect(written).toBe('---\nheader-font:\n' + line.trimEnd() + (line.endsWith(' ') ? line.slice(line.trimEnd().length) : ' ') + 'Georgia\n---\n');
+			expect(parseFrontmatter(written).metadata.headerFont).toEqual(['Georgia']);
+		}
+	});
+
+	test('offers a table-col-widths item no width, as export reads equal and auto only alone', () => {
+		for (const line of ['  - ', '  - eq', '- ']) {
+			const text = '---\ntable-col-widths:\n' + line + '\n---\n';
+			expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('\n---\n', 4)), 'darwin')).toEqual([]);
+		}
+		// As the list `- equal` is read
+		expect(parseFrontmatter('---\ntable-col-widths:\n  - equal\n---\n').metadata).toEqual({});
+		expect(parseFrontmatter('---\ntable-col-widths: equal\n---\n').metadata).toEqual({ tableColWidths: 'equal' });
+	});
+
+	test('offers an item only what an item of its key\'s inline array takes, read as that array reads it', async () => {
+		// None for a key that takes one value, of which the list is the key
+		// repeated
+		let offered = 0;
+		for (const def of FRONTMATTER_SCHEMA.filter(def => def.key !== 'styles')) {
+			for (const key of [def.key, ...def.aliases ?? []]) {
+				const text = '---\n' + key + ':\n  - \n---\n';
+				const loc = getFrontmatterLocation(text, text.indexOf('  - ') + 4);
+				const items = getFrontmatterCompletionItems(loc, 'darwin');
+				if (!def.arrayField) {
+					expect({ key, labels: items.map(item => item.label) }).toEqual({ key, labels: [] });
+					continue;
+				}
+				for (const item of items) {
+					offered++;
+					const written = text.slice(0, loc.valueStart) + item.insertText + text.slice(loc.valueEnd);
+					const read = parseFrontmatter(written);
+					const inline = parseFrontmatter('---\n' + key + ': [' + item.label + ']\n---\n');
+					expect({ key, label: item.label, metadata: read.metadata }).toEqual({ key, label: item.label, metadata: inline.metadata });
+					expect({ key, label: item.label, set: Object.keys(read.metadata).length, warnings: read.warnings, diagnostics: await messages(written) })
+						.toEqual({ key, label: item.label, set: 1, warnings: undefined, diagnostics: [] });
+				}
+			}
+		}
+		expect(offered).toBeGreaterThan(20);
+	});
+
+	test('locates an item as a value of its key', () => {
+		const text = '---\nheader-font:\n  - Geo\n  - "Arial"\n    more\n---\n';
+		const item = getFrontmatterLocation(text, text.indexOf('Geo') + 2);
+		expect(item).toMatchObject({ kind: 'value', key: 'header-font', valueStart: text.indexOf('Geo'), valueEnd: text.indexOf('Geo') + 3 });
+		expect(item.suppressCompletions).toBeFalsy();
+		expect(getFrontmatterCompletionItems(item, 'darwin').some(i => i.label === 'Georgia')).toBe(true);
+		expect(getFrontmatterHover(item)?.markdown).toContain('**header-font**');
+		// Inside its quotes
+		expect(getFrontmatterLocation(text, text.indexOf('Arial'))).toMatchObject({ kind: 'value', valueStart: text.indexOf('Arial'), valueEnd: text.indexOf('Arial') + 5 });
+		// Not on the `-`, or on an item that goes on past its line
+		expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('- Geo')), 'darwin')).toEqual([]);
+		expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('Arial')), 'darwin')).toEqual([]);
+		// Nor counts as the key declared again
+		const key = getFrontmatterLocation(text, text.indexOf('header-font'));
+		expect(key.currentKeyHasOtherDeclaration).toBe(false);
 	});
 });

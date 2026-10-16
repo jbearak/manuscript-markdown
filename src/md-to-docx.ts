@@ -11726,7 +11726,7 @@ export async function convertMdToDocx(
   const closing = closingFenceAtEnd(maskFrontmatter(written));
   const markdown = closing ? written.slice(0, closing.end) + closing.fence : written;
   // Parse frontmatter for CSL style and other metadata
-  const { metadata: frontmatter, body, fieldOrder } = parseFrontmatter(markdown);
+  const { metadata: frontmatter, body, fieldOrder, warnings: frontmatterWarnings } = parseFrontmatter(markdown);
   // Count blank lines between frontmatter closing --- and body content.
   // parseFrontmatter strips the closing line's end; the line ends left at
   // the body's start are the blank lines
@@ -11900,7 +11900,8 @@ export async function convertMdToDocx(
 
   // Create citeproc engine if CSL style specified in frontmatter
   let citeprocEngine: CiteprocEngine | undefined;
-  const earlyWarnings: string[] = [...parseWarnings];
+  // What the frontmatter's reading leaves out first, as of a block list's
+  const earlyWarnings: string[] = [...frontmatterWarnings ?? [], ...parseWarnings];
 
   // Detect custom style name collisions (e.g. 'my-heading' and 'my_heading' both → MsCustomMyHeading)
   if (frontmatter.styles && Object.keys(frontmatter.styles).length > 1) {

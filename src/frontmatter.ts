@@ -1,5 +1,6 @@
 export type NoteType = 'in-text' | 'footnotes' | 'endnotes';
 
+import { pushAll } from './arrays';
 import {
   parseTableDigits,
   parseTableDecimalMark,
@@ -46,6 +47,238 @@ export interface CustomStyleDef {
   spacingBefore?: number;  // points
   spacingAfter?: number;   // points
   paragraphIndent?: number | 'none'; // inches; 'none' = explicit zero first-line indent
+}
+
+/**
+ * The keys whose list export reads as an inline array, as
+ * `header-font: [Georgia, Arial]`, so a block list under one too, as
+ * `header-font:` then `  - Georgia` and `  - Arial` (see readBlockLists).
+ */
+export const ARRAY_KEYS: ReadonlySet<string> = new Set([
+  'header-font', 'header-font-size', 'header-font-style',
+  'title-font', 'title-font-size', 'title-font-style', 'table-col-widths',
+]);
+
+/**
+ * The keys parseFrontmatter reads that take one value, aliases among them.
+ * A block list under one reads as the key repeated, which keeps one of its
+ * items, as a repeated key keeps one of its values. Of the other keys it
+ * reads, `title` takes several, one for each time it's written, and
+ * `styles` a mapping.
+ */
+export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
+  'author', 'csl', 'locale', 'zotero-notes', 'note-type', 'notes', 'timezone',
+  'bibliography', 'bib', 'bibtex', 'font', 'code-font', 'font-size', 'code-font-size',
+  'code-background-color', 'code-background', 'code-font-color', 'code-color', 'code-block-inset',
+  'table-font', 'table-font-size', 'pipe-table-max-line-width', 'grid-table-max-line-width',
+  'table-borders', 'table-digits', 'table-decimal-mark', 'table-digit-grouping',
+  'blockquote-style', 'callout-labels', 'colors', 'breaks', 'line-spacing', 'paragraph-indent',
+  'bibliography-hanging-indent',
+]);
+
+/** An item of a block list in frontmatter, as `  - One` after `title:` */
+export interface BlockListItem {
+  /** The index of its line among the frontmatter's */
+  line: number;
+  /** The offset in that line of its text, past the `-` and the spaces after it, those that end the line too */
+  start: number;
+  /** The offset in that line past its text, before the spaces that end the line */
+  end: number;
+  /**
+   * The indices of the lines after it more indented than its `-`. They're
+   * no value: export reads them as it reads the lines after a key's value,
+   * each as a key's line where it has a colon.
+   */
+  more: number[];
+  /** Its text, on its line, as a value is after a key: an item is one line */
+  text: string;
+  /** Whether it's a mapping, as `- name: Jane`, not text */
+  mapping: boolean;
+  /**
+   * Whether it's text YAML would read on past its line: it has lines in
+   * `more`, or it opens a quote its line doesn't close, which YAML would
+   * close on a later line, past blank lines and lines that start with #
+   */
+  continued: boolean;
+}
+
+/** A line's indentation, of spaces and tabs */
+function indentOf(line: string): number {
+  let k = 0;
+  while (line[k] === ' ' || line[k] === '\t') k++;
+  return k;
+}
+
+/** Whether text after a line's indentation is an item of a block list: a `-`, then a space, a tab or the line's end */
+function isListItem(content: string): boolean {
+  return content[0] === '-' && (content.length === 1 || content[1] === ' ' || content[1] === '\t');
+}
+
+/**
+ * For text that starts with a quote, the index of the quote that closes
+ * it, past \" in double quotes and '' in single, or -1 where none does
+ */
+function closingQuoteAt(text: string): number {
+  const quote = text[0];
+  for (let k = 1; k < text.length; k++) {
+    if (quote === '"' && text[k] === '\\') k++;
+    else if (text[k] === quote && quote === "'" && text[k + 1] === "'") k++;
+    else if (text[k] === quote) return k;
+  }
+  return -1;
+}
+
+/**
+ * Whether an item's text is a mapping, as YAML reads it: a key, plain or
+ * quoted, then a `:` before a space, a tab or the end, as `name: Jane` or
+ * `"a": b`. A `:` inside quotes, as in `"a: b"`, or in a comment, after a
+ * space and a `#`, as in `One # note: x` or `#1: x`, isn't one, nor is one
+ * before other text, as in `https://x.org`.
+ */
+function isMappingItem(text: string): boolean {
+  if (text[0] === '"' || text[0] === "'") {
+    let k = closingQuoteAt(text);
+    if (k < 0) return false;
+    k++;
+    while (text[k] === ' ' || text[k] === '\t') k++;
+    return text[k] === ':' && (k + 1 === text.length || text[k + 1] === ' ' || text[k + 1] === '\t');
+  }
+  for (let k = 0; k < text.length; k++) {
+    const c = text[k];
+    // A comment, which a space before the item's text starts too
+    if (c === '#' && (k === 0 || text[k - 1] === ' ' || text[k - 1] === '\t')) return false;
+    if (c === ':' && (k + 1 === text.length || text[k + 1] === ' ' || text[k + 1] === '\t')) return true;
+  }
+  return false;
+}
+
+/**
+ * The block list after the key that starts the line at index `at`, where
+ * the key's value is empty or a comment, as `title:` then `  - One` and
+ * `  - Two`: the lines after the key of its items, each a `-` then a space
+ * or the line's end, with blank lines and comments between them. A line
+ * more indented than an item's `-` goes with that item. Returns the items
+ * and the index of the list's last line, or undefined where no item
+ * follows the key. A key indented, as in a mapping, opens none, nor does
+ * a comment or an item.
+ *
+ * Linear time: it reads the list's lines once each, and where the key opens
+ * none, the blank lines and comments after it, which no other key has after
+ * it.
+ */
+export function blockListAfter(lines: readonly string[], at: number): { items: BlockListItem[]; last: number } | undefined {
+  const header = lines[at].replace(/\r$/, '');
+  if (header[0] === ' ' || header[0] === '\t' || header[0] === '#' || isListItem(header)) return undefined;
+  const colon = header.indexOf(':');
+  if (colon <= 0 || !/^(?:[ \t]*|[ \t]+#.*)$/.test(header.slice(colon + 1))) return undefined;
+  const items: BlockListItem[] = [];
+  let last = at;
+  // The indentation of the last item's `-`
+  let dash = -1;
+  for (let k = at + 1; k < lines.length; k++) {
+    const line = lines[k].replace(/\r$/, '');
+    const indent = indentOf(line);
+    const content = line.slice(indent).trimEnd();
+    // Blank lines and comments don't end it
+    if (!content.trim() || content[0] === '#') continue;
+    if (items.length > 0 && indent > dash) {
+      items[items.length - 1].more.push(k);
+      last = k;
+      continue;
+    }
+    if (!isListItem(content)) break;
+    const start = indent + 1 + indentOf(line.slice(indent + 1));
+    const text = content.slice(1).trim();
+    items.push({ line: k, start, end: Math.max(start, indent + content.length), more: [], text, mapping: isMappingItem(text), continued: false });
+    dash = indent;
+    last = k;
+  }
+  if (items.length === 0) return undefined;
+  for (const item of items) {
+    item.continued = !item.mapping && (item.more.length > 0 || ((item.text[0] === '"' || item.text[0] === "'") && closingQuoteAt(item.text) < 0));
+  }
+  return { items, last };
+}
+
+/**
+ * The block list readBlockLists reads after line `at`, with its key: that
+ * of blockListAfter, after any key but `styles`, which takes a mapping
+ * that parseFrontmatter reads itself. Where it isn't undefined, the next
+ * list is past `last`.
+ */
+export function blockListOf(lines: readonly string[], at: number): { key: string; items: BlockListItem[]; last: number } | undefined {
+  const line = lines[at];
+  const colon = line.indexOf(':');
+  const key = colon > 0 ? line.slice(0, colon).trim() : '';
+  const list = key && key !== 'styles' ? blockListAfter(lines, at) : undefined;
+  return list && { key, items: list.items, last: list.last };
+}
+
+/**
+ * The lines a block list in frontmatter stands for, which parseFrontmatter
+ * then reads, as a key's lines: for a key in ARRAY_KEYS, the inline array of
+ * its items, and for another key, as `title`, the key once for each item,
+ * each as the key written with that value is read. An item is its line:
+ * the lines after it that go with it are read as before, as the lines
+ * after a key's value are, and so are a mapping's, which is no value.
+ * Where no item is text, the key is as written. `warnings` gets what
+ * export reads differently from what the list holds, under a key it
+ * reads: a mapping, an item that goes on past its line, and more than one
+ * value for a key that takes one.
+ */
+function readBlockLists(lines: string[], warnings: string[]): string[] {
+  const read: string[] = [];
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k];
+    const list = blockListOf(lines, k);
+    if (!list) {
+      read.push(line);
+      continue;
+    }
+    const key = list.key;
+    k = list.last;
+    const array = ARRAY_KEYS.has(key);
+    const known = array || key === 'title' || SINGLE_VALUE_KEYS.has(key);
+    // The items of text, and in their order each item's lines but an
+    // array's, which is one line
+    const texts: string[] = [];
+    const itemLines: string[] = [];
+    for (const item of list.items) {
+      const shown = '`- ' + (item.text.length > 60 ? item.text.slice(0, 60) + '…' : item.text) + '`';
+      if (item.mapping) {
+        itemLines.push(lines[item.line]);
+        if (known) warnings.push('Frontmatter `' + key + '` has a list item that is a mapping, which export doesn\'t read: ' + shown + '. Put the item in quotes to read it as text.');
+      } else {
+        texts.push(item.text);
+        if (!array) itemLines.push(key + ': ' + item.text);
+      }
+      for (const more of item.more) itemLines.push(lines[more]);
+      if (item.continued && known) {
+        warnings.push('Frontmatter `' + key + '` has a list item that goes on past its line, or opens a quote that doesn\'t close on it, and export reads only its line: '
+          + shown + '. Write the item on one line, with any quote it opens closed.');
+      }
+    }
+    if (texts.length === 0) {
+      read.push(line);
+    } else if (array) {
+      // Its items, each as a value after the key is read, as the inline
+      // array reads its own, without those that are empty
+      const values = texts.map(unquote).filter(value => value.length > 0);
+      read.push(values.length > 0 ? key + ': [' + values.join(', ') + ']' : key + ':');
+    }
+    pushAll(read, itemLines);
+    const count = texts.filter(text => unquote(text).length > 0).length;
+    if (SINGLE_VALUE_KEYS.has(key) && count > 1) {
+      warnings.push('Frontmatter `' + key + '` takes one value, but its list has ' + count
+        + ' items. Export used only one, as it does for `' + key + '` repeated.');
+    }
+  }
+  return read;
+}
+
+/** A value as parseFrontmatter reads it after a key, without a quote at its start or end */
+function unquote(value: string): string {
+  return value.trim().replace(/^["']|["']$/g, '');
 }
 
 /** Parse a value that may be a YAML inline array `[v1, v2, ...]` or bare comma-separated values. */
@@ -216,9 +449,10 @@ export function colWidthsToPct(ratios: number[]): number[] {
 
 /**
  * Split YAML frontmatter (delimited by `---`) from the markdown body.
- * Returns the parsed metadata and the remaining body text.
+ * Returns the parsed metadata and the remaining body text, with `warnings`
+ * where it reads something other than what's written (see readBlockLists).
  */
-export function parseFrontmatter(markdown: string): { metadata: Frontmatter; body: string; fieldOrder: string[] } {
+export function parseFrontmatter(markdown: string): { metadata: Frontmatter; body: string; fieldOrder: string[]; warnings?: string[] } {
   const bodyStart = frontmatterBodyStartOffset(markdown);
   if (bodyStart === undefined) {
     return { metadata: {}, body: markdown, fieldOrder: [] };
@@ -228,13 +462,18 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
   const endMatch = trimmed.substring(3).match(FRONTMATTER_CLOSING_RE)!;
   const endIdx = endMatch.index! + 3;
 
-  const yamlBlock = trimmed.slice(3, endIdx).trim();
+  // From the line after the opening one, with its indentation, which says
+  // whether a key there opens a block list, as the language server reads it
+  const yamlBlock = trimmed.slice(3, endIdx).replace(/^[ \t]*\r?\n/, '').trimEnd();
   const body = markdown.slice(bodyStart);
 
   const metadata: Frontmatter = {};
   const fieldOrder: string[] = [];
   const seenFields = new Set<string>();
-  const yamlLines = yamlBlock.split('\n');
+  const warnings: string[] = [];
+  // Each block list as the lines it stands for, as `title:` then `  - One`
+  // and `  - Two` as `title: One` and `title: Two`
+  const yamlLines = readBlockLists(yamlBlock.split('\n'), warnings);
   for (let lineIdx = 0; lineIdx < yamlLines.length; lineIdx++) {
     const line = yamlLines[lineIdx];
     const colonIdx = line.indexOf(':');
@@ -515,7 +754,7 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
     }
   }
 
-  return { metadata, body, fieldOrder };
+  return warnings.length > 0 ? { metadata, body, fieldOrder, warnings } : { metadata, body, fieldOrder };
 }
 
 /**
