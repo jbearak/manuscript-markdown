@@ -401,6 +401,8 @@ Some tags are dropped, as before:
 - a `\tag` inside CriticMarkup, or with CriticMarkup inside it;
 - a `\tag*` with a `#` in it, whose number would be a row with two `#`s (see below).
 
+A tracked change in a row before its `\tag` stays out of the number. Word gets the number in the row, after the change, and import writes the `\tag` back after it, as in `x {--E--} \tag{1}` or `{~~E~>F~~} \tag{1}`. That holds where the change is all of the row before the `\tag` too, as in `{--E--} \tag{1}` or `{++E++} \tag{1}`, on a row of `align*` or `gather*` as well. Accepting such a deletion in Word, or rejecting such an insertion, leaves a row of the number alone, as LaTeX shows the `\tag` of an empty row. Import reads a `#` with nothing before it as no number, so that row comes back as `#(1)` in `gathered`.
+
 A row from Word with more than one `#` in its math, as `x#(A#B)`, stays as Word wrote it, since it's unclear which `#` starts the number. A `#` inside the parentheses Word builds up is no other `#`, so `\tag{A\#B}`, which export writes that way, comes back.
 
 ### Bare Environments

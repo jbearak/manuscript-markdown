@@ -1693,6 +1693,49 @@ describe('equation numbers', () => {
     expect(back).toBe(expected);
     expect(await trip(back)).toBe(back);
   });
+
+  // A tracked change that was all of a row before its \tag left that row of
+  // one view, accepted or rejected, showing nothing, so export recorded the
+  // equation as replaced, with its number in the deleted one. Import wrote
+  // the \tag in the deletion, as {--\alpha \tag{1.2}--}, and the next export
+  // dropped it. Word now holds the number in the row, out of the change, as
+  // for x {--E--} \tag{1}, and import writes it back after the change
+  test.each([
+    ['a deletion before a \\tag', fence + '\n{--\\alpha--} \\tag{1.2}\n' + fence, ['1.2']],
+    ['an insertion before a \\tag', fence + '\n{++E++} \\tag{1}\n' + fence, ['1']],
+    ['a deletion before a \\tag*', fence + '\n{--E--} \\tag*{A}\n' + fence, []],
+    ['a deletion before a \\tag in a paragraph', 'A\n' + fence + '\n{--\\alpha--} \\tag{1.2}\n' + fence + '&#32;B.', ['1.2']],
+    ['a deletion before a \\tag on a row of gather*', fence + '\n\\begin{gather*}\n{--a--} \\tag{1} \\\\\nc \\tag{2}\n\\end{gather*}\n' + fence, ['1', '2']],
+    ['a deletion before a \\tag on a row of align*', fence + '\n\\begin{align*}\n{--a--} \\tag{1} \\\\\nc &= d \\tag{2}\n\\end{align*}\n' + fence, ['1', '2']],
+    ['an insertion before a \\tag on a row of align*', fence + '\n\\begin{align*}\na &= b \\tag{1} \\\\\n{++c++} \\tag{2}\n\\end{align*}\n' + fence, ['1', '2']],
+    // As before
+    ['math and a deletion before a \\tag', fence + '\nx {--E--} \\tag{1}\n' + fence, ['1']],
+    ['a deletion and math before a \\tag', fence + '\n{--E--} x \\tag{1}\n' + fence, ['1']],
+    ['a substitution before a \\tag', fence + '\n{~~E~>F~~} \\tag{1}\n' + fence, ['1']],
+  ])('keeps Word\'s number out of the change for %s', async (_name, md, numbers) => {
+    const [math] = await equations(md);
+    // The equation array is the equation's, not in a change
+    expect(math).toMatch(/^<m:oMath><m:eqArr>/);
+    expect(math).not.toMatch(/<w:(?:ins|del) [^>]*><m:eqArr>/);
+    for (const text of numbers) expect(math).toContain(number(text));
+    if (md.includes('\\tag*')) expect(math).toContain('<m:r><m:t>#</m:t></m:r><m:r><m:t>A</m:t></m:r>');
+    const back = await trip(md);
+    expect(back).toBe(md);
+    expect(await equations(back)).toEqual(await equations(md));
+    expect(await trip(back)).toBe(back);
+  });
+
+  test('keeps the number after an insertion right before its \\tag, which comes back with a space before it', async () => {
+    // As E\tag{1} comes back as E \tag{1}
+    const md = fence + '\n{++E++}\\tag{1}\n' + fence;
+    const [math] = await equations(md);
+    expect(math).toMatch(/^<m:oMath><m:eqArr><m:e><w:ins [^>]*><m:r><m:t>E<\/m:t><\/m:r><\/w:ins>/);
+    expect(math).toContain(number('1'));
+    const back = await trip(md);
+    expect(back).toBe(fence + '\n{++E++} \\tag{1}\n' + fence);
+    expect((await equations(back))[0]).toContain(number('1'));
+    expect(await trip(back)).toBe(back);
+  });
 });
 
 // Word's cancel, a border box with its sides hidden and a strike, came
