@@ -2845,6 +2845,19 @@ describe('a brace in an equation', () => {
     expect((await convertDocx((await convertMdToDocx(inline('{ {^2'))).docx)).markdown).toBe(inline('^2'));
   });
 
+  // A group's own closing brace, read past while the group is open, as
+  // where \sum_i^2 takes the environment's \end for its body, is dropped,
+  // as on main
+  test.each([
+    ['\\boxed{\\begin{matrix}\\sum_i^2\\end{matrix}}', '\\boxed{\\begin{matrix} \\sum_i^2 \\end{matrix}}'],
+    ['\\boxed{\\begin{matrix}\\sum_i^2{}\\end{matrix}}', '\\boxed{\\begin{matrix} \\sum_i^2 \\end{matrix}}'],
+    ['{\\left( x } \\right)}', '(x)'],
+  ])('a closing brace read past in an open group, in %s, is dropped, as on main', async (latex, back) => {
+    expect((await equations(inline(latex))).map(shown).join('')).not.toContain('}');
+    expect((await convertDocx((await convertMdToDocx(inline(latex))).docx)).markdown).toBe(inline(back));
+    expect((await equations(inline(back))).map(shown).join('')).not.toContain('}');
+  });
+
   // A backslash before it in Word's text, as export wrote for \{ before, or
   // in the run before, comes back as \{, as on main, which export now writes
   // as Word's {

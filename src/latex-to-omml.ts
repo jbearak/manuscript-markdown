@@ -486,6 +486,8 @@ class Parser {
   private tag?: EquationTag;
   /** Whether the last group parseGroup read in braces had its closing one */
   private groupClosed = true;
+  /** The groups parseGroup is reading, in braces, around where it is now */
+  private openGroups = 0;
   /**
    * Whether \{ and \} export as written, backslash included, as before, in
    * the equation: where Word's text for it holds LaTeX anyway (see
@@ -594,7 +596,9 @@ class Parser {
     const token = this.peek();
     if (token?.type === 'lbrace') {
       this.consume(); // consume '{'
+      this.openGroups++;
       const content = this.parseExpression();
+      this.openGroups--;
       const close = this.peek();
       this.groupClosed = close?.type === 'rbrace';
       if (this.groupClosed) {
@@ -636,9 +640,12 @@ class Parser {
           return makeRun(token.value);
         // A closing brace no group is open for, as in x } y, read as an
         // atom: the character, which import writes back as \}. It was
-        // dropped, as LaTeX's error recovery drops it, so Word lost it
+        // dropped, as LaTeX's error recovery drops it, so Word lost it. One
+        // read where a group is open, which closes that group but is read
+        // past, as by \sum_i^2 taking an environment's \end, is dropped,
+        // as before
         case 'rbrace':
-          return makeRun('}');
+          return this.openGroups > 0 ? '' : makeRun('}');
         case 'comment':
           return makeHiddenCommentRun(token.value);
         case 'line_continuation':
@@ -1083,6 +1090,7 @@ class Parser {
           // A \tag in it numbers the equation, as in a group
           const parser = new Parser(operand, this.onUnknownCommand, this.mode, this.track);
           parser.bracesAsText = this.bracesAsText;
+          parser.openGroups = this.openGroups;
           const omml = parser.parseExpression(false);
           this.tag = parser.tag ?? this.tag;
           return omml;
