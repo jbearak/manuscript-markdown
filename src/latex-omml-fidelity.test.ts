@@ -3352,6 +3352,39 @@ describe('a lone backslash in an equation', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(again);
   });
 
+  // Export writes Word's \ only where import is sure to write what follows
+  // as LaTeX of its own. Before what import drops, as an empty \text{} or a
+  // change of spaces alone, may write as Word's text, as a styled run, or
+  // writes bare, as <b>, or a highlight's edge where import reads none, as
+  // in a script, Word's \ came back joined to what followed, as \b or \<b>.
+  // So \backslash is text there, as on main
+  test.each([
+    ['an empty \\text{}', inline('x\\backslash\\text{}b'), inline('x\\backslash b'), 'x\\backslashb'],
+    ['an insertion of spaces alone', inline('x\\backslash{++ \\! ++}b'), inline('x\\backslash b'), 'x\\backslash  b'],
+    ['a deletion of a space', inline('x\\backslash{-- --}b'), inline('x\\backslash{}{-- --}b'), 'x\\backslash b'],
+    ['a highlight in a superscript', inline('x^{\\backslash{==b==}}'), inline('x^{\\backslash b}'), 'x\\backslashb'],
+    ['the end of a highlight in a subscript', inline('x_{a{==x\\backslash==}b}'), inline('x_{ax\\backslash b}'), 'xax\\backslashb'],
+    ['an italic run', inline('x\\backslash\\mathit{b}'), inline('x\\backslash\\mathit{b}'), 'x\\backslashb'],
+    ['an upright symbol', inline('x\\backslash\\mathrm{\\alpha}'), inline('x\\backslash\\mathrm{\\alpha}'), 'x\\backslashα'],
+    ['brackets import writes bare', inline('x\\backslash\\left<b\\right>'), inline('x\\backslash<b>'), 'x\\backslashb'],
+    ['the end of brackets import writes bare', inline('\\left<x\\backslash\\right>'), inline('<x\\backslash>'), 'x\\backslash'],
+  ])('\\backslash before %s exports as text, as on main, as import may read on into it, and comes back as on main', async (_name, markdown, again, text) => {
+    expect((await equations(markdown)).map(shown).join('')).toBe(text);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(again);
+  });
+
+  // Where import is sure to, Word's \ stays: before brackets LaTeX sizes, at
+  // their end, before a phantom, which export writes as one Word hides, and
+  // before a change with text after a highlight's end
+  test.each([
+    ['square brackets', inline('x\\backslash\\left[b\\right]'), 'x\\b'],
+    ['the end of square brackets', inline('\\left[x\\backslash\\right]'), 'x\\'],
+    ['a phantom', inline('x\\backslash\\phantom{b}'), 'x\\b'],
+    ['an insertion after a highlight', inline('a{==x\\backslash==}{++b++}'), 'ax\\b'],
+  ])('\\backslash before %s exports as Word\'s \\, and comes back', async (_name, markdown, text) => {
+    await expectTrips(markdown, text);
+  });
+
   // Word's \ before each character import writes as a command, as α, which
   // came back as \\alpha, and before others, which LaTeX reads on from the
   // \, as x\b, and come back as typed, but LaTeX's escapes and spaces: \#,
@@ -3421,6 +3454,18 @@ describe('a lone backslash in an equation', () => {
       const latex = 'x\\backslash \\alpha'.repeat(count) + '\\backslash' + ' '.repeat(count) + 'y';
       return fastestRun(() => {
         for (let k = 0; k < 5; k++) expect(latexToOmml(latex)).toStartWith('<m:r><m:t>x</m:t></m:r><m:r><m:t>\\backslash</m:t>');
+      });
+    };
+    time(500);
+    expect(time(8000) / time(2000)).toBeLessThan(8);
+  }, 60000);
+
+  // Each \backslash in structures, which export reads once for what holds it
+  test('many \\backslash in structures export in time linear in their number', () => {
+    const time = (count: number) => {
+      const latex = '\\frac{x\\backslash}{\\sqrt{a\\backslash}}'.repeat(count);
+      return fastestRun(() => {
+        for (let k = 0; k < 5; k++) expect(latexToOmml(latex)).toStartWith('<m:f><m:num><m:r><m:t>x</m:t></m:r><m:r><m:t>\\</m:t>');
       });
     };
     time(500);

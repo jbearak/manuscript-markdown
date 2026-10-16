@@ -1436,7 +1436,7 @@ function trackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings: s
   const equation = (omml: string) => display ? '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>' : '<m:oMath>' + omml + '</m:oMath>';
   const latex = trackedEquationLatex(parts);
   if (latex !== undefined && tracksInPlace(latex, parts, numbered)) {
-    return equation(trackedLatexToOmml(latex, track, unknownCommandWarning(warnings), numbered));
+    return equation(trackedLatexToOmml(latex, track, unknownCommandWarning(warnings), numbered, !display));
   }
   // An equation with highlights and no change in it is the equation, without
   // a highlight that holds syntax rather than math, as x{==^2==}

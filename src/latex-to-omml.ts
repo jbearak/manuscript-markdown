@@ -200,66 +200,179 @@ export function withWordBackslashes<T>(write: () => T): T {
 
 /**
  * `omml`, an equation's, with each \backslash in math (see
- * MARKED_BACKSLASH_RUN) written as Word's \ where import reads that back as
- * \backslash (see ommlChildrenToLatex in omml.ts): at the end of a part,
- * and before a structure, a tracked change, a highlight's edge, or a run
- * whose first character import writes as a command, as α as \alpha.
- *
- * Before a run whose text import writes as it is, LaTeX would read on from
- * Word's \, so \backslash is text there, as before. Word's \ before b came
- * back as \b, and before a \tag's # or a row's &, as \# or \&, which lost
- * the number or the alignment point. So is a space before anything but the
- * part's end, which import writes as it is, so Word's \ before it would come
- * back as \ and a space, LaTeX's space. That's the source's spaces, which
- * TeX skips, and a control space, as \ , alike: export writes each as a run
- * of a space, and import reads each back as the source's, as before. Spaces
- * at the part's end, as import writes before a matrix's & or a row's \\,
- * import trims, and writes Word's \ before them as \backslash.
+ * MARKED_BACKSLASH_RUN) written as Word's \ where import is sure to read
+ * that back as \backslash (see wordBackslash, and ommlChildrenToLatex in
+ * omml.ts), and as the text \backslash elsewhere, as before. Where
+ * `highlights`, as in an inline equation, import writes a highlight at the
+ * equation's top level as {==...==} (see isHighlightedPart in omml.ts).
  */
-function literalBackslashes(omml: string): string {
+function literalBackslashes(omml: string, highlights = false): string {
   const pieces = omml.split(MARKED_BACKSLASH);
   if (pieces.length === 1) return omml;
   const written = [pieces[0]];
+  const holders: Holder[] = [];
+  holdersAfter(pieces[0], holders);
   for (let k = 1; k < pieces.length; k++) {
     const run = pieces[k - 1].endsWith(MATH_HIGHLIGHT_RPR) ? '<m:r>' + MATH_HIGHLIGHT_RPR : '<m:r>';
-    const readOn = !backslashesAsCharacters && readsOn(pieces[k], run, k < pieces.length - 1);
-    written.push(readOn ? '<m:t>\\backslash</m:t></m:r>' : '<m:t>\\</m:t></m:r>', pieces[k]);
+    const word = backslashesAsCharacters ||
+      wordBackslash(pieces[k], run, k < pieces.length - 1, highlights && holders.length === 0, trimsPart(holders));
+    written.push(word ? '<m:t>\\</m:t></m:r>' : '<m:t>\\backslash</m:t></m:r>', pieces[k]);
+    holdersAfter(pieces[k], holders);
   }
   return written.join('');
 }
 
-/** The end of a part of a structure, at which import trims the part and
- *  writes a \ of Word's as \backslash (see trimPart in omml.ts) */
+/** A structure, a part of one or a tracked change that holds a run, and,
+ *  for brackets, whether import sizes them (see sizedBrackets) */
+interface Holder { tag: string; sized: boolean }
+
+/** The opening or closing tag of a structure, a part of one or a tracked
+ *  change, or such an empty tag, which holds nothing */
+const HOLDER_TAG_RE = /<(\/?)(m:(?:e|num|den|sub|sup|deg|lim|fName|f|sSup|sSub|sSubSup|sPre|rad|nary|d|acc|m|func|eqArr|borderBox|limLow|limUpp|bar|groupChr|box|phant)|w:ins|w:del)(?=[\s/>])([^>]*)>/g;
+
+/** `holders`, those open at the start of `omml`, from the outermost in, as
+ *  they are at its end */
+function holdersAfter(omml: string, holders: Holder[]): void {
+  for (const match of omml.matchAll(HOLDER_TAG_RE)) {
+    if (match[1]) holders.pop();
+    else if (!match[3].endsWith('/')) holders.push({ tag: match[2], sized: match[2] === 'm:d' && sizedBrackets(omml, match.index) });
+  }
+}
+
+/** Whether import trims the part the innermost of `holders` is, and writes a
+ *  \ of Word's at its end as \backslash (see trimPart in omml.ts): a part of
+ *  a structure but a box's, a phantom's or the base of scripts before it,
+ *  which import reads in the structure's place (see unwrapped in omml.ts),
+ *  and but brackets' that import writes bare (see sizedBrackets) */
+function trimsPart(holders: Holder[]): boolean {
+  const part = holders[holders.length - 1];
+  const structure = holders[holders.length - 2];
+  return part !== undefined && /^m:(?:e|num|den|sub|sup|deg|lim|fName)$/.test(part.tag) && structure !== undefined &&
+    !['m:box', 'm:phant', 'm:sPre'].includes(structure.tag) && (structure.tag !== 'm:d' || structure.sized);
+}
+
+/** The brackets that import writes with \left and \right, as export writes
+ *  them, with a begChr and an endChr: those LaTeX sizes (see sizedDelimiter
+ *  in omml.ts), and none. Import writes others bare, as <y> of \left<, which
+ *  Word's \ would join */
+const SIZED_BRACKETS: ReadonlySet<string> = new Set(['', '(', ')', '[', ']', '{', '}', '|', '‖', '/', '⟨', '⟩', '⌊', '⌋', '⌈', '⌉', '↑', '↓']);
+
+/** The properties of brackets as export writes them */
+const BRACKETS_RE = /<m:d><m:dPr><m:begChr m:val="([^"]*)"\/><m:endChr m:val="([^"]*)"\/><\/m:dPr>/y;
+
+/** Whether the brackets at `at` in `omml` are ones import sizes, with their
+ *  content, after a \ of Word's (see SIZED_BRACKETS) */
+function sizedBrackets(omml: string, at: number): boolean {
+  BRACKETS_RE.lastIndex = at;
+  const brackets = BRACKETS_RE.exec(omml);
+  return brackets !== null && SIZED_BRACKETS.has(brackets[1]) && SIZED_BRACKETS.has(brackets[2]);
+}
+
+/** The end of a part of a structure (see trimsPart) */
 const PART_END_RE = /<\/m:(?:e|num|den|sub|sup|deg|lim|fName)>/y;
 
+/** A structure that import writes as LaTeX of its own, which isn't empty:
+ *  any but brackets that import writes bare (see sizedBrackets), a box,
+ *  which export doesn't write, or a phantom Word shows, whose content import
+ *  reads in its place (see trimsPart). Export writes a phantom as one Word
+ *  hides, as \phantom{} */
+const STRUCTURE_RE = /<m:(?:f|sSup|sSub|sSubSup|sPre|rad|nary|acc|m|func|eqArr|borderBox|limLow|limUpp|bar|groupChr|phant><m:phantPr><m:show m:val="0"\/)>/y;
+
+/** A run as export writes one: its properties, math's and Word's, each of
+ *  empty elements, and its text */
+const RUN_RE = /<m:r>((?:<m:rPr>(?:<m:\w+(?: [^>]*)?\/>)*<\/m:rPr>)?(?:<w:rPr>(?:<w:\w+(?: [^>]*)?\/>)*<\/w:rPr>)?)<m:t(?: xml:space="preserve")?>([^<]*)<\/m:t><\/m:r>/y;
+
+/** The start of a hidden comment's run (see makeHiddenCommentRun) */
+const COMMENT_RUN_START = '<m:r><m:rPr><m:nor/></m:rPr><w:rPr><w:vanish/></w:rPr>';
+
+/** The opening tag of a tracked change */
+const CHANGE_RE = /<w:(ins|del)\b[^>]*>/y;
+
+/** Text that shows something, not only spaces */
+const SHOWN_TEXT_RE = /<(?:m:t|w:delText)(?: [^>]*)?>[^<]*[^\s<]/;
+
 /**
- * Whether import reads on from Word's \ into Word's text in `after`, the
- * OMML after the \'s run (see literalBackslashes). It does where, past
- * empty runs, which Word shows as nothing, a run opens as the \'s does,
- * `run`, with no properties or a highlight's alone, and its first character
- * is one import writes as it is, not as a command, or is a space before
- * anything but the part's end. Where `marked`, `after` ends with the start
- * of the next \backslash's run, which is such a run. Anything else, as a
- * structure, a tracked change or a highlight's edge, import writes as its
- * own LaTeX.
+ * Whether import is sure to read Word's \ back as \backslash before
+ * `after`, the OMML after the \'s run, which opens as `run` does, with no
+ * properties or a highlight's alone. Where `marked`, `after` ends with the
+ * start of the next \backslash's run. Past runs of no text, which import
+ * drops, as \text{}'s, it is so before:
+ *
+ * - the part's end, where `trims`, where import trims the part (see
+ *   trimsPart), or the equation's;
+ * - a structure, which import writes as LaTeX of its own (see
+ *   STRUCTURE_RE), and brackets it sizes (see sizedBrackets);
+ * - a tracked change with text, which import writes as CriticMarkup, and
+ *   the end of one's content;
+ * - a comment, which import writes as one, as % c;
+ * - a highlight's edge, where `highlights` (see literalBackslashes);
+ * - and a run that opens as `run` does, or that import reads as such a run,
+ *   as a highlighted one where it reads no highlight, whose first character
+ *   import writes as a command, as α as \alpha.
+ *
+ * But for the part's end, not after spaces, which import writes as they
+ * are, so Word's \ before them would come back as \ and a space, LaTeX's
+ * space. That's the source's spaces, which TeX skips, and a control space,
+ * as \ , alike: export writes each as a run of a space, and import reads
+ * each back as the source's, as before.
+ *
+ * Before anything else, \backslash is text, as before, as import may read
+ * on into it from Word's \: Word text that import writes as it is, as b,
+ * which came back as \b, or a \tag's #, which came back as \#; a styled
+ * run, which import may write as it is, as an italic one; a tracked change
+ * of spaces alone, which import may drop; brackets import writes bare, as
+ * <y>; a highlight's edge where import reads no highlight, as in a script
+ * or in display math; and anything export doesn't write as such.
  */
-function readsOn(after: string, run: string, marked: boolean): boolean {
+function wordBackslash(after: string, run: string, marked: boolean, highlights: boolean, trims: boolean): boolean {
   let spaced = false;
   for (let at = 0; ;) {
-    const text = at + run.length;
-    const open = after.startsWith(run, at) ? ['<m:t>', '<m:t xml:space="preserve">'].find(start => after.startsWith(start, text)) : undefined;
-    if (open === undefined) {
-      if (marked && text === after.length && after.startsWith(run, at)) return true;
+    const next = runAt(after, at, marked);
+    if (next === undefined) {
+      if (at === after.length) return !marked;
       PART_END_RE.lastIndex = at;
-      return spaced && at < after.length && !PART_END_RE.test(after);
+      if (PART_END_RE.test(after)) return trims;
+      STRUCTURE_RE.lastIndex = at;
+      return !spaced && (after.startsWith('</w:ins>', at) || after.startsWith('</w:del>', at) || STRUCTURE_RE.test(after) ||
+        (after.startsWith('<m:d>', at) && sizedBrackets(after, at)) || showsChange(after, at, marked));
     }
-    const first = text + open.length;
-    const close = after.indexOf('</m:t></m:r>', first);
-    const content = after.slice(first, close);
-    if (content.trim()) return spaced || !COMMAND_CHARACTERS.has(content.charAt(0));
-    spaced ||= content !== '';
-    at = close + '</m:t></m:r>'.length;
+    at = next.end;
+    if (!next.text) continue;
+    const edge = next.props !== run && [next.props, run].every(props => props === '<m:r>' || props === '<m:r>' + MATH_HIGHLIGHT_RPR);
+    if (next.props === run || (edge && !highlights)) {
+      if (!next.text.trim()) {
+        spaced = true;
+        continue;
+      }
+      return !spaced && COMMAND_CHARACTERS.has(next.text.charAt(0));
+    }
+    return !spaced && (edge || (next.props === COMMENT_RUN_START && next.text.startsWith('\u200B') && next.text.includes('%')));
   }
+}
+
+/** The run at `at` in `after` (see wordBackslash), or undefined where none
+ *  starts there: its opening tag and properties, its text, and its end */
+function runAt(after: string, at: number, marked: boolean): { props: string; text: string; end: number } | undefined {
+  if (marked && after.length - at <= ('<m:r>' + MATH_HIGHLIGHT_RPR).length) {
+    const props = after.slice(at);
+    if (props === '<m:r>' || props === '<m:r>' + MATH_HIGHLIGHT_RPR) return { props, text: '\\', end: after.length };
+  }
+  RUN_RE.lastIndex = at;
+  const match = RUN_RE.exec(after);
+  return match ? { props: '<m:r>' + match[1], text: match[2], end: RUN_RE.lastIndex } : undefined;
+}
+
+/** Whether a tracked change starts at `at` in `after` that import writes as
+ *  CriticMarkup: one with text that shows, not spaces alone, which import
+ *  may drop (see isDroppedChange in omml.ts), or, where `marked`, the next
+ *  \backslash */
+function showsChange(after: string, at: number, marked: boolean): boolean {
+  CHANGE_RE.lastIndex = at;
+  const open = CHANGE_RE.exec(after);
+  if (!open) return false;
+  const close = after.indexOf('</w:' + open[1] + '>', CHANGE_RE.lastIndex);
+  if (close === -1) return marked;
+  return SHOWN_TEXT_RE.test(after.slice(CHANGE_RE.lastIndex, close));
 }
 
 /** The environments parseEnvironment gives an OMML form; keep in step with its cases. */
@@ -1867,15 +1980,17 @@ export function latexToOmml(latex: string, onUnknownCommand?: (command: string) 
 /**
  * As latexToOmml, with each CRITIC_INSERTION_COMMAND or CRITIC_DELETION_COMMAND
  * span's OMML passed through `track`, and each CRITIC_HIGHLIGHT_COMMAND
- * span's runs highlighted.
+ * span's runs highlighted. `display` is as latexToOmml's, whether a \tag is
+ * Word's number, and `inline` says whether the equation is inline, where
+ * import reads a highlight at its top level (see literalBackslashes).
  */
-export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownCommand?: (command: string) => void, display = false): string {
+export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownCommand?: (command: string) => void, display = false, inline = false): string {
   if (!latex.trim()) {
     return '';
   }
   const parser = new Parser(tokenize(latex), onUnknownCommand, 'math', track);
   parser.numbered = display;
-  return literalBackslashes(keepWhitespaceChanges(parser.numberedEquation(parser.parseExpression(false))));
+  return literalBackslashes(keepWhitespaceChanges(parser.numberedEquation(parser.parseExpression(false))), inline);
 }
 
 /** The mark on the w:ins or w:del of a tracked change whose source is only
