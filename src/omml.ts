@@ -1598,12 +1598,39 @@ export function ommlToLatex(children: XmlNode[], display = false): string {
   partDepth++;
   try {
     const latex = trimPart(ommlChildrenToLatex(children));
-    return partDepth > 1 ? beforeCloser(apartFromMarkup(latex)) : latex;
+    return partDepth > 1 ? beforeCloser(apartFromMarkup(latex)) : escapeDollars(latex);
   } finally {
     partDepth--;
     if (whole) highlightDepth--;
     displayEquation = outerDisplay;
   }
+}
+
+/** An equation's `latex` with each $ a backslash doesn't escape escaped,
+ *  as \$, which export writes as Word's $ (see parseCommand in
+ *  latex-to-omml.ts). Word's $ in a run of math, which import keeps as it
+ *  is, would end the equation in Markdown: $ $x$ came back for $x, and
+ *  $x$y$, no equation, for x$y. Over the whole equation, as a run's
+ *  backslash can escape the next run's $, as x\ and $y, which stays x\$y.
+ *  A comment's $ is its text, kept as it is. */
+function escapeDollars(latex: string): string {
+  let escaped = '';
+  let backslashes = 0;
+  for (let at = 0; at < latex.length; at++) {
+    const ch = latex[at];
+    if (ch === '%' && backslashes % 2 === 0) {
+      const end = latex.indexOf('\n', at);
+      const stop = end === -1 ? latex.length : end;
+      escaped += latex.slice(at, stop);
+      at = stop - 1;
+      backslashes = 0;
+      continue;
+    }
+    if (ch === '$' && backslashes % 2 === 0) escaped += '\\';
+    escaped += ch;
+    backslashes = ch === '\\' ? backslashes + 1 : 0;
+  }
+  return escaped;
 }
 
 /**
