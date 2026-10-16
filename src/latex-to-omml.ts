@@ -479,6 +479,33 @@ class Parser {
     return this.tokens[this.pos++];
   }
 
+  /** After \genfrac, the rest of \genfrac{}{}{0pt}{}{a}{b}, consumed, as
+   *  Word's fraction without a bar, or undefined, with the tokens untouched,
+   *  for one with delimiters, a rule or a style */
+  private barlessFraction(): string | undefined {
+    const start = this.pos;
+    if (!['', '', '0pt', ''].every(text => this.groupText() === text)) {
+      this.pos = start;
+      return undefined;
+    }
+    const num = this.parseGroup();
+    const den = this.parseGroup();
+    return '<m:f><m:fPr><m:type m:val="noBar"/></m:fPr><m:num>' + num + '</m:num><m:den>' + den + '</m:den></m:f>';
+  }
+
+  /** The text of the next group, as of {0pt}, consumed, where it holds text
+   *  alone, or undefined */
+  private groupText(): string | undefined {
+    let at = this.pos;
+    while (this.tokens[at]?.type === 'text' && this.tokens[at].value.trim() === '') at++;
+    if (this.tokens[at]?.type !== 'lbrace') return undefined;
+    let text = '';
+    for (at++; this.tokens[at]?.type === 'text'; at++) text += this.tokens[at].value;
+    if (this.tokens[at]?.type !== 'rbrace') return undefined;
+    this.pos = at + 1;
+    return text;
+  }
+
   private parseGroup(): string {
     // Skip whitespace-only text tokens so arguments split across lines
     // (e.g. \frac{num}\n{den}) still bind to the command.
@@ -704,6 +731,16 @@ class Parser {
         const fnum = this.parseGroup();
         const fden = this.parseGroup();
         return '<m:f><m:num>' + fnum + '</m:num><m:den>' + fden + '</m:den></m:f>';
+      }
+
+      // A fraction without a bar, \genfrac{}{}{0pt}{}{a}{b}, as import writes
+      // Word's (see translateFraction in omml.ts); any other is unknown, as
+      // before
+      case '\\genfrac': {
+        const omml = this.barlessFraction();
+        if (omml !== undefined) return omml;
+        this.onUnknownCommand?.(cmd);
+        return makeRun(cmd);
       }
 
       // Binomial coefficients

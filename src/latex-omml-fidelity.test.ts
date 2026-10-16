@@ -2418,3 +2418,85 @@ describe('a highlight inside an equation', () => {
     '$$\na{++b++}c\n$$\n',
   ])('%j comes back as before, and again', markdown => expectTrips(markdown));
 });
+
+// Word's fraction without a bar (m:type noBar) came back as \frac, a bar
+// and all, outside parentheses, where it's \binom. It's \genfrac{}{}{0pt}{}
+// now, which KaTeX draws without a bar and export writes back as noBar
+describe('a fraction without a bar', () => {
+  const noBar = (num: string, den: string) => '<m:f><m:fPr><m:type m:val="noBar"/></m:fPr><m:num>' + run(num) + '</m:num><m:den>' + run(den) + '</m:den></m:f>';
+  const frac = (num: string, den: string) => '<m:f><m:num>' + run(num) + '</m:num><m:den>' + run(den) + '</m:den></m:f>';
+  const parens = (omml: string) => '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>' + omml + '</m:e></m:d>';
+  const display = (latex: string) => '$'.repeat(2) + '\n' + latex + '\n' + '$'.repeat(2) + '\n';
+  const inline = (latex: string) => 'A $' + latex + '$ B.\n';
+  const barless = '\\genfrac{}{}{0pt}{}{a}{b}';
+
+  /** The document Word gets for `markdown` */
+  async function documentXml(markdown: string): Promise<string> {
+    return (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+  }
+
+  /** A document from Word with an equation of `omml`, inline or on its own line */
+  async function wordDocx(omml: string, isDisplay: boolean): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(isDisplay ? display('x') : inline('x'))).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** `markdown` comes back as `back`, and again */
+  async function expectTrips(markdown: string, back = markdown): Promise<void> {
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(back);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(back);
+  }
+
+  test.each([
+    ['inline', noBar('a', 'b'), false, inline(barless)],
+    ['in display math', noBar('a', 'b'), true, display(barless)],
+    ['in a superscript', '<m:sSup><m:e>' + run('x') + '</m:e><m:sup>' + noBar('a', 'b') + '</m:sup></m:sSup>', true, display('x^{' + barless + '}')],
+    ['in a matrix cell', '<m:m><m:mr><m:e>' + noBar('a', 'b') + '</m:e><m:e>' + run('c') + '</m:e></m:mr></m:m>', true, display('\\begin{matrix} ' + barless + ' & c \\end{matrix}')],
+    ['beside a fraction', noBar('a', 'b') + frac('c', 'd'), true, display(barless + '\\frac{c}{d}')],
+  ])('from Word, %s, comes back as \\genfrac, which export writes as noBar, and again', async (_name, omml, isDisplay, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, isDisplay))).markdown).toBe(markdown);
+    const xml = await documentXml(markdown);
+    expect(xml).toContain(noBar('a', 'b'));
+    expect(xml).not.toContain('genfrac');
+    await expectTrips(markdown);
+  });
+
+  test('in parentheses alone, from Word, comes back as \\binom, as on main, and again', async () => {
+    expect((await convertDocx(await wordDocx(parens(noBar('a', 'b')), true))).markdown).toBe(display('\\binom{a}{b}'));
+    await expectTrips(display('\\binom{a}{b}'));
+  });
+
+  test('in \\left( and \\right), exports as Word\'s binomial, and comes back as \\binom, and again', async () => {
+    expect(await documentXml(inline('\\left(' + barless + '\\right)'))).toContain(parens(noBar('a', 'b')));
+    await expectTrips(inline('\\left(' + barless + '\\right)'), inline('\\binom{a}{b}'));
+  });
+
+  // As on main
+  test.each([
+    ['\\binom{a}{b}', inline('\\binom{a}{b}')],
+    ['\\frac{a}{b}', inline('\\frac{a}{b}')],
+    ['{a}/{b}', inline('{a}/{b}')],
+  ])('%s comes back as before, and again', (_latex, markdown) => expectTrips(markdown));
+
+  test('a skewed fraction from Word comes back as a linear one, as on main, and again', async () => {
+    expect((await convertDocx(await wordDocx('<m:f><m:fPr><m:type m:val="skw"/></m:fPr><m:num>' + run('a') + '</m:num><m:den>' + run('b') + '</m:den></m:f>', false))).markdown).toBe(inline('{a}/{b}'));
+    await expectTrips(inline('{a}/{b}'));
+  });
+
+  // Any other \genfrac, with delimiters, a rule or a style, is an unknown
+  // command, as on main
+  test.each([
+    ['\\genfrac{(}{)}{0pt}{}{a}{b}', '\\genfrac()0ptab'],
+    ['\\genfrac{}{}{1pt}{}{a}{b}', '\\genfrac1ptab'],
+    ['\\genfrac{}{}{0pt}{0}{a}{b}', '\\genfrac0pt0ab'],
+    ['{a \\atop b}', 'a \\atop b'],
+  ])('%s comes back as before, and again', async (latex, back) => {
+    const warnings: string[] = [];
+    expect(latexToOmml(latex, command => warnings.push(command))).not.toContain('noBar');
+    expect(warnings.length).toBe(1);
+    await expectTrips(inline(latex), inline(back));
+  });
+});

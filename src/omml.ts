@@ -607,7 +607,10 @@ function textModeLatex(text: string): string {
  * Translate an m:f (fraction) element to LaTeX.
  * Extracts m:num and m:den children, emits \frac{numerator}{denominator},
  * or {numerator}/{denominator} for Word's linear or skewed fraction, which
- * export writes back as a linear one.
+ * export writes back as a linear one, or \genfrac{}{}{0pt}{}{numerator}{denominator}
+ * for one without a bar, which KaTeX draws without one, and export writes
+ * back as one (see barlessFraction in latex-to-omml.ts). In parentheses
+ * alone, it's \binom (see translateDelimiter).
  * Falls back to placeholder if both are missing. An empty one, as Word keeps
  * for \frac{}{}, is {}.
  */
@@ -621,6 +624,7 @@ function translateFraction(children: XmlNode[]): string {
   const denominator = ommlToLatex(den);
   const type = getOmmlAttr(findChildNode(findChild(children, 'm:fPr'), 'm:type'), 'val');
   if (type === 'lin' || type === 'skw') return '{' + numerator + '}/{' + denominator + '}';
+  if (type === 'noBar') return '\\genfrac{}{}{0pt}{}{' + numerator + '}{' + denominator + '}';
   return `\\frac{${numerator}}{${denominator}}`;
 }
 
