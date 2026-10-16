@@ -3198,3 +3198,187 @@ describe('an underscore, a # or an & in an equation', () => {
     expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
   });
 });
+
+// A \ that Word's text ends with, or has before a character import writes
+// as a command, ran into what import wrote after it: Word's x\ at the end of
+// an inline equation came back as $x\$, which is no equation, x\ and α#(1)
+// as x\\alpha \tag{1}, a line break and no number, and x_{a\} without its
+// closing brace. Import writes it as \backslash, which export writes back as
+// Word's \ where import would read it so again
+describe('a lone backslash in an equation', () => {
+  const inline = (latex: string) => 'c $' + latex + '$ b.\n';
+  const display = (latex: string) => '$'.repeat(2) + '\n' + latex + '\n' + '$'.repeat(2) + '\n';
+  const matrix = (...cells: string[]) => '<m:m><m:mr>' + cells.map(cell => '<m:e>' + cell + '</m:e>').join('') + '</m:mr></m:m>';
+  const array = (...rows: string[]) => '<m:eqArr>' + rows.map(row => '<m:e>' + row + '</m:e>').join('') + '</m:eqArr>';
+  const parens = (omml: string) => '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>' + omml + '</m:e></m:d>';
+  const fraction = (num: string, den: string) => '<m:f><m:num>' + num + '</m:num><m:den>' + den + '</m:den></m:f>';
+  const ins = (omml: string) => '<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:ins>';
+  const del = (omml: string) => '<w:del w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z">' + omml + '</w:del>';
+  const marked = (t: string) => '<m:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><m:t>' + t + '</m:t></m:r>';
+  const hidden = (t: string) => '<m:r><m:rPr><m:nor/></m:rPr><w:rPr><w:vanish/></w:rPr><m:t xml:space="preserve">\u200B' + t + '</m:t></m:r>';
+
+  /** A document from Word with `markdown`'s first equation as `omml` */
+  async function wordDocx(omml: string, markdown: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** The equations Word gets for `markdown` */
+  async function equations(markdown: string): Promise<string[]> {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]);
+  }
+
+  /** The text of an equation's runs */
+  const shown = (omml: string) => [...omml.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1]).join('');
+
+  /** `markdown`'s equations are `text` in Word, and the next trip gives the
+   *  same Markdown and the same equations */
+  async function expectTrips(markdown: string, text: string): Promise<void> {
+    const once = await equations(markdown);
+    expect(once.map(shown).join('')).toBe(text);
+    const twice = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(twice).toBe(markdown);
+    expect(await equations(twice)).toEqual(once);
+  }
+
+  test.each([
+    ['at the end of an inline equation', run('x\\'), inline('y'), inline('x\\backslash'), 'x\\'],
+    ['alone in an inline equation', run('\\'), inline('y'), inline('\\backslash'), '\\'],
+    ['at the end of display math', run('x\\'), display('y'), display('x\\backslash'), 'x\\'],
+    ['after \\\\ at the end', run('x\\\\\\'), inline('y'), inline('x\\\\\\backslash'), 'x\\\\\\'],
+    ['before α', run('x\\') + run('α'), inline('y'), inline('x\\backslash\\alpha'), 'x\\α'],
+    ['before α in its run', run('x\\α'), inline('y'), inline('x\\backslash\\alpha'), 'x\\α'],
+    ['before α#(1) in a numbered row', array(run('x\\') + run('α#') + parens(run('1'))), display('y'), display('x\\backslash\\alpha \\tag{1}'), 'x\\α #1'],
+    ['before a prime', run('x\\') + run('′'), inline('y'), inline("x\\backslash'"), 'x\\′'],
+    ['at the end of a subscript', '<m:sSub><m:e>' + run('x') + '</m:e><m:sub>' + run('a\\') + '</m:sub></m:sSub>', inline('y'), inline('x_{a\\backslash}'), 'xa\\'],
+    ['before a fraction', run('x\\') + fraction(run('a'), run('b')), inline('y'), inline('x\\backslash\\frac{a}{b}'), 'x\\ab'],
+    ['before a superscript', run('x\\') + '<m:sSup><m:e>' + run('b') + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup>', inline('y'), inline('x\\backslash b^2'), 'x\\b2'],
+    ['in parentheses', parens(run('x\\')), inline('y'), inline('\\left(x\\backslash\\right)'), 'x\\'],
+    ['at the end of a matrix\'s cell', matrix(run('a\\'), run('b')), inline('y'), inline('\\begin{matrix} a\\backslash & b \\end{matrix}'), ' a\\ b '],
+    ['at the end of a row', array(run('x\\'), run('y')), inline('y'), inline('\\begin{gathered} x\\backslash \\\\ y \\end{gathered}'), ' x\\ y '],
+    ['before a highlight', run('a\\') + marked('b'), inline('y'), inline('a\\backslash{==b==}'), 'a\\b'],
+    ['before a comment', run('a\\') + hidden(' % c\n') + run('b'), inline('y'), inline('a\\backslash % c\nb'), 'a\\\u200B % c\nb'],
+  ])('%s, from Word, is \\backslash, which export writes as Word\'s \\, and again', async (_name, omml, template, markdown, text) => {
+    expect((await convertDocx(await wordDocx(omml, template))).markdown).toBe(markdown);
+    await expectTrips(markdown, text);
+  });
+
+  // Its markup's brace, which the \ escaped, as {++\++}, or x\{++b++}
+  test.each([
+    ['inserted alone', run('a') + ins(run('\\')) + run('b'), inline('a{++\\backslash++}{}b')],
+    ['deleted alone', run('a') + del(run('\\')) + run('b'), inline('a{--\\backslash--}{}b')],
+    ['before an insertion', run('a\\') + ins(run('b')), inline('a\\backslash{}{++b++}')],
+    ['at the end of an insertion', run('a') + ins(run('b\\')) + run('c'), inline('a{++b\\backslash++}{}c')],
+  ])('%s, from Word, is \\backslash, which export tracks in place as Word\'s \\, and again', async (_name, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
+    await expectTrips(markdown, shown(omml));
+    const [tracked] = await equations(markdown);
+    expect(tracked).toContain('<m:t>\\</m:t>');
+    expect(tracked.match(/<w:(?:ins|del) /g)).toHaveLength(1);
+  });
+
+  test.each([
+    ['inserted', inline('a{++\\backslash++}b'), inline('a{++\\backslash++}{}b'), 'a\\b'],
+    ['before an insertion in a numbered row', display('x\\backslash{++b++} \\tag{1}'), display('x\\backslash{}{++b++} \\tag{1}'), 'x\\b #1'],
+  ])('\\backslash %s exports as Word\'s \\, tracked in place, and comes back', async (_name, markdown, again, text) => {
+    const [tracked] = await equations(markdown);
+    expect(shown(tracked)).toBe(text);
+    expect(tracked.match(/<w:ins /g)).toHaveLength(1);
+    expect(tracked).not.toContain('<w:del ');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(again);
+    await expectTrips(again, text);
+  });
+
+  // Before Word's text that LaTeX would read on from the \, as a \tag's #,
+  // a row's &, or a letter, it's \backslash as text, as on main, which
+  // keeps the number, the alignment point and the letter
+  test.each([
+    ['before a \\tag', display('x\\backslash \\tag{1}'), 'x\\backslash #1'],
+    ['before an alignment point', display('\\begin{aligned}\nx\\backslash&=y \\\\\n&=z\n\\end{aligned}'), '\nx\\backslash&amp;=y \n&amp;=z\n'],
+    ['before a letter', inline('a\\backslash b'), 'a\\backslash b'],
+    ['before a number', inline('a\\backslash 2'), 'a\\backslash 2'],
+    ['before an escaped brace', inline('x\\backslash\\{y\\}'), 'x\\backslash\\{y\\}'],
+  ])('\\backslash %s exports as text, as on main, and again', async (_name, markdown, text) => {
+    await expectTrips(markdown, text);
+  });
+
+  test('\\backslash right before a \\tag keeps the number, as on main', async () => {
+    const again = (await convertDocx((await convertMdToDocx(display('x\\backslash\\tag{1}'))).docx)).markdown;
+    expect(again).toBe(display('x\\backslash \\tag{1}'));
+    await expectTrips(again, 'x\\backslash #1');
+  });
+
+  // The last at the end, as Word's \
+  test('\\backslash before another exports as text, and the other as Word\'s \\, and again', async () => {
+    await expectTrips(inline('x\\backslash\\backslash'), 'x\\backslash\\');
+  });
+
+  // TeX skips the spaces after it, which export wrote as runs Word drops
+  test('\\backslash exports as Word\'s \\ before a symbol after a space, which Word drops', async () => {
+    expect((await equations(inline('x\\backslash \\alpha'))).map(shown)).toEqual(['x\\α']);
+    const again = (await convertDocx((await convertMdToDocx(inline('x\\backslash \\alpha'))).docx)).markdown;
+    expect(again).toBe(inline('x\\backslash\\alpha'));
+    await expectTrips(again, 'x\\α');
+  });
+
+  // Word's \ before each character import writes as a command, as α, which
+  // came back as \\alpha, and before others, which LaTeX reads on from the
+  // \, as x\b, and come back as typed, but LaTeX's escapes and spaces: \#,
+  // \$, \&, \_, \{, \}, \|, \!, \, \: and \;, which older exports wrote,
+  // or a Word user typed, and which stay so, as on main
+  const symbols = Array.from({ length: 0x20000 - 0xA0 }, (_, k) => String.fromCodePoint(0xA0 + k))
+    .filter(character => !/^[\uD800-\uDFFF]$/.test(character) && unicodeToLatex(character) !== character);
+  const characters = [...new Set([
+    ...Array.from({ length: 0x7E - 0x20 }, (_, k) => String.fromCharCode(0x21 + k)).filter(character => !/[!#$&,:;_{|}]/.test(character)),
+    ...symbols, '′', '″', '→', 'é', '\uE000',
+  ])];
+  const xmlText = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const plainText = (omml: string) => shown(omml).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  const imported = (omml: string) => ommlToLatex(xmlParser(parserOptions).parse('<m:oMath>' + omml + '</m:oMath>')[0]['m:oMath']);
+  test('Word\'s \\ before any character, in its run or apart, comes back as Word\'s text', () => {
+    for (const character of characters) {
+      for (const omml of [run('x\\' + xmlText(character)), run('x\\') + run(xmlText(character))]) {
+        expect([character, plainText(latexToOmml(imported(omml)))]).toEqual([character, 'x\\' + character]);
+      }
+    }
+  });
+
+  test.each([
+    // Typed in Word: LaTeX, as on main
+    ['a command', run('\\frac{a}{b}'), inline('\\frac{a}{b}')],
+    ['a command before its arguments\' run', run('\\frac') + run('{a}{b}'), inline('\\frac{a}{b}')],
+    ['\\ before a command\'s name', run('\\') + run('frac{a}{b}'), inline('\\frac{a}{b}')],
+    ['\\ before a letter', run('x\\') + run('b'), inline('x\\b')],
+    ['\\\\ at the end', run('x\\\\'), inline('x\\\\')],
+    ['\\ before ^', run('x\\^2'), inline('x\\^2')],
+    ['\\ before ^ in another run', run('x\\') + run('^2'), inline('x\\^2')],
+    ['\\ before a space', run('x\\ y'), inline('x\\ y')],
+    ['\\ before an escape\'s character', run('x\\') + run('#'), inline('x\\#')],
+    // Older exports wrote \{ and \$ so
+    ['\\ before {', run('x\\') + run('{y'), inline('x\\{y')],
+    ['\\{ and \\}', run('\\{x\\}'), inline('\\{x\\}')],
+    ['\\ before $', run('x\\') + run('$y'), inline('x\\$y')],
+    // A comment's \ is its text
+    ['\\ in a comment', run('a') + hidden(' % c\\\n') + run('b'), inline('a % c\\\nb')],
+    ['\\ in a comment Word\'s % starts', run('a%c\\α'), inline('a%c\\\\alpha')],
+  ])('%s, from Word, comes back as on main', async (_name, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
+  });
+
+  // Each lone \ was read once, and only the \ at a part's end counted
+  test('many lone backslashes import in time linear in their number', () => {
+    const equation = (count: number) => xmlParser(parserOptions).parse('<m:oMath>' + run('x\\α'.repeat(count)) +
+      fraction(run('\\'.repeat(2 * count + 1)), run('b')) + '</m:oMath>')[0]['m:oMath'];
+    const time = (count: number) => {
+      const nodes = equation(count);
+      return fastestRun(() => {
+        for (let k = 0; k < 20; k++) expect(ommlToLatex(nodes)).toStartWith('x\\backslash\\alpha x\\backslash\\alpha');
+      });
+    };
+    time(500);
+    expect(time(8000) / time(2000)).toBeLessThan(8);
+  }, 60000);
+});

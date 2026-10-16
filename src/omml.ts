@@ -456,8 +456,10 @@ function fallbackPlaceholder(tag: string, children: XmlNode[]): string {
  * Checks m:rPr for m:sty val="p" (plain text → \mathrm{}).
  * Extracts text from m:t children, applies unicodeToLatex mapping.
  * Multi-letter runs are wrapped in \mathrm{} unless already a LaTeX command.
+ * `start` is where Word's text before the run leaves the LaTeX (see
+ * literalBackslashesIn).
  */
-function translateRun(children: XmlNode[]): string {
+function translateRun(children: XmlNode[], start = TEXT_START): string {
   if (!Array.isArray(children)) return '';
 
   const { style: runStyle, script, bare } = runStyleOf(children);
@@ -474,7 +476,7 @@ function translateRun(children: XmlNode[]): string {
   if (bare && pieces.some(piece => piece.reserved)) {
     return pieces.map(piece => runTextLatex(piece.text, piece.reserved ? 'p' : runStyle, script, 'math', preserved)).join('');
   }
-  return runTextLatex(text, runStyle, script, 'math', preserved);
+  return runTextLatex(text, runStyle, script, 'math', preserved, start);
 }
 
 /**
@@ -523,7 +525,10 @@ type RunContext = 'math' | 'name';
  *   and \prime in a script or limit (a raw ′ breaks pdflatex). Reserved
  *   characters stay as they are, since the export keeps math escapes such as
  *   \% and unknown commands as literal text, but for { } _ # &, which take a
- *   backslash where the equation holds no LaTeX (see escapeReserved).
+ *   backslash where the equation holds no LaTeX (see escapeReserved), and a
+ *   lone \ before a symbol written as a command, which is \backslash (see
+ *   literalBackslashesIn), as is one before what import writes after the run
+ *   (see ommlChildrenToLatex).
  * - An upright run with spaces, apostrophes, or reserved characters is text
  *   (see textModeLatex): \mathrm{} drops spaces and reads ' as a prime.
  * - Any other styled run is math in a group, \mathrm{} or an alphabet such
@@ -540,14 +545,14 @@ type RunContext = 'math' | 'name';
  *  characters LaTeX reserves */
 const TEXT_MODE_CHARACTERS = /[\s'#$%&_{}~^\\]/;
 
-function runTextLatex(text: string, style: string, script: string, context: RunContext = 'math', preserved = false): string {
+function runTextLatex(text: string, style: string, script: string, context: RunContext = 'math', preserved = false, start = TEXT_START): string {
   if (context === 'name') return unicodeToLatex(escapeLatex(text), false, '{}');
 
   const mathLatex = (source: string, separator: string) =>
     unicodeToLatex(source, scriptDepth > 0, separator).replace(/′/g, "'");
   const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
   const group = alphabet ?? (style === 'p' ? '\\mathrm' : '');
-  if (!group) return mathLatex(escapeReserved(text), ' ');
+  if (!group) return mathLatex(escapeReserved(literalBackslashesIn(text, start)), ' ');
   if (!alphabet && TEXT_MODE_CHARACTERS.test(text)) return textModeLatex(text);
   // Word drops a space at an edge without xml:space="preserve", and keeps one
   // with it, which goes in \text{}, as \text{} keeps it, beside the math
@@ -614,6 +619,102 @@ function holdsLatexText(nodes: XmlNode[]): boolean {
     const text = runPieces(children).map(piece => piece.text).join('');
     return /[\\%]/.test(text) && runStyleOf(children).bare && !isCommentRun(children, text);
   }));
+}
+
+/**
+ * Where the LaTeX import has written of Word's text leaves off: after a
+ * lone \, which LaTeX reads with what follows it, as \b or \{, and in a
+ * comment, after a % that no lone \ escapes, to the line's end, whose \ is
+ * the comment's text.
+ */
+interface TextEnd { lone: boolean; comment: boolean }
+
+/** Where nothing is written yet, or import's own LaTeX leaves off */
+const TEXT_START: TextEnd = { lone: false, comment: false };
+
+/** Where `latex` leaves off, read on from `start` (see TextEnd) */
+function textEnd(latex: string, start: TextEnd): TextEnd {
+  let { lone, comment } = start;
+  for (let at = 0; at < latex.length; at++) {
+    const code = latex.charCodeAt(at);
+    if (comment) {
+      if (code === 0x0A) comment = false;
+    } else if (code === 0x5C) {
+      lone = !lone;
+    } else {
+      if (code === 0x25 && !lone) comment = true;
+      lone = false;
+    }
+  }
+  return { lone, comment };
+}
+
+/**
+ * A bare run's `text` with each lone \ in it that comes before a character
+ * import writes as a command, as α as \alpha, or before ′, written as
+ * \backslash, Word's character, which export writes back as Word's \ (see
+ * literalBackslashes in latex-to-omml.ts). Before, Word's x\α came back as
+ * x\\alpha, whose \\ is a line break, and x\′ as x\', an accent. A \ before
+ * a character that import writes as it is, as in \b, \{ or \^, may be LaTeX
+ * typed in Word, and stays as it is, as before. `start` says whether Word's
+ * text before the run leaves a lone \: the run's first \ then pairs with
+ * it, as x\ and \α are \\ and \alpha, as before, and a \ before the run's
+ * first character is ommlChildrenToLatex's to write. A \ in a comment is the
+ * comment's text and stays.
+ */
+function literalBackslashesIn(text: string, start: TextEnd): string {
+  if (!text.includes('\\')) return text;
+  let written = '';
+  let from = 0;
+  let { lone, comment } = start;
+  for (let at = 0; at < text.length; at++) {
+    const ch = text[at];
+    if (comment) {
+      if (ch === '\n') comment = false;
+      continue;
+    }
+    if (ch === '\\') {
+      lone = !lone;
+      continue;
+    }
+    if (lone && at > 0 && (ch === '′' || UNICODE_LATEX_MAP.has(ch))) {
+      written += text.slice(from, at - 1) + '\\backslash';
+      from = at;
+    }
+    if (ch === '%' && !lone) comment = true;
+    lone = false;
+  }
+  return written + text.slice(from);
+}
+
+/**
+ * `latex`, of an equation or a part of one, with a lone \ at its end,
+ * Word's character, written as \backslash, which export writes back as
+ * Word's \ (see literalBackslashes in latex-to-omml.ts). As it was, the \
+ * escaped or started what import writes after the part: the $ that ends an
+ * inline equation, as $x\$, which was no equation, the closing brace of
+ * x_{a\}, or a matrix's & after a\ in its cell, as LaTeX's \ and a space.
+ * Not one in a comment, which is the comment's text.
+ */
+function literalBackslashAtEnd(latex: string): string {
+  let backslashes = 0;
+  while (backslashes < latex.length && latex.charCodeAt(latex.length - 1 - backslashes) === 0x5C) backslashes++;
+  return backslashes % 2 === 1 && !endsInLatexComment(latex) ? latex.slice(0, -1) + '\\backslash' : latex;
+}
+
+/**
+ * The text of `node` where it's Word's text that import writes as it is,
+ * which LaTeX reads on from the text before it: a bare run, not a
+ * comment's, with no reserved character a w:sym shows, which goes in
+ * \text{} (see translateRun); otherwise undefined.
+ */
+function wordText(node: XmlNode): string | undefined {
+  if (node['m:r'] === undefined) return undefined;
+  const run = asXmlNodes(node['m:r']);
+  const pieces = runPieces(run);
+  if (!runStyleOf(run).bare || pieces.some(piece => piece.reserved)) return undefined;
+  const text = pieces.map(piece => piece.text).join('');
+  return text && !isCommentRun(run, text) ? text : undefined;
 }
 
 /** A hidden comment run (text after a \u200B marker) as its LaTeX comment. */
@@ -1020,11 +1121,12 @@ function translateDelimiter(children: XmlNode[]): string {
         return `\\binom{${ommlToLatex(num)}}{${ommlToLatex(den)}}`;
       }
 
-      // Pmod: parens wrapping \mathrm{mod} + space + argument
-      const innerLatex = unbracedToLatex(eChildren);
+      // Pmod: parens wrapping \mathrm{mod} + space + argument. A lone \ at
+      // the end stays as it is until delimitedLatex reads it
+      const innerLatex = unbracedToLatex(eChildren, false);
       const pmodMatch = /^\\mathrm\{mod\}\s*(.+)$/.exec(innerLatex);
       if (pmodMatch) {
-        return `\\pmod{${beforeCloser(apartFromMarkup(pmodMatch[1].trim()))}}`;
+        return `\\pmod{${beforeCloser(apartFromMarkup(literalBackslashAtEnd(pmodMatch[1].trim())))}}`;
       }
 
       // Reuse already-computed innerLatex for default path
@@ -1039,12 +1141,16 @@ function translateDelimiter(children: XmlNode[]): string {
   // any other, as a comma, or U+2223, which LaTeX has as the relation \mid,
   // or with neither bracket, where \middle can't go, the separator goes
   // between the parts as it is
-  const parts = elements.map(e => beforeCloser(unbracedToLatex(e)));
+  //
+  // A lone \ of Word's at the end of a part stays as it is but before
+  // \middle or \right (see delimitedLatex): export writes a separator or a
+  // bracket between bare parts as text, which Word's text goes on with
+  const parts = elements.map(e => beforeCloser(unbracedToLatex(e, false)));
   const left = sizedDelimiter(begChr);
   const middle = sizedDelimiter(sepChr);
   const right = sizedDelimiter(endChr);
   if (parts.length > 1 && (begChr || endChr) && left && middle && right) {
-    const inner = parts.reduce((latex, part) => appendLatex(appendLatex(latex, '\\middle' + middle), part));
+    const inner = parts.map(literalBackslashAtEnd).reduce((latex, part) => appendLatex(appendLatex(latex, '\\middle' + middle), part));
     return appendLatex('\\left' + left, inner) + '\\right' + right;
   }
   const bare = !delimiterCommand(begChr) && !delimiterCommand(endChr);
@@ -1087,13 +1193,22 @@ function delimiterCommand(chr: string): string | undefined {
  * LaTeX for a Word delimiter. Brackets typed as characters import bare, as
  * (x). One that needs a command, such as ⟨, gets \left and \right, since a
  * bare \langle re-exports as text instead of a delimiter.
+ *
+ * A lone \ of Word's at the end of `inner` is \backslash before \right (see
+ * literalBackslashAtEnd), and brackets LaTeX can size get \left and \right
+ * for it too, as \left(x\backslash\right), which export writes as Word's
+ * delimiter: bare, export writes them as text, which the \ would join, as
+ * (x\) came back with \) as text, a command export doesn't know. With
+ * brackets LaTeX can't size, it stays as it is, as before.
  */
 function delimitedLatex(begChr: string, inner: string, endChr: string): string {
-  if (!delimiterCommand(begChr) && !delimiterCommand(endChr)) {
+  const literal = literalBackslashAtEnd(inner);
+  const sized = literal !== inner && sizedDelimiter(begChr) && sizedDelimiter(endChr);
+  if (!delimiterCommand(begChr) && !delimiterCommand(endChr) && !sized) {
     return begChr + inner + endChr;
   }
   const side = (chr: string) => delimiterCommand(chr) ?? (chr || '.');
-  return appendLatex('\\left' + side(begChr), inner) + '\\right' + side(endChr);
+  return appendLatex('\\left' + side(begChr), literal) + '\\right' + side(endChr);
 }
 
 
@@ -1721,12 +1836,13 @@ function escapeDollars(latex: string): string {
  * of cases or an equation array, between spaces and & or \\, a delimiter's
  * content, a root's degree, in [ ], or an n-ary operator's body of one
  * operand. It needs no break, and keeps Word's text as it is, as a row that
- * starts with ~~~, three nonbreaking spaces, does.
+ * starts with ~~~, three nonbreaking spaces, does. Without `literal`, a lone
+ * \ of Word's at its end stays as it is (see trimPart).
  */
-function unbracedToLatex(children: XmlNode[]): string {
+function unbracedToLatex(children: XmlNode[], literal = true): string {
   partDepth++;
   try {
-    return trimPart(ommlChildrenToLatex(children));
+    return trimPart(ommlChildrenToLatex(children), literal);
   } finally {
     partDepth--;
   }
@@ -1763,10 +1879,13 @@ function apartFromMarkup(latex: string, text = false): string {
  *  alone are their commands too, as \quad for an equation, a row or a
  *  script of an em space, which Word shows, and which came back as nothing:
  *  no equation, an empty row or x^{}. Nothing for other spaces alone, as
- *  before, which export reads as no equation. */
-function trimPart(latex: string): string {
-  const body = latex.trim();
-  if (!body) return spaceCommands(latex);
+ *  before, which export reads as no equation. A lone \ of Word's at the end
+ *  is \backslash where `literal` (see literalBackslashAtEnd), as is one the
+ *  trim leaves there, as of x\ and a space, which LaTeX reads as a space. */
+function trimPart(latex: string, literal = true): string {
+  const trimmed = latex.trim();
+  if (!trimmed) return spaceCommands(latex);
+  const body = literal ? literalBackslashAtEnd(trimmed) : trimmed;
   const before = spaceCommands(latex.slice(0, latex.length - latex.trimStart().length));
   let trailing = latex.slice(latex.trimEnd().length);
   // A comment's spaces, to its line end, are its text, trimmed as before
@@ -1887,13 +2006,24 @@ function latexEnvironment(name: string, rows: string[]): string {
 }
 
 /** ommlToLatex without the trim, for the content of a tracked change, which
- *  may be only a space such as \quad's em space. */
+ *  may be only a space such as \quad's em space. A lone \ of Word's at its
+ *  end is the caller's to write (see literalBackslashAtEnd). */
 function ommlChildrenToLatex(nodes: XmlNode[]): string {
   if (!Array.isArray(nodes)) return '';
   const children = unwrapped(nodes);
   let result = '';
   // Whether the last markup's content ends with a command
   let markupEndsInCommand = false;
+  // Where Word's text written so far leaves off (see TextEnd). A lone \ at
+  // its end is held back from result until what follows shows what it is:
+  // the start of LaTeX where Word's text goes on, as \{ of x\ and {y, which
+  // older exports wrote for \{, or \b of x\ and b, as before, or else
+  // Word's character, as \backslash, before what import writes, which it
+  // would escape or start: a symbol's command, as \alpha for α, a
+  // structure, as \frac, a styled run, a comment, or CriticMarkup, as x\
+  // and an insertion came back as x\{++...++}
+  let text = TEXT_START;
+  const heldBackslash = () => text.lone ? '\\backslash' : '';
   for (let i = 0; i < children.length; i++) {
     // Word's highlight on part of an equation, on each of its runs, as
     // {==...==} around them, as export writes it (see CRITIC_HIGHLIGHT_COMMAND
@@ -1911,23 +2041,40 @@ function ommlChildrenToLatex(nodes: XmlNode[]): string {
       highlightDepth++;
       let latex: string;
       try {
-        latex = ommlChildrenToLatex(children.slice(i, end));
+        latex = literalBackslashAtEnd(ommlChildrenToLatex(children.slice(i, end)));
       } finally {
         highlightDepth--;
       }
       i = end - 1;
       if (latex) {
-        result += /\\tag\b/.test(latex) ? latex : '{==' + latex + '==}';
+        const highlighted = /\\tag\b/.test(latex) ? latex : '{==' + latex + '==}';
+        result = text.lone ? appendLatex(result + heldBackslash(), highlighted) : result + highlighted;
+        text = TEXT_START;
         markupEndsInCommand = false;
       }
       continue;
     }
     const change = trackedChange(children[i]);
     if (!change) {
-      let latex = translateNode(children[i]);
+      const node = children[i];
+      const shown = wordText(node);
+      let latex = shown === undefined ? translateNode(node) : translateRun(asXmlNodes(node['m:r']), text);
+      if (!latex) continue;
+      // LaTeX reads on from a held \ into Word's text that import writes as
+      // it is, not as a command, as α as \alpha
+      const goesOn = shown !== undefined && latex.charAt(0) === shown.charAt(0);
+      if (text.lone) result += goesOn ? '\\' : heldBackslash();
       if (markupEndsInCommand && /^[A-Za-z]/.test(latex)) latex = '{}' + latex;
-      if (latex) markupEndsInCommand = false;
-      result = appendLatex(result, latex);
+      markupEndsInCommand = false;
+      if (shown === undefined) {
+        // Import's LaTeX, in a comment only where one goes on through it, as
+        // Word's % before it starts one, or where it ends in one
+        text = { lone: false, comment: (text.comment && !latex.includes('\n')) || endsInLatexComment(latex) };
+        result = appendLatex(result, latex);
+        continue;
+      }
+      text = textEnd(latex, { lone: goesOn && text.lone, comment: text.comment });
+      result = appendLatex(result, text.lone ? latex.slice(0, -1) : latex);
       continue;
     }
     let contents: string[];
@@ -1946,6 +2093,8 @@ function ommlChildrenToLatex(nodes: XmlNode[]): string {
       : oldLatex ? '{--' + oldLatex + '--}'
         : newLatex ? '{++' + newLatex + '++}' : '';
     if (!markup) continue;
+    result += heldBackslash();
+    text = TEXT_START;
     // Accepting or rejecting the change joins what's on either side of the
     // markup to its content, so {} keeps a command from running into a letter
     // there, as in \alpha{}{++x++}. A space would export as a space in both.
@@ -1955,7 +2104,7 @@ function ommlChildrenToLatex(nodes: XmlNode[]): string {
     result += markup;
     markupEndsInCommand = contents.some(latex => /\\[A-Za-z]+$/.test(latex));
   }
-  return result;
+  return text.lone ? result + '\\' : result;
 }
 
 /** The LaTeX of a tracked change's content, or '' where it is only runs of
@@ -1963,12 +2112,13 @@ function ommlChildrenToLatex(nodes: XmlNode[]): string {
  *  change. Export writes one so for the padding of a change such as
  *  {++ \! ++}, whose command Word has no form for (see keepWhitespaceChanges
  *  in latex-to-omml.ts). A highlight in it isn't read, as no span inside an
- *  equation can hold another. */
+ *  equation can hold another. A lone \ at its end is \backslash, before
+ *  the markup's end (see literalBackslashAtEnd). */
 function trackedChangeLatex(children: XmlNode[]): string {
   if (isDroppedChange(children)) return '';
   highlightDepth++;
   try {
-    return ommlChildrenToLatex(children);
+    return literalBackslashAtEnd(ommlChildrenToLatex(children));
   } finally {
     highlightDepth--;
   }

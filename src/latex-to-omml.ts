@@ -164,6 +164,106 @@ function holdsLatexText(omml: string): boolean {
   return false;
 }
 
+/** The characters import writes as commands in a run of math, as \alpha for
+ *  α, and ′, as ' or \prime (see unicodeToLatex and runTextLatex in
+ *  omml.ts): those of LATEX_UNICODE_MAP but |, which import keeps */
+const COMMAND_CHARACTERS: ReadonlySet<string> = new Set([...LATEX_UNICODE_MAP.values()].filter(ch => ch !== '|'));
+
+/** The run of Word's \ that \backslash writes in math, its m:t marked for
+ *  literalBackslashes, which writes it as Word's \ or as \backslash */
+const MARKED_BACKSLASH_RUN = '<m:r><m:t mm:backslash="">\\</m:t></m:r>';
+
+/** What literalBackslashes finds of a MARKED_BACKSLASH_RUN, before which
+ *  highlightedRuns may put a highlight */
+const MARKED_BACKSLASH = '<m:t mm:backslash="">\\</m:t></m:r>';
+
+/** Whether latexToOmml and trackedLatexToOmml write each \backslash as
+ *  Word's \, wherever it is (see withWordBackslashes) */
+let backslashesAsCharacters = false;
+
+/**
+ * `write()`, with each \backslash in math written as Word's \ wherever it
+ * is, and the spaces after it kept. tracksInPlace in md-to-docx-citations.ts
+ * compares the runs of a tracked equation with those of its views, where
+ * different things may follow a \backslash: in the accepted view, an
+ * insertion's content follows it, and in the equation, the insertion does.
+ */
+export function withWordBackslashes<T>(write: () => T): T {
+  const outer = backslashesAsCharacters;
+  backslashesAsCharacters = true;
+  try {
+    return write();
+  } finally {
+    backslashesAsCharacters = outer;
+  }
+}
+
+/**
+ * `omml`, an equation's, with each \backslash in math (see
+ * MARKED_BACKSLASH_RUN) written as Word's \ where import reads that back as
+ * \backslash (see ommlChildrenToLatex in omml.ts): at the end of a part,
+ * and before a structure, a tracked change, a highlight's edge, or a run
+ * whose first character import writes as a command, as α as \alpha.
+ *
+ * Before a run whose text import writes as it is, LaTeX would read on from
+ * Word's \, so \backslash is text there, as before. Word's \ before b came
+ * back as \b, and before a \tag's # or a row's &, as \# or \&, which lost
+ * the number or the alignment point.
+ *
+ * TeX skips the spaces after \backslash, and Word drops their runs (see
+ * skippedSpaces), so what follows them decides. Where that's Word's \, the
+ * spaces go, since import would read the \ and a space as LaTeX's space.
+ */
+function literalBackslashes(omml: string): string {
+  const pieces = omml.split(MARKED_BACKSLASH);
+  if (pieces.length === 1) return omml;
+  const written = [pieces[0]];
+  for (let k = 1; k < pieces.length; k++) {
+    const after = pieces[k];
+    const run = pieces[k - 1].endsWith(MATH_HIGHLIGHT_RPR) ? '<m:r>' + MATH_HIGHLIGHT_RPR : '<m:r>';
+    const spaces = backslashesAsCharacters ? 0 : skippedSpaces(after, run);
+    if (!backslashesAsCharacters && readsOn(after, spaces, run, k < pieces.length - 1)) {
+      written.push('<m:t>\\backslash</m:t></m:r>', after);
+    } else {
+      written.push('<m:t>\\</m:t></m:r>', spaces ? after.slice(spaces) : after);
+    }
+  }
+  return written.join('');
+}
+
+/** The text of a run that Word drops, only spaces or line ends, or
+ *  nothing, without xml:space="preserve", and the run's end */
+const SKIPPED_TEXT_RE = /<m:t>[ \t\r\n]*<\/m:t><\/m:r>/y;
+
+/** Where the runs at the start of `after` that open as `run` does and hold
+ *  only text Word drops (see SKIPPED_TEXT_RE) end */
+function skippedSpaces(after: string, run: string): number {
+  let end = 0;
+  while (after.startsWith(run, end)) {
+    SKIPPED_TEXT_RE.lastIndex = end + run.length;
+    if (!SKIPPED_TEXT_RE.test(after)) break;
+    end = SKIPPED_TEXT_RE.lastIndex;
+  }
+  return end;
+}
+
+/**
+ * Whether import reads on from Word's \ into the run at `at` in `after`,
+ * the OMML after the \'s run (see literalBackslashes). It does where that
+ * run opens as the \'s does, `run`, with no properties or a highlight's
+ * alone, and its first character is one import writes as it is, not as a
+ * command. Where `marked`, `after` ends with the start of the next
+ * \backslash's run, which is such a run. Anything else, as a structure, a
+ * tracked change or a highlight's edge, import writes as its own LaTeX.
+ */
+function readsOn(after: string, at: number, run: string, marked: boolean): boolean {
+  if (!after.startsWith(run, at)) return false;
+  const text = at + run.length;
+  if (marked && text === after.length) return true;
+  const open = ['<m:t>', '<m:t xml:space="preserve">'].find(start => after.startsWith(start, text));
+  return open !== undefined && !COMMAND_CHARACTERS.has(after.charAt(text + open.length));
+}
+
 /** The environments parseEnvironment gives an OMML form; keep in step with its cases. */
 const SUPPORTED_ENVIRONMENTS: ReadonlySet<string> = new Set([
   'matrix', 'smallmatrix', 'pmatrix', 'bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix', 'cases',
@@ -785,6 +885,10 @@ class Parser {
     if (escaped !== undefined) {
       return makeRun(escaped);
     }
+
+    // Word's \, which import writes as \backslash in math (see
+    // literalBackslashes); in a style's group or text, as written, as before
+    if (cmd === '\\backslash' && this.mode === 'math') return MARKED_BACKSLASH_RUN;
 
     // Greek letters and symbols
     const unicode = LATEX_UNICODE_MAP.get(cmd);
@@ -1720,7 +1824,10 @@ class Parser {
     // Simple extraction - just get text between <m:t> tags, skipping hidden
     // comment runs, though not a shown run of a zero-width space.
     // NOTE: <m:t> content has already been escaped via escapeXmlChars().
-    const matches = [...omml.split(HIDDEN_RUN_RE).filter((_part, i) => i % 2 === 0).join('').matchAll(/<m:t(?: xml:space="preserve")?>([^<]*)<\/m:t>/g)];
+    // A \backslash of math, as in an environment's name, is as written, as
+    // before (see MARKED_BACKSLASH_RUN)
+    const shown = omml.split(HIDDEN_RUN_RE).filter((_part, i) => i % 2 === 0).join('').split(MARKED_BACKSLASH).join('<m:t>\\backslash</m:t></m:r>');
+    const matches = [...shown.matchAll(/<m:t(?: xml:space="preserve")?>([^<]*)<\/m:t>/g)];
     return unescapeXmlChars(matches.map(m => m[1]).join(''));
   }
 
@@ -1756,7 +1863,7 @@ export function latexToOmml(latex: string, onUnknownCommand?: (command: string) 
   const parser = new Parser(tokens, onUnknownCommand, 'math');
   parser.numbered = display;
   parser.numbersBlank = numberBlank;
-  return parser.numberedEquation(parser.parseExpression(false));
+  return literalBackslashes(parser.numberedEquation(parser.parseExpression(false)));
 }
 
 /**
@@ -1770,7 +1877,7 @@ export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownC
   }
   const parser = new Parser(tokenize(latex), onUnknownCommand, 'math', track);
   parser.numbered = display;
-  return keepWhitespaceChanges(parser.numberedEquation(parser.parseExpression(false)));
+  return literalBackslashes(keepWhitespaceChanges(parser.numberedEquation(parser.parseExpression(false))));
 }
 
 /** The mark on the w:ins or w:del of a tracked change whose source is only

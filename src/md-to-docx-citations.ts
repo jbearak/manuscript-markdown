@@ -1,5 +1,5 @@
 import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText } from './bibtex-parser';
-import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, withEquationEscapes, type TrackChange } from './latex-to-omml';
+import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, withEquationEscapes, withWordBackslashes, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 import { decodeHtmlCharacterReferences } from './html-entities';
@@ -1379,17 +1379,24 @@ function joinedRuns(omml: string): string {
  * dropped.
  */
 function tracksInPlace(latex: string, parts: CriticMathPart[], numbered: boolean): boolean {
-  const omml = trackedLatexToOmml(latex, (element, content) => '<' + element + '>' + content + '</' + element + '>', undefined, numbered)
-    .split(MATH_HIGHLIGHT_RPR).join('');
-  const view = (accepted: boolean) => {
-    const [keep, drop] = accepted ? ['w:ins', 'w:del'] : ['w:del', 'w:ins'];
-    return omml.replace(new RegExp('<' + drop + '>[\\s\\S]*?</' + drop + '>', 'g'), '').replace(new RegExp('</?' + keep + '>', 'g'), '');
-  };
-  return [true, false].every(accepted => {
-    const tracked = joinedRuns(view(accepted));
-    const viewLatex = equationViewLatex(parts, accepted);
-    return tracked === joinedRuns(equationViewOmml(viewLatex, undefined, numbered))
-      || numbered && tracked === joinedRuns(equationViewOmml(viewLatex, undefined, true, true));
+  // Each \backslash as Word's \ in the equation and its views alike. A view
+  // could write one as text where the equation writes Word's \, as before
+  // an insertion's content, which follows it in the accepted view, where the
+  // insertion follows it in the equation (see literalBackslashes in
+  // latex-to-omml.ts)
+  return withWordBackslashes(() => {
+    const omml = trackedLatexToOmml(latex, (element, content) => '<' + element + '>' + content + '</' + element + '>', undefined, numbered)
+      .split(MATH_HIGHLIGHT_RPR).join('');
+    const view = (accepted: boolean) => {
+      const [keep, drop] = accepted ? ['w:ins', 'w:del'] : ['w:del', 'w:ins'];
+      return omml.replace(new RegExp('<' + drop + '>[\\s\\S]*?</' + drop + '>', 'g'), '').replace(new RegExp('</?' + keep + '>', 'g'), '');
+    };
+    return [true, false].every(accepted => {
+      const tracked = joinedRuns(view(accepted));
+      const viewLatex = equationViewLatex(parts, accepted);
+      return tracked === joinedRuns(equationViewOmml(viewLatex, undefined, numbered))
+        || numbered && tracked === joinedRuns(equationViewOmml(viewLatex, undefined, true, true));
+    });
   });
 }
 
