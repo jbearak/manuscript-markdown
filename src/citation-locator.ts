@@ -21,9 +21,10 @@
 // Where it differs from Pandoc: Pandoc writes each space as one; here a
 // locator and a suffix keep the whitespace written in them, as a line end,
 // which export kept in a locator before. The text is read as text, but
-// for an escaped brace or backslash (see ESCAPED_RE): Pandoc reads
-// Markdown's formatting in a suffix, which export takes as written, as it
-// does a locator, and Word shows as written (see AFFIX_MARKUP in
+// for an escaped brace or backslash (see ESCAPED_RE), and a tag citeproc
+// reads, which is part of a word (see TAG_RE): Pandoc reads Markdown's
+// formatting in a suffix, which export takes as written, as it does a
+// locator, and Word shows a suffix as written (see AFFIX_MARKUP in
 // md-to-docx-citations.ts).
 //
 // Every scan here is linear in the text: a term is at most
@@ -122,13 +123,20 @@ export interface CitationLocator {
 
 /** A token as Pandoc's parser reads one: a run of whitespace, a
  *  punctuation character but :, or a run of other characters, with an
- *  escaped brace or backslash among them (see ESCAPED_RE) */
+ *  escaped brace or backslash among them (see ESCAPED_RE), and a tag (see
+ *  TAG_RE) */
 interface Token {
   text: string;
   space: boolean;
 }
 
-const TOKEN_RE = /\s+|(?:\\[\\{}]|[^\s\p{P}]|:)+|\p{P}/gu;
+// A tag citeproc reads as markup (its FlipFlopper), whole: part of a word,
+// as <sup>2</sup>, which export wrote as a page's locator before, and Word
+// showed as a superscript 2, not split at its / or its punctuation. Pandoc
+// reads a tag in a word as part of it too.
+const TAG = '<(?:/?(?:i|b|sc|sup|sub)|span class="no(?:case|decor)"|span style="font-variant: ?small-caps;"|/span)>';
+const TAG_RE = new RegExp(TAG, 'g');
+const TOKEN_RE = new RegExp('\\s+|(?:' + TAG + '|\\\\[\\\\{}]|[^\\s\\p{P}]|:)+|\\p{P}', 'gu');
 // A brace or a backslash after a backslash, as \{, which is that
 // character as text, not a brace or an escape: the Markdown escapes read
 // here, so a locator can hold a brace no other brace closes, as A\{B, and
@@ -138,6 +146,7 @@ const TOKEN_RE = /\s+|(?:\\[\\{}]|[^\s\p{P}]|:)+|\p{P}/gu;
 // character too.
 const ESCAPED_RE = /\\([\\{}])/g;
 const unescaped = (text: string) => text.replace(ESCAPED_RE, (_escape, character: string) => character);
+const untagged = (text: string) => text.replace(TAG_RE, '');
 const PUNCTUATION_RE = /^\p{P}/u;
 const DIGIT_RE = /[0-9]/;
 // A Roman numeral as Pandoc reads one, its case aside: each part greedy,
@@ -173,15 +182,17 @@ function readLocator(text: string, withCompatible: boolean): CitationLocator {
   const textFrom = (from: number, to = n) => tokens.slice(from, to).map(token => token.text).join('');
 
   // A page's unit: a Roman numeral, or a run of tokens to a space or
-  // punctuation but a range's dash or :, with whether it has digits
+  // punctuation but a range's dash or :, with whether it has digits. Each
+  // read without its tags, as <i>iv</i>, a Roman numeral.
   const pageUnit = (at: number): Parsed<[boolean, string]> => {
     const token = tokens[at];
-    if (token && !token.space && ROMAN_RE.test(token.text.toUpperCase())) return { value: [true, token.text], next: at + 1 };
+    const roman = token && !token.space ? untagged(token.text).toUpperCase() : '';
+    if (roman && ROMAN_RE.test(roman)) return { value: [true, token.text], next: at + 1 };
     let end = at;
     while (end < n && !tokens[end].space && !isLocatorPunctuation(single(end))) end++;
     if (end === at) return undefined;
     const unit = textFrom(at, end);
-    return { value: [DIGIT_RE.test(unit), unit], next: end };
+    return { value: [DIGIT_RE.test(untagged(unit)), unit], next: end };
   };
   // .2, a unit after a period
   const withPeriod = (at: number): Parsed<[boolean, string]> => {

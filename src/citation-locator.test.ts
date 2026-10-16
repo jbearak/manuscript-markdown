@@ -5,7 +5,7 @@ import { join } from 'path';
 import { readCitationLocator, citationLocatorText, type CitationLocator } from './citation-locator';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
-import { createCiteprocEngine, generateCitation, generateFallbackText } from './md-to-docx-citations';
+import { createCiteprocEngine, generateCitation, generateFallbackText, renderCitationText } from './md-to-docx-citations';
 import { parseBibtex } from './bibtex-parser';
 import { fastestRun } from './test-timing';
 
@@ -125,6 +125,32 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
     expect(readCitationLocator(text)).toEqual(expected);
   });
 
+  // A tag citeproc reads is part of a word, as export read it in a page's
+  // locator before, which Word showed as its markup, as a superscript 2:
+  // not split at its /, as the reader split <sup>2</sup> into the locator
+  // <sup>2< and the suffix /sup>. A word without a digit is no page's
+  // without a term, as ii.
+  it.each<[string, CitationLocator]>([
+    ['<sup>2</sup>', { locator: '<sup>2</sup>', label: 'page' }],
+    ['p. <sup>2</sup>', { locator: '<sup>2</sup>', label: 'page' }],
+    ['<sub>2</sub>', { locator: '<sub>2</sub>', label: 'page' }],
+    ['p. <i>iv</i>', { locator: '<i>iv</i>', label: 'page' }],
+    ['chap. <b>2</b>', { locator: '<b>2</b>', label: 'chapter' }],
+    ['p. <sc>2</sc>', { locator: '<sc>2</sc>', label: 'page' }],
+    ['p. <span class="nocase">2</span>', { locator: '<span class="nocase">2</span>', label: 'page' }],
+    ['p. <span class="nodecor">2</span>', { locator: '<span class="nodecor">2</span>', label: 'page' }],
+    ['p. <span style="font-variant:small-caps;">2</span>', { locator: '<span style="font-variant:small-caps;">2</span>', label: 'page' }],
+    ['p. 2<sup>a</sup>', { locator: '2<sup>a</sup>', label: 'page' }],
+    ['p. 2</i>', { locator: '2</i>', label: 'page' }],
+    ['pp. <sup>2</sup>-<sup>5</sup>', { locator: '<sup>2</sup>-<sup>5</sup>', label: 'page' }],
+    ['<sup>2</sup>, emphasis added', { locator: '<sup>2</sup>', label: 'page', suffix: ', emphasis added' }],
+    ['p. 2, <sup>a</sup>', { locator: '2', label: 'page', suffix: ', <sup>a</sup>' }],
+    ['p. 2 <sup>a</sup> b', { locator: '2', label: 'page', suffix: ' <sup>a</sup> b' }],
+    ['<i>iv</i>', { suffix: ', <i>iv</i>' }],
+  ])('reads the tags in %j as part of a word', (text, expected) => {
+    expect(readCitationLocator(text)).toEqual(expected);
+  });
+
   it('keeps a line end in a locator, as export did before', () => {
     expect(readCitationLocator('p. 1\n2')).toEqual({ locator: '1\n2', label: 'page' });
     expect(readCitationLocator('p.\n2')).toEqual({ locator: '2', label: 'page' });
@@ -166,7 +192,7 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
   // read and written: linear work takes 4 times as long at 64,000, where a
   // scan that read a run of spaces or backslashes again from each of its
   // characters took 16 times as long, and seconds
-  it.each([' ', '1', ',', '-', '{', '}', '{}', 'i', 'M', '\\'])('reads and writes a long run of %j in linear time', run => {
+  it.each([' ', '1', ',', '-', '{', '}', '{}', 'i', 'M', '\\', '<sup>', '<i>1</i>'])('reads and writes a long run of %j in linear time', run => {
     const places = [(text: string) => text, (text: string) => 'p. ' + text, (text: string) => '1' + text + '2', (text: string) => '{p. 1' + text + '}'];
     const works = [
       (text: string) => readCitationLocator(text),
@@ -231,6 +257,11 @@ describe('citationLocatorText, as import writes a locator', () => {
     ['A\\', 'page', undefined, '{p. A\\\\}'],
     ['A\\{B', 'page', undefined, '{p. A\\\\\\{B}'],
     ['2', 'page', ', see \\{x', 'p. 2, see \\\\\\{x'],
+    // A tag, part of the locator's word, as main wrote it, and in a suffix
+    ['<sup>2</sup>', 'page', undefined, 'p. <sup>2</sup>'],
+    ['<i>iv</i>', 'chapter', undefined, 'chap. <i>iv</i>'],
+    ['<span class="nocase">2</span>', 'page', undefined, 'p. <span class="nocase">2</span>'],
+    ['2', 'page', ', <sup>a</sup>', 'p. 2, <sup>a</sup>'],
     [undefined, undefined, undefined, ''],
   ])('writes %j, %j and %j as %j', (locator, label, suffix, expected) => {
     expect(citationLocatorText(locator, label, suffix)).toBe(expected);
@@ -238,7 +269,8 @@ describe('citationLocatorText, as import writes a locator', () => {
 
   it('writes what reads back as the reading of any text', () => {
     const words = ['p.', 'pp.', 'chap.', 'c.', 'ch.', 'sec.', '§', '¶', 's.v.', 'vol.', 'iv', 'mix', 'I', 'x', '33', '3-5', '12a', 'A1', 'A', '2.1', '33ff',
-      'emphasis', 'and', 'passim', 'Table', ',', '.', '(', ')', '(1)', '{', '}', '{}', ':', '—', '!', '5'];
+      'emphasis', 'and', 'passim', 'Table', ',', '.', '(', ')', '(1)', '{', '}', '{}', ':', '—', '!', '5', '<sup>2</sup>', '<i>iv</i>', '<i>', '</i>', '2</sup>',
+      '<span class="nocase">'];
     let seed = 7;
     const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
     for (let i = 0; i < 3000; i++) {
@@ -262,7 +294,9 @@ const BIB = '@article{doe2020,\n  author = {Doe, Jane},\n  title = {A Title},\n 
   + '@book{roe2019,\n  author = {Roe, Rick},\n  title = {A Book},\n  publisher = {Pub},\n  year = {2019},\n  zotero-key = {EFGH5678},\n  zotero-uri = {http://zotero.org/users/1/items/EFGH5678}\n}\n';
 const STYLE = 'chicago-author-date';
 type FieldItem = { locator?: string; label?: string; prefix?: string; suffix?: string; 'suppress-author'?: boolean };
-type Field = { items: FieldItem[]; shown: string };
+/** A field's items, Word's text for it, and each run of that text with
+ *  formatting, as ['superscript', '2'] */
+type Field = { items: FieldItem[]; shown: string; formatted: Array<[string, string]> };
 type Trip = { first: Field; markdown: string; next: Field };
 const unescape = (s: string) => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -270,13 +304,15 @@ const FIELD_RE = /(CSL_CITATION )(.*?)( <\/w:instrText>[\s\S]*?fldCharType="sepa
 const once = <T,>(make: () => Promise<T>) => { let made: Promise<T> | undefined; return () => made ??= make(); };
 
 /** The citation fields of a document's body, in order: each one's items,
- *  without their data, and the text Word shows for it */
+ *  without their data, and the text Word shows for it, with its formatting */
 async function fields(docx: Uint8Array): Promise<Field[]> {
   const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
   return [...xml.matchAll(FIELD_RE)].map(m => ({
     items: (JSON.parse(unescape(m[2])).citationItems as Array<Record<string, unknown>>).map(({ locator, label, prefix, suffix, 'suppress-author': sa }) =>
       JSON.parse(JSON.stringify({ locator, label, prefix, suffix, 'suppress-author': sa })) as FieldItem),
     shown: unescape([...m[4].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join('')),
+    formatted: [...m[4].matchAll(/<w:rPr>(.*?)<\/w:rPr><w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(r =>
+      [[...r[1].matchAll(/<w:(\w+)(?: w:val="([^"]*)")?\/>/g)].map(p => p[2] ?? p[1]).join(' '), unescape(r[2])] as [string, string]),
   }));
 }
 
@@ -405,15 +441,17 @@ const ZOTERO_COMPATIBLE: Array<[FieldItem, string]> = [
   [{ locator: '2', label: 'supplement' }, 'supp. 2'],
 ];
 
-// What citeproc reads as markup in a prefix and a suffix, which Word shows
-// as written: each one's Markdown, its field's items, and Word's text
-const AFFIXES: Array<[string, FieldItem[], string]> = [
-  ['A [@doe2020, p. 2, <i>emphasis</i>] b.\n', [{ locator: '2', label: 'page', suffix: ', <i>emphasis</i>' }], '(Doe 2020, 2, <i>emphasis</i>)'],
-  ['A [@doe2020, p. 2, "emphasis added"] b.\n', [{ locator: '2', label: 'page', suffix: ', "emphasis added"' }], '(Doe 2020, 2, "emphasis added")'],
-  ["A [@doe2020, p. 2, it's 'x'] b.\n", [{ locator: '2', label: 'page', suffix: ", it's 'x'" }], "(Doe 2020, 2, it's 'x')"],
-  ['A [@doe2020, {}<sup>2</sup>] b.\n', [{ suffix: ', <sup>2</sup>' }], '(Doe 2020, <sup>2</sup>)'],
-  ['A [see "x" @doe2020] b.\n', [{ prefix: 'see "x"' }], '(see "x" Doe 2020)'],
-  ['A [\\<i>see\\</i> @doe2020, p. 2] b.\n', [{ locator: '2', label: 'page', prefix: '<i>see</i>' }], '(<i>see</i> Doe 2020, 2)'],
+// What citeproc reads as markup in a suffix, which Word shows as written,
+// as main showed a suffix in the locator, and in a prefix, which citeproc
+// formats, as on main: each one's Markdown, its field's items, Word's text
+// and its formatting
+const AFFIXES: Array<[string, FieldItem[], string, Array<[string, string]>]> = [
+  ['A [@doe2020, p. 2, <i>emphasis</i>] b.\n', [{ locator: '2', label: 'page', suffix: ', <i>emphasis</i>' }], '(Doe 2020, 2, <i>emphasis</i>)', []],
+  ['A [@doe2020, p. 2, "emphasis added"] b.\n', [{ locator: '2', label: 'page', suffix: ', "emphasis added"' }], '(Doe 2020, 2, "emphasis added")', []],
+  ["A [@doe2020, p. 2, it's 'x'] b.\n", [{ locator: '2', label: 'page', suffix: ", it's 'x'" }], "(Doe 2020, 2, it's 'x')", []],
+  ['A [@doe2020, {}<sup>2</sup>] b.\n', [{ suffix: ', <sup>2</sup>' }], '(Doe 2020, <sup>2</sup>)', []],
+  ['A [see "x" @doe2020] b.\n', [{ prefix: 'see "x"' }], '(see \u201cx\u201d Doe 2020)', []],
+  ['A [\\<i>see\\</i> @doe2020, p. 2] b.\n', [{ locator: '2', label: 'page', prefix: '<i>see</i>' }], '(see Doe 2020, 2)', [['i', 'see']]],
 ];
 
 // A brace no other closes, escaped: each one's Markdown and its field's item
@@ -427,9 +465,33 @@ const ZOTERO_ESCAPES: Array<[FieldItem, string]> = [
   [{ locator: '2', label: 'page', suffix: ', see \\{x' }, 'p. 2, see \\\\\\{x'],
 ];
 
+// A tag in a locator, part of its word, which main's export wrote as a
+// page's locator and Word showed as its markup, and in a suffix after one,
+// which Word shows as written, as main showed it in the locator: each
+// one's text after the key, its field's item, Word's text and its
+// formatting, and its Markdown at the import, as main wrote it
+const LOCATOR_TAGS: Array<[string, FieldItem, string, Array<[string, string]>, string]> = [
+  ['<sup>2</sup>', { locator: '<sup>2</sup>', label: 'page' }, '(Roe 2019, 2)', [['superscript', '2']], 'p. <sup>2</sup>'],
+  ['<sub>2</sub>', { locator: '<sub>2</sub>', label: 'page' }, '(Roe 2019, 2)', [['subscript', '2']], 'p. <sub>2</sub>'],
+  ['p. <i>iv</i>', { locator: '<i>iv</i>', label: 'page' }, '(Roe 2019, iv)', [['i', 'iv']], 'p. <i>iv</i>'],
+  ['p. <sc>2</sc>', { locator: '<sc>2</sc>', label: 'page' }, '(Roe 2019, 2)', [['smallCaps', '2']], 'p. <sc>2</sc>'],
+  ['p. <span class="nocase">2</span>', { locator: '<span class="nocase">2</span>', label: 'page' }, '(Roe 2019, 2)', [], 'p. <span class="nocase">2</span>'],
+  ['<sup>2</sup>, emphasis added', { locator: '<sup>2</sup>', label: 'page', suffix: ', emphasis added' }, '(Roe 2019, 2, emphasis added)', [['superscript', '2']], 'p. <sup>2</sup>, emphasis added'],
+  ['p. 2, <sup>a</sup>', { locator: '2', label: 'page', suffix: ', <sup>a</sup>' }, '(Roe 2019, 2, <sup>a</sup>)', [], 'p. 2, <sup>a</sup>'],
+  // Which main wrote as a page's locator, sec. <b>2</b>, which citeproc
+  // showed as the section's
+  ['sec. <b>2</b>', { locator: '<b>2</b>', label: 'section' }, '(Roe 2019, sec. 2)', [['b', '2']], 'sec. <b>2</b>'],
+];
+
+// Zotero's locator with a tag, imported as main wrote it
+const ZOTERO_TAGS: Array<[FieldItem, string, Array<[string, string]>]> = [
+  [{ locator: '<sup>2</sup>', label: 'page' }, 'p. <sup>2</sup>', [['superscript', '2']]],
+  [{ locator: '<i>iv</i>', label: 'chapter' }, 'chap. <i>iv</i>', [['i', 'iv']]],
+];
+
 const markdownTrips = once(() => fromMarkdown([...TERMS.map(([, term]) => 'A [@doe2020, ' + term + ' 2] b.\n'), ...SUFFIXES.map(([md]) => md), ...MORE, ...GUARDS.map(([md]) => md),
   ...COMPATIBLE.map(([text]) => 'A [@roe2019, ' + text + '] b.\n'), 'A [@roe2019, ' + COMPATIBLE_SUFFIX + '] b.\n',
-  ...AFFIXES.map(([md]) => md), ...ESCAPES.map(([md]) => md)]));
+  ...AFFIXES.map(([md]) => md), ...ESCAPES.map(([md]) => md), ...LOCATOR_TAGS.map(([text]) => 'A [@roe2019, ' + text + '] b.\n')]));
 const zoteroTrips = once(() => fromZotero([
   ...TERMS.map(([label]) => ({ keys: ['doe2020'], items: [{ locator: '2', label }] })),
   ...ZOTERO_SUFFIXES.map(([item]) => ({ keys: ['doe2020'], items: [item] })),
@@ -440,6 +502,7 @@ const zoteroTrips = once(() => fromZotero([
   ...ZOTERO_ESCAPES.map(([item]) => ({ keys: ['doe2020'], items: [item] })),
   // Zotero's markup in a suffix (see the test below)
   { keys: ['doe2020'], items: [{ locator: '2', label: 'page', suffix: ', <i>sic</i>' }] },
+  ...ZOTERO_TAGS.map(([item]) => ({ keys: ['doe2020'], items: [item] })),
 ]));
 const markdownTrip = async (k: number) => (await markdownTrips())[k];
 const zoteroTrip = async (k: number) => (await zoteroTrips())[k];
@@ -543,10 +606,11 @@ describe('a citation\'s locator, its label and its suffix through Word', () => {
   const escapes = affixes + AFFIXES.length;
   const zoteroEscapes = zoteroCompatible + ZOTERO_COMPATIBLE.length;
 
-  it.each(AFFIXES.map((c, k) => [...c, affixes + k] as const))('shows the markup of %j as written', async (md, items, shown, k) => {
+  it.each(AFFIXES.map((c, k) => [...c, affixes + k] as const))('shows the markup of %j in Word as main did', async (md, items, shown, formatted, k) => {
     const trip = await markdownTrip(k);
     expect(trip.first.items).toEqual(items);
     expect(trip.first.shown).toBe(shown);
+    expect(trip.first.formatted).toEqual(formatted);
     expect(trip.markdown).toBe(md);
     expect(trip.next).toEqual(trip.first);
   }, 60000);
@@ -579,6 +643,26 @@ describe('a citation\'s locator, its label and its suffix through Word', () => {
     expect(trip.next.shown).toBe('(Doe 2020, 2, <i>sic</i>)');
   }, 60000);
 
+  const locatorTags = escapes + ESCAPES.length;
+  const zoteroTags = zoteroEscapes + ZOTERO_ESCAPES.length + 1;
+
+  it.each(LOCATOR_TAGS.map((c, k) => [...c, locatorTags + k] as const))('exports the tag in %j as part of the locator', async (text, item, shown, formatted, back, k) => {
+    const trip = await markdownTrip(k);
+    expect(trip.first.items).toEqual([item]);
+    expect(trip.first.shown).toBe(shown);
+    expect(trip.first.formatted).toEqual(formatted);
+    expect(trip.markdown).toBe('A [@roe2019, ' + back + '] b.\n');
+    expect(trip.next).toEqual(trip.first);
+  }, 60000);
+
+  it.each(ZOTERO_TAGS.map((c, k) => [...c, zoteroTags + k] as const))('imports Zotero\'s %j as main did', async (item, written, formatted, k) => {
+    const trip = await zoteroTrip(k);
+    expect(trip.markdown).toBe('A [@doe2020, ' + written + '] b.\n');
+    expect(trip.next.items).toEqual([item]);
+    expect(trip.next.shown).toBe(trip.shown);
+    expect(trip.next.formatted).toEqual(formatted);
+  }, 60000);
+
   it('imports a plural locator with the plural term', async () => {
     const trip = await markdownTrip(more + 3);
     expect(trip.first.items).toEqual([{ locator: '3-5', label: 'page' }, { locator: '2-3', label: 'chapter' }]);
@@ -592,6 +676,21 @@ describe('guards: citations main wrote as these already', () => {
     expect(trip.first.items).toEqual(items);
     expect(trip.markdown).toBe(back);
   }, 60000);
+
+  // A suffix's markup goes to citeproc as private-use stand-ins (see
+  // AFFIX_MARKUP), which came back as markup where citeproc showed one of
+  // them already, as in a name: (Roe&#60; 2019) for every citation
+  it('keeps a private-use character citeproc shows, as in a name', () => {
+    const pua = String.fromCharCode(0xe000);
+    const bib = '@book{roe2019,\n  author = {Roe' + pua + ', Rick},\n  title = {A Book},\n  publisher = {Pub},\n  year = {2019}\n}\n';
+    const puaEngine = createCiteprocEngine(parseBibtex(bib), STYLE)!;
+    expect(renderCitationText(puaEngine, ['roe2019'])).toBe('(Roe' + pua + ' 2019)');
+    expect(renderCitationText(puaEngine, ['roe2019'], new Map([['roe2019', 'p. 2, see ' + pua]]))).toBe('(Roe' + pua + ' 2019, 2, see ' + pua + ')');
+    // Where the suffix's markup is then citeproc's, as Zotero shows it
+    expect(renderCitationText(puaEngine, ['roe2019'], new Map([['roe2019', 'p. 2, <i>sic</i>']]))).toBe('(Roe' + pua + ' 2019, 2, <i>sic</i>)');
+    const plain = createCiteprocEngine(parseBibtex(BIB), STYLE)!;
+    expect(renderCitationText(plain, ['roe2019'], new Map([['roe2019', 'p. 2, <i>sic</i>']]))).toBe('(Roe 2019, 2, &#60;i&#62;sic&#60;/i&#62;)');
+  });
 
   it('shows the locator\'s text as written without a style', () => {
     const entries = parseBibtex(BIB);

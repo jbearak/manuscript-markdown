@@ -78,8 +78,6 @@ interface CiteprocSystem {
 
 interface CiteprocNamespace {
   Engine: new (system: CiteprocSystem, styleXml: string, locale: string) => CiteprocEngine;
-  /** citeproc-js internal: a prefix with the space it puts after one */
-  checkPrefixSpaceAppend?: (state: unknown, prefix: string) => string;
 }
 
 // citeproc is a CommonJS module exporting the CSL namespace
@@ -467,19 +465,15 @@ export function renderCitationText(
       }
       return withAffixes(item, locators?.get(key), prefixes?.[i]);
     });
-    // Each prefix and suffix as written, but where one holds a stand-in
-    // already, which would come back as what it stands for
-    const standIns = !rawList.some(item => hasStandIn(item.prefix ?? '') || hasStandIn(item.suffix ?? ''));
-    if (standIns) {
-      for (const item of rawList) {
-        if (item.prefix) item.prefix = prefixWithStandIns(item.prefix);
-        if (item.suffix) item.suffix = withStandIns(item.suffix);
-      }
-    }
 
     if (sort) sort.tokens = [];
     const html = engine.makeCitationCluster(rawList) as string;
-    return standIns ? fromStandIns(html) : html;
+    // Each suffix as written (see AFFIX_MARKUP), where one holds markup, but
+    // where citeproc shows a stand-in already, as in a name, which would
+    // come back as what it stands for. A prefix's markup is citeproc's, as
+    // before, as <i>see</i> in italics.
+    if (!rawList.some(item => item.suffix && withStandIns(item.suffix) !== item.suffix) || hasStandIn(html)) return html;
+    return fromStandIns(engine.makeCitationCluster(rawList.map(item => item.suffix ? { ...item, suffix: withStandIns(item.suffix) } : item)) as string);
   } catch {
     return undefined;
   } finally {
@@ -487,16 +481,18 @@ export function renderCitationText(
   }
 }
 
-/** What citeproc reads as markup in an item's prefix and suffix (its
- *  FlipFlopper): a tag, as <i> or <sup>, which starts with < and ends with
- *  >, and quotes, straight or curly, which it pairs, curls and turns, as
- *  'x' to a double-quoted x. It has no escape for them, and shows an
- *  entity as written, so renderCitationText gives it each as its stand-in,
- *  the private-use character at its place after STAND_IN_BASE, which
- *  citeproc shows as it is, and turns those back after: Word shows a
- *  prefix and a suffix as written, as it does a locator, and as main
- *  showed a suffix in the locator. The field holds them as written, which
- *  Zotero's citeproc reads its markup in when it refreshes the field. */
+/** What citeproc reads as markup in an item's suffix (its FlipFlopper): a
+ *  tag, as <i> or <sup>, which starts with < and ends with >, and quotes,
+ *  straight or curly, which it pairs, curls and turns, as 'x' to a
+ *  double-quoted x. It has no escape for them, and shows an entity as
+ *  written, so renderCitationText gives it each as its stand-in, the
+ *  private-use character at its place after STAND_IN_BASE, which citeproc
+ *  shows as it is, and turns those back after: Word shows a suffix as
+ *  written, as export showed one before, in the locator, where citeproc
+ *  showed such markup after a word as written. The field holds it as
+ *  written, which Zotero's citeproc reads its markup in when it refreshes
+ *  the field. A tag around a locator's word is the locator's (see TAG_RE
+ *  in citation-locator.ts), which citeproc formats, as a prefix's. */
 const AFFIX_MARKUP = String.fromCharCode(0x3c, 0x3e, 0x22, 0x27, 0x201c, 0x201d, 0x2018, 0x2019, 0xab, 0xbb, 0x2039, 0x203a, 0x201e, 0x201a);
 const STAND_IN_BASE = 0xe000;
 
@@ -517,15 +513,6 @@ function withStandIns(text: string): string {
     out += at < 0 ? c : String.fromCharCode(STAND_IN_BASE + at);
   }
   return out;
-}
-
-/** A prefix with its stand-ins, and the space citeproc puts after the
- *  prefix as written, where it would put none after a stand-in, as after
- *  see "x", where it looks past the closing quote */
-function prefixWithStandIns(prefix: string): string {
-  const standIn = withStandIns(prefix);
-  if (standIn === prefix || standIn.endsWith(' ')) return standIn;
-  return CSL?.checkPrefixSpaceAppend?.({}, prefix).endsWith(' ') ? standIn + ' ' : standIn;
 }
 
 /** citeproc's HTML with each stand-in as what it stands for: a tag's < and
