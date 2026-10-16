@@ -55,7 +55,6 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
     ['p. 3—5', { locator: '3', label: 'page', suffix: '—5' }],
     ['p. (1)(a)', { locator: '(1)(a)', label: 'page' }],
     ['emphasis added', { suffix: ', emphasis added' }],
-    ['ch. 2', { suffix: ', ch. 2' }],
     ['I think', { suffix: ', I think' }],
     ['ii', { suffix: ', ii' }],
     ['chap. civil', { suffix: ', chap. civil' }],
@@ -73,6 +72,42 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
     ['{p. 2}35', { locator: '2', label: 'page', suffix: '35' }],
     ['{p. 2} iv', { locator: '2', label: 'page', suffix: ' iv' }],
   ])('reads %j', (text, expected) => {
+    expect(readCitationLocator(text)).toEqual(expected);
+  });
+
+  // Not Pandoc's: citeproc's abbreviations of a label, which Pandoc reads
+  // as text, or before a word that isn't a number, and which main's export
+  // wrote as a page's locator, which Word showed as that label. In lower
+  // case, before whitespace, as citeproc reads them, with any word after
+  // one, as citeproc takes it
+  it.each<[string, CitationLocator]>([
+    ['ch. 2', { locator: '2', label: 'chapter' }],
+    ['ch. 2-3', { locator: '2-3', label: 'chapter' }],
+    ['ch.  2', { locator: '2', label: 'chapter' }],
+    ['ch. A', { locator: 'A', label: 'chapter' }],
+    ['ch. 2, emphasis added', { locator: '2', label: 'chapter', suffix: ', emphasis added' }],
+    ['{ch. A to B}', { locator: 'A to B', label: 'chapter' }],
+    ['sv. word', { locator: 'word', label: 'sub verbo' }],
+    ['vrs. 2', { locator: '2', label: 'verse' }],
+    ['app. A', { locator: 'A', label: 'appendix' }],
+    ['r. 2', { locator: '2', label: 'rule' }],
+    ['supp. 2', { locator: '2', label: 'supplement' }],
+    ['tbl. 3', { locator: '3', label: 'table' }],
+    ['sec. A', { locator: 'A', label: 'section' }],
+    ['fig. A, emphasis added', { locator: 'A', label: 'figure', suffix: ', emphasis added' }],
+    ['l. A', { locator: 'A', label: 'line' }],
+    // Which main's export read as a page's, with anything after it
+    ['p. A', { locator: 'A', label: 'page' }],
+    ['pp. passim', { locator: 'passim', label: 'page' }],
+    // Which citeproc reads as no label: in another case, without a space,
+    // or one it shows as Preprint or as a page
+    ['Ch. 2', { suffix: ', Ch. 2' }],
+    ['Sec. A', { suffix: ', Sec. A' }],
+    ['ch.2', { locator: 'ch.2', label: 'page' }],
+    ['art. 2', { suffix: ', art. 2' }],
+    ['subpara. 2', { suffix: ', subpara. 2' }],
+    ['ch.', { suffix: ', ch.' }],
+  ])('reads %j as citeproc did', (text, expected) => {
     expect(readCitationLocator(text)).toEqual(expected);
   });
 
@@ -106,6 +141,7 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
       '{' + 'a '.repeat(40000) + '}',
       '('.repeat(80000),
       's.v. ' + 'iv.'.repeat(40000),
+      'app. ' + 'A, '.repeat(40000),
     ];
     // A quadratic search took minutes here; linear takes milliseconds
     for (const text of texts) expect(fastestRun(() => readCitationLocator(text))).toBeLessThan(2000);
@@ -126,6 +162,14 @@ describe('citationLocatorText, as import writes a locator', () => {
     ['2', 'sub verbo', undefined, 's.v. 2'],
     ['2', 'sub-verbo', undefined, 's.v. 2'],
     ['iv', 'volume', undefined, 'vol. iv'],
+    // A label of citeproc's abbreviations alone
+    ['A', 'appendix', undefined, 'app. A'],
+    ['2-3', 'table', undefined, 'tbl. 2-3'],
+    ['2', 'rule', undefined, 'r. 2'],
+    ['2', 'supplement', undefined, 'supp. 2'],
+    // As Pandoc reads it too, not sec. A, which it reads as text
+    ['A', 'section', undefined, '{sec. A}'],
+    ['A', 'page', undefined, '{p. A}'],
     // A page's, as citeproc takes a locator without a label
     ['2', undefined, undefined, 'p. 2'],
     ['33', 'page', ', emphasis added', 'p. 33, emphasis added'],
@@ -143,6 +187,8 @@ describe('citationLocatorText, as import writes a locator', () => {
     [undefined, undefined, ' x', '{} x'],
     [undefined, undefined, '.x', '{}.x'],
     [undefined, undefined, 'emphasis added', '{} emphasis added'],
+    [undefined, undefined, ', ch. 2', '{}ch. 2'],
+    [undefined, undefined, ', sec. A', '{}sec. A'],
     [undefined, undefined, undefined, ''],
   ])('writes %j, %j and %j as %j', (locator, label, suffix, expected) => {
     expect(citationLocatorText(locator, label, suffix)).toBe(expected);
@@ -255,8 +301,8 @@ const SUFFIXES: Array<[string, FieldItem]> = [
   ['A [@doe2020, p. 33, emphasis added] b.\n', { locator: '33', label: 'page', suffix: ', emphasis added' }],
   ['A [@doe2020, chap. 2 and passim] b.\n', { locator: '2', label: 'chapter', suffix: ' and passim' }],
   ['A [@doe2020, emphasis added] b.\n', { suffix: ', emphasis added' }],
-  // Not one of Pandoc's terms, which is chap.: a suffix, shown as written
-  ['A [@doe2020, ch. 2] b.\n', { suffix: ', ch. 2' }],
+  // Not one of Pandoc's terms, nor of citeproc's: a suffix, shown as written
+  ['A [@doe2020, Ch. 2] b.\n', { suffix: ', Ch. 2' }],
   ['A [@doe2020, {chap. A to B}] b.\n', { locator: 'A to B', label: 'chapter' }],
 ];
 
@@ -291,13 +337,41 @@ const GUARDS: Array<[string, FieldItem[], string]> = [
   ['A [-@doe2020] b.\n', [{ 'suppress-author': true }], 'A [-@doe2020] b.\n'],
 ];
 
-const markdownTrips = once(() => fromMarkdown([...TERMS.map(([, term]) => 'A [@doe2020, ' + term + ' 2] b.\n'), ...SUFFIXES.map(([md]) => md), ...MORE, ...GUARDS.map(([md]) => md)]));
+// citeproc's abbreviations, which main's export wrote as a page's locator,
+// and Word showed as the label: each one's text, its field's item, and its
+// Markdown at the import, with the label's own term where it has one
+const COMPATIBLE: Array<[string, FieldItem, string]> = [
+  ['ch. 2', { locator: '2', label: 'chapter' }, 'chap. 2'],
+  ['ch. 2-3', { locator: '2-3', label: 'chapter' }, 'chaps. 2-3'],
+  ['sv. 3', { locator: '3', label: 'sub verbo' }, 's.v. 3'],
+  ['vrs. 2', { locator: '2', label: 'verse' }, 'v. 2'],
+  ['app. A', { locator: 'A', label: 'appendix' }, 'app. A'],
+  ['r. 2', { locator: '2', label: 'rule' }, 'r. 2'],
+  ['supp. 2', { locator: '2', label: 'supplement' }, 'supp. 2'],
+  ['tbl. 3', { locator: '3', label: 'table' }, 'tbl. 3'],
+  ['sec. A', { locator: 'A', label: 'section' }, '{sec. A}'],
+  ['fig. A', { locator: 'A', label: 'figure' }, '{fig. A}'],
+  ['vol. A-C', { locator: 'A-C', label: 'volume' }, '{vol. A-C}'],
+];
+// Which main showed as chaps. 2, emphasis added, the suffix in the locator
+const COMPATIBLE_SUFFIX = 'ch. 2, emphasis added';
+
+const ZOTERO_COMPATIBLE: Array<[FieldItem, string]> = [
+  [{ locator: 'A', label: 'appendix' }, 'app. A'],
+  [{ locator: '2-3', label: 'table' }, 'tbl. 2-3'],
+  [{ locator: '4', label: 'rule' }, 'r. 4'],
+  [{ locator: '2', label: 'supplement' }, 'supp. 2'],
+];
+
+const markdownTrips = once(() => fromMarkdown([...TERMS.map(([, term]) => 'A [@doe2020, ' + term + ' 2] b.\n'), ...SUFFIXES.map(([md]) => md), ...MORE, ...GUARDS.map(([md]) => md),
+  ...COMPATIBLE.map(([text]) => 'A [@roe2019, ' + text + '] b.\n'), 'A [@roe2019, ' + COMPATIBLE_SUFFIX + '] b.\n']));
 const zoteroTrips = once(() => fromZotero([
   ...TERMS.map(([label]) => ({ keys: ['doe2020'], items: [{ locator: '2', label }] })),
   ...ZOTERO_SUFFIXES.map(([item]) => ({ keys: ['doe2020'], items: [item] })),
   ...ZOTERO_MORE,
   // Edited by hand (see the guard below)
   { keys: ['doe2020'], items: [{ locator: '2', label: 'page' }], edited: '(Doe 2020, 2, my emphasis)' },
+  ...ZOTERO_COMPATIBLE.map(([item]) => ({ keys: ['doe2020'], items: [item] })),
 ]));
 const markdownTrip = async (k: number) => (await markdownTrips())[k];
 const zoteroTrip = async (k: number) => (await zoteroTrips())[k];
@@ -368,6 +442,33 @@ describe('a citation\'s locator, its label and its suffix through Word', () => {
     expect(zotero.markdown).toBe('A [@doe2020, secs. 3-5, emphasis added; also @roe2019, vol. iv] b.\n');
     expect(zotero.next.items).toEqual(ZOTERO_MORE[2].items);
     expect(zotero.next.shown).toBe(zotero.shown);
+  }, 60000);
+
+  const compatible = TERMS.length + SUFFIXES.length + MORE.length + GUARDS.length;
+  const zoteroCompatible = TERMS.length + ZOTERO_SUFFIXES.length + ZOTERO_MORE.length + 1;
+
+  // As Word showed main's field, which held the text as a page's locator
+  it.each(COMPATIBLE.map((c, k) => [...c, compatible + k] as const))('exports %j with its label, as Word showed it before, and imports it back', async (text, item, back, k) => {
+    const trip = await markdownTrip(k);
+    expect(trip.first.items).toEqual([item]);
+    expect(trip.first.shown).toBe(rendered(['roe2019'], [{ locator: text, label: 'page' }]));
+    expect(trip.markdown).toBe('A [@roe2019, ' + back + '] b.\n');
+    expect(trip.next).toEqual(trip.first);
+  }, 60000);
+
+  it('exports a suffix after citeproc\'s abbreviation\'s locator', async () => {
+    const trip = await markdownTrip(compatible + COMPATIBLE.length);
+    expect(trip.first.items).toEqual([{ locator: '2', label: 'chapter', suffix: ', emphasis added' }]);
+    expect(trip.first.shown).toBe(rendered(['roe2019'], trip.first.items));
+    expect(trip.markdown).toBe('A [@roe2019, chap. 2, emphasis added] b.\n');
+    expect(trip.next).toEqual(trip.first);
+  }, 60000);
+
+  it.each(ZOTERO_COMPATIBLE.map((c, k) => [...c, zoteroCompatible + k] as const))('imports Zotero\'s %j with citeproc\'s abbreviation', async (item, written, k) => {
+    const trip = await zoteroTrip(k);
+    expect(trip.markdown).toBe('A [@doe2020, ' + written + '] b.\n');
+    expect(trip.next.items).toEqual([item]);
+    expect(trip.next.shown).toBe(trip.shown);
   }, 60000);
 
   it('imports a plural locator with the plural term', async () => {

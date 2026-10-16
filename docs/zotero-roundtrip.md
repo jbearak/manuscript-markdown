@@ -49,8 +49,9 @@ Citations use [Pandoc citation syntax](https://pandoc.org/chunkedhtml-demo/8.20-
 
 | Zotero label | Terms |
 |--------------|-------|
+| Appendix | `app.`\* |
 | Book | `bk.`, `bks.`, `book`, `books` |
-| Chapter | `chap.`, `chaps.`, `chapter`, `chapters`, `c.`, `cc.` |
+| Chapter | `chap.`, `chaps.`, `chapter`, `chapters`, `c.`, `cc.`, `ch.`\* |
 | Column | `col.`, `cols.`, `column`, `columns` |
 | Figure | `fig.`, `figs.`, `figure`, `figures` |
 | Folio | `fol.`, `fols.`, `folio`, `folios` |
@@ -61,12 +62,17 @@ Citations use [Pandoc citation syntax](https://pandoc.org/chunkedhtml-demo/8.20-
 | Page | `p.`, `pp.`, `page`, `pages`, or none before a number, as `[@smith2020, 20]` |
 | Paragraph | `para.`, `paras.`, `paragraph`, `paragraphs`, `¶`, `¶¶` |
 | Part | `pt.`, `pts.`, `part`, `parts` |
+| Rule | `r.`\* |
 | Section | `sec.`, `secs.`, `section`, `sections`, `§`, `§§` |
-| Sub verbo | `s.v.`, `s.vv.`, `sub verbo`, `sub verbis` |
-| Verse | `v.`, `vv.`, `verse`, `verses` |
+| Sub verbo | `s.v.`, `s.vv.`, `sub verbo`, `sub verbis`, `sv.`\* |
+| Supplement | `supp.`\* |
+| Table | `tbl.`\* |
+| Verse | `v.`, `vv.`, `verse`, `verses`, `vrs.`\* |
 | Volume | `vol.`, `vols.`, `volume`, `volumes` |
 
-The locator is the words after the term that hold a number or a Roman numeral, with ranges and commas between them, as `pp. 33-35, 38`, and the rest is the suffix, as `, emphasis added` in `[@smith2020, p. 20, emphasis added]`. Text with no term or number first is all suffix, as `[@smith2020, emphasis added]`, and so is text after another word, as `ch. 2`, which isn't one of Pandoc's terms (`chap.` is). Braces make the rest a locator, as `[@smith2020, {chap. A to B}]`, and `{}` makes a suffix of what would read as one, as `[@smith2020, {}99 more]`. Export writes the locator, its label and the suffix to the Zotero field, and import writes Zotero's label as its abbreviated term, singular or plural as Word shows it, with the suffix after the locator. Pandoc reads another language's terms in a document in that language. Export reads only the English ones.
+\* Not Pandoc's. Pandoc reads `[@smith2020, ch. 3]` as text, a suffix. Export reads these as their labels for compatibility: earlier versions wrote `ch. 3` to the Zotero field as a page locator, which Zotero's citation processor shows as a chapter. For the same reason, an abbreviation that processor reads, as `sec.`, `fig.` or `p.`, before a word with no number in it is read as its label with that word as the locator, as `[@smith2020, sec. A]`, where Pandoc reads text. Pandoc reads `{sec. A}` as a section, and import writes that. These are read only in lower case and before a space. Import writes `chap.`, `s.v.` and `v.` for their labels.
+
+The locator is the words after the term that hold a number or a Roman numeral, with ranges and commas between them, as `pp. 33-35, 38`, and the rest is the suffix, as `, emphasis added` in `[@smith2020, p. 20, emphasis added]`. Text with no term or number first is all suffix, as `[@smith2020, emphasis added]`, and so is text after another word, as `Ch. 2` or `art. 2`. Braces make the rest a locator, as `[@smith2020, {chap. A to B}]`, and `{}` makes a suffix of what would read as one, as `[@smith2020, {}99 more]`. Export writes the locator, its label and the suffix to the Zotero field, and import writes Zotero's label as its abbreviated term, singular or plural as Word shows it, with the suffix after the locator. Pandoc reads another language's terms in a document in that language. Export reads only the English ones.
 
 **Prefixes**: Text before a key, such as `e.g.,` in `[e.g., @smith2020; @jones2021]`, becomes that item's Zotero prefix. Import does the reverse. Export turns off Zotero's "Keep Sources Sorted" for any citation with a prefix, so the keys stay in the order written and the prefix stays in front.
 

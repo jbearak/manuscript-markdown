@@ -11,6 +11,13 @@
 // locales are bundled; see loadLocale). Pandoc reads a locale's own terms
 // in another language, as S. in German.
 //
+// Also read, where Pandoc reads text: the abbreviations of
+// COMPATIBLE_TERMS, as ch., which citeproc reads as a label at the start of
+// a page's locator, with any word after one as the locator, as sec. A.
+// Export wrote all of such a text as a page's locator before, which Word
+// showed as that label, so a document written so keeps its label. Import
+// writes what Pandoc reads the same where it can (citationLocatorText).
+//
 // Where it differs from Pandoc: Pandoc writes each space as one; here a
 // locator and a suffix keep the whitespace written in them, as a line end,
 // which export kept in a locator before. The text is read as text: Pandoc
@@ -48,11 +55,55 @@ const LOCATOR_TERMS: ReadonlyArray<readonly [label: string, single: string, plur
   ['volume', 'vol.', 'vols.', 'volume', 'volumes'],
 ];
 
+/** Abbreviations citeproc reads as a label at the start of a page's
+ *  locator (its LOCATOR_LABELS_REGEXP and LOCATOR_LABELS_MAP), each with
+ *  its label: those of a label with a term in the en-US locale, which
+ *  export wrote as a page's locator before (with p. and pp., which it read
+ *  as a page's with any text after them), and which Word then showed as
+ *  that label. Read as citeproc reads them, in lower case, before
+ *  whitespace, with any word after one as the locator's first, where
+ *  Pandoc's terms read no locator: ch. 2 and sec. A, but not sec. 2,
+ *  which Pandoc reads. Not art., which citeproc shows as Preprint, nor an
+ *  abbreviation of a label with no term in the locale, as subpara., which
+ *  it shows as Page subpara. Import writes the label's own term where it
+ *  has one in LOCATOR_TERMS, as chap., and these where it has none. */
+const COMPATIBLE_TERMS: ReadonlyArray<readonly [term: string, label: string]> = [
+  ['app.', 'appendix'],
+  ['bk.', 'book'],
+  ['ch.', 'chapter'],
+  ['col.', 'column'],
+  ['fig.', 'figure'],
+  ['fol.', 'folio'],
+  ['l.', 'line'],
+  ['n.', 'note'],
+  ['no.', 'issue'],
+  ['op.', 'opus'],
+  ['p.', 'page'],
+  ['pp.', 'page'],
+  ['para.', 'paragraph'],
+  ['pt.', 'part'],
+  ['r.', 'rule'],
+  ['sec.', 'section'],
+  ['supp.', 'supplement'],
+  ['sv.', 'sub verbo'],
+  ['tbl.', 'table'],
+  ['vol.', 'volume'],
+  ['vrs.', 'verse'],
+];
+
+/** The label of each of COMPATIBLE_TERMS, by its word without the period */
+const COMPATIBLE_LABELS: ReadonlyMap<string, string> = new Map(COMPATIBLE_TERMS.map(([term, label]) => [term.slice(0, -1), label] as const));
+
 /** The label of each term, its case folded, as Pandoc looks a term up */
 const TERM_LABELS: ReadonlyMap<string, string> = new Map(LOCATOR_TERMS.flatMap(([label, ...terms]) => terms.map(term => [term, label] as const)));
 
-/** The terms of each label */
-const LABEL_TERMS: ReadonlyMap<string, readonly string[]> = new Map(LOCATOR_TERMS.map(([label, ...terms]) => [label, terms]));
+/** The terms of each label, and for a label of COMPATIBLE_TERMS alone, its
+ *  term there, singular and plural */
+const LABEL_TERMS: ReadonlyMap<string, readonly string[]> = (() => {
+  const terms = new Map<string, readonly string[]>(LOCATOR_TERMS.map(([label, ...forms]) => [label, forms]));
+  for (const [term, label] of COMPATIBLE_TERMS) if (!terms.has(label)) terms.set(label, [term, term]);
+  return terms;
+})();
 
 /** The longest term's length */
 const MAX_TERM_LENGTH = maxOf([...TERM_LABELS.keys()].map(term => term.length));
@@ -85,8 +136,15 @@ const ROMAN_RE = /^M*(?:CM)?D?(?:CD)?C*(?:XC)?L?(?:XL)?X*(?:IX)?V?(?:IV)?I*$/;
  *  both ends trimmed, as readCitationItem reads it, as Pandoc reads it:
  *  its locator, the locator's label and the suffix after it, or the whole
  *  of it as the suffix where it starts with no locator, as in
- *  [@doe, emphasis added], with its comma. */
+ *  [@doe, emphasis added], with its comma. With COMPATIBLE_TERMS too, as
+ *  export reads it. */
 export function readCitationLocator(text: string): CitationLocator {
+  return readLocator(text, true);
+}
+
+/** The text after a key as readCitationLocator reads it, or as Pandoc
+ *  alone does, without COMPATIBLE_TERMS */
+function readLocator(text: string, withCompatible: boolean): CitationLocator {
   // As Pandoc gets it: the suffix after the key, from its comma
   const tokens: Token[] = [];
   for (const match of (', ' + text).matchAll(TOKEN_RE)) tokens.push({ text: match[0], space: /^\s/.test(match[0]) });
@@ -191,12 +249,20 @@ export function readCitationLocator(text: string): CitationLocator {
     }
     return found;
   };
+  // One of COMPATIBLE_TERMS from `at`, before whitespace and a word, and
+  // where the locator starts after it
+  const compatible = (at: number): { label: string; next: number; compatible: true } | undefined => {
+    if (!withCompatible) return undefined;
+    const word = tokens[at];
+    const label = word && !word.space ? COMPATIBLE_LABELS.get(word.text) : undefined;
+    return label !== undefined && single(at + 1) === '.' && tokens[at + 2]?.space && at + 3 < n ? { label, next: at + 3, compatible: true } : undefined;
+  };
   // A locator in braces, with or without a term, as {pp. iv, vi}
   const delimited = (at: number): { label: string; locator: string; next: number } | undefined => {
     if (single(at) !== '{') return undefined;
     let next = at + 1;
     while (tokens[next]?.space) next++;
-    const found = term(next, k => k < n);
+    const found = term(next, k => k < n) ?? compatible(next);
     // A digit alone is a page's, as Pandoc reads one; anything else a
     // locator without a label
     const label = found?.label ?? (/^[0-9]$/.test(single(next) ?? '') ? 'page' : '');
@@ -209,12 +275,13 @@ export function readCitationLocator(text: string): CitationLocator {
   };
   // A locator with a term or a number first, as p. 33-35, 38 or 33
   const integrated = (at: number): { label: string; locator: string; next: number } | undefined => {
-    const found = term(at, romansOrDigitsAt);
+    const found: { label: string; next: number; compatible?: true } | undefined = term(at, romansOrDigitsAt) ?? compatible(at);
     const implicit = !found;
     if (implicit && !digitsAt(at)) return undefined;
     const accepts = (word: [boolean, string]) => implicit ? DIGIT_RE.test(word[1]) : word[0];
     const first = locatorWord(!implicit, found ? found.next : at);
-    if (!first || !accepts(first.value)) return undefined;
+    // After one of COMPATIBLE_TERMS, any word, as sec. A, as citeproc reads one
+    if (!first || !(found?.compatible || accepts(first.value))) return undefined;
     let locator = first.value[1];
     let next = first.next;
     for (let word = locatorWord(false, next); word && accepts(word.value); word = locatorWord(false, next)) {
@@ -275,7 +342,7 @@ function pluralLocator(locator: string): boolean {
   return /^\d/.test(parts[0]) || /^[ivxlcm]+$/i.test(parts[0]);
 }
 
-/** Zotero's label as LOCATOR_TERMS has it, as CSL 1.0.2's sub-verbo as
+/** Zotero's label as LABEL_TERMS has it, as CSL 1.0.2's sub-verbo as
  *  sub verbo, or page where it has no terms there or none is given, as
  *  citeproc takes a locator without one */
 function knownLabel(label: string | undefined): string {
@@ -294,19 +361,22 @@ function knownLabel(label: string | undefined): string {
  *  locator's words wouldn't read as one or the suffix would read as more
  *  of it. Without a locator, the suffix after its comma and space, then
  *  after {}, which reads as no locator, where it would read as one or
- *  starts with neither. Failing all, the last of them, which reads the
- *  locator, or none, as given. Empty where there's neither. `locator` and
- *  `suffix` hold no ; or ], which would end the item or the citation. */
+ *  starts with neither. Of these, the first Pandoc reads the same too,
+ *  else the first export reads so, as app. A, for a label Pandoc has no
+ *  term for (see COMPATIBLE_TERMS). Failing all, the last of them, which
+ *  reads the locator, or none, as given. Empty where there's neither.
+ *  `locator` and `suffix` hold no ; or ], which would end the item or the
+ *  citation. */
 export function citationLocatorText(locator: string | undefined, label: string | undefined, suffix: string | undefined): string {
   const loc = (locator ?? '').trim();
   // Its end as readCitationItem trims it
   const after = (suffix ?? '').trimEnd();
   if (!loc && !after) return '';
   const wanted = loc ? knownLabel(label) : undefined;
-  const reads = (text: string) => {
+  const reads = (text: string, withCompatible: boolean) => {
     // As readCitationItem gives it, trimmed
     if (text !== text.trim()) return false;
-    const read = readCitationLocator(text);
+    const read = readLocator(text, withCompatible);
     const readSuffix = read.suffix ?? '';
     return (read.locator ?? '') === loc && read.label === wanted
       && (readSuffix === after || SPACED_SUFFIX_RE.test(after) && readSuffix === ' ' + after);
@@ -321,5 +391,7 @@ export function citationLocatorText(locator: string | undefined, label: string |
     candidates = after.startsWith(', ') ? [after.slice(2), '{}' + after.slice(2)] : [];
     candidates.push('{}' + after, '{} ' + after);
   }
-  return candidates.find(reads) ?? candidates[candidates.length - 1];
+  // As export reads it, and as Pandoc does too where one reads so, as
+  // {p. A}, not p. A, which Pandoc reads as text
+  return candidates.find(text => reads(text, true) && reads(text, false)) ?? candidates.find(text => reads(text, true)) ?? candidates[candidates.length - 1];
 }
