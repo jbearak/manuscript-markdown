@@ -225,6 +225,7 @@ export interface MdRun {
   commentText?: string;     // for critic_comment: the comment body
   commentId?: string;       // for comment_range_start/end/body_with_id
   innerRangeMarker?: true;  // for comment_range_start/end: inside the one range Word gets for its ID's ranges (see prescanCommentIds)
+  unwrittenRangeMarker?: true; // for comment_range_start/end: of no range Word gets, as one of an ID with no body, which writes nothing (see prescanCommentIds)
   reservedCommentId?: number; // for critic_highlight: its comment's ID, if prescanCommentIds gave it one
   footnoteLabel?: string;   // for footnote_ref: the [^label] label
   replies?: Array<{author?: string; date?: string; text: string; parentReply?: number}>; // nested replies for comment_body_with_id; parentReply: the index of the reply this one replies to
@@ -5484,6 +5485,9 @@ export interface DocxGenState {
   // none of, as a range in a note, whose ID registers after (see
   // addIdCommentBody)
   deferredCommentBodies?: MdRun[];
+  // The IDs of the comments' bodies in the text and its notes, without one
+  // of which a range writes nothing (see prescanCommentIds)
+  commentBodyIds?: ReadonlySet<string>;
   relationships: Map<string, string>; // URL -> rId
   nextRId: number;
   rIdOffset: number; // reserved rIds for fixed relationships (styles, numbering, comments, theme, settings)
@@ -9030,6 +9034,9 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         numericId = state.commentId++;
         state.commentIdMap.set(mdId, numericId);
       }
+      // Its ID has its number, which the warning of a range with no body
+      // reads, but Word gets nothing of it
+      if (run.unwrittenRangeMarker) continue;
       xml += '<w:commentRangeStart w:id="' + numericId + '"/>';
       const replyRanges = replyRangesOf(state.replyRanges, numericId);
       for (const reply of replyRanges) {
@@ -9043,6 +9050,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         state.warnings.push(`Unmatched comment range end marker: {/${mdId}}`);
         continue;
       }
+      if (run.unwrittenRangeMarker) continue;
       xml += '<w:commentRangeEnd w:id="' + numericId + '"/>';
       xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + numericId + '"/></w:r>';
       const replyRanges = replyRangesOf(state.replyRanges, numericId);
@@ -9106,13 +9114,16 @@ function addIdCommentBody(run: MdRun, state: DocxGenState): void {
   state.hasComments = true;
 }
 
-/** `xml` without the reference runs of the comments of `ids`, as
- *  generateRuns writes them. Word ignores a range marker with no comment,
- *  but a reference to none makes the document invalid */
-function withoutCommentReferences(xml: string, ids: ReadonlySet<number>): string {
+/** `xml` without the range markers and reference runs of the comments of
+ *  `ids`, as generateRuns writes them. A reference to no comment makes the
+ *  document invalid, and a range marker with none is one no comment ends
+ *  or starts. A range whose ID has no body writes none (see
+ *  prescanCommentIds), but one whose body isn't written, as in a note no
+ *  reference makes, would */
+function withoutCommentMarkers(xml: string, ids: ReadonlySet<number>): string {
   if (ids.size === 0) return xml;
-  return xml.replace(/<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference w:id="(\d+)"\/><\/w:r>/g,
-    (reference: string, id: string) => ids.has(Number(id)) ? '' : reference);
+  return xml.replace(/<w:commentRange(?:Start|End) w:id="(\d+)"\/>|<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference w:id="(\d+)"\/><\/w:r>/g,
+    (marker: string, rangeId: string | undefined, referenceId: string | undefined) => ids.has(Number(rangeId ?? referenceId)) ? '' : marker);
 }
 
 /** An image's run: its drawing, or if export can't embed the image, its
@@ -10608,30 +10619,153 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
   }
   // Word takes a comment's ID in one range, so an ID with more than one, as
   // import writes a comment that reaches into a table in a range of each
-  // paragraph and cell, gets one from its first start to its last end
-  const markers = new Map<string, MdRun[]>();
-  const collectMarkers = (runs: MdRun[] = []) => {
+  // paragraph and cell, gets one from its first start to its last end. As
+  // the preview reads them, a range with no end after its start ends with
+  // the paragraph or cell it starts in. An end before its ID's first start
+  // here, as one in a note whose start is in the text, and the markers of an
+  // ID no body has anywhere, as a Pandoc heading ID's in `# Intro {#intro}`,
+  // are of no range Word gets, and write nothing, so that Word gets no
+  // range marker without its comment and its other end
+  const bodies = state.commentBodyIds ?? commentBodyIdsIn(tokens);
+  // The markers of each ID, with the paragraph or cell each is in and
+  // where it is among them all
+  const markers = new Map<string, Array<{ run: MdRun; owner: { runs: MdRun[] }; at: number }>>();
+  let count = 0;
+  const collectMarkers = (runs: MdRun[] = [], owner: { runs: MdRun[] }) => {
     for (const run of runs) {
       if (run.type === 'comment_range_start' || run.type === 'comment_range_end') {
         const mdId = run.commentId || '';
+        const marker = { run, owner, at: count++ };
         const seen = markers.get(mdId);
-        if (seen) seen.push(run);
-        else markers.set(mdId, [run]);
+        if (seen) seen.push(marker);
+        else markers.set(mdId, [marker]);
       }
-      collectMarkers(run.innerRuns);
-      collectMarkers(run.oldRuns);
-      collectMarkers(run.newRuns);
+      collectMarkers(run.innerRuns, owner);
+      collectMarkers(run.oldRuns, owner);
+      collectMarkers(run.newRuns, owner);
     }
   };
   for (const token of tokens) {
-    collectMarkers(token.runs);
-    for (const row of token.rows ?? []) for (const cell of row.cells) collectMarkers(cell.runs);
+    collectMarkers(token.runs, token);
+    for (const row of token.rows ?? []) for (const cell of row.cells) collectMarkers(cell.runs, cell);
   }
-  for (const runs of markers.values()) {
-    const first = runs.find(run => run.type === 'comment_range_start');
-    const last = [...runs].reverse().find(run => run.type === 'comment_range_end');
-    for (const run of runs) if (run !== first && run !== last) run.innerRangeMarker = true;
+  let unwritten = false;
+  // The ends of the ranges with none, which go at the end of each's
+  // paragraph or cell, there in the order they start, as import ends
+  // ranges that end together
+  const ends = new Map<{ runs: MdRun[] }, Array<{ end: MdRun; at: number }>>();
+  for (const [mdId, found] of markers) {
+    const first = found.findIndex(({ run }) => run.type === 'comment_range_start');
+    let last = found.length - 1;
+    while (last > first && found[last].run.type !== 'comment_range_end') last--;
+    const ranged = first !== -1 && bodies.has(mdId);
+    found.forEach(({ run }, k) => {
+      if (!ranged || k < first) {
+        run.unwrittenRangeMarker = true;
+        unwritten = true;
+      } else if (k !== first && k !== last) {
+        run.innerRangeMarker = true;
+      }
+    });
+    if (ranged && last === first) {
+      const { owner, at } = found[first];
+      const end: MdRun = { type: 'comment_range_end', text: '', commentId: mdId };
+      const owned = ends.get(owner);
+      if (owned) owned.push({ end, at });
+      else ends.set(owner, [{ end, at }]);
+    }
   }
+  for (const [owner, owned] of ends) owner.runs = owner.runs.concat(owned.sort((a, b) => a.at - b.at).map(({ end }) => end));
+  if (!unwritten) return;
+  for (const token of tokens) {
+    token.runs = withoutUnwrittenMarkerSpaces(token.runs, true);
+    for (const row of token.rows ?? []) for (const cell of row.cells) cell.runs = withoutUnwrittenMarkerSpaces(cell.runs, true);
+  }
+}
+
+/** The IDs of the comments' bodies, `{#id>>...<<}`, in `tokens`, in their
+ *  table cells and revisions' and highlights' text too, added to `ids` */
+function commentBodyIdsIn(tokens: MdToken[], ids = new Set<string>()): Set<string> {
+  const collect = (runs: MdRun[] = []) => {
+    for (const run of runs) {
+      if (run.type === 'comment_body_with_id') ids.add(run.commentId || '');
+      collect(run.innerRuns);
+      collect(run.oldRuns);
+      collect(run.newRuns);
+    }
+  };
+  for (const token of tokens) {
+    collect(token.runs);
+    for (const row of token.rows ?? []) for (const cell of row.cells) collect(cell.runs);
+  }
+  return ids;
+}
+
+/**
+ * `runs` without the spaces and tabs on one side of each range marker that
+ * writes nothing (see prescanCommentIds) where it has a space or a line's
+ * start or end on each side, as taking a word out there would leave them:
+ * `Text {#sec} here.`, where no body has the ID `sec`, gives Word `Text
+ * here.`, and `# Intro {#intro}` gives it `Intro`, as import writes them
+ * back. A line starts and ends at a line break, and at the paragraph's or
+ * cell's start and end where `edges` says `runs` start and end it, which a
+ * revision's or a highlight's text doesn't. The spaces after the marker go,
+ * or where they can't, the spaces before it: code and a link keep theirs.
+ * Returns `runs` itself where nothing changes.
+ */
+function withoutUnwrittenMarkerSpaces(runs: MdRun[], edges: boolean): MdRun[] {
+  for (const run of runs) {
+    for (const key of ['innerRuns', 'oldRuns', 'newRuns'] as const) {
+      const side = run[key];
+      if (side) run[key] = withoutUnwrittenMarkerSpaces(side, false);
+    }
+  }
+  if (!runs.some(run => run.unwrittenRangeMarker)) return runs;
+  const lineEdge = (run: MdRun | undefined) => run === undefined ? edges : run.type === 'softbreak' || run.type === 'hardbreak';
+  const SPACES_AT_START = /^[ \t]+/;
+  const SPACES_AT_END = /[ \t]+$/;
+  // Whether text's spaces can go: not code's, a link's or raw HTML's, which
+  // are its own, nor, where none stays, at a line's start or end, a
+  // highlight's or a mark's, which show
+  const loses = (run: MdRun, atLineEdge: boolean) => run.type === 'text' && !(run.code || run.href || run.rawHtml)
+    && !(atLineEdge && (run.highlight || run.underline || run.strikethrough));
+  const out: MdRun[] = [];
+  // The last run Word gets something of in `out`, and where it is
+  let shown: MdRun | undefined;
+  let shownAt = -1;
+  // The index of the run whose spaces at its start go
+  let trimAt = -1;
+  // In place of a run of spaces alone the marker after it took
+  const emptied: MdRun = { type: 'text', text: '' };
+  for (let i = 0; i < runs.length;) {
+    const run = runs[i];
+    if (!run.unwrittenRangeMarker) {
+      const kept = i === trimAt ? { ...run, text: run.text.replace(SPACES_AT_START, '') } : run;
+      // A run of spaces alone the marker before it took goes
+      if (kept === run || kept.text) {
+        shown = kept;
+        shownAt = out.length;
+        out.push(kept);
+      }
+      i++;
+      continue;
+    }
+    let end = i;
+    while (end < runs.length && runs[end].unwrittenRangeMarker) out.push(runs[end++]);
+    const after = runs[end];
+    const textBefore = shown?.type === 'text' && SPACES_AT_END.test(shown.text);
+    const textAfter = after?.type === 'text' && SPACES_AT_START.test(after.text);
+    if ((lineEdge(shown) || textBefore) && (lineEdge(after) || textAfter)) {
+      if (textAfter && loses(after, lineEdge(shown))) trimAt = end;
+      else if (textBefore && loses(shown!, lineEdge(after))) {
+        const text = shown!.text.replace(SPACES_AT_END, '');
+        // A run of spaces alone the marker after it took goes
+        out[shownAt] = text ? { ...shown!, text } : emptied;
+      }
+    }
+    i = end;
+  }
+  return out.includes(emptied) ? out.filter(run => run !== emptied) : out;
 }
 
 export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
@@ -12244,23 +12378,15 @@ export async function convertMdToDocx(
     moveHiddenAlertLeadComments(tokens);
   }
 
-  // A body whose range is in a note waits for the notes' ranges, which
-  // register after the body is written, so that the body's IDs, and the
-  // changes', stay as they are
-  state.deferredCommentBodies = [];
-  const documentXml = generateDocumentXml(tokens, state, resolvedOptions, bibEntries, citeprocEngine, frontmatter);
-
-  // Build footnote/endnote body OOXML from definitions.
-  // Set inNoteBody so hyperlinks/images route to note-scoped relationship maps
-  // (footnotes.xml has its own .rels file, separate from document.xml.rels).
   // The notes the text reaches go in the order import writes them back in,
   // which their tables' and code blocks' indices follow (see
   // compareNoteLabels): the body's, whose first references break ties, and
   // then those only another note refers to, which import writes after
   // those, as the notes before reach them, and so after the note that gives
-  // each its ID. All are parsed before any is made, so that a comment's
-  // range in one registers before its body in another, whatever their order.
-  state.inNoteBody = true;
+  // each its ID. All are parsed before the body is written, and before any
+  // note is made, so that a comment's range in one registers before its
+  // body in another, whatever their order, and a range's markers know
+  // whether a body of their ID is anywhere (see commentBodyIds).
   const noteQueue = [...footnoteDefs.keys()].filter(label => firstReferences.has(label))
     .sort((a, b) => compareNoteLabels(a, b) || firstReferences.get(a)! - firstReferences.get(b)!);
   const queuedNotes = new Set(noteQueue);
@@ -12279,6 +12405,20 @@ export async function convertMdToDocx(
       }
     }
   }
+  const commentBodyIds = commentBodyIdsIn(tokens);
+  for (const { tokens: noteBody } of parsedNotes.values()) commentBodyIdsIn(noteBody, commentBodyIds);
+  state.commentBodyIds = commentBodyIds;
+
+  // A body whose range is in a note waits for the notes' ranges, which
+  // register after the body is written, so that the body's IDs, and the
+  // changes', stay as they are
+  state.deferredCommentBodies = [];
+  const documentXml = generateDocumentXml(tokens, state, resolvedOptions, bibEntries, citeprocEngine, frontmatter);
+
+  // Build footnote/endnote body OOXML from definitions.
+  // Set inNoteBody so hyperlinks/images route to note-scoped relationship maps
+  // (footnotes.xml has its own .rels file, separate from document.xml.rels).
+  state.inNoteBody = true;
   for (const { tokens: noteBody } of parsedNotes.values()) prescanCommentIds(noteBody, state);
   // The bodies the body holds of the notes' ranges, which the notes' range
   // markers then write the replies' ranges beside
@@ -12432,6 +12572,9 @@ export async function convertMdToDocx(
     }
   }
 
+  // Word gets the comments' part where it gets a comment, which a range
+  // whose ID has no body doesn't give it (see prescanCommentIds)
+  state.hasComments = state.comments.length > 0;
   const hasCommentsExtended = state.hasComments && state.comments.some(c => c.parentParaId);
   const hasThreadedComments = hasCommentsExtended;
   const hasCommentsIds = hasThreadedComments;
@@ -12459,12 +12602,14 @@ export async function convertMdToDocx(
     (hasTheme ? 1 : 0) +
     3 /* settings + webSettings + fontTable */;
 
-  // A range whose comment no body writes writes no reference, which Word
-  // would hold with no comment, only the warning below
+  // A range whose comment no body writes writes no markers, nor do its
+  // replies', which Word would hold with no comment, only the warning below
   const commentsWritten = new Set(state.comments.map(comment => comment.id));
-  const unwritten = new Set([...state.commentIdMap.values()].filter(id => !commentsWritten.has(id)));
-  for (const entry of state.footnoteEntries) entry.bodyXml = withoutCommentReferences(entry.bodyXml, unwritten);
-  let finalDocumentXml = withoutCommentReferences(documentXml, unwritten);
+  const unwritten = new Set<number>();
+  for (const id of state.commentIdMap.values()) if (!commentsWritten.has(id)) unwritten.add(id);
+  for (const { replyId } of state.replyRanges) if (!commentsWritten.has(replyId)) unwritten.add(replyId);
+  for (const entry of state.footnoteEntries) entry.bodyXml = withoutCommentMarkers(entry.bodyXml, unwritten);
+  let finalDocumentXml = withoutCommentMarkers(documentXml, unwritten);
   if (actualFixedCount < state.rIdOffset) {
     const shift = state.rIdOffset - actualFixedCount;
     // Remap dynamic rId references in XML attribute contexts only

@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { fastestRunAsync } from './test-timing';
 import {
   buildMarkdown,
   convertDocx,
@@ -907,22 +908,161 @@ describe('Overlapping comments: a range in a note, its body in the text', () => 
   });
 
   // A range whose comment export writes no body of anywhere writes no
-  // reference, which Word would have with no comment, only the warning.
-  // Import drops its markers, as before
+  // markers, a reference or a range's start or end, which Word would have
+  // with no comment, only the warning. Import drops its markers, as before
   test.each([
     ['in the text', 'a {#c1}x{/c1} b\n', 'a x b\n', 0],
     ['in a note', 'a[^1]\n\n[^1]: Note {#c1}x{/c1}.\n', 'a[^1]\n\n[^1]: Note x.\n', 0],
     ['beside a comment with one', 'a {#c1}x{/c1} {#c2}y{/c2} b\n{#c2>>@A | two<<}\n', 'a x {==y==}{>>@A | two<<} b\n', 1],
-  ])('writes no reference for a range with no body %s', async (_name, md, back, comments) => {
+  ])('writes no markers for a range with no body %s', async (_name, md, back, comments) => {
     const { docx, warnings } = await convertMdToDocx(md);
     expect(warnings).toContain('Comment range markers {#c1}...{/c1} exist without corresponding body {#c1>>...<<}');
-    const [references, written] = await referencesAndComments(docx, 'Reference');
+    const [references, written] = await referencesAndComments(docx);
     expect(written).toHaveLength(comments);
     expect(references.filter(id => !written.includes(id))).toEqual([]);
     const once = (await convertDocx(docx)).markdown;
     expect(strip(once)).toBe(back);
     expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
   });
+});
+
+describe('Overlapping comments: the markers of no range Word gets', () => {
+  const strip = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const warning = (id: string) => 'Comment range markers {#' + id + '}...{/' + id + '} exist without corresponding body {#' + id + '>>...<<}';
+
+  /** Word's comment markers in each of its stories, the text and each
+   *  note, in order, the comments it has, and its paragraphs' text */
+  async function wordOf(docx: Uint8Array): Promise<{ stories: Array<Array<[string, string]>>; comments: string[]; paragraphs: string[] }> {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const text = async (part: string) => (await zip.file(part)?.async('string')) ?? '';
+    const document = await text('word/document.xml');
+    const notes = (await text('word/footnotes.xml')) + (await text('word/endnotes.xml'));
+    const stories = [document, ...[...notes.matchAll(/<w:(footnote|endnote)\b[^>]*>([\s\S]*?)<\/w:\1>/g)].map(match => match[2])]
+      .map(xml => [...xml.matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id="(\d+)"\/>/g)].map(match => [match[1], match[2]] as [string, string]));
+    const comments = [...(await text('word/comments.xml')).matchAll(/<w:comment w:id="(\d+)"/g)].map(match => match[1]);
+    const paragraphs = [...(document + notes).matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)]
+      .map(match => [...match[1].matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+    return { stories, comments, paragraphs };
+  }
+
+  /** What's wrong with Word's comment markers: in each story, each range's
+   *  start before an end of its ID, each end after a start, and each marker
+   *  of a comment Word has */
+  function markerErrors({ stories, comments }: { stories: Array<Array<[string, string]>>; comments: string[] }): string[] {
+    const errors: string[] = [];
+    const written = new Set(comments);
+    stories.forEach((markers, story) => {
+      const open = new Map<string, number>();
+      for (const [kind, id] of markers) {
+        if (!written.has(id)) errors.push(story + ': ' + kind + ' ' + id + ' of no comment');
+        if (kind === 'RangeStart') open.set(id, (open.get(id) ?? 0) + 1);
+        else if (kind === 'RangeEnd') {
+          if (!open.get(id)) errors.push(story + ': end ' + id + ' of no start');
+          else open.set(id, open.get(id)! - 1);
+        }
+      }
+      for (const [id, count] of open) if (count > 0) errors.push(story + ': start ' + id + ' of no end');
+    });
+    return errors;
+  }
+
+  async function trips(md: string): Promise<{ once: string; twice: string }> {
+    const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    const twice = (await convertDocx((await convertMdToDocx(once)).docx)).markdown;
+    return { once, twice };
+  }
+
+  // A Pandoc ID, as a heading's, or a {#id} with no body and no {/id}, is a
+  // range's start with no comment. Export warned and dropped it, but wrote
+  // Word a range's start with no end and no comment, and an empty comments
+  // part, and Word showed the spaces on both sides of it
+  test.each([
+    ['a heading', '# Intro {#intro}\n', 'intro', 'Intro', '# Intro\n'],
+    ['a paragraph', 'Text {#sec} here.\n', 'sec', 'Text here.', 'Text here.\n'],
+    ['a list item', '- Item {#sec} here.\n', 'sec', 'Item here.', '- Item here.\n'],
+    ['a note', 'T.[^1]\n\n[^1]: Note {#sec} here.\n', 'sec', 'Note here.', 'T.[^1]\n\n[^1]: Note here.\n'],
+    ['a table\'s cell', '| A {#sec} b | c |\n|---|---|\n| d | e |\n', 'sec', 'A b', '| A b | c |\n| --- | --- |\n| d | e |\n'],
+    ['a paragraph\'s start', '{#sec} Text here.\n', 'sec', 'Text here.', 'Text here.\n'],
+    ['a line\'s end', 'Text {#sec}\nhere.\n', 'sec', 'Text here.', 'Text here.\n'],
+    ['an insertion', '{++Text {#sec} here.++}\n', 'sec', 'Text here.', '{++Text here.++}\n'],
+  ])('writes nothing of a {#id} with no body or end in %s, and one space', async (_name, md, id, shown, back) => {
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toContain(warning(id));
+    const word = await wordOf(docx);
+    expect(word.stories.flat()).toEqual([]);
+    expect(word.comments).toEqual([]);
+    expect(markerErrors(word)).toEqual([]);
+    expect(word.paragraphs.map(paragraph => paragraph.trim())).toContain(shown);
+    expect(word.paragraphs.filter(paragraph => paragraph.includes('  '))).toEqual([]);
+    const { once, twice } = await trips(md);
+    expect(strip(once)).toBe(back);
+    expect(twice).toBe(once);
+  });
+
+  // The other markers export wrote with no comment or no other end, which
+  // it now writes as the preview shows them: an end before a start, or with
+  // none, and the markers of an ID with no body write nothing, and a range
+  // with no end ends with its paragraph or cell
+  test.each([
+    ['an end with no start', 'Text {/sec} here.\n', 'Text here.', 'Text here.\n', 0],
+    ['a range with no body over a space', 'Text {#sec} {/sec} here.\n', 'Text here.', 'Text here.\n', 0],
+    ['a range with no body beside one with a body', 'Text {#sec}{#1}x{/1} here.\n\n{#1>>c<<}\n', 'Text x here.', 'Text {==x==}{>>c<<} here.\n', 1],
+    ['a start with a body and no end', 'Text {#a}here.\n\nMore.\n\n{#a>>c<<}\n', 'Text here.', 'Text {==here.==}{>>c<<}\n\nMore.\n', 1],
+    ['a start with a body and replies and no end', 'Text {#a}here.\n\n{#a>>c<<}{>>r<<}\n', 'Text here.', 'Text {==here.==}{>>c<<}{>>r<<}\n', 2],
+    ['a start with a body and no end in a table\'s cell', '| A {#a}b | c |\n|---|---|\n| d | e |\n\n{#a>>c<<}\n', 'A b',
+      '| A {==b==}{>>c<<} | c |\n| --- | --- |\n| d | e |\n', 1],
+    ['an end before the start', 'Text {/a} x {#a}y.\n\n{#a>>c<<}\n', 'Text x y.', 'Text x {==y.==}{>>c<<}\n', 1],
+    ['an end in a note of a start in the text', 'Text {#a}here[^1].\n\n[^1]: Note{/a}.\n\n{#a>>c<<}\n', 'Text here.',
+      'Text {==here[^1].==}{>>c<<}\n\n[^1]: Note.\n', 1],
+  ])('writes a range\'s markers with its comment and both ends for %s', async (_name, md, shown, back, comments) => {
+    const word = await wordOf((await convertMdToDocx(md)).docx);
+    expect(markerErrors(word)).toEqual([]);
+    expect(word.comments).toHaveLength(comments);
+    expect(word.paragraphs.map(paragraph => paragraph.trim())).toContain(shown);
+    const { once, twice } = await trips(md);
+    expect(strip(once)).toBe(back);
+    expect(twice).toBe(once);
+  });
+
+  // Which main wrote so too
+  test.each([
+    ['a range with its body', 'Text {#1}x{/1} here.\n\n{#1>>c<<}\n', 'Text {==x==}{>>c<<} here.\n', 1],
+    ['a comment on no text, with a reply', 'Text {#1}{/1} here.\n\n{#1>>c<<}{>>r<<}\n', 'Text {#1}{/1} here.\n{#1>>c<<}{>>r<<}\n', 2],
+    ['a range with a reply', 'Text {#1}x{/1} here.\n\n{#1>>c<<}{>>r<<}\n', 'Text {==x==}{>>c<<}{>>r<<} here.\n', 2],
+    ['a range from a heading to the next paragraph', '# H {#a}\n\nText{/a}.\n\n{#a>>c<<}\n', '# H {#a}\n\nText{/a}.\n{#a>>c<<}\n', 1],
+    ['ranges that overlap', 'A {#1}b {#2}c{/1} d{/2} e.\n\n{#1>>one<<}\n{#2>>two<<}\n', 'A {#1}b {#2}c{/1} d{/2} e.\n{#1>>one<<}\n{#2>>two<<}\n', 2],
+    ['a Pandoc ID with a class', 'Text {#sec .class} here.\n', 'Text \\{#sec .class} here.\n', 0],
+    ['a Pandoc ID with a colon', '# Intro {#sec:intro}\n', '# Intro \\{#sec:intro}\n', 0],
+  ])('writes %s as before', async (_name, md, back, comments) => {
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings.filter(text => text.includes('Comment'))).toEqual([]);
+    const word = await wordOf(docx);
+    expect(markerErrors(word)).toEqual([]);
+    expect(word.comments).toHaveLength(comments);
+    const { once, twice } = await trips(md);
+    expect(strip(once)).toBe(back);
+    expect(twice).toBe(once);
+  });
+
+  // Ending each range at its paragraph's end in turn, which copied the
+  // paragraph's runs for each, took some 9 seconds for these; linear
+  // takes some hundred milliseconds
+  test('drops the markers of many IDs with no body, and a space by each, and ends many ranges, in linear time', async () => {
+    const N = 40000;
+    const words = Array.from({ length: N }, (_, i) => 'w {#o' + i + '}').join(' ');
+    const orphans = words + '\n';
+    const unended = words + '\n\n' + Array.from({ length: N }, (_, i) => '{#o' + i + '>>c<<}').join('\n') + '\n';
+    let docx: Uint8Array | undefined;
+    expect(await fastestRunAsync(async () => { docx = (await convertMdToDocx(orphans)).docx; }, 2)).toBeLessThan(4000);
+    let word = await wordOf(docx!);
+    expect(word.stories.flat()).toEqual([]);
+    expect(word.paragraphs).toContain(Array.from({ length: N }, () => 'w').join(' '));
+    expect(await fastestRunAsync(async () => { docx = (await convertMdToDocx(unended)).docx; }, 2)).toBeLessThan(4000);
+    word = await wordOf(docx!);
+    expect(markerErrors(word)).toEqual([]);
+    expect(word.comments).toHaveLength(N);
+  }, 120000);
 });
 
 describe('Overlapping comments: CLI config', () => {

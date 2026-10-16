@@ -55,9 +55,11 @@ export const SPREAD_LIMIT_CASES: Record<string, (n: number) => Promise<string> |
     String(count(await documentXml((await convertMdToDocx('{--x {++' + comments(n) + '++}--}\n')).docx), /<w:commentReference /g)),
   'the runs on a line with a comment\'s body': async n =>
     String(count(await documentXml((await convertMdToDocx('{#1}x{/1}{#1>>c<<} ' + '*a* '.repeat(n) + '\n')).docx), /<w:i\/>/g)),
-  // Alone, which Word gets nothing of to insert
+  // Alone, which Word gets nothing of to insert, each with its body,
+  // without which a range writes nothing
   'the range markers in an addition with a comment\'s body': async n =>
-    String(count(await documentXml((await convertMdToDocx('x {++' + repeat(n, i => '{#' + i + '}{/' + i + '}') + '++} {#1>>c<<}\n')).docx), /<w:commentRangeStart /g)),
+    String(count(await documentXml((await convertMdToDocx('x {++' + repeat(n, i => '{#' + i + '}{/' + i + '}') + '++} '
+      + repeat(n, i => '{#' + i + '>>c<<}') + '\n')).docx), /<w:commentRangeStart /g)),
   'the warnings of a table\'s numbers': async n =>
     String((await convertMdToDocx('---\ntable-digits: 2\n---\n\n| a |\n|---|\n' + repeat(n, i => '| 1,2,' + i + ' |\n'))).warnings.length),
   'the warnings of a note\'s table\'s numbers': async n =>
