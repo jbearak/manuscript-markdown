@@ -11298,6 +11298,130 @@ describe('Word text that reads as Markdown', () => {
   });
 });
 
+describe('A citation whose key comes after a prefix, right before a bracket', () => {
+  const bibtex = '@book{roe2019,\n  author = {Roe, Rick},\n  title = {A Book},\n  publisher = {Pub},\n  year = {2019}\n}\n\n'
+    + '@article{doe2020,\n  author = {Doe, Jane},\n  title = {A Title},\n  journal = {J},\n  year = {2020}\n}\n';
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  /** The first paragraph of a docx as Word shows it: a citation's field
+   *  as «its result», another field as ‹its result›, a link as ⟨its
+   *  text⟩, an equation as $its text$ and a note's mark as ^ */
+  const shown = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'));
+    return body.slice(0, body.indexOf('</w:p>'))
+      .replace(/<w:fldChar w:fldCharType="begin"\/>[\s\S]*?<w:fldChar w:fldCharType="separate"\/>/g, field => field.includes('ZOTERO_ITEM') ? '«' : '‹')
+      .replace(/<w:fldChar w:fldCharType="end"\/>/g, '»')
+      .replace(/<w:hyperlink [^>]*>/g, '⟨').replace(/<\/w:hyperlink>/g, '⟩')
+      .replace(/<w:footnoteReference [^>]*\/>/g, '^')
+      .replace(/<m:oMath>([\s\S]*?)<\/m:oMath>/g, (_all, math: string) => '$' + math.replace(/<[^>]+>/g, '') + '$')
+      .replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trimStart();
+  };
+  /** Each export's paragraph and each import's Markdown, over two trips */
+  const trips = async (md: string) => {
+    const views: string[] = [];
+    const markdowns: string[] = [];
+    let markdown = md;
+    let bib = bibtex;
+    for (;;) {
+      const { docx } = await convertMdToDocx(markdown, { bibtex: bib });
+      views.push(await shown(docx));
+      if (views.length === 3) return { views, markdowns };
+      const result = await convertDocx(docx);
+      markdown = result.markdown;
+      bib = result.bibtex || bib;
+      markdowns.push(strip(markdown));
+    }
+  };
+
+  test.each([
+    ['text in parentheses', 'S [see @roe2019]\\(x) e.', '', 'S «(see Roe, 2019)»(x) e.'],
+    ['text in brackets', 'S [see @roe2019]\\[x] e.', '', 'S «(see Roe, 2019)»[x] e.'],
+    ['text in parentheses, on a substitution\'s side', 'S {~~a~>[see @roe2019]\\(x)~~} e.', '', 'S a«(see Roe, 2019)»(x) e.'],
+    ['text in parentheses, in a highlight', 'S ==[see @roe2019]\\(x)== e.', '', 'S «(see Roe, 2019)»(x) e.'],
+    ['text in parentheses, in a comment\'s range', 'S {==[see @roe2019]\\(x)==}{>>c<<} e.', '', 'S «(see Roe, 2019)»(x) e.'],
+    // As on main
+    ['a link, its key first', 'S [@roe2019]**[x](https://e.org)** e.', 'S [@roe2019][**x**](https://e.org) e.', 'S «(Roe, 2019)»⟨x⟩ e.'],
+    ['text in parentheses, its key first', 'S [@roe2019]\\(x) e.', 'S [@roe2019](x) e.', 'S «(Roe, 2019)»(x) e.'],
+    ['text in parentheses, in a change of its own', 'S [see @roe2019]{++(x)++} e.', '', 'S «(see Roe, 2019)»(x) e.'],
+    ['a citation after a link', 'S [x](https://e.org) [see @roe2019] e.', '', 'S ⟨x⟩ «(see Roe, 2019)» e.'],
+  ])('keeps its field before %s', async (_name, md, imported, view) => {
+    // Its ] before the [ or ( read as a link's text, so the next export
+    // wrote the citation as its text
+    const { views, markdowns } = await trips(md);
+    expect(markdowns[0]).toBe((imported || md) + '\n');
+    expect(markdowns[1]).toBe(markdowns[0]);
+    expect(views[0]).toBe(view);
+    expect(views[1]).toBe(views[0]);
+    expect(views[2]).toBe(views[0]);
+  });
+
+  test('keeps a citation\'s field right after a link', async () => {
+    // Import puts a space before it (see citationSeparator)
+    const { views, markdowns } = await trips('S [x](https://e.org)[see @roe2019] e.');
+    expect(markdowns[1]).toBe(markdowns[0]);
+    expect(views[0]).toBe('S ⟨x⟩«(see Roe, 2019)» e.');
+    for (const view of views.slice(1)) expect(view).toMatch(/^S ⟨x⟩ ?«\(see Roe, 2019\)» e\.$/);
+  });
+
+  test.each([
+    ['link text', 'S [see @roe2019](https://e.org) e.', '', 'S ⟨see @roe2019⟩ e.'],
+    ['link text before a defined label', 'S [see @roe2019][x] e.\n\n[x]: https://e.org', 'S [see @roe2019](https://e.org) e.', 'S ⟨see @roe2019⟩ e.'],
+    ['link text before a defined label and a (', 'S [see @roe2019][x](https://f.org) e.\n\n[x]: https://e.org', 'S [see @roe2019](https://e.org)(https://f.org) e.', 'S ⟨see @roe2019⟩(⟨https://f.org⟩) e.'],
+    ['text before a link', 'S [see @roe2019][x](https://e.org) e.', 'S \\[see @roe2019][x](https://e.org) e.', 'S [see @roe2019]⟨x⟩ e.'],
+    ['text before a link whose text has a reference', 'S [see @roe2019][a&lt;b](https://e.org) e.', 'S \\[see @roe2019][a<b](https://e.org) e.', 'S [see @roe2019]⟨a&lt;b⟩ e.'],
+    ['escaped text before a link', 'S \\[see @roe2019\\][x](https://e.org) e.', 'S \\[see @roe2019][x](https://e.org) e.', 'S [see @roe2019]⟨x⟩ e.'],
+    // Before a note's reference, which export reads as link text, as in
+    // a highlight, and before what footnoteRefRule reads no note's
+    // reference in, or one to a note the document doesn't define, which
+    // export gives an empty note, which import writes no definition of
+    ['text before a note\'s reference', 'S [see @roe2019][^1] e.\n\n[^1]: n', '', 'S [see @roe2019]^ e.'],
+    ['text before a note\'s reference, in a highlight', 'S ==[see @roe2019][^1]== e.\n\n[^1]: n', '', 'S [see @roe2019]^ e.'],
+    // Word's literal text before a note's reference, where the bibliography
+    // has the key, which import writes unescaped (citationKnown)
+    ['escaped text before a note\'s reference', 'S \\[see @roe2019\\][^1] e.\n\n[^1]: n', 'S [see @roe2019][^1] e.\n\n[^1]: n', 'S [see @roe2019]^ e.'],
+    ['text before a ^ alone', 'S [see @roe2019][^] e.\n\n[^1]: n', 'S \\[see @roe2019]\\[^] e.', 'S [see @roe2019][^] e.'],
+    ['text before a ^ and a label no note can have', 'S [see @roe2019][^not a note] e.', 'S \\[see @roe2019]\\[^not a note] e.', 'S [see @roe2019][^not a note] e.'],
+    ['text before a note\'s reference the document defines no note for', 'S [see @roe2019][^undefined] e.\n\n[^1]: n', 'S [see @roe2019][^1] e.', 'S [see @roe2019]^ e.'],
+    // Before a reference link to a label a quote defines, which a note has
+    // too, in the text and in a note's, which export reads as a link
+    ['link text before a label a note has too', 'S [see @roe2019][^1] e.\n\n> [^1]: https://e.org\n\n[^1]: n', 'S [see @roe2019](https://e.org) e.', 'S ⟨see @roe2019⟩ e.'],
+    ['link text before a label a note has too, in a note', 'S x[^2] e.\n\n[^2]: m [see @roe2019][^1].\n\n> [^1]: https://e.org\n\n[^1]: n', 'S x[^2] e.\n\n[^2]: m [see @roe2019](https://e.org).', 'S x^ e.'],
+    // In a grid table's cell
+    ['text before a note\'s reference in a grid table\'s cell', '+---+\n| [see @roe2019][^1] |\n+---+\n\n[^1]: n', '+--------------------+\n| [see @roe2019][^1] |\n+--------------------+\n\n[^1]: n', '[see @roe2019]^'],
+    ['text before a label a note has too, in a grid table\'s cell', '+---+\n| [see @roe2019][^1] |\n+---+\n\n> [^1]: https://e.org\n\n[^1]: n', '+--------------------+\n| [see @roe2019][^1] |\n+--------------------+\n\n[^1]: n', '[see @roe2019]^'],
+    // In a link's text, which a citation would take out of the link, where
+    // markdown-it scans it for its ], as a link in it, which makes the link none
+    ['link text before a note\'s reference in a link', 'S [link [see @roe2019][^1]](https://e.org) e.\n\n[^1]: n', 'S [link \\[see @roe2019\\][^1]](https://e.org) e.\n\n[^1]: n', 'S ⟨link [see @roe2019]^⟩ e.'],
+    // And in a change in a link's text, which its own parse reads apart
+    ['link text before a note\'s reference in an insertion in a link', 'S [link {++[see @roe2019][^1]++}](https://e.org) e.\n\n[^1]: n', 'S [link {++\\[see @roe2019\\]++}{++[^1]++}](https://e.org) e.\n\n[^1]: n', 'S ⟨link [see @roe2019]^⟩ e.'],
+    ['link text before a note\'s reference in a deletion in a link', 'S [link {--[see @roe2019][^1]--}](https://e.org) e.\n\n[^1]: n', 'S [link {--\\[see @roe2019\\]--}{--[^1]--}](https://e.org) e.\n\n[^1]: n', 'S ⟨link [see @roe2019]^⟩ e.'],
+    ['link text before a note\'s reference in a substitution in a link', 'S [link {~~a~>[see @roe2019][^1]~~}](https://e.org) e.\n\n[^1]: n', 'S [link {~~a~>\\[see @roe2019\\]~~}{++[^1]++}](https://e.org) e.\n\n[^1]: n', 'S ⟨link a[see @roe2019]^⟩ e.'],
+    // Whose range import writes outside the link, which it splits, as on main
+    ['link text before a note\'s reference in a comment\'s range in a link', 'S [link {==[see @roe2019][^1]==}{>>c<<}](https://e.org) e.\n\n[^1]: n', 'S [link ](https://e.org){==[\\[see @roe2019\\]](https://e.org)[^1]==}{>>c<<} e.\n\n[^1]: n', 'S ⟨link ⟩⟨[see @roe2019]⟩^ e.'],
+    ['a citation in a link', 'S [link [@roe2019] b](https://e.org) e.', 'S \\[link [@roe2019] b](https://e.org) e.', 'S [link «(Roe, 2019)» b](⟨https://e.org⟩) e.'],
+  ])('leaves %s as it was', async (_name, md, imported, view) => {
+    const { views, markdowns } = await trips(md);
+    expect(markdowns[0]).toBe((imported || md) + '\n');
+    expect(markdowns[1]).toBe(markdowns[0]);
+    expect(views[0]).toBe(view);
+    expect(views[1]).toBe(views[0]);
+    expect(views[2]).toBe(views[0]);
+  });
+
+  test.each([
+    ['in an insertion', 'S {++[see @roe2019][^1]++} e.\n\n[^1]: n', 'S ', ''],
+    ['in an insertion, where a quote defines its label as a link\'s too', 'S {++[see @roe2019][^1]++} e.\n\n> [^1]: https://e.org\n\n[^1]: n', 'S ', ''],
+    ['in an insertion in a link to nowhere', 'S [link {++[see @roe2019][^1]++}]() e.\n\n[^1]: n', 'S link ', 'link '],
+  ])('reads text before a note\'s reference %s as main does', async (_name, md, before, text) => {
+    // Export reads the citation as text. Import writes the note's reference in an
+    // insertion of its own, after which the citation's is one, and the next
+    // trip joins the two again
+    const { views, markdowns } = await trips(md);
+    expect(markdowns).toEqual([before + '{++[see @roe2019]++}{++[^1]++} e.\n\n[^1]: n\n', before + '{++[see @roe2019][^1]++} e.\n\n[^1]: n\n']);
+    expect(views).toEqual(['S ' + text + '[see @roe2019]^ e.', 'S ' + text + '«(see Roe, 2019)»^ e.', 'S ' + text + '[see @roe2019]^ e.']);
+  });
+});
+
 describe('HTML table cells', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
   const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);

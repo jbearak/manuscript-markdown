@@ -8772,6 +8772,27 @@ function escapeBraceAfterImage(markdown: string, segment: ContentItem[], index: 
   return (own !== undefined ? !own.endsWith('}') : image.widthPx <= 0 && image.heightPx <= 0) ? '\\' + markdown : markdown;
 }
 
+/** `markdown`, the Markdown of the text at `index`, with a ( or [ it starts
+ *  with escaped right after a citation whose key comes after a prefix,
+ *  which export would read before it as a link's text, as in [see @a](x),
+ *  or a reference link's, as in [see @a][x] (see citationEnd). Where the
+ *  Markdown `before` it ends with the citation, so not after the
+ *  citation's highlight or a change's delimiters, which keep them apart,
+ *  and not in a change of its own, whose spans canJoinSpans keeps apart
+ *  there, but where they go together with no spans of their own (`joined`),
+ *  as on a side of a substitution or in a highlight group. */
+function escapeBracketAfterCitation(markdown: string, segment: ContentItem[], index: number, before: string, joined = false): string {
+  const item = segment[index];
+  if (!readsMarkdown || item.type !== 'text' || item.href || markdown[0] !== '(' && markdown[0] !== '[' || item.revision && !joined) return markdown;
+  let k = index - 1;
+  while (k >= 0 && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k--;
+  const citation = segment[k];
+  if (citation?.type !== 'citation' || citation.pandocKeys.length === 0) return markdown;
+  const own = citationText(citation);
+  if (!before.endsWith(own) || citationEndInText(own, 0) !== own.length - 1 || citationEndInText(own + markdown, 0) !== -1) return markdown;
+  return '\\' + markdown;
+}
+
 /** `markdown`, the Markdown of an item, with a }, = or {color} it starts
  *  with escaped after a highlight's closing == at the end of the Markdown
  *  `before` it, which would read them as its own: ==a==} as CriticMarkup's
@@ -9346,8 +9367,8 @@ function renderHighlightGroup(
       // with an equation, ==a&#61;$x$==, which keeps the == around it the
       // only ones that navigation and the grammar read in it
       const references = !!item.formatting.highlight && /==|=\s*$/.test(item.text);
-      inner += textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd), false, false, references), segment, g, end, true),
-        segment, g, end, inner.length === mathEnd, true, inner);
+      inner += escapeBracketAfterCitation(textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd), false, false, references), segment, g, end, true),
+        segment, g, end, inner.length === mathEnd, true, inner), segment, g, inner, true);
     } else if (item.type === 'footnote_ref') {
       inner += footnoteRefText(item, noteLabels);
     } else if (item.type === 'math') {
@@ -9600,8 +9621,8 @@ function renderSubstitutionRun(
         // After a line break in the side, as the span of one would have it
         const prev = segment[j - 1];
         const lineStart = j > from && prev.type === 'text' && endsLine(prev.text);
-        text += textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to),
-          joinsHighlight(segment, j, from, to), lineStart), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text);
+        text += escapeBracketAfterCitation(textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to),
+          joinsHighlight(segment, j, from, to), lineStart), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text), segment, j, text, true);
         if (item.type === 'math' && !item.display) mathEnd = text.length;
         j++;
       }
@@ -10804,8 +10825,8 @@ function renderInlineRange(
         // distinct: Word text that is both highlighted AND commented needs both layers,
         // producing {====text====} (highlight nested inside comment delimiters).
         const after = runsAfter(segment, j + 1, segmentEnd);
-        let segText = textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after,
-          false, joinsHighlight(segment, j, startIndex, segmentEnd)), anchorText, inSpanBefore(anchorText, seg, anchorSpan)), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
+        let segText = escapeBracketAfterCitation(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after,
+          false, joinsHighlight(segment, j, startIndex, segmentEnd)), anchorText, inSpanBefore(anchorText, seg, anchorSpan)), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText), segment, j, anchorText);
         if (seg.href) {
           segText = bareLinkChoice(seg, markdownLink(segText, seg.href), '==}');
         }
@@ -10879,7 +10900,7 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      const text = escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i);
+      const text = escapeBracketAfterCitation(escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i), segment, i, out);
       const before = out;
       [out, lastSpan] = appendRevised(out, text, item, lastSpan);
       if (!item.revision) {
@@ -11173,7 +11194,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      const text = escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i);
+      const text = escapeBracketAfterCitation(escapeBraceAfterImage(textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), segment, i), segment, i, out);
       const before = out;
       [out, lastSpan] = appendRevised(out, text, item, lastSpan);
       if (!item.revision) {
