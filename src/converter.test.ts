@@ -7173,6 +7173,94 @@ describe('A heading whose text starts with an HTML comment', () => {
   });
 });
 
+// The text of a list item, a quote or a paragraph that starts with an HTML
+// comment in a hidden run, as export writes one for a heading's in a list
+// item, and ends in a line break and a space, came back as <!-- c -->a\
+// with &#32; on the next line. Markdown reads the comment's line as an HTML
+// block, which ends there, so the next export wrote the space as a
+// paragraph of its own, which the next import dropped, after a blank line
+describe('Text that starts with an HTML comment and ends in a line break and a space', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  // The text of each of Word's paragraphs with any, with each line break as
+  // [break] and each hidden run, as a comment's, as [hidden]
+  const word = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).map(p => [...p.matchAll(/<w:r[ >][\s\S]*?<\/w:r>/g)]
+      .map(([run]) => run.includes('<w:vanish/>') ? '[hidden]'
+        : run.replace(/<w:br\/>/g, '<w:t>[break]</w:t>').match(/<w:t(?: [^>]*)?>[^<]*<\/w:t>/g)?.map(t => t.replace(/<[^>]*>/g, '')).join('') ?? '').join(''))
+      .filter(text => text !== '');
+  };
+
+  // Word shows nothing for the space at the end of the paragraph, after the
+  // break, which then ends the text, as <br>, as with no space after it.
+  // After comments alone, Word's comment stays hidden
+  test.each([
+    ['- # <!-- c -->a<br>&#32;\n', '- <!-- c -->a<br>\n', ['&lt;!-- c --&gt;a&lt;br&gt;']],
+    ['> # <!-- c -->a<br>&#32;\n', '> <!-- c -->a<br>\n', ['&lt;!-- c --&gt;a&lt;br&gt;']],
+    ['1. # <!-- c -->a<br>&#9;\n', '1. <!-- c -->a<br>\n', ['&lt;!-- c --&gt;a&lt;br&gt;']],
+    ['- # <!-- c --><br>&#32;\n', '- <!-- c --><br>\n', ['[hidden][break]']],
+    ['- # <!-- a --><!-- b --><br><br>&#32;\n', '- <!-- a --><!-- b --><br><br>\n', ['[hidden][hidden][break][break]']],
+  ])('drops the space after the line break that ends %j', async (md, expected, paragraphs) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+    expect(await word(back)).toEqual(paragraphs);
+  });
+
+  // As on main: no space after the break, no comment before the text, a
+  // paragraph's HTML block, which Word has as text, and a task's box,
+  // after which the comment is inline, and the break holds
+  test.each([
+    ['- # <!-- c -->a<br>\n', '- <!-- c -->a<br>\n'],
+    ['- # a<br>&#32;\n', '- a\\\n&#32;\n'],
+    ['<!-- c -->a<br>&#32;\n', '<!-- c -->a<br>&#32;\n'],
+    ['- [ ] # <!-- c -->a<br>&#32;\n', '- [ ] \\# <!-- c -->a\\\n&#32;\n'],
+  ])('keeps %j as on main', async (md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+  });
+});
+
+// A quote's paragraph of spaces and tabs alone, as > &#32;, came back as >
+// alone, a quote of nothing, which export writes no paragraph for, so the
+// next trip dropped the paragraph Word has
+describe('A quote of spaces and tabs alone', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  // The text of each of Word's quote paragraphs
+  const quotes = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    return (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) ?? []).filter(p => p.includes('<w:pStyle w:val="GitHubBlockquote"/>'))
+      .map(p => [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+  };
+
+  // A space, as a reference, which Word shows nothing for, keeps it
+  test.each([
+    ['> &#32;\n', '> &#32;\n', [' ']],
+    ['> &#9;\n', '> &#32;\n', [' ']],
+    ['> - # &#32;\n', '> &#32;\n', [' ']],
+    ['> a\n>\n> &#32;\n', '> a\n>\n> &#32;\n', ['a', ' ']],
+    ['> &#32;\n>\n> b\n\nAfter.\n', '> &#32;\n>\n> b\n\nAfter.\n', [' ', 'b']],
+    ['- a\n\n  > &#32;\n', '- a\n\n  > &#32;\n', [' ']],
+  ])('keeps the paragraph of %j', async (md, expected, paragraphs) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+    expect(await quotes(back)).toEqual(paragraphs);
+  });
+
+  // As on main: a list item's, a paragraph's and an alert's
+  test.each([
+    ['- &#32;\n', '- \n'],
+    ['a\n\n&#32;\n\nb\n', 'a\n\nb\n'],
+    ['> [!NOTE]\n> &#32;\n', '> [!NOTE]\n'],
+  ])('writes %j as on main', async (md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+  });
+});
+
 describe('A template whose built-in styles Word named in another language', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
   /** styles.xml of `styles` */
@@ -17704,16 +17792,15 @@ describe('Code block round-trip', () => {
     };
     const roundTrip = async (text: string) => (await convertDocx((await convertMdToDocx(text)).docx)).markdown;
     const body = (text: string) => text.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
-    // As it comes back right after a paragraph
-    expect(body(await importEdited('a\n\n' + md, xml => xml.replace('<w:t>a</w:t></w:r></w:p>', end => end + emptyQuote)))).toBe('a\n\n> \n\n' + md);
+    // As it comes back right after a paragraph, a space, as a reference,
+    // which Word shows nothing for: export writes nothing for > alone, a
+    // quote of nothing, and the next trip dropped the paragraph
+    expect(body(await importEdited('a\n\n' + md, xml => xml.replace('<w:t>a</w:t></w:r></w:p>', end => end + emptyQuote)))).toBe('a\n\n> &#32;\n\n' + md);
     const code = '```\nx\n```\n\n';
     const once = await importEdited(code + md, xml => xml.replace(
       /(<w:t>x<\/w:t><\/w:r><\/w:p>)<w:p [^>]*(?:\/>|><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p>)/, (_para, end: string) => end + emptyQuote));
-    expect(body(once)).toBe(code + '> \n\n' + md);
-    // Export writes nothing for an empty quote, as after a paragraph
-    const twice = await roundTrip(once);
-    expect(body(twice)).toBe(code + md);
-    expect(await roundTrip(twice)).toBe(twice);
+    expect(body(once)).toBe(code + '> &#32;\n\n' + md);
+    expect(await roundTrip(once)).toBe(once);
   });
 
   // Each paragraph's properties and text

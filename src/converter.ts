@@ -14701,7 +14701,10 @@ function afterTrackedBreakSpan(text: string, at: number, marks: TrackedBreakMark
  *  end, escaped. The space alone, with no text before it, stays, which
  *  the math branch takes off, as it writes the equation on the line after,
  *  and so does the text of an HTML block, which would show references and
- *  a backslash's escape as text, as withoutEndSpaces leaves it. */
+ *  a backslash's escape as text, as withoutEndSpaces leaves it. After a
+ *  line break, with nothing else on its line, it goes, as the break ends
+ *  the line before the equation, whose line end export reads as no space
+ *  there, and Word shows nothing for the space at the end of that line. */
 function beforeParagraphMath(text: string): string {
   if (!text.endsWith(' ') || /^ +$/.test(text)) return text;
   const end = text.length - 1;
@@ -15767,8 +15770,9 @@ function buildMarkdownOnce(
   let pendingDisplayMathContainer: { prefix: string; type: 'list' | 'blockquote' } | undefined;
   // Display math next in the paragraph just written, after its text or on
   // its list item's marker line, which goes on in the paragraph: a blank
-  // line before it would end the paragraph, and a quote or list around it
-  let mathInParagraph: { prefix: string; sameLine: boolean; quoted: boolean } | undefined;
+  // line before it would end the paragraph, and a quote or list around it,
+  // but after one where the text is a block of its own (`apart`)
+  let mathInParagraph: { prefix: string; sameLine: boolean; quoted: boolean; apart?: boolean } | undefined;
   // The paragraph whose text is being written
   let currentPara: Extract<ContentItem, { type: 'para' }> | undefined;
   // Where the space or line end after an alert's marker is in output, which
@@ -16470,6 +16474,14 @@ function buildMarkdownOnce(
         const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
         const nextIsDisplayMath = next?.type === 'math' && next.display;
         if (!nextIsDisplayMath) output.push(itemPrefix);
+        // A quote's paragraph with nothing in it, as one of spaces and tabs
+        // alone (see dropBlankParagraphText), is a space, as a reference,
+        // which Word shows nothing for: its > alone would be a blank line
+        // in the quote, or a quote of nothing, which export writes no
+        // paragraph for, so the next trip dropped the paragraph Word has.
+        // Not an alert's, whose label is its text, nor one whose mark or the
+        // one before it is tracked, whose break the text around it may take
+        if (!item.alertType && !item.breakRevision && !paragraphHasContent(mergedContent, i)) output.push('&#32;');
         if (item.alertType) {
           const alertKey = item.blockquoteLevel + ':' + item.alertType;
           // A new alert group starts when the key differs OR when the
@@ -16772,13 +16784,14 @@ function buildMarkdownOnce(
       const inBlockquote = displayMathContainer?.type === 'blockquote' || !!continued?.quoted;
       if (continued) {
         // On the line after the paragraph's text, whose line end is the
-        // space before the equation export wrote for it
+        // space before the equation export wrote for it, or after a blank
+        // line, where the text is an HTML block of its own (see `apart`)
         if (!continued.sameLine) {
           const last = output.length - 1;
           if (output[last].endsWith('\n')) output.push(continued.prefix);
           else {
             output[last] = output[last].replace(/(?<!\\) $/, '');
-            output.push('\n' + continued.prefix);
+            output.push((continued.apart ? '\n' + continued.prefix.trimEnd() : '') + '\n' + continued.prefix);
           }
         }
       } else if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n') && !(recordedGap?.para === i - 1 && recordedGap.end === output.length)) {
@@ -16813,7 +16826,7 @@ function buildMarkdownOnce(
       }
       if (equationNext) {
         mathInParagraph = continued
-          ? { ...continued, sameLine: false }
+          ? { ...continued, sameLine: false, apart: false }
           : { prefix: currentPara ? paragraphLinePrefix(currentPara) : '', sameLine: false, quoted: !!currentPara?.blockquoteLevel };
       }
       i++;
@@ -16979,6 +16992,17 @@ function buildMarkdownOnce(
         !breaks.has(offset + backslashes.length + 2) ? match
           : backslashes + '<br>' + (whitespace ?? '').replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;'));
     } else if (atEnd && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
+      // Comments that start the text, at its line's start, start an HTML
+      // block, which ends on their line. Spaces and tabs alone after a line
+      // break that ends that line would be a paragraph of their own, which
+      // the next import drops (see dropBlankParagraphText). Word shows
+      // nothing for them, at the end of the paragraph, so they go, and the
+      // break ends the text, as below
+      let end = textOut.length;
+      while (end > 0 && (textOut[end - 1] === ' ' || textOut[end - 1] === '\t')) end--;
+      const bare = textOut.slice(0, end);
+      if (end < textOut.length && alertMarkerLineEnd === undefined && commentsEnd(bare) > 0 && lastLine(output).replace(CONTAINER_PREFIX, '') === ''
+          && (commentsBeforeBreaks(bare) || HARD_BREAK_AT_END.test(bare) && bare.indexOf('\n') === bare.length - 1)) textOut = bare;
       // After comments alone, which start an HTML block, a \ and line end
       // are the block's text, so each line break is <br>, which export
       // reads there (see isLineBreakBlock)
@@ -17043,8 +17067,18 @@ function buildMarkdownOnce(
         && readsCommentsInline(referenced, payloads, !blockKeepsRuns(text));
       // Whitespace alone before an equation in the paragraph keeps the space
       // export wrote for its line end as it is, which the math branch takes
-      // off, as it does after other text, or it would gain one each round trip
-      const edged = mathFollows && /^[ \t]* $/.test(text) ? keepParagraphWhitespace(text.slice(0, -1), atStart, atEnd) + ' '
+      // off, as it does after other text, or it would gain one each round
+      // trip. So does whitespace alone on the line after a line break, which
+      // keepParagraphWhitespace would write all as references, as in
+      // Model\<line end>&#32;<line end> before the opening fence, which
+      // export reads as two spaces, where Word had one (see
+      // beforeParagraphMath). Not where HTML starts the text after a task's
+      // box or an alert's marker, which beforeParagraphMath reads as an HTML
+      // block, as it isn't there, so it keeps the space, and the math branch
+      // would end the line twice
+      const lineEndSpace = mathFollows && text.endsWith(' ') && (/^[ \t]*$/.test(text) || referenced.endsWith('&#32;')
+        && !(/^[ \t]*</.test(text) && (alertMarkerLineEnd !== undefined || lastLine(output).replace(CONTAINER_PREFIX, '') !== '')));
+      const edged = lineEndSpace ? keepParagraphWhitespace(text.slice(0, -1), atStart, atEnd) + ' '
         : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + text.slice(htmlIndent.length)) && !inline()
           ? htmlIndent + keepParagraphWhitespace(text.slice(htmlIndent.length), true, atEnd)
           : referenced;
@@ -17276,6 +17310,16 @@ function buildMarkdownOnce(
       }
     }
     listHtmlBlockOpen = !!listLinePrefix && startsHtmlBlock(textOut) && !HTML_BLOCK_ENDS_AT_MARKER.test(textOut.trimStart());
+    // Whether text before an equation in the paragraph starts its line,
+    // after the prefixes of the quotes and list items it's in alone, as no
+    // task's box or alert's marker
+    const startsLine = mathFollows && alertMarkerLineEnd === undefined && lastLine(output).replace(CONTAINER_PREFIX, '') === '';
+    // The space alone before an equation, export's for the line end before
+    // it, which the math branch takes off, would leave that line with its
+    // prefix alone, which Markdown reads as a blank line, so the next trip
+    // drops the space. Word shows nothing for it, at the end of the line
+    // before the equation, which goes on the text's line, as with none
+    if (startsLine && textOut === ' ' && rendered.deferredComments.length === 0) textOut = '';
     if (rendered.deferredComments.length > 0) {
       // Before an equation, whose line end is the one after the bodies (see
       // the math branch), a line break is a \ before the bodies' line end,
@@ -17301,10 +17345,19 @@ function buildMarkdownOnce(
     // the line the text would start, as after an item's task box or an
     // alert's marker. The first paragraph has no para item before it.
     if (mathFollows) {
+      // After text on one line that is an HTML block Markdown ends at that
+      // line, as a comment that starts a list item's or a quote's text, the
+      // equation is a paragraph of its own to export, which the next import
+      // writes after a blank line, so it goes after one now. Not after
+      // comments a paragraph's text is alone (see lastRenderedHtmlCommentIndex
+      // above), whose blank lines after them export records
+      const block = startsLine && /^ {0,3}</.test(textOut) && !textOut.includes('\n') && rendered.deferredComments.length === 0
+        && lastRenderedHtmlCommentIndex === undefined ? htmlBlocksIn(textOut + '\na')[0] : undefined;
       mathInParagraph = {
         prefix: currentPara ? paragraphLinePrefix(currentPara) : '',
         sameLine: textOut === '' && rendered.deferredComments.length === 0,
         quoted: !!currentPara?.blockquoteLevel,
+        apart: block?.start === 0 && block.end === 1,
       };
     }
     // Where it took a form main doesn't write, the paragraph alone, at a
