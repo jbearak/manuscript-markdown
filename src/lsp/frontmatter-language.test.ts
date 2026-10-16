@@ -1247,6 +1247,43 @@ describe('block lists', () => {
 		}
 	});
 
+	test('offers a table-col-widths item no width, as export reads equal and auto only alone', () => {
+		for (const line of ['  - ', '  - eq', '- ']) {
+			const text = '---\ntable-col-widths:\n' + line + '\n---\n';
+			expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('\n---\n', 4)), 'darwin')).toEqual([]);
+		}
+		// As the list `- equal` is read
+		expect(parseFrontmatter('---\ntable-col-widths:\n  - equal\n---\n').metadata).toEqual({});
+		expect(parseFrontmatter('---\ntable-col-widths: equal\n---\n').metadata).toEqual({ tableColWidths: 'equal' });
+	});
+
+	test('offers an item only what an item of its key\'s inline array takes, read as that array reads it', async () => {
+		// None for a key that takes one value, of which the list is the key
+		// repeated
+		let offered = 0;
+		for (const def of FRONTMATTER_SCHEMA.filter(def => def.key !== 'styles')) {
+			for (const key of [def.key, ...def.aliases ?? []]) {
+				const text = '---\n' + key + ':\n  - \n---\n';
+				const loc = getFrontmatterLocation(text, text.indexOf('  - ') + 4);
+				const items = getFrontmatterCompletionItems(loc, 'darwin');
+				if (!def.arrayField) {
+					expect({ key, labels: items.map(item => item.label) }).toEqual({ key, labels: [] });
+					continue;
+				}
+				for (const item of items) {
+					offered++;
+					const written = text.slice(0, loc.valueStart) + item.insertText + text.slice(loc.valueEnd);
+					const read = parseFrontmatter(written);
+					const inline = parseFrontmatter('---\n' + key + ': [' + item.label + ']\n---\n');
+					expect({ key, label: item.label, metadata: read.metadata }).toEqual({ key, label: item.label, metadata: inline.metadata });
+					expect({ key, label: item.label, set: Object.keys(read.metadata).length, warnings: read.warnings, diagnostics: await messages(written) })
+						.toEqual({ key, label: item.label, set: 1, warnings: undefined, diagnostics: [] });
+				}
+			}
+		}
+		expect(offered).toBeGreaterThan(20);
+	});
+
 	test('locates an item as a value of its key', () => {
 		const text = '---\nheader-font:\n  - Geo\n  - "Arial"\n    more\n---\n';
 		const item = getFrontmatterLocation(text, text.indexOf('Geo') + 2);

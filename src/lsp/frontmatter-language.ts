@@ -696,6 +696,8 @@ export interface FrontmatterLocation {
 	frontmatterClosed: boolean;
 	/** Whether completion should be suppressed at punctuation outside an array item */
 	suppressCompletions?: boolean;
+	/** Whether the value is a block list's item, which takes only what one item of the key's inline array takes */
+	listItem?: boolean;
 	/** Formatting consumed by an array-item replacement range */
 	completionPrefix?: string;
 	completionSuffix?: string;
@@ -836,7 +838,8 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 				// A value of the list's key: its item's text, with no
 				// completion on the `-`, or for a mapping or an item that
 				// goes on past its line, which a value on it wouldn't end.
-				// After a `-` with no space, a value needs one.
+				// After a `-` with no space, a value needs one. Its values are
+				// those of an item of the key's inline array (listItem).
 				const valueRange = completionValueRange(line);
 				const separator = text[line.valueStart - 1] === '-' ? ' ' : '';
 				return {
@@ -845,6 +848,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 					valueStart: valueRange.start, valueEnd: valueRange.end,
 					declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 					suppressCompletions: valueRange.suppress || line.mapping || line.continued || offset < line.valueStart,
+					listItem: true,
 					completionPrefix: separator + (valueRange.prefix ?? ''),
 					completionSuffix: valueRange.suffix,
 					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
@@ -1111,6 +1115,11 @@ export function getFrontmatterCompletionItems(
 	}
 
 	if (location.kind === 'value' || location.kind === 'styles-value') {
+		// A block list's item is one item of the key's inline array, so it
+		// gets what an item of that array gets: values for a key whose array
+		// takes one per item, and none for a key that takes one value or for
+		// table-col-widths, whose equal and auto export reads only alone.
+		if (location.listItem && !lookupDef(location.key)?.arrayField) return [];
 		const items = getValueCompletions(location, platform, cachedCslStyles);
 		if (!location.completionPrefix && !location.completionSuffix) return items;
 		return items.map(item => ({

@@ -201,6 +201,20 @@ export function blockListAfter(lines: readonly string[], at: number): { items: B
 }
 
 /**
+ * The block list readBlockLists reads after line `at`, with its key: that
+ * of blockListAfter, after any key but `styles`, which takes a mapping
+ * that parseFrontmatter reads itself. Where it isn't undefined, the next
+ * list is past `last`.
+ */
+export function blockListOf(lines: readonly string[], at: number): { key: string; items: BlockListItem[]; last: number } | undefined {
+  const line = lines[at];
+  const colon = line.indexOf(':');
+  const key = colon > 0 ? line.slice(0, colon).trim() : '';
+  const list = key && key !== 'styles' ? blockListAfter(lines, at) : undefined;
+  return list && { key, items: list.items, last: list.last };
+}
+
+/**
  * The lines a block list in frontmatter stands for, which parseFrontmatter
  * then reads, as a key's lines: for a key in ARRAY_KEYS, the inline array of
  * its items, and for another key, as `title`, the key once for each item,
@@ -216,14 +230,12 @@ function readBlockLists(lines: string[], warnings: string[]): string[] {
   const read: string[] = [];
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k];
-    const colon = line.indexOf(':');
-    const key = colon > 0 ? line.slice(0, colon).trim() : '';
-    // `styles` takes a mapping, which parseFrontmatter reads itself
-    const list = key && key !== 'styles' ? blockListAfter(lines, k) : undefined;
+    const list = blockListOf(lines, k);
     if (!list) {
       read.push(line);
       continue;
     }
+    const key = list.key;
     k = list.last;
     const array = ARRAY_KEYS.has(key);
     const known = array || key === 'title' || SINGLE_VALUE_KEYS.has(key);

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { shouldAutoTriggerLspSuggest } from './auto-suggest';
+import { fastestRun } from '../test-timing';
 
 function shouldTrigger(
 	text: string,
@@ -111,6 +112,39 @@ describe('shouldAutoTriggerLspSuggest frontmatter policy', () => {
 		const text = '---\n# Document metadata\ntitle: Draft\n\n';
 		expect(shouldTrigger(text, text.length, '\n')).toBe(true);
 	});
+
+	test('keeps unfinished-frontmatter popup over a block list\'s unindented items, for the next item and the next key', () => {
+		// The second item, after an item that export reads as a value
+		expect(shouldTrigger('---\nheader-font:\n- Arial\n- G')).toBe(true);
+		expect(shouldTrigger('---\nheader-font:\n- Arial\n  # c\n\n- G')).toBe(true);
+		// The next key, and the line Enter opens for it
+		expect(shouldTrigger('---\nheader-font:\n- Arial\n- Georgia\nfo')).toBe(true);
+		const enter = '---\ntitle:\n- One\n- Two\n';
+		expect(shouldTrigger(enter, enter.length, '\n')).toBe(true);
+	});
+
+	test('still stops unfinished-frontmatter popup at a - that no list holds', () => {
+		for (const text of [
+			'---\n- a list item\n\n',
+			// After a key with a value, or `styles`, whose mapping holds no list
+			'---\ntitle: Draft\n- item\n\n',
+			'---\nstyles:\n- item\n\n',
+			// After prose that ends the list
+			'---\nheader-font:\n- Arial\nProse.\n- item\n\n',
+		]) {
+			expect(shouldTrigger(text, text.length, '\n')).toBe(false);
+		}
+	});
+
+	test('reads the block lists of unfinished frontmatter in linear time', () => {
+		// Many lists, and many blank lines and comments after a key with none
+		const text = '---\n' + Array.from({ length: 4000 }, (_, k) => 'title:\n- T' + k + '\n# c\n\n- U' + k).join('\n')
+			+ '\nauthor:\n' + '\n# c\n'.repeat(20000) + 'header-font:\n- Arial\n- G';
+		let triggered = false;
+		// Quadratic reading took seconds here; linear takes milliseconds
+		expect(fastestRun(() => { triggered = shouldTrigger(text); })).toBeLessThan(2000);
+		expect(triggered).toBe(true);
+	}, 30000);
 
 	test('does not trigger values for unknown or free-text settings', () => {
 		for (const text of [

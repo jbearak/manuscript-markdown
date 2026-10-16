@@ -68,7 +68,7 @@ Typing `:` after a known key automatically opens its value choices, and the list
 
 For comma-separated and inline-array font fields, accepting a suggestion replaces only the item under the cursor.
 
-An item of a YAML block list, as `  - Georgia` after `header-font:`, gets the same value completions, hover and checks as a value written after its key. An item that goes on past its line gets no value completions, and a value completed after a bare `-` gets a space before it.
+An item of a YAML block list, as `  - Georgia` after `header-font:`, gets the same hover and checks as a value written after its key, and the value completions an item of the key's inline array gets: fonts and font styles for `header-font`, `header-font-style`, `title-font` and `title-font-style`, and none under a key that takes one value, or under `table-col-widths`, whose `equal` and `auto` export reads only alone. An item that goes on past its line gets no value completions, and a value completed after a bare `-` gets a space before it. Suggestions open while you type the items of a list with its `-` unindented, as `- Arial` after `header-font:`, before the block's closing `---` is added, as they do for the keys after it.
 
 ### Hover
 
