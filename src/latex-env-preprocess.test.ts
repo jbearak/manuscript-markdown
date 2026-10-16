@@ -366,6 +366,66 @@ describe('a stray fence of two dollar signs before display math', () => {
 	});
 });
 
+describe('dollar signs and backticks as export reads them around a bare environment', () => {
+	const D = '$' + '$';
+	const aligned = '\\begin{aligned}\na &= b\n\\end{aligned}';
+	const bare = '\\begin{equation}\nx\n\\end{equation}';
+
+	// The zones of code spans and comments are found across the text, where
+	// a backtick or a <!-- in one paragraph pairs with one in the next, which
+	// markdown-it reads as no code span or comment. The read of the
+	// equations took that zone's opening fence as code, and the environment
+	// in the math, past the zone's end, was wrapped again
+	test.each([
+		['a backtick', 'A ` tick.\n\n' + D + '\na ` b\n' + aligned + '\n' + D + '\n'],
+		['a comment\'s opener', 'a <!-- b\n\n' + D + '\nx --> y\n' + aligned + '\n' + D + '\n'],
+	])('leaves an environment in display math after %s in a paragraph before it, which pairs with none there, as before', async (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const { docx } = await convertMdToDocx(md);
+		const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+		expect(xml.match(/<m:oMath>/g)).toHaveLength(1);
+		expect(xml).not.toContain('begin{aligned}');
+	});
+
+	// Which export's inline rules read before its math rule reads the dollar
+	// sign, so it opens no equation. The read of the equations took it for
+	// one's opener, whose equation, to the inline equation's after the
+	// environment, held the environment, which Word got as text
+	test.each([
+		['in a tag\'s attribute', 'Text <span title="$">cost</span>'],
+		['in a tag\'s attribute without quotes', 'Text <span title=$>cost</span>'],
+		['in an autolink', 'Mail <http://x.org/$y>'],
+		['in a URL', 'Go http://x.org/$y'],
+		['in a citation', 'Text [@a, p. $5] b'],
+		['in a code span', 'Use `$` here'],
+	])('wraps an environment in a paragraph after a dollar sign %s, as before', async (_name, before) => {
+		const md = before + '\n' + bare + '\n$\\alpha$ here.\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(before + '\n' + D + bare + D + '\n$\\alpha$ here.\n');
+		const { docx } = await convertMdToDocx(md);
+		const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+		expect(xml).not.toContain('begin{equation}');
+	});
+
+	test.each([
+		['in a link\'s destination', 'See [a](x/$y)'],
+		['in a link\'s title', 'See [a](x "t $")'],
+		['in an image\'s destination', 'See ![a](x/$y.png)'],
+	])('wraps an environment in a paragraph after a dollar sign %s, as before', (_name, before) => {
+		const md = before + '\n' + bare + '\n$\\alpha$ here.\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(before + '\n' + D + bare + D + '\n$\\alpha$ here.\n');
+	});
+
+	// Where export reads one, as the math rule reads on past a link's text
+	// and a tag's end
+	test.each([
+		['in a link\'s text', 'See [a $ b](u)'],
+		['between tags', 'Text <b>cost $</b>'],
+	])('leaves an environment in an inline equation from a dollar sign %s, as before', (_name, before) => {
+		const md = before + '\n' + bare + '\n$\\alpha$ here.\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+});
+
 describe('wrapBareLatexEnvironments with stray fences in time linear in the text', () => {
 	const D = '$' + '$';
 	const env = '\\begin{equation}\nx\n\\end{equation}\n\n';
@@ -379,6 +439,15 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		['equations and dollar signs in one paragraph', 'x ' + D + 'y' + D + ' $a$ \\$ $5 $x' + D + 'y$ ', 0],
 		['dollar signs after an opener without its closer in one paragraph', '$ ' + D + 'a' + D + ' \\$ ', 0],
 		['CriticMarkup spans over blank lines in display math', D + '\na {++b\n\nc++} d\n\\begin{aligned}\na\n\\end{aligned}\n' + D + '\n\n', 0],
+		// Each equation of four read from a run's dollar sign counted the
+		// rest of the run
+		['a run of dollar signs', D.repeat(8), 0],
+		['a run of backticks', '`'.repeat(16), 0],
+		['tags without their ends in one paragraph', '<a b="$ ', 0],
+		['brackets in one paragraph', '[$ ', 0],
+		['citations without their ends in one paragraph', '[@a $ ', 0],
+		['autolinks without their ends in one paragraph', '<http://x/$ ', 0],
+		['URLs in one paragraph', 'http://x.org/$y ', 0],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		const count = (text: string) => wrapBareLatexEnvironments(text).split(D + '\\begin').length - 1;
 		expect(count(unit.repeat(2))).toBe(wrapped * 2);
@@ -389,5 +458,17 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		time(4000);
 		const small = time(4000);
 		expect(time(16000) / small).toBeLessThan(8);
+	}, 60000);
+
+	test('wraps a text of a run of dollar signs after a backslash', () => {
+		// Which escapes the first, so the math rule reads the run from the next
+		const time = (n: number) => {
+			const text = '\\' + '$'.repeat(n) + '\n\n' + env;
+			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text));
+		};
+		expect(wrapBareLatexEnvironments('\\' + '$'.repeat(9) + '\n\n' + env)).toContain(D + '\\begin{equation}');
+		time(32000);
+		const small = time(32000);
+		expect(time(128000) / small).toBeLessThan(8);
 	}, 60000);
 });

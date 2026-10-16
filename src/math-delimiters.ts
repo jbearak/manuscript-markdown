@@ -6,10 +6,6 @@ export interface DollarMathOptions {
   excludedRegions?: readonly CodeRegion[];
   /** DOCX compatibility accepts display delimiters whose dollar run exceeds two. */
   displayRun?: 'exact' | 'at-least';
-  /** Where the text the math rule reads ends, as a paragraph's, which
-   *  markdown-it's inline parse reads on its own: the content's end by
-   *  default */
-  end?: number;
 }
 
 export type DollarMathMatch =
@@ -33,9 +29,9 @@ export function isEscapedAt(content: string, offset: number): boolean {
   return backslashes % 2 === 1;
 }
 
-function dollarRunLength(content: string, offset: number, end = content.length): number {
+function dollarRunLength(content: string, offset: number): number {
   let length = 0;
-  while (offset + length < end && content.charCodeAt(offset + length) === 0x24) length++;
+  while (offset + length < content.length && content.charCodeAt(offset + length) === 0x24) length++;
   return length;
 }
 
@@ -50,11 +46,10 @@ function findDollarMathClose(
   options?: DollarMathOptions,
 ): number {
   const exactRun = delimiterLength === 1 || options?.displayRun !== 'at-least';
-  const end = options?.end ?? content.length;
-  for (let i = start; i < end; i++) {
+  for (let i = start; i < content.length; i++) {
     if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) ||
         isExcluded(i, options?.excludedRegions)) continue;
-    const runLength = dollarRunLength(content, i, end);
+    const runLength = dollarRunLength(content, i);
     if ((exactRun && runLength === delimiterLength) || (!exactRun && runLength >= delimiterLength)) return i;
     i += runLength - 1;
   }
@@ -70,8 +65,7 @@ export function findDollarMathAt(
   if (content.charCodeAt(start) !== 0x24 || isEscapedAt(content, start) ||
       isExcluded(start, options?.excludedRegions)) return undefined;
 
-  const end = options?.end ?? content.length;
-  const openingRunLength = dollarRunLength(content, start, end);
+  const openingRunLength = dollarRunLength(content, start);
   let delimiterLength: DollarDelimiterLength;
   if (openingRunLength === 1) delimiterLength = 1;
   else if (openingRunLength === 2 || (openingRunLength > 2 && options?.displayRun === 'at-least')) delimiterLength = 2;
@@ -82,12 +76,12 @@ export function findDollarMathAt(
     if ((before === '$' && !isEscapedAt(content, start - 1)) || /\w/.test(before)) return undefined;
     const next = content.charCodeAt(start + 1);
     if (next >= 0x30 && next <= 0x39 &&
-        /^\d[\d,.]*(?:\s|$)/.test(content.slice(start + 1, end))) return { kind: 'currency' };
+        /^\d[\d,.]*(?:\s|$)/.test(content.slice(start + 1))) return { kind: 'currency' };
   }
 
   const close = findDollarMathClose(content, start + delimiterLength, delimiterLength, options);
   if (close === -1) return undefined;
-  if (delimiterLength === 1 && close + 1 < end && /\w/.test(content.charAt(close + 1))) return undefined;
+  if (delimiterLength === 1 && /\w/.test(content.charAt(close + 1))) return undefined;
 
   return {
     kind: 'math',

@@ -11,10 +11,15 @@
  * of a paragraph after a fence of two dollar signs export reads as text.
  */
 
+import MarkdownIt from 'markdown-it';
+import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { exportsLiterally } from './html-blocks';
 import { criticCloserSearch } from './critic-markup';
-import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt, type DollarMathOptions } from './math-delimiters';
+import { citationEnd } from './citation-syntax';
+import { imagePathsWithSpaces } from './image-paths';
+import { linearInlineComments } from './inline-html-comments';
+import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-delimiters';
 
 // All environments recognized by the latexToOmml parser as display math.
 export const DISPLAY_MATH_ENVIRONMENTS = new Set([
@@ -134,66 +139,147 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 		}
 	}
 
+	const critic = mergeZones(zones.slice(criticFrom));
+
 	// 4. Each equation, display math and inline, whose environments are its
-	// own, as one in inline math over lines, as export's math rule reads it
-	// in the text it reads on its own: a paragraph's or a heading's (see
-	// inlineBlocks in code-regions.ts), with those a CriticMarkup span above
-	// joins, as preprocessCriticMarkup puts its line ends in placeholders, an
-	// HTML block's, or else a line's, as a table row's or a note's first
-	// line's. An equation opens at a dollar sign in none of the zones above,
-	// whose constructs export reads first, and closes at the next that can
-	// close it, in a zone or not, as the rule reads on into a code span or a
-	// comment after its opener, but for one a backslash escapes (see
-	// findDollarMathAt in math-delimiters.ts). A fence of two dollar signs
-	// there that opens no equation, which export writes as text, as in a
-	// line of text, or with a blank line before its closer, holds the rest of
-	// that text, as an environment there, wrapped, would be its equation.
-	// Before, each fence in the text paired with the next, so one in code, a
-	// comment, CriticMarkup, an equation or a line of text paired with the
-	// opening fence of display math after it, and the environment in that
-	// math, out of each zone, was wrapped again, as was each in display math
-	// after it. A search for an opener's closer stops at the first run of
-	// dollar signs that may close it, so one of each kind at most reads to
-	// its text's end, after which none of that kind opens there
+	// own, as one in inline math over lines, as export reads it in the text
+	// markdown-it's inline parse reads on its own: a paragraph's or a
+	// heading's (see inlineBlocks in code-regions.ts), with those a
+	// CriticMarkup span above joins, as preprocessCriticMarkup puts its line
+	// ends in placeholders, an HTML block's, or else a line's, as a table
+	// row's or a note's first line's. That text is read with the inline rules
+	// of export's that read past a dollar sign before its math rule can (see
+	// equationReader), so a code span's backticks pair in that text alone,
+	// where the zones above pair one in a paragraph with one in the next, and
+	// a dollar sign in a tag, an autolink, a link's destination or title, a
+	// URL or a citation opens no equation. A fence of two dollar signs that
+	// opens none, which export writes as text, as in a line of text, or with
+	// a blank line before its closer, holds the rest of that text, as an
+	// environment there, wrapped, would be its equation. Before, each fence
+	// in the text paired with the next, so one in code, a comment,
+	// CriticMarkup, an equation or a line of text paired with the opening
+	// fence of display math after it, and the environment in that math, out
+	// of each zone, was wrapped again, as was each in display math after it.
+	// Each text with a dollar sign out of a code block is read once
 	{
-		const inert = mergeZones(zones);
 		// Apart where they touch, as two list items' paragraphs
-		const units = joinedUnits(inlineBlocks.concat(htmlRegions).sort((a, b) => a.start - b.start), mergeZones(zones.slice(criticFrom)));
-		let zone = 0;
+		const units = joinedUnits(inlineBlocks.concat(htmlRegions).sort((a, b) => a.start - b.start), critic);
+		const read: EquationRead = { zones, critic, nextCritic: 0, from: 0, inert: new Map(), runAt: -1, runEnd: -1 };
+		let code = 0;
 		let unit = 0;
-		let lineEnd = -1;
-		let options: DollarMathOptions | undefined;
 		for (let at = text.indexOf('$'); at !== -1;) {
-			while (zone < inert.length && inert[zone].end <= at) zone++;
-			if (zone < inert.length && inert[zone].start <= at) {
-				at = text.indexOf('$', inert[zone].end);
+			while (code < blockCodeRegions.length && blockCodeRegions[code].end <= at) code++;
+			if (code < blockCodeRegions.length && blockCodeRegions[code].start <= at) {
+				at = text.indexOf('$', blockCodeRegions[code].end);
 				continue;
 			}
 			while (unit < units.length && units[unit].end <= at) unit++;
+			let start: number;
 			let end: number;
-			if (unit < units.length && units[unit].start <= at) end = units[unit].end;
+			if (unit < units.length && units[unit].start <= at) ({ start, end } = units[unit]);
 			else {
-				if (at >= lineEnd) {
-					const lineBreak = text.indexOf('\n', at);
-					lineEnd = lineBreak === -1 ? text.length : lineBreak + 1;
-				}
-				end = lineEnd;
+				start = text.lastIndexOf('\n', at - 1) + 1;
+				const lineBreak = text.indexOf('\n', at);
+				end = lineBreak === -1 ? text.length : lineBreak + 1;
 			}
-			if (options?.end !== end) options = { ...DOCX_DOLLAR_MATH_OPTIONS, end };
-			const math = findDollarMathAt(text, at, options);
-			if (math?.kind === 'math') {
-				zones.push({ start: math.start, end: math.end });
-				at = text.indexOf('$', math.end);
-			} else if (text.charCodeAt(at + 1) === 0x24 && !isEscapedAt(text, at)) {
-				zones.push({ start: at, end });
-				at = text.indexOf('$', end);
-			} else {
-				at = text.indexOf('$', at + 1);
-			}
+			readEquations(text, start, end, read);
+			at = text.indexOf('$', end);
 		}
 	}
 
 	return { zones: mergeZones(zones), literalHtml: literalHtmlRegions };
+}
+
+/** What readEquations reads with: the zones it adds to, the CriticMarkup
+ *  spans, sorted and merged, and the first that may reach the text it reads
+ *  next, where that text starts, the spans in it, each end by where it
+ *  starts in it, and the run of dollar signs read last there */
+interface EquationRead {
+	zones: Zone[];
+	critic: Zone[];
+	nextCritic: number;
+	from: number;
+	inert: Map<number, number>;
+	runAt: number;
+	runEnd: number;
+}
+
+/** markdown-it with the inline rules of export's (see createMarkdownIt in
+ *  md-to-docx.ts) that read past a dollar sign before its math rule can: an
+ *  escape, a code span, raw HTML, an autolink, a link's or an image's
+ *  destination and title, a URL linkify reads, a citation, and CriticMarkup
+ *  as the zones above have it, which comes first, as one may start a text
+ *  that a span from before joins. And that math rule */
+const equationReader = new MarkdownIt({ html: true, linkify: true });
+equationReader.linkify.set({ fuzzyLink: false });
+equationReader.linkify.add('//', null);
+equationReader.use(imagePathsWithSpaces);
+equationReader.use(linearInlineComments);
+equationReader.inline.ruler.before('text', 'inert', (state, silent) => {
+	const end = (state.env as EquationRead).inert.get(state.pos);
+	if (end === undefined) return false;
+	if (!silent) state.pending += state.src.slice(state.pos, end);
+	state.pos = end;
+	return true;
+});
+equationReader.inline.ruler.before('emphasis', 'citation', (state, silent) => {
+	if (state.pos + 2 >= state.posMax) return false;
+	const end = citationEnd(state, state.pos);
+	if (end === -1) return false;
+	if (!silent) state.pending += state.src.slice(state.pos, end + 1);
+	state.pos = end + 1;
+	return true;
+});
+equationReader.inline.ruler.before('emphasis', 'math', readMath);
+
+/** export's math rule (see mathRule in md-to-docx.ts), which adds each
+ *  equation it reads to the read's zones, and the rest of the text after a
+ *  fence that opens none */
+function readMath(state: StateInline, silent: boolean): boolean {
+	const src = state.src;
+	const at = state.pos;
+	if (src.charCodeAt(at) !== 0x24) return false;
+	const read = state.env as EquationRead;
+	// The run of dollar signs from here, counted once for each run
+	if (!(read.runAt <= at && at < read.runEnd)) {
+		read.runAt = at;
+		read.runEnd = at;
+		while (src.charCodeAt(read.runEnd) === 0x24) read.runEnd++;
+	}
+	const run = read.runEnd - at;
+	if (run >= 4 && !isEscapedAt(src, at)) {
+		// An empty equation for each four, as findDollarMathAt reads them in
+		// turn, from the first and then from the end of each, each time
+		// counting the rest of the run, so a long one took time in its square
+		const end = at + run - run % 4;
+		if (!silent) read.zones.push({ start: read.from + at, end: read.from + end });
+		state.pos = end;
+		return true;
+	}
+	const match = findDollarMathAt(src, at, DOCX_DOLLAR_MATH_OPTIONS);
+	if (match?.kind === 'math') {
+		if (!silent) read.zones.push({ start: read.from + match.start, end: read.from + match.end });
+		state.pos = match.end;
+		return true;
+	}
+	// A fence export writes as text
+	if (!silent && run >= 2 && !isEscapedAt(src, at)) read.zones.push({ start: read.from + at, end: read.from + src.length });
+	return false;
+}
+
+/** Adds to `read`'s zones each equation export reads in the text of `text`
+ *  from `start` to `end`, which it reads on its own, and the rest of that
+ *  text after a fence that opens none */
+function readEquations(text: string, start: number, end: number, read: EquationRead): void {
+	read.from = start;
+	read.inert.clear();
+	read.runAt = read.runEnd = -1;
+	const { critic } = read;
+	while (read.nextCritic < critic.length && critic[read.nextCritic].end <= start) read.nextCritic++;
+	for (let k = read.nextCritic; k < critic.length && critic[k].start < end; k++) {
+		read.inert.set(Math.max(critic[k].start, start) - start, Math.min(critic[k].end, end) - start);
+	}
+	equationReader.inline.parse(text.slice(start, end), equationReader, read, []);
 }
 
 /** `units`, sorted, none in another, with each that a span of `spans`,
