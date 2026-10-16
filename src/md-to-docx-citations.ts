@@ -1247,8 +1247,8 @@ export function generateBibliographyXml(
  * form adds a warning to `warnings`; the converter drops duplicate warnings.
  * In `display` math a \tag is Word's equation number.
  */
-function equationOmml(latex: string, warnings?: string[], display = false): string {
-  return latexToOmml(latex, unknownCommandWarning(warnings), display);
+function equationOmml(latex: string, warnings?: string[], display = false, numberBlank = false): string {
+  return latexToOmml(latex, unknownCommandWarning(warnings), display, numberBlank);
 }
 
 function unknownCommandWarning(warnings?: string[]): ((command: string) => void) | undefined {
@@ -1343,8 +1343,8 @@ function equationViewLatex(parts: CriticMathPart[], accepted: boolean): string {
  *  only whitespace, as {++ ++} accepted is, is a run of it, where equationOmml
  *  gives nothing, as for an empty equation. Word keeps it with
  *  xml:space="preserve", which a space such as an em space doesn't need. */
-function equationViewOmml(latex: string, warnings?: string[], numbered = false): string {
-  if (!latex || latex.trim()) return equationOmml(latex, warnings, numbered);
+function equationViewOmml(latex: string, warnings?: string[], numbered = false, numberBlank = false): string {
+  if (!latex || latex.trim()) return equationOmml(latex, warnings, numbered, numberBlank);
   return '<m:r>' + (/^[ \t\r\n]+$/.test(latex) ? '<m:t xml:space="preserve">' : '<m:t>') + latex + '</m:t></m:r>';
 }
 
@@ -1367,6 +1367,16 @@ function joinedRuns(omml: string): string {
  * accepted, and rejected. Word tracks runs, so a span that holds syntax
  * rather than math doesn't, as in a{++&++}b in a matrix, x{++^2++},
  * \sum{++\limits++} or {++\frac++}{1}{2}.
+ *
+ * A change that is all of a row before its \tag, as in {--E--} \tag{1},
+ * leaves the row of that view showing nothing, whose number export drops,
+ * as of an equation of a \tag alone. In place, Word holds the number out of
+ * the change, in the row, which import reads back as the \tag after the
+ * change, and the view keeps it, as LaTeX shows the tag of an empty row. So
+ * the view may have the number there too (see numberBlank in latexToOmml).
+ * Without that, the equation was recorded as replaced, its number in the
+ * deleted one, and import wrote the \tag in the deletion, which export then
+ * dropped.
  */
 function tracksInPlace(latex: string, parts: CriticMathPart[], numbered: boolean): boolean {
   const omml = trackedLatexToOmml(latex, (element, content) => '<' + element + '>' + content + '</' + element + '>', undefined, numbered)
@@ -1375,7 +1385,12 @@ function tracksInPlace(latex: string, parts: CriticMathPart[], numbered: boolean
     const [keep, drop] = accepted ? ['w:ins', 'w:del'] : ['w:del', 'w:ins'];
     return omml.replace(new RegExp('<' + drop + '>[\\s\\S]*?</' + drop + '>', 'g'), '').replace(new RegExp('</?' + keep + '>', 'g'), '');
   };
-  return [true, false].every(accepted => joinedRuns(view(accepted)) === joinedRuns(equationViewOmml(equationViewLatex(parts, accepted), undefined, numbered)));
+  return [true, false].every(accepted => {
+    const tracked = joinedRuns(view(accepted));
+    const viewLatex = equationViewLatex(parts, accepted);
+    return tracked === joinedRuns(equationViewOmml(viewLatex, undefined, numbered))
+      || numbered && tracked === joinedRuns(equationViewOmml(viewLatex, undefined, true, true));
+  });
 }
 
 /**

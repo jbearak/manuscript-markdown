@@ -427,6 +427,9 @@ class Parser {
   private track?: TrackChange;
   /** Whether a \tag becomes Word's equation number, as in display math */
   numbered = false;
+  /** Whether a row with a \tag that shows nothing takes its number too (see
+   *  latexToOmml) */
+  numbersBlank = false;
   /** The last \tag read and not yet written as a row's number */
   private tag?: EquationTag;
 
@@ -1461,13 +1464,14 @@ class Parser {
   /**
    * Word's number for a row ending here, `row`, from the tag read in it, if
    * rows are numbered. A row with nothing to number drops it, as before, as
-   * import reads a # with nothing before it as no number.
+   * import reads a # with nothing before it as no number, but where it's
+   * numbersBlank.
    */
   private rowNumber(numberRows: boolean, row: string): string {
     if (!numberRows || !this.numbered || !this.tag) return '';
     const tag = this.tag;
     this.tag = undefined;
-    return shows(row) ? equationNumberOmml(tag) : '';
+    return shows(row) || this.numbersBlank ? equationNumberOmml(tag) : '';
   }
 
   /**
@@ -1478,7 +1482,7 @@ class Parser {
   numberedEquation(omml: string): string {
     const tag = this.tag;
     this.tag = undefined;
-    if (!this.numbered || !tag || !shows(omml)) return omml;
+    if (!this.numbered || !tag || !shows(omml) && !this.numbersBlank) return omml;
     return '<m:eqArr><m:e>' + omml + equationNumberOmml(tag) + '</m:e></m:eqArr>';
   }
 
@@ -1553,9 +1557,14 @@ class Parser {
 /**
  * Convert a LaTeX math string to OMML XML string. `onUnknownCommand` hears
  * each command or environment that has no OMML form and is exported as
- * literal text. In `display` math a \tag is Word's equation number.
+ * literal text. In `display` math a \tag is Word's equation number. With
+ * `numberBlank`, a row with a \tag that shows nothing has its number too, as
+ * LaTeX shows the tag of an empty row: the view, accepted or rejected, of an
+ * equation whose tracked change was all of that row, which Word holds with
+ * the number outside the change (see tracksInPlace in
+ * md-to-docx-citations.ts).
  */
-export function latexToOmml(latex: string, onUnknownCommand?: (command: string) => void, display = false): string {
+export function latexToOmml(latex: string, onUnknownCommand?: (command: string) => void, display = false, numberBlank = false): string {
   if (!latex.trim()) {
     return '';
   }
@@ -1563,6 +1572,7 @@ export function latexToOmml(latex: string, onUnknownCommand?: (command: string) 
   const tokens = tokenize(latex);
   const parser = new Parser(tokens, onUnknownCommand, 'math');
   parser.numbered = display;
+  parser.numbersBlank = numberBlank;
   return parser.numberedEquation(parser.parseExpression(false));
 }
 
