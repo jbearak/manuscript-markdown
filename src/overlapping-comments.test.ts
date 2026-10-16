@@ -602,6 +602,60 @@ describe('Overlapping comments: round-trip', () => {
   });
 });
 
+describe('Overlapping comments: IDs over trips', () => {
+  const F = '$' + '$';
+  const display = F + '\nx\n' + F;
+  const pair = '{#1}x {#2}y{/1} z{/2}\n{#1>>p<<}\n{#2>>q<<}';
+  const equationAfterInline = '{==x==}{>>c1<<}\n\n{#1}' + display + '{/1}\n{#1>>c2<<}';
+
+  /** The Markdown of each of three trips through Word from `md` */
+  async function trips(md: string): Promise<string[]> {
+    const back: string[] = [];
+    for (let k = 0; k < 3; k++) {
+      md = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '').trim();
+      back.push(md);
+    }
+    return back;
+  }
+
+  // Import gave a comment it writes inline, whose ID doesn't show, the next
+  // free number, which could be the one export had named a comment after it
+  // with. That one, written with its ID, then took the number after.
+  test.each([
+    ['a highlighted, commented display equation after a comment written inline', '{#a}x{/a}{#a>>c1<<}\n\n{==' + display + '==}{>>c2<<}', equationAfterInline],
+    ['that equation as the first trip writes it', equationAfterInline, equationAfterInline],
+    ['an equation\'s comment after two written inline', '{==a==}{>>c1<<} and {==b==}{>>c2<<}\n\n{#1}' + display + '{/1}\n{#1>>c3<<}', ''],
+    ['overlapping comments after one written inline', '{==a==}{>>c1<<}\n\n' + pair, ''],
+    ['a comment over an HTML comment after one written inline', '{==a==}{>>c1<<}\n\n{#1}x <!-- h --> y{/1}\n{#1>>k<<}', ''],
+    ['overlapping comments after one written inline in a table', '| a | b |\n| --- | --- |\n| {==c==}{>>k<<} | d |\n\n' + pair, ''],
+    ['overlapping comments in a note after one written inline in the text', 'x[^1] {==a==}{>>c1<<}\n\n[^1]: {#1}n {#2}m{/1} o{/2}\n    {#1>>p<<}\n    {#2>>q<<}', ''],
+    // Guards
+    ['plain ID comments, which import writes inline', '{#1}x{/1}{#1>>c1<<} and {#2}y{/2}{#2>>c2<<}', '{==x==}{>>c1<<} and {==y==}{>>c2<<}'],
+    ['comments written inline only', '{==a==}{>>c1<<} and {==b==}{>>c2<<}{>>reply<<}', ''],
+    ['overlapping comments only', pair, ''],
+    ['an equation\'s comment before one written inline', '{#1}' + display + '{/1}\n{#1>>c2<<}\n\n{==a==}{>>c1<<}', ''],
+    ['an equation\'s comment with a name', '{#a}' + display + '{/a}\n{#a>>e<<}', ''],
+  ])('keep their IDs from one trip to the next: %s', async (_name, md, first) => {
+    const [once, twice, thrice] = await trips(md);
+    expect(once).toBe(first || md);
+    expect(twice).toBe(once);
+    expect(thrice).toBe(once);
+  });
+
+  test('comments export named keep their names after comments added in Word', () => {
+    const comments = new Map([
+      ['7', { author: 'bob', text: 'added', date: '' }],
+      ['8', { author: 'bob', text: 'added too', date: '' }],
+      ['0', { author: 'alice', text: 'one', date: '' }],
+      ['1', { author: 'alice', text: 'two', date: '' }],
+    ]);
+    const text = (t: string, ids: string[]) => ({ type: 'text' as const, text: t, commentIds: new Set(ids), formatting: DEFAULT_FORMATTING });
+    const content = [text('A', ['7']), text('B', ['7', '8']), text(' and ', []), text('C', ['0']), text('D', ['0', '1'])];
+    const result = buildMarkdown(content, comments, { commentIdMapping: new Map([['0', '1'], ['1', '2']]) });
+    expect(result).toBe('{#3}A{#4}B{/3}{/4} and {#1}C{#2}D{/1}{/2}\n{#1>>@alice | one<<}\n{#2>>@alice | two<<}\n{#3>>@bob | added<<}\n{#4>>@bob | added too<<}');
+  });
+});
+
 describe('Overlapping comments: ranges that end together', () => {
   const F = '$' + '$';
   const bodies = '\n{#1>>one<<}\n{#2>>two<<}';
