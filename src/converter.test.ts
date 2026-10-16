@@ -16845,11 +16845,10 @@ describe('Display math\'s rows and the spaces at their edges', () => {
     expect(await roundTrip(back)).toBe(back);
   });
 
-  // Within an equation the space stays its character, and an equation of
-  // spaces alone is none
+  // Within an equation the space stays its character. An equation of a
+  // \quad alone is kept (see 'Math of spacing alone' below)
   test.each([
     ['a \\quad within an inline equation', 'A $a\\quad b$ C.', 'A $a' + em + ' b$ C.'],
-    ['an inline equation of a \\quad alone', 'A $\\quad$ C.', 'A  C.'],
   ])('writes %s as before', async (_name, md, expected) => {
     const back = await roundTrip(md);
     expect(back).toBe(expected);
@@ -16938,6 +16937,112 @@ describe('Display math\'s rows and the spaces at their edges', () => {
     const back = await roundTrip(md);
     expect(back).toBe(expected);
     expect(await allEquations(back)).toEqual(await allEquations(md));
+    expect(await roundTrip(back)).toBe(back);
+  });
+});
+
+// An equation or a part of one that's only spacing commands' spaces, as an
+// em space for \quad, came back as nothing, as spaces alone, which Word
+// shows: no equation, an empty row or cell, or x^{}. They come back as the
+// commands, as at a part's edge (see trimPart in omml.ts)
+describe('Math of spacing alone', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const fence = '$' + '$';
+  const em = '\u2003';
+  const run = (text: string) => '<m:r><m:t>' + text + '</m:t></m:r>';
+  const x = run('x');
+
+  /** Each equation of the document and its notes */
+  const equations = async (md: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const parts = await Promise.all(['word/document.xml', 'word/footnotes.xml'].map(async name => await zip.file(name)?.async('string') ?? ''));
+    return parts.flatMap(xml => xml.match(/<m:oMath>[\s\S]*?<\/m:oMath>/g) ?? []);
+  };
+
+  /** A document from Word with `md`'s equation as `omml` */
+  const wordDocx = async (omml: string, md: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  /** `md` comes back as it is, with the same equations in Word */
+  const expectKept = async (md: string) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(md);
+    const omml = await equations(md);
+    expect(omml.length).toBeGreaterThan(0);
+    expect(await equations(back)).toEqual(omml);
+  };
+
+  test.each([
+    ['an inline equation of \\quad', 'A $\\quad$ C.'],
+    ['an inline equation of \\qquad', 'A $\\qquad$ C.'],
+    ['an inline equation of \\,', 'A $\\,$ C.'],
+    ['an inline equation of \\;', 'A $\\;$ C.'],
+    ['an inline equation of \\:', 'A $\\:$ C.'],
+    ['display math of \\quad', fence + '\n\\quad\n' + fence],
+    ['display math of \\,', fence + '\n\\,\n' + fence],
+    ['a numerator of \\quad', 'A $\\frac{\\quad}{2}$ C.'],
+    ['a superscript of \\quad', 'A $x^\\quad$ C.'],
+    ['a superscript of \\quad, before a letter', 'A $x^\\quad y$ C.'],
+    ['a subscript\'s base of \\quad', 'A $\\quad_x$ C.'],
+    ['a radicand of \\quad', 'A $\\sqrt{\\quad}$ C.'],
+    ['a root\'s degree of \\quad', 'A $\\sqrt[\\quad]{x}$ C.'],
+    ['an accent\'s base of \\quad', 'A $\\hat{\\quad}$ C.'],
+    ['a matrix\'s cell of \\quad', 'A $\\begin{matrix} x & \\quad \\end{matrix}$ C.'],
+    ['a row of \\quad', fence + '\n\\begin{gathered}\nx \\\\\n\\quad \\\\\ny\n\\end{gathered}\n' + fence],
+    ['braces of \\quad', 'A $\\left\\{\\quad\\right\\}$ C.'],
+    ['an inline equation of \\quad in a table cell', '| h |\n| --- |\n| $\\quad$ |'],
+    ['an inline equation of \\quad in a note', 'a[^1]\n\n[^1]: N $\\quad$ M.'],
+    ['an inline equation of \\quad in a highlight', 'A ==$\\quad$== C.'],
+    // After a dollar amount, and after a dollar sign of text
+    ['an inline equation of \\quad after a dollar amount', 'Cost $2 and $\\quad$ C.'],
+    ['an inline equation of \\quad after a dollar sign', 'Cost \\$' + '$\\quad$ C.'],
+  ])('keeps %s', async (_name, md) => {
+    await expectKept(md);
+  });
+
+  test.each([
+    ['an inline equation of an em space', 'A $y$ C.', run(em), 'A $\\quad$ C.'],
+    ['an inline equation of two em spaces', 'A $y$ C.', run(em + em), 'A $\\qquad$ C.'],
+    ['an inline equation of a thin space', 'A $y$ C.', run('\u2009'), 'A $\\,$ C.'],
+    ['display math of an em space', fence + '\ny\n' + fence, run(em), fence + '\n\\quad\n' + fence],
+    ['a row of an em space', fence + '\ny\n' + fence, '<m:eqArr><m:e>' + x + '</m:e><m:e>' + run(em) + '</m:e><m:e>' + x + '</m:e></m:eqArr>', fence + '\n\\begin{gathered}\nx \\\\\n\\quad \\\\\nx\n\\end{gathered}\n' + fence],
+    ['a numerator of an em space', 'A $y$ C.', '<m:f><m:num>' + run(em) + '</m:num><m:den>' + run('2') + '</m:den></m:f>', 'A $\\frac{\\quad}{2}$ C.'],
+    ['a superscript of an em space', 'A $y$ C.', '<m:sSup><m:e>' + x + '</m:e><m:sup>' + run(em) + '</m:sup></m:sSup>', 'A $x^\\quad$ C.'],
+    ['a radicand of an em space', 'A $y$ C.', '<m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/><m:e>' + run(em) + '</m:e></m:rad>', 'A $\\sqrt{\\quad}$ C.'],
+    ['a root\'s degree of an em space', 'A $y$ C.', '<m:rad><m:deg>' + run(em) + '</m:deg><m:e>' + x + '</m:e></m:rad>', 'A $\\sqrt[\\quad]{x}$ C.'],
+    ['an accent\'s base of an em space', 'A $y$ C.', '<m:acc><m:e>' + run(em) + '</m:e></m:acc>', 'A $\\hat{\\quad}$ C.'],
+    ['a matrix\'s cell of an em space', 'A $y$ C.', '<m:m><m:mr><m:e>' + x + '</m:e><m:e>' + run(em) + '</m:e></m:mr></m:m>', 'A $\\begin{matrix} x & \\quad \\end{matrix}$ C.'],
+    ['an n-ary operator\'s body of an em space', 'A $y$ C.', '<m:nary><m:naryPr><m:chr m:val="\u2211"/></m:naryPr><m:sub>' + x + '</m:sub><m:sup/><m:e>' + run(em) + '</m:e></m:nary>' + x, 'A $\\sum_x\\quad x$ C.'],
+    ['braces of an em space', 'A $y$ C.', '<m:d><m:dPr><m:begChr m:val="{"/><m:endChr m:val="}"/></m:dPr><m:e>' + run(em) + '</m:e></m:d>', 'A $\\left\\{\\quad\\right\\}$ C.'],
+    // Brackets export writes as text, so the space between them is within
+    // the equation, where import writes its character
+    ['parentheses of an em space', 'A $y$ C.', '<m:d><m:e>' + run(em) + '</m:e></m:d>', 'A $(' + em + ')$ C.'],
+    ['brackets of two em spaces', 'A $y$ C.', '<m:d><m:dPr><m:begChr m:val="["/><m:endChr m:val="]"/></m:dPr><m:e>' + run(em + em) + '</m:e></m:d>', 'A $[' + em + em + ']$ C.'],
+  ])('keeps %s from Word', async (_name, base, omml, md) => {
+    const back = strip((await convertDocx(await wordDocx(omml, base + '\n'))).markdown);
+    expect(back).toBe(md);
+    await expectKept(md);
+  });
+
+  // As on main: a space LaTeX ignores, or a control space, which export
+  // writes as one, is no equation alone, and ~ exports as itself
+  test.each([
+    ['an inline equation of a space', 'A $ $ C.', 'A  C.'],
+    ['an inline equation of a control space', 'A $\\ $ C.', 'A  C.'],
+    ['display math of a control space', fence + '\n\\ \n' + fence, ''],
+    ['an inline equation of ~', 'A $~$ C.', 'A $~$ C.'],
+    ['a \\quad after a number', 'A $2\\quad$ C.', 'A $2\\quad$ C.'],
+    ['a \\quad before a number', 'A $\\quad 2$ C.', 'A $\\quad 2$ C.'],
+    ['a \\quad within an equation', 'A $a\\quad b$ C.', 'A $a' + em + ' b$ C.'],
+    ['an insertion of a \\quad', 'A $x{++\\quad++}y$ C.', 'A $x{++' + em + '++}y$ C.'],
+  ])('writes %s as before', async (_name, md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
     expect(await roundTrip(back)).toBe(back);
   });
 });
