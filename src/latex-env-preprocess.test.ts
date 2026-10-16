@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { wrapBareLatexEnvironments, wrapBareLatexEnvironmentsWithLines, DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
+import { wrapBareLatexEnvironments, wrapBareLatexEnvironmentsWithLines, DISPLAY_MATH_ENVIRONMENTS, equationZones } from './latex-env-preprocess';
 import { fastestRun } from './test-timing';
 import JSZip from 'jszip';
 import { convertMdToDocx } from './md-to-docx';
@@ -269,6 +269,7 @@ describe('a stray fence of two dollar signs before display math', () => {
 		['in an HTML comment', '<!-- ' + D + ' -->\n'],
 		['in an HTML comment in a paragraph', 'Text <!-- ' + D + ' --> more.\n'],
 		['in a line of text', 'A ' + D + ' sign.\n'],
+		['in a URL', 'See http://x.org/' + D + ' here.\n'],
 		['in a heading', '# Cost ' + D + '\n'],
 		['in a list item', '- a ' + D + '\n'],
 		['in a quote', '> a ' + D + '\n'],
@@ -542,6 +543,87 @@ describe('equations in a highlight, an image\'s alt and a citation around a bare
 	});
 });
 
+describe('a citation\'s prefix, a highlight in a link and CriticMarkup around a bare environment, as export reads them', () => {
+	const D = '$' + '$';
+	const aligned = '\\begin{aligned}\na &= b\n\\end{aligned}';
+	const wordXml = async (md: string) => {
+		const { docx } = await convertMdToDocx(md);
+		return (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+	};
+	const wordText = (xml: string) => [...xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '').matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join('');
+
+	// Export reads no citation where the parse of its prefix holds a token
+	// but text, as an equation, a highlight, CriticMarkup or a comment's
+	// range, nor a substitution without its ~>, and in a link's text, at a
+	// link level of one, no URL. The read took each for one, and the display
+	// math in it, read on past the citation's ], or the substitution's ~~},
+	// or into the URL, for its text, so its environment, out of each zone,
+	// was wrapped again: Word got the environment as text and an empty
+	// equation
+	test.each([
+		['an equation in a citation\'s prefix', '[see $x$ @ref, '],
+		['a comment\'s range in a citation\'s prefix', '[{/c1} @ref, '],
+		['the start of a comment\'s range in a citation\'s prefix', '[{#c1} @ref, '],
+		['a highlight in a citation\'s prefix', '[==a== @ref, '],
+		['CriticMarkup in a citation\'s prefix', '[{++a++} @ref, '],
+	])('leaves an environment in display math after %s as it is, as before', async (_name, before) => {
+		const md = before + D + '\nx]\n' + aligned + '\n' + D + '\n';
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const xml = await wordXml(md);
+		expect(wordText(xml)).not.toContain('begin{aligned}');
+		expect([...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].every(m => /<m:t[^>]*>[^<]*\S/.test(m[1]))).toBe(true);
+	});
+
+	test.each([
+		['a URL in a highlight in a link\'s text', '[==http://x.org/' + D + '\n' + aligned + '\n' + D + '==](u)\n'],
+		['a substitution without its ~>', '{~~a ' + D + ' b~~}\n' + aligned + '\n' + D + '\n'],
+	])('leaves an environment in display math from %s as it is, as before', async (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const xml = await wordXml(md);
+		expect(wordText(xml)).not.toContain('begin{aligned}');
+		expect([...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].every(m => /<m:t[^>]*>[^<]*\S/.test(m[1]))).toBe(true);
+	});
+
+	// A URL linkify reads in a line of text holds the fence, which so opens no
+	// equation, and the later fence none either, so the environment between
+	// them, which main left in the zone it paired them in, is wrapped
+	test('wraps an environment after a URL with a fence in it', async () => {
+		const md = '[see http://x.org/' + D + '\n\\begin{equation}\nx\n\\end{equation}\n' + D + ' c\n';
+		expect(wrapBareLatexEnvironments(md)).toContain(D + '\\begin{equation}\nx\n\\end{equation}' + D);
+		const xml = await wordXml(md);
+		expect(wordText(xml)).not.toContain('begin{equation}');
+		expect([...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].every(m => /<m:t[^>]*>[^<]*\S/.test(m[1]))).toBe(true);
+	});
+
+	// A CriticMarkup span's line end is a placeholder to export's parse, no
+	// space, as the math rule reads $5 before one, where it reads an
+	// equation, and before the line end no equation, for a sum of money.
+	// Where the read of the text leaves the span's line end out of the
+	// CriticMarkup it reads, as in a citation's key, an autolink, a link's
+	// destination or an equation, it reads the text as main did, with its
+	// fences paired, and no equation in it
+	test.each([
+		['in a citation\'s key', '[@{++]$5\n++}$\n'],
+		['in an autolink', '<http://x/{++>$5\n++}$\n'],
+		['in a link\'s destination', '[a](x/{++)$5\n++}$\n'],
+		['in an equation', 'a $x {++b\nc++} y$ d\n'],
+	])('reads a text with a CriticMarkup span\'s line end %s as main did', (_name, md) => {
+		expect(equationZones(md)).toEqual({ equations: [], fallbacks: [{ start: 0, end: md.length }] });
+	});
+
+	test.each([
+		['an insertion', '$a$ {++b\nc++} $d$\n'],
+		['a comment', '$a$ {>>b\n\nc<<} $d$\n'],
+		['an insertion in a link\'s text', '$a$ [{++b\nc++}](u) $d$\n'],
+		['an insertion in a highlight', '$a$ =={++b\nc++}== $d$\n'],
+		['an insertion in an image\'s alt', '$a$ ![{++b\nc++}](x.png) $d$\n'],
+	])('reads the equations around %s over lines, which it reads as CriticMarkup', (_name, md) => {
+		const { equations, fallbacks } = equationZones(md);
+		expect(fallbacks).toEqual([]);
+		expect(equations.map(e => md.slice(e.start, e.end))).toEqual(['$a$', '$d$']);
+	});
+});
+
 describe('wrapBareLatexEnvironments with stray fences in time linear in the text', () => {
 	const D = '$' + '$';
 	const env = '\\begin{equation}\nx\n\\end{equation}\n\n';
@@ -569,12 +651,34 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		['images with equations in their alts in one paragraph', '![$x$](x.png) ', 0],
 		['citations with equations in one paragraph', '[see @a, $x$] ', 0],
 		['citations with fences in one paragraph', '[@a, ' + D + '] ', 0],
+		['notes\' references without their ends in one paragraph', '[^a $ ', 0],
+		['comments\' ranges without their ends in one paragraph', '{#a $ ', 0],
+		['the ends of comments\' ranges without their ends in one paragraph', '{/a $ ', 0],
+		['comments with ids without their ends in one paragraph', '{#a>> $ ', 0],
+		['highlights in links in one paragraph', '[==a $x$==](u) ', 0],
+		['CriticMarkup spans over lines in one paragraph', '{++a\nb++} $x$ ', 0],
+		['CriticMarkup spans over lines in citations\' keys in one paragraph', '[@{++]$5\n++} ', 0],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		const count = (text: string) => wrapBareLatexEnvironments(text).split(D + '\\begin').length - 1;
 		expect(count(unit.repeat(2))).toBe(wrapped * 2);
 		const time = (n: number) => {
 			const text = unit.repeat(n);
 			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text + '\n\n' + env));
+		};
+		time(4000);
+		const small = time(4000);
+		expect(time(16000) / small).toBeLessThan(8);
+	}, 60000);
+
+	// Each alt was parsed in the image rule, and read again on its own, so
+	// an alt in an alt was read again for each image around it
+	test.each([
+		['images', '![', '](x.png)'],
+		['highlights in links', '[==a ', '==](u)'],
+	])('wraps a text of %s nested in each other', (_name, open, close) => {
+		const time = (n: number) => {
+			const text = open.repeat(n) + '$x$' + close.repeat(n) + '\n\n' + env;
+			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text));
 		};
 		time(4000);
 		const small = time(4000);

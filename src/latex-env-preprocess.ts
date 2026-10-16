@@ -13,12 +13,13 @@
 
 import MarkdownIt from 'markdown-it';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
+import { computeLineStarts, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { exportsLiterally } from './html-blocks';
-import { criticCloserSearch } from './critic-markup';
+import { criticCloserSearch, criticCloserSearchOf, preprocessCriticMarkupWithLines } from './critic-markup';
 import { citationEnd } from './citation-syntax';
 import { highlightCloseAt } from './highlight-syntax';
-import { imagePathsWithSpaces } from './image-paths';
+import { imageRuleWithSpaces } from './image-paths';
+import { pushAll } from './arrays';
 import { linearInlineComments } from './inline-html-comments';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-delimiters';
 
@@ -50,8 +51,24 @@ export function computeInertZones(text: string): Zone[] {
 	return inertZonesAndLiteralHtml(text).zones;
 }
 
-/** The inert zones of `text`, and the HTML blocks export writes as text */
-function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Zone[] } {
+/** The equations step 4 of computeInertZones reads in `text`, as export
+ *  reads them, each as its zone, and the texts it reads as main did, for
+ *  the test that checks them against the equations of export's own parse */
+export function equationZones(text: string): EquationsFound {
+	const found: EquationsFound = { equations: [], fallbacks: [] };
+	inertZonesAndLiteralHtml(text, found);
+	return found;
+}
+
+interface EquationsFound {
+	equations: Zone[];
+	fallbacks: Zone[];
+}
+
+/** The inert zones of `text`, and the HTML blocks export writes as text,
+ *  with step 4's equations, and the texts it reads as main did, added to
+ *  `found`'s */
+function inertZonesAndLiteralHtml(text: string, found?: EquationsFound): { zones: Zone[]; literalHtml: Zone[] } {
 	const zones: Zone[] = [];
 
 	// 1. Code regions (fenced blocks + inline code spans), as export reads
@@ -60,7 +77,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	// export writes as text, as a <pre> or a <div>, but not one it reads
 	// tables from, in which it reads an environment as display math (see
 	// markWrappedLatexBlocks in md-to-docx.ts)
-	const { codeRegions, blockCodeRegions, htmlRegions, literalHtmlRegions, inlineBlocks } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally, inlineBlocks: true });
+	const { codeRegions, blockCodeRegions, htmlRegions, literalHtmlRegions, inlineBlocks, references } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally, inlineBlocks: true });
 	for (const r of codeRegions) {
 		zones.push({ start: r.start, end: r.end });
 	}
@@ -91,7 +108,6 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	// all of them at once, as each unclosed one searched the rest of the text.
 	// Not from an opener in a code block, which is the code's text: its zone
 	// hid an environment up to a later closer (see inCode)
-	const criticFrom = zones.length;
 	const closers = criticCloserSearch(text);
 	const cmMarkers: Array<{ open: string; close: string; nested?: boolean }> = [
 		{ open: '{++', close: '++}' },
@@ -140,8 +156,6 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 		}
 	}
 
-	const critic = mergeZones(zones.slice(criticFrom));
-
 	// 4. Each equation, display math and inline, whose environments are its
 	// own, as one in inline math over lines, as export reads it in the text
 	// markdown-it's inline parse reads on its own: a paragraph's or a
@@ -162,13 +176,18 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	// CriticMarkup, an equation or a line of text paired with the opening
 	// fence of display math after it, and the environment in that math, out
 	// of each zone, was wrapped again, as was each in display math after it.
-	// Each text with a dollar sign out of a code block is read once
+	// Each text with a dollar sign out of a code block is read once. Where
+	// export reads a CriticMarkup span's line end in it as a placeholder,
+	// and the read reads that line end out of CriticMarkup, the read can't
+	// tell export's equations, so the text's fences pair, as on main (see
+	// readEquations)
 	{
 		// Apart where they touch, as two list items' paragraphs
-		const units = joinedUnits(inlineBlocks.concat(htmlRegions).sort((a, b) => a.start - b.start), critic);
-		const read: EquationRead = { zones, critic, nextCritic: 0, from: 0, inert: new Map(), top: undefined, apart: [], runState: undefined, runAt: -1, runEnd: -1 };
+		const { units, breaks } = exportUnits(text, inlineBlocks, htmlRegions);
+		const read: EquationRead = { zones, found, references, from: 0, top: undefined, apart: [], critics: [], runState: undefined, runAt: -1, runEnd: -1 };
 		let code = 0;
 		let unit = 0;
+		let lineBreak = 0;
 		for (let at = text.indexOf('$'); at !== -1;) {
 			while (code < blockCodeRegions.length && blockCodeRegions[code].end <= at) code++;
 			if (code < blockCodeRegions.length && blockCodeRegions[code].start <= at) {
@@ -181,10 +200,13 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 			if (unit < units.length && units[unit].start <= at) ({ start, end } = units[unit]);
 			else {
 				start = text.lastIndexOf('\n', at - 1) + 1;
-				const lineBreak = text.indexOf('\n', at);
-				end = lineBreak === -1 ? text.length : lineBreak + 1;
+				const lineEnd = text.indexOf('\n', at);
+				end = lineEnd === -1 ? text.length : lineEnd + 1;
 			}
-			readEquations(text, start, end, read);
+			while (lineBreak < breaks.length && breaks[lineBreak] < start) lineBreak++;
+			const first = lineBreak;
+			while (lineBreak < breaks.length && breaks[lineBreak] < end) lineBreak++;
+			readEquations(text, start, end, read, breaks.slice(first, lineBreak));
 			at = text.indexOf('$', end);
 		}
 	}
@@ -192,80 +214,192 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	return { zones: mergeZones(zones), literalHtml: literalHtmlRegions };
 }
 
-/** What readEquations reads with: the zones it adds to, the CriticMarkup
- *  spans, sorted and merged, and the first that may reach the text it reads
- *  next, where that text starts, the spans in it, each end by where it
- *  starts in it, the state that reads that text, the highlights' texts in it
- *  to read on their own after it, and the run of dollar signs read last, and
- *  the state that read it */
+/** What readEquations reads with: the zones it adds to, with the equations
+ *  among them, and the texts it reads as main did, where a test asks for
+ *  those (see equationZones), the link definitions, which markdown-it's
+ *  link rule reads from its env, as export's reads the document's, where
+ *  the text read starts, the state that reads it, the texts in it to read
+ *  on their own after it, the CriticMarkup read in the text, and the run of
+ *  dollar signs read last, and the state that read it */
 interface EquationRead {
 	zones: Zone[];
-	critic: Zone[];
-	nextCritic: number;
+	found: EquationsFound | undefined;
+	references: Record<string, unknown> | undefined;
 	from: number;
-	inert: Map<number, number>;
 	top: StateInline | undefined;
-	apart: Zone[];
+	apart: Apart[];
+	critics: Zone[];
 	runState: StateInline | undefined;
 	runAt: number;
 	runEnd: number;
 }
 
+/** A text that export's parse reads on its own, as a highlight's or an
+ *  image's alt, and the link level it reads it at */
+interface Apart extends Zone {
+	linkLevel: number;
+}
+
+/** markdown-it's typing leaves out linkLevel, which its linkify rule reads */
+type LinkState = StateInline & { linkLevel: number };
+
 /** markdown-it with the inline rules of export's (see createMarkdownIt in
- *  md-to-docx.ts) that read past a dollar sign before its math rule can: an
- *  escape, a code span, raw HTML, an autolink, a link's or an image's
- *  destination and title, a URL linkify reads, a highlight, a citation, and
- *  CriticMarkup as the zones above have it, which comes first, as one may
- *  start a text that a span from before joins. And that math rule.
+ *  md-to-docx.ts) that read past a dollar sign before its math rule can, in
+ *  its order: an escape, a code span, raw HTML, an autolink, a link's or an
+ *  image's destination and title, a URL linkify reads, a comment's range,
+ *  a highlight, CriticMarkup, a note's reference and a citation. And that
+ *  math rule. Each pushes a token where export's does, as citationEnd reads
+ *  a citation's prefix as plain text only where its parse holds no token
+ *  but text, so a prefix with an equation in it is no citation's, as for
+ *  export, where the read took it for one, and the display math in it, read
+ *  on past the ], for the citation's text.
  *
  *  Only the state readEquations reads its text with records a zone, at
- *  offsets in that text: its tokens, a link's text's too, which markdown-it
- *  reads with that state, and the scans for a link's or an image's label in
- *  it. Not the parses of other texts, as an image's alt, which markdown-it
- *  parses as a text of its own with the same env, or a citation's first
- *  item, which citationEnd parses to see whether its prefix is plain text,
- *  nor citationEnd's scans ahead, in a state of their own: their offsets
- *  are in other texts, or their reading may not be the text's, and an alt's
- *  [0, 3) made a zone at the paragraph's start, over the environment there */
+ *  offsets in that text: its equations, a link's text's too, which
+ *  markdown-it reads with that state, and a fence that opens none there or
+ *  in its scans for a link's or an image's label. Not the parses of other
+ *  texts, as a citation's first item, which citationEnd parses to see
+ *  whether its prefix is plain text, nor citationEnd's scans ahead, in a
+ *  state of their own. A highlight's text and an image's alt, which export
+ *  parses as texts of their own, are read after the text, each on its own,
+ *  a highlight's at the link level it is at, an alt's at none, at their
+ *  offsets in the text. A reference link reads the document's link
+ *  definitions, as export's does */
 const equationReader = new MarkdownIt({ html: true, linkify: true });
 equationReader.linkify.set({ fuzzyLink: false });
 equationReader.linkify.add('//', null);
-equationReader.use(imagePathsWithSpaces);
 equationReader.use(linearInlineComments);
-equationReader.inline.ruler.before('text', 'inert', (state, silent) => {
-	const read = state.env as EquationRead;
-	// Its offsets are in the text read
-	if (state.src !== read.top?.src) return false;
-	const end = read.inert.get(state.pos);
-	if (end === undefined) return false;
-	if (!silent) state.pending += state.src.slice(state.pos, end);
+{
+	const image = imageRuleWithSpaces(equationReader);
+	// But for the parse of its alt, in a state of its own, which records no
+	// zone and whose tokens no rule here reads, as the read reads the alt on
+	// its own. With it, an alt in an alt was parsed again for each image
+	// around it, and read again for each, which took time in the cube of
+	// their depth
+	const parse = equationReader.inline.parse.bind(equationReader.inline);
+	let inImage = false;
+	equationReader.inline.parse = (src, md, env, tokens) => {
+		if (!inImage) parse(src, md, env, tokens);
+	};
+	equationReader.inline.ruler.at('image', (state, silent) => {
+		const start = state.pos;
+		const count = state.tokens.length;
+		const outer = inImage;
+		inImage = true;
+		let found: boolean;
+		try {
+			found = image(state, silent);
+		} finally {
+			inImage = outer;
+		}
+		if (!found) return false;
+		const read = state.env as EquationRead;
+		const token = state.tokens[state.tokens.length - 1];
+		if (!silent && state === read.top && state.tokens.length > count && token.type === 'image' && state.src.startsWith(token.content, start + 2)) {
+			read.apart.push({ start: read.from + start + 2, end: read.from + start + 2 + token.content.length, linkLevel: 0 });
+		}
+		return true;
+	});
+}
+// A comment's range, as {#c1} and {/c1}, or its text, as {#c1>>text<<},
+// as commentRangeRule in md-to-docx.ts reads it, and a CriticMarkup span,
+// as criticMarkupRule does. They start alike, so one rule reads both
+equationReader.inline.ruler.before('emphasis', 'critic', (state, silent) => {
+	const end = criticEnd(state, state.pos);
+	if (end === -1) return false;
+	if (!silent) {
+		state.push('critic_markup', '', 0);
+		const read = state.env as EquationRead;
+		if (state === read.top) read.critics.push({ start: read.from + state.pos, end: read.from + end });
+	}
 	state.pos = end;
 	return true;
 });
-// A highlight, whose text export reads on its own, so a dollar sign in it
-// opens or closes no equation out of it (see coloredHighlightRule in
-// md-to-docx.ts). A {color} after it holds no dollar sign
+// A highlight, whose text export reads on its own (see coloredHighlightRule
+// in md-to-docx.ts), so a dollar sign in it opens or closes no equation out
+// of it. A {color} after it holds no dollar sign
 equationReader.inline.ruler.before('emphasis', 'highlight', (state, silent) => {
 	const close = highlightCloseAt(state, state.pos);
 	if (close === -1) return false;
 	const read = state.env as EquationRead;
-	if (!silent && state === read.top) read.apart.push({ start: read.from + state.pos + 2, end: read.from + close });
+	if (!silent) {
+		state.push('mark_open', 'mark', 0);
+		if (state === read.top) read.apart.push({ start: read.from + state.pos + 2, end: read.from + close, linkLevel: (state as LinkState).linkLevel });
+	}
 	state.pos = close + 2;
+	return true;
+});
+// A note's reference, as footnoteRefRule in md-to-docx.ts reads it, which
+// in a scan for a link's label takes its [ alone. Its label is read to its
+// first character no label holds, where that rule reads to the first ] and
+// checks the label then, which reads the same ones
+equationReader.inline.ruler.before('emphasis', 'footnote_ref', (state, silent) => {
+	const { src, posMax: max } = state;
+	const start = state.pos;
+	if (start + 2 >= max || src.charCodeAt(start) !== 0x5B || src.charCodeAt(start + 1) !== 0x5E) return false;
+	let end = start + 2;
+	while (end < max && /[a-zA-Z0-9_-]/.test(src[end])) end++;
+	if (end === start + 2 || end >= max || src.charCodeAt(end) !== 0x5D) return false;
+	if (silent) {
+		state.pos = start + 1;
+		return true;
+	}
+	state.push('footnote_ref', '', 0);
+	state.pos = end + 1;
 	return true;
 });
 equationReader.inline.ruler.before('emphasis', 'citation', (state, silent) => {
 	if (state.pos + 2 >= state.posMax) return false;
 	const end = citationEnd(state, state.pos);
 	if (end === -1) return false;
-	if (!silent) state.pending += state.src.slice(state.pos, end + 1);
-	// Export reads no equation in it, and its text is the citation's, so
-	// display math with an environment in it is left as main left it, which
-	// paired its fences
-	if (!silent && state === (state.env as EquationRead).top) pairFences(state.src, state.pos + 1, end, state.env as EquationRead);
+	const read = state.env as EquationRead;
+	if (!silent) {
+		state.push('citation', '', 0);
+		// Export reads no equation in it, and its text is the citation's, so
+		// display math with an environment in it is left as main left it,
+		// which paired its fences
+		if (state === read.top) pairFences(state.src, state.pos + 1, end, read);
+	}
 	state.pos = end + 1;
 	return true;
 });
 equationReader.inline.ruler.before('emphasis', 'math', readMath);
+
+/** Where the comment's range or text, or the CriticMarkup span, that the {
+ *  at `start` in `state`'s text opens ends, past its closer, as export's
+ *  commentRangeRule and criticMarkupRule read them, or -1. A closer, of a
+ *  span or a comment's text, may be past posMax, as their search for it
+ *  reads the whole text. */
+function criticEnd(state: StateInline, start: number): number {
+	const { src, posMax: max } = state;
+	if (start >= max || src.charCodeAt(start) !== 0x7B) return -1;
+	const second = src[start + 1];
+	if (second === '#' || second === '/') {
+		let idEnd = start + 2;
+		while (idEnd < max && /[a-zA-Z0-9_-]/.test(src[idEnd])) idEnd++;
+		if (idEnd === start + 2) return -1;
+		if (second === '#' && idEnd + 1 < max && src[idEnd] === '>' && src[idEnd + 1] === '>') {
+			const close = criticCloserSearchOf(state).matching(idEnd + 2);
+			return close === -1 ? -1 : close + 3;
+		}
+		return idEnd < max && src[idEnd] === '}' ? idEnd + 1 : -1;
+	}
+	if (start + 3 >= max) return -1;
+	const marker = src.slice(start, start + 3);
+	const closer = CRITIC_CLOSERS.get(marker);
+	if (!closer) return -1;
+	const closers = criticCloserSearchOf(state);
+	const close = marker === '{>>' ? closers.matching(start + 3) : closers.next(closer, start + 3);
+	if (close === -1) return -1;
+	// A substitution's sides, with the ~> between them, before its closer
+	if (marker === '{~~') {
+		const separator = closers.next('~>', start + 3);
+		if (separator === -1 || separator >= close) return -1;
+	}
+	return close + closer.length;
+}
+
+const CRITIC_CLOSERS = new Map([['{++', '++}'], ['{--', '--}'], ['{~~', '~~}'], ['{==', '==}'], ['{>>', '<<}']]);
 
 /** Adds to `read`'s zones from each fence of two dollar signs in `src` from
  *  `start` to `end`, which no backslash escapes, to the next, as main paired
@@ -288,14 +422,13 @@ function pairFences(src: string, start: number, end: number, read: EquationRead)
 	if (open !== -1) read.zones.push({ start: read.from + open, end: read.from + end });
 }
 
-/** export's math rule (see mathRule in md-to-docx.ts). In the text read,
- *  it adds each equation it reads to the read's zones, and the rest of that
- *  text after a fence that opens none. In a scan for a label there, it adds
- *  display math, whose fences main paired too, and such a fence: with an
- *  environment after it wrapped, the scan would read an equation from it to
- *  the wrapped one's opening fence, and so no label, as of an image, whose
- *  alt markdown-it then reads in a text of its own. But not an inline
- *  equation, which main read as none */
+/** export's math rule (see mathRule in md-to-docx.ts), which pushes a
+ *  token for each equation it reads, as export's does. In the text read,
+ *  it adds each equation to the read's zones, and the rest of that text
+ *  after a fence that opens none, which a scan for a label there adds too:
+ *  with an environment after it wrapped, the scan would read an equation
+ *  from it to the wrapped one's opening fence, and so no label, as of an
+ *  image, whose alt markdown-it then reads in a text of its own */
 function readMath(state: StateInline, silent: boolean): boolean {
 	const src = state.src;
 	const at = state.pos;
@@ -315,13 +448,19 @@ function readMath(state: StateInline, silent: boolean): boolean {
 		// turn, from the first and then from the end of each, each time
 		// counting the rest of the run, so a long one took time in its square
 		const end = at + run - run % 4;
-		if (top) read.zones.push({ start: read.from + at, end: read.from + end });
+		if (!silent) {
+			state.push('math', '', 0);
+			if (top) addEquation(read, at, end);
+		}
 		state.pos = end;
 		return true;
 	}
 	const match = findDollarMathAt(src, at, DOCX_DOLLAR_MATH_OPTIONS);
 	if (match?.kind === 'math') {
-		if (top && (!silent || match.delimiterLength === 2)) read.zones.push({ start: read.from + match.start, end: read.from + match.end });
+		if (!silent) {
+			state.push('math', '', 0);
+			if (top) addEquation(read, match.start, match.end);
+		}
 		state.pos = match.end;
 		return true;
 	}
@@ -330,42 +469,89 @@ function readMath(state: StateInline, silent: boolean): boolean {
 	return false;
 }
 
-/** Adds to `read`'s zones each equation export reads in the text of `text`
- *  from `start` to `end`, which it reads on its own, and the rest of that
- *  text after a fence that opens none, and then so for each highlight's
- *  text in it */
-function readEquations(text: string, start: number, end: number, read: EquationRead): void {
-	read.from = start;
-	read.inert.clear();
-	const { critic } = read;
-	while (read.nextCritic < critic.length && critic[read.nextCritic].end <= start) read.nextCritic++;
-	for (let k = read.nextCritic; k < critic.length && critic[k].start < end; k++) {
-		read.inert.set(Math.max(critic[k].start, start) - start, Math.min(critic[k].end, end) - start);
-	}
-	const apart: Zone[] = [];
-	read.apart = apart;
-	// As inline.parse reads it, but for the rules after its tokens', which
-	// read none of its dollar signs
-	const state = new equationReader.inline.State(text.slice(start, end), equationReader, read, []);
-	read.top = state;
-	equationReader.inline.tokenize(state);
-	for (const span of apart) readEquations(text, span.start, span.end, read);
+/** Adds the equation from `start` to `end` in the text read to `read`'s
+ *  zones, and to its equations */
+function addEquation(read: EquationRead, start: number, end: number): void {
+	const zone = { start: read.from + start, end: read.from + end };
+	read.zones.push(zone);
+	read.found?.equations.push(zone);
 }
 
-/** `units`, sorted, none in another, with each that a span of `spans`,
- *  sorted and merged, reaches from before it joined to the one before it */
-function joinedUnits(units: Zone[], spans: Zone[]): Zone[] {
-	const joined: Zone[] = [];
-	let span = 0;
-	// The furthest end of the spans that start before the unit
-	let reach = -1;
-	for (const u of units) {
-		while (span < spans.length && spans[span].start < u.start) reach = Math.max(reach, spans[span++].end);
-		const last = joined[joined.length - 1];
-		if (last && reach > u.start) last.end = Math.max(last.end, u.end);
-		else joined.push({ start: u.start, end: u.end });
+/** Adds to `read`'s zones each equation export reads in the text of `text`
+ *  from `start` to `end`, which it reads on its own, and the rest of that
+ *  text after a fence that opens none, and then so for each text in it
+ *  that export reads on its own, in turn. But where a line end of
+ *  `breaks`, sorted, which export reads as a placeholder, is out of the
+ *  CriticMarkup read, as in a citation's key or a code span, the
+ *  placeholder is no space to the math rule, as in $5, a line end, and 6$,
+ *  which export reads as an equation, and the read of the text could tell
+ *  others than export's. There the text's fences pair, as on main */
+function readEquations(text: string, start: number, end: number, read: EquationRead, breaks: number[]): void {
+	const zoneCount = read.zones.length;
+	const equationCount = read.found?.equations.length ?? 0;
+	read.critics = [];
+	const texts: Apart[] = [{ start, end, linkLevel: 0 }];
+	for (let next = texts.pop(); next; next = texts.pop()) {
+		read.from = next.start;
+		read.apart = [];
+		// As inline.parse reads it, but for the rules after its tokens', which
+		// read none of its dollar signs
+		const state = new equationReader.inline.State(text.slice(next.start, next.end), equationReader, read, []);
+		(state as LinkState).linkLevel = next.linkLevel;
+		read.top = state;
+		equationReader.inline.tokenize(state);
+		pushAll(texts, read.apart);
 	}
-	return joined;
+	if (breaks.length === 0) return;
+	const critics = read.critics.sort((a, b) => a.start - b.start);
+	let critic = 0;
+	for (const lineBreak of breaks) {
+		while (critic < critics.length && critics[critic].end <= lineBreak) critic++;
+		if (critic < critics.length && critics[critic].start <= lineBreak) continue;
+		read.zones.length = zoneCount;
+		if (read.found) {
+			read.found.equations.length = equationCount;
+			read.found.fallbacks.push({ start, end });
+		}
+		read.from = 0;
+		pairFences(text, start, end, read);
+		return;
+	}
+}
+
+/** The lines of each paragraph, heading and HTML block of `text`, sorted,
+ *  as export's block parse reads them, after preprocessCriticMarkup puts the
+ *  line ends of each CriticMarkup span in placeholders, and those line
+ *  ends, sorted. A span over a blank line joins a paragraph to the next,
+ *  and one in a heading takes the lines it goes over into the heading, from
+ *  the paragraph after it. Those are `inlineBlocks` and `htmlRegions`,
+ *  which the block parse of `text` read, where no span has a line end in
+ *  it. Before, a span from one block into another joined the two, so the
+ *  read of a heading took in all of the paragraph after it */
+function exportUnits(text: string, inlineBlocks: Zone[], htmlRegions: Zone[]): { units: Zone[]; breaks: number[] } {
+	const sorted = (units: Zone[]) => units.sort((a, b) => a.start - b.start);
+	// Its line ends are \n alone, as preprocessCriticMarkup reads them
+	if (text.includes('\r')) return { units: sorted(inlineBlocks.concat(htmlRegions)), breaks: [] };
+	const { output, lines } = preprocessCriticMarkupWithLines(text);
+	if (output === text) return { units: sorted(inlineBlocks.concat(htmlRegions)), breaks: [] };
+	const regions = computeMarkdownRegions(output, { html: 'all', inlineBlocks: true });
+	// Where each line of the output starts, by its line, and where the line
+	// of `text` it comes from starts
+	const outputLines = new Map(computeLineStarts(output).map((start, line) => [start, line]));
+	const textStarts = computeLineStarts(text);
+	const inText = (offset: number) => {
+		const line = outputLines.get(offset);
+		return offset >= output.length || line === undefined ? text.length : textStarts[lines[line]] ?? text.length;
+	};
+	// The line end before each line of `text` that a line of the output
+	// goes on into, past its first
+	const breaks: number[] = [];
+	for (let line = 0; line + 1 < lines.length; line++) {
+		for (let joined = lines[line] + 1; joined < lines[line + 1]; joined++) {
+			if (joined < textStarts.length) breaks.push(textStarts[joined] - 1);
+		}
+	}
+	return { units: sorted(regions.inlineBlocks.concat(regions.htmlRegions).map(({ start, end }) => ({ start: inText(start), end: inText(end) }))), breaks };
 }
 
 /** `zones` sorted by start, with those that overlap or touch merged */

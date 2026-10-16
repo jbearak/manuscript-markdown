@@ -1200,7 +1200,9 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
-function createMarkdownIt(): MarkdownIt {
+/** markdown-it as export reads Markdown with it, which a test of the
+ *  equations latex-env-preprocess.ts reads parses with too */
+export function createMarkdownIt(): MarkdownIt {
   const md = new MarkdownIt({ html: true, linkify: true });
   // Match the VS Code preview, which links only URLs with a scheme. Fuzzy
   // matching would turn sd.ky or README.md into links to a country's TLD, and

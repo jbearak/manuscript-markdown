@@ -1,4 +1,5 @@
 import type MarkdownIt from 'markdown-it';
+import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import image from 'markdown-it/lib/rules_inline/image.mjs';
 
 /** Accept bare image paths with spaces after the standard image parser has
@@ -6,7 +7,13 @@ import image from 'markdown-it/lib/rules_inline/image.mjs';
  * Preview and Word export must install the same rule.
  */
 export function imagePathsWithSpaces(md: MarkdownIt): void {
-  md.inline.ruler.at('image', (state, silent) => {
+  md.inline.ruler.at('image', imageRuleWithSpaces(md));
+}
+
+/** The image rule imagePathsWithSpaces installs, for a parser that wraps it,
+ *  as the one latex-env-preprocess.ts reads equations with */
+export function imageRuleWithSpaces(md: MarkdownIt): (state: StateInline, silent: boolean) => boolean {
+  return (state, silent) => {
     const start = state.pos;
     if (image(state, silent)) {
       // An inline image's Markdown as written, which export keeps when it
@@ -75,5 +82,5 @@ export function imagePathsWithSpaces(md: MarkdownIt): void {
     }
     state.pos = pos + 1;
     return true;
-  });
+  };
 }
