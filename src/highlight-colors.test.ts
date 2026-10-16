@@ -381,3 +381,42 @@ describe('Editor decorations skip an escaped highlight opener', () => {
     expect((extractAllDecorationRanges(text, 'yellow').highlights.get('critic') ?? []).map(r => text.slice(r.start, r.end))).toEqual(['x']);
   });
 });
+
+// An == right after a { that an odd run of backslashes escapes opens a
+// highlight, as export and the preview read it: the { is text, as in
+// \{==x==\}, which import writes for Word's literal braces around a
+// highlight. One right after a { no odd run escapes opens none, as before
+describe('Editor decorations read an == after an escaped { as a highlight\'s opener', () => {
+  /** Each highlight's text in document order, after its key */
+  const highlights = (text: string, ranges: Map<string, Array<{ start: number; end: number }>>) =>
+    [...ranges.entries()]
+      .flatMap(([key, list]) => list.map(range => ({ key, range })))
+      .sort((a, b) => a.range.start - b.range.start)
+      .map(({ key, range }) => key + ': ' + text.slice(range.start, range.end));
+
+  it.each<[string, string, string[]]>([
+    ['an escaped { and } around a highlight', '\\{==x==\\}', ['yellow: ==x==']],
+    ['a highlight after three backslashes and a {', '\\\\\\{==x==\\}', ['yellow: ==x==']],
+    ['an escaped { and } around a highlight in text', 'a \\{==x==\\} b', ['yellow: ==x==']],
+    ['a colored highlight after an escaped {', 'a \\{==x=={red} b', ['red: ==x=={red}']],
+    ['a highlight after an escaped { without a closing brace', 'a \\{==x== b', ['yellow: ==x==']],
+    ['an escaped { and } around a highlight in an insertion', '{++a \\{==x==\\} b++}', ['yellow: ==x==']],
+    ['an escaped { and } around a highlight in a critic highlight', '{==a \\{==x==\\} b==}', ['critic: a \\{==x==\\} b', 'yellow: ==x==']],
+    ['an escaped critic highlight, whose == before a } closes none', 'a \\{==x==} b', []],
+    ['a critic highlight', 'a {==x==} b', ['critic: x']],
+    ['a critic highlight after an escaped backslash', 'a \\\\{==x==} b', ['critic: x']],
+    ['a highlight', 'a ==x== b', ['yellow: ==x==']],
+    ['an escaped opener', 'a \\==x== b', []],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(highlights(text, extractAllDecorationRanges(text, 'yellow').highlights)).toEqual(expected);
+    expect(highlights(text, extractHighlightRanges(text, 'yellow'))).toEqual(expected);
+  });
+
+  // Export reads a highlight there, its { text, but the preview none, and
+  // only a search past it for its ==} could tell the two apart
+  it('reads no highlight after a {== that no ==} closes, as the preview does', () => {
+    const text = 'a {==x== b';
+    expect(highlights(text, extractAllDecorationRanges(text, 'yellow').highlights)).toEqual([]);
+    expect(highlights(text, extractHighlightRanges(text, 'yellow'))).toEqual([]);
+  });
+});

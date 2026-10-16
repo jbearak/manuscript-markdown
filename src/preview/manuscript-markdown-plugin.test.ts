@@ -1530,6 +1530,44 @@ describe('A format highlight with a {== after its opening ==', () => {
   });
 });
 
+describe('A format highlight right after an escaped {', () => {
+  // An == right after a { that an odd run of backslashes escapes opens a
+  // highlight, as export reads it: the { is text, as in \{==x==\}, which
+  // import writes for Word's literal braces around a highlight. The preview
+  // read the { as a critic highlight's, which made the == none. One right
+  // after a { no odd run escapes opens none, as before
+  const hl = (text: string) => '<mark class="manuscript-markdown-format-highlight">' + text + '</mark>';
+  const critic = (text: string) => '<mark class="manuscript-markdown-highlight">' + text + '</mark>';
+  it.each([
+    ['\\{==x==\\}', '{' + hl('x') + '}', [['text', '{', false], ['text', 'x', true], ['text', '}', false]]],
+    ['\\\\\\{==x==\\}', '\\{' + hl('x') + '}', [['text', '\\{', false], ['text', 'x', true], ['text', '}', false]]],
+    ['a \\{==x==\\} b', 'a {' + hl('x') + '} b', [['text', 'a {', false], ['text', 'x', true], ['text', '} b', false]]],
+    ['a \\{==x=={red} b', 'a {<mark class="manuscript-markdown-format-highlight manuscript-markdown-highlight-red">x</mark> b',
+      [['text', 'a {', false], ['text', 'x', true], ['text', ' b', false]]],
+    ['a \\{==x== b', 'a {' + hl('x') + ' b', [['text', 'a {', false], ['text', 'x', true], ['text', ' b', false]]],
+    // An == right before a } closes none (see the tests of export)
+    ['a \\{==x==} b', 'a {==x==} b', [['text', 'a {==x==} b', false]]],
+    ['a {==x==} b', 'a ' + critic('x') + ' b', [['text', 'a ', false], ['critic_highlight', 'x', false], ['text', ' b', false]]],
+    ['a \\\\{==x==} b', 'a \\' + critic('x') + ' b', [['text', 'a \\', false], ['critic_highlight', 'x', false], ['text', ' b', false]]],
+    ['a ==x== b', 'a ' + hl('x') + ' b', [['text', 'a ', false], ['text', 'x', true], ['text', ' b', false]]],
+    ['a \\==x== b', 'a ==x== b', [['text', 'a ==x== b', false]]],
+  ])('%j shows as export reads it', (markdown, html, runs) => {
+    expect(renderWithPlugin(markdown, 'github').match(/<p>[\s\S]*<\/p>/)?.[0]).toBe('<p>' + html + '</p>');
+    expect(parseMd(markdown)[0].runs.map(run => [run.type, run.text, !!run.highlight])).toEqual(runs);
+  });
+
+  it('shows one in an insertion and in a critic highlight, as export writes it', () => {
+    expect(renderWithPlugin('{++a \\{==x==\\} b++}', 'github')).toContain('<ins class="manuscript-markdown-addition">a {' + hl('x') + '} b</ins>');
+    expect(renderWithPlugin('{==a \\{==x==\\} b==}', 'github')).toContain(critic('a {' + hl('x') + '} b'));
+  });
+
+  // Export reads a highlight there, its { text, but the editor none, and
+  // only a search past it for its ==} could tell the two apart
+  it('shows no highlight after a {== that no ==} closes, as the editor does', () => {
+    expect(renderWithPlugin('a {==x== b', 'github').match(/<p>[\s\S]*<\/p>/)?.[0]).toBe('<p>a {==x== b</p>');
+  });
+});
+
 // Highlight color properties
 describe('Property 2: Preview renders colored highlights with correct color class', () => {
   const colorIdGen = fc.constantFrom(...VALID_COLOR_IDS as string[]);

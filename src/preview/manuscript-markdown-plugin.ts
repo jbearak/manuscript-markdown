@@ -1513,8 +1513,11 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
     return false;
   }
 
-  // Check if preceded by { (to avoid matching CriticMarkup {==...==})
-  if (start > 0 && src.charCodeAt(start - 1) === 0x7B /* { */) {
+  // Check if preceded by { (to avoid matching CriticMarkup {==...==}), but
+  // for one an odd run of backslashes escapes, which is text, as export
+  // reads it: \{==x==\} is a {, the highlighted x and a }, which import
+  // writes for Word's literal braces around a highlight
+  if (opensCriticHighlight(src, start)) {
     return false;
   }
 

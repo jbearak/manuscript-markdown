@@ -12,7 +12,9 @@ import { isEscapedAt } from './math-delimiters';
 // - TextMate inline highlight regex: exclude = inside ==...== captures ([^}=]+) for
 //   multi-span tokenization
 // - An == after an odd run of backslashes opens no format highlight, as export and
-//   the preview read it; a closing == has no such check. Keep hlRe and
+//   the preview read it; a closing == has no such check. Nor does one right after a
+//   {, but for a { an odd run of backslashes escapes, as in \{==x==\}, which is a {,
+//   the highlighted x and a } to export and the preview. Keep hlRe and
 //   isBlockedPredecessor in step with combinedPattern in changes.ts and the grammar
 // - A { after an odd run of backslashes, whose last escapes it, opens no CriticMarkup,
 //   as export and the preview read it. Keep criticSpans, criticIn and
@@ -241,9 +243,9 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
   }
 
   // Colored highlights ==text=={color} and default highlights ==text==, none
-  // whose opening == an odd run of backslashes escapes (see combinedPattern
-  // in changes.ts)
-  const hlRe = /(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
+  // whose opening == an odd run of backslashes escapes or that comes right
+  // after a { no odd run escapes (see combinedPattern in changes.ts)
+  const hlRe = /(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?![}=])(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
   const formatIn = (part: string, offset: number) => {
     hlRe.lastIndex = 0;
     let m;
@@ -439,12 +441,13 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     if (!highlights.has(key)) highlights.set(key, []);
     highlights.get(key)!.push({ start, end });
   };
-  // An == after { or =, or after an odd run of backslashes, whose last
-  // escapes its first = (see hlRe), opens no format highlight
+  // An == after a { no odd run of backslashes escapes, or after =, or after
+  // an odd run of backslashes, whose last escapes its first = (see hlRe),
+  // opens no format highlight
   const isBlockedPredecessor = (index: number, boundEnd: number): boolean =>
     index > 0 &&
     index < boundEnd &&
-    (text.charCodeAt(index - 1) === 0x7B || text.charCodeAt(index - 1) === 0x3D || isEscapedAt(text, index));
+    ((text.charCodeAt(index - 1) === 0x7B && !isEscapedAt(text, index - 1)) || text.charCodeAt(index - 1) === 0x3D || isEscapedAt(text, index));
   const isBlockedSuccessor = (indexAfterClose: number, boundEnd: number): boolean => {
     if (indexAfterClose >= boundEnd) return false;
     const ch = text.charCodeAt(indexAfterClose);

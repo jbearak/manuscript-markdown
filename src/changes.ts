@@ -16,13 +16,18 @@ import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 // runs only where an == is. The grammar's patterns match the run of
 // backslashes instead: Oniguruma's lookbehind of no fixed length steps back to
 // the line's start at each == after an even run.
+// An == right after a { opens none either, as the preview reads it, but for
+// a { that an odd run of backslashes escapes, which is text to export and
+// the preview: \{==a==\} is a {, the highlighted a and a }, as import writes
+// Word's literal braces around a highlight. The lookbehind for that { comes
+// after the == too.
 // A { after an odd run of backslashes, whose last escapes it, opens no
 // CriticMarkup, as export and the preview read it (markdown-it's escape
 // rule): \{++a++} is text, \\{++a++} an insertion. The openers share one {,
 // with the lookbehind after it, so it runs only where a { is. The grammar's
 // escaped_brace and extractAllDecorationRanges in highlight-colors.ts read
 // the same.
-const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<![{=])==(?<!(?<!\\)(?:\\\\)*\\==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Version-keyed cache for navigation match results (single-document cache)
 let cachedUri: string | undefined;
