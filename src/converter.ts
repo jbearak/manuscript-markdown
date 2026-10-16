@@ -9977,39 +9977,47 @@ export function globallyOverlappingComments(items: ContentItem[]): Set<string> {
  *  from `firstIndex` among those buildMarkdown renders (`takesNoRanges`,
  *  see cellsTakeNoRanges), or of a table in one's cell, whose HTML shows the
  *  markers as text, and whose bodies, after the table, have no range; nor
- *  in a paragraph that starts with an HTML comment, but for a heading's or
- *  a cell's, which is an HTML block that shows them as text too (see
- *  beginsHtmlBlock), with its bodies after it. */
-function pointsAfterRanges(items: ContentItem[], takesNoRanges: (table: TableItem, index: number) => boolean, firstIndex = 0): string[] {
+ *  in an inline range that starts with an HTML comment, which is an HTML
+ *  block that shows them as text too, with its bodies after it (see
+ *  beginsHtmlBlock), but in a cell, or in a heading of the body (`headings`),
+ *  whose flag buildMarkdown passes, as a note's parts don't. An inline range
+ *  starts where buildMarkdown starts one, at the content's start and after
+ *  each item that ends one (see endsInlineRange), as a section's fence with
+ *  no paragraph after it, before a first paragraph that starts with an HTML
+ *  comment (see endSection). Not after a display equation, after whose
+ *  closing fence the paragraph goes on, on its line. The range starts with
+ *  the comment where only runs of spaces and tabs come before it, whatever
+ *  their changes, which may write nothing; after a tracked paragraph mark
+ *  joinTrackedParagraphBreaks put in the text, the next paragraph's text
+ *  goes on after the span's closer, on its line. After a section's fence or
+ *  the like, the paragraph is no heading, as one would start with a para
+ *  item. */
+function pointsAfterRanges(items: ContentItem[], takesNoRanges: (table: TableItem, index: number) => boolean, firstIndex = 0, headings = false): string[] {
   const points: string[] = [];
   let index = firstIndex;
   const visit = (list: ContentItem[], inTable: boolean, noRanges: boolean) => {
     let before: ContentItem | undefined;
     let inCodeBlock = false;
     let heading = false;
-    // Whether the paragraph has written nothing yet but whitespace, and
+    // Whether the inline range has written nothing yet but whitespace, and
     // whether it starts with an HTML comment, as an HTML block
     let atStart = true;
     let block = false;
     for (const item of list) {
-      if (item.type === 'para') {
-        inCodeBlock = !!item.isCodeBlock;
-        heading = !!item.headingLevel;
+      if (endsInlineRange(item)) {
+        heading = item.type === 'para' && !!item.headingLevel;
+        if (item.type === 'para') inCodeBlock = !!item.isCodeBlock;
         atStart = true;
         block = false;
         before = undefined;
-        continue;
-      }
-      if (item.type === 'table') {
+        if (item.type !== 'table') continue;
         const html = inTable ? noRanges || !gridHoldsTableShape(item.rows) : takesNoRanges(item, index++);
         for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true, html);
-        before = item;
-        atStart = false;
         continue;
       }
       if (atStart) {
-        if (item.type === 'html_comment') block = !heading && !inTable;
-        if (!(item.type === 'text' && !item.revision && item.commentIds.size === 0 && /^[ \t]*$/.test(item.text))) atStart = false;
+        if (item.type === 'html_comment') block = beginsHtmlBlock('', 0, { heading: headings && heading, cell: inTable });
+        if (!(item.type === 'text' && item.commentIds.size === 0 && /^[ \t]*$/.test(item.text))) atStart = false;
       }
       if (item.type === 'text' && item.text === '' && !item.revision && item.commentIds.size === 0) continue;
       const ranged = before && 'commentIds' in before && before.type !== 'html_comment' && !(before.type === 'math' && before.display)
@@ -15437,7 +15445,7 @@ function buildMarkdownOnce(
   // as they render
   let tablesBefore = 0;
   for (const items of [mergedContent, ...noteBodies.values()]) {
-    for (const id of pointsAfterRanges(items, takesNoRanges, tablesBefore)) forceIdCommentIds.add(id);
+    for (const id of pointsAfterRanges(items, takesNoRanges, tablesBefore, items === mergedContent)) forceIdCommentIds.add(id);
     for (const item of items) if (item.type === 'table') tablesBefore++;
   }
   // Over an HTML comment, a range takes ID syntax, as {#1}<!-- a -->{/1},

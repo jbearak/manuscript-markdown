@@ -511,6 +511,11 @@ describe('A comment on no text right after a range', () => {
     ['a list item that starts with an HTML comment', '- X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/document.xml', withoutX],
     ['a quote that starts with an HTML comment', '> X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/document.xml', withoutX],
     ['a note that starts with an HTML comment', 'T.[^1]\n\n[^1]: X<!-- h -->P ' + ranged + ' ' + two + ' Q', 'word/footnotes.xml', withoutX],
+    // Whose fence import puts right before the comment, with no paragraph
+    // between them
+    ['a landscape section\'s first paragraph that starts with an HTML comment', '<!-- landscape -->\n\nX<!-- h -->P ' + ranged + ' ' + two + ' Q\n\nR\n\n<!-- /landscape -->\n\nS', 'word/document.xml', withoutX],
+    ['a portrait section\'s first paragraph that starts with an HTML comment', '<!-- portrait -->\n\nX<!-- h -->P ' + ranged + ' ' + two + ' Q\n\nR\n\n<!-- /portrait -->\n\nS', 'word/document.xml', withoutX],
+    ['a landscape section\'s only paragraph that starts with an HTML comment', '<!-- landscape -->\n\nX<!-- h -->P ' + ranged + ' ' + two + ' Q\n\n<!-- /landscape -->', 'word/document.xml', withoutX],
   ])('writes Word\'s comment on no text at a range\'s end in %s as before, where export reads ID syntax as text', async (_name, md, part, edit) => {
     // ID syntax there went to Word as text, and the bodies after the table
     // or the paragraph, with no range, were lost on the next trip
