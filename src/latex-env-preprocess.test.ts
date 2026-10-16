@@ -1005,6 +1005,9 @@ describe('a bare environment in a quote, an alert or a list item', () => {
 		// the first one wrapped, Word got it and the second as text
 		['in a quote\'s paragraph with another that a code span\'s zone holds', '> P\n> \\begin{equation}\n> x = 1 % $\n> \\end{equation}\n> `\n> \\begin{equation}\n> y = 2 % $\n> \\end{equation}\n>\n> A ` b.\n'],
 		['in a quote\'s paragraph with a \\begin with no end', '> P\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> \\begin{equation}\n> y\n'],
+		// Whose empty equation import wrote as a line of the item's indent
+		// alone, which the next trip dropped
+		['with nothing in it after a wide marker', '10. a\n\n    \\begin{equation}\n    \\end{equation}\n    - item\n'],
 	])('leaves a bare environment %s as main leaves it', (_name, md) => {
 		expect(wrapBareLatexEnvironments(md)).toBe(md);
 	});

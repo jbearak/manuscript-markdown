@@ -1055,7 +1055,10 @@ const CONTAINED_BEGIN = /( {0,3})\\begin\{([a-zA-Z*]+)\}/y;
  *  paragraph, out of the zones of steps 1 to 3, `steps`. None where one
  *  isn't, nor where main finds one, nor where a line's prefix holds a tab:
  *  a paragraph's environments are wrapped together or not at all, as a
- *  dollar sign in one that stays text may pair with one in another */
+ *  dollar sign in one that stays text may pair with one in another. Nor
+ *  where one holds nothing but white space, whose empty equation import
+ *  writes as a line of the container's indent alone, which the next trip
+ *  drops */
 function containedEnvironments(text: string, paragraph: ContainedParagraph, endOf: (marker: string, from: number) => number, steps: Zone[]): BareEnvironment[] {
 	const { content } = paragraph;
 	const lines = paragraph.lines!;
@@ -1079,6 +1082,7 @@ function containedEnvironments(text: string, paragraph: ContainedParagraph, endO
 		if (at === -1 || at + marker.length > textEnd) return [];
 		const end = at + marker.length;
 		if (holdsEither({ start: begin, end: contentStart }, { start: at, end }, steps)) return [];
+		if (/^[\s>]*$/.test(text.slice(contentStart, at))) return [];
 		environments.push({ start: lineStart, indent: begin - lineStart, contentStart, contentEnd: at, end });
 	}
 	return environments;
