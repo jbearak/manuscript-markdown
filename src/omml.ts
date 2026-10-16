@@ -427,7 +427,7 @@ function translateMatrixAsEnv(matrixChildren: XmlNode[], envName: string): strin
   const rowStrings: string[] = [];
   for (const rowChildren of rows) {
     const cells = findAllChildren(rowChildren, 'm:e');
-    rowStrings.push(joinLatexParts(cells.map(cell => unbracedToLatex(cell)), ' & '));
+    rowStrings.push(joinLatexParts(cells.map(cell => inArrayRow(false, () => unbracedToLatex(cell))), ' & '));
   }
   return latexEnvironment(envName, rowStrings);
 }
@@ -522,8 +522,8 @@ type RunContext = 'math' | 'name';
  * - A bare run is math: symbols become commands, and ′ is ' at the base level
  *   and \prime in a script or limit (a raw ′ breaks pdflatex). Reserved
  *   characters stay as they are, since the export keeps math escapes such as
- *   \% and unknown commands as literal text, but for { and }, which take a
- *   backslash where the equation holds no LaTeX (see escapeBraces).
+ *   \% and unknown commands as literal text, but for { } _ # &, which take a
+ *   backslash where the equation holds no LaTeX (see escapeReserved).
  * - An upright run with spaces, apostrophes, or reserved characters is text
  *   (see textModeLatex): \mathrm{} drops spaces and reads ' as a prime.
  * - Any other styled run is math in a group, \mathrm{} or an alphabet such
@@ -547,7 +547,7 @@ function runTextLatex(text: string, style: string, script: string, context: RunC
     unicodeToLatex(source, scriptDepth > 0, separator).replace(/′/g, "'");
   const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
   const group = alphabet ?? (style === 'p' ? '\\mathrm' : '');
-  if (!group) return mathLatex(escapeBraces(text), ' ');
+  if (!group) return mathLatex(escapeReserved(text), ' ');
   if (!alphabet && TEXT_MODE_CHARACTERS.test(text)) return textModeLatex(text);
   // Word drops a space at an edge without xml:space="preserve", and keeps one
   // with it, which goes in \text{}, as \text{} keeps it, beside the math
@@ -559,31 +559,52 @@ function runTextLatex(text: string, style: string, script: string, context: RunC
   return group + '{' + apartFromMarkup(kept(lead) + math(core) + kept(trail)) + '}';
 }
 
-/** Whether import escapes the braces of the equation it reads now, as
- *  ommlToLatex decides for each (see holdsLatexText) */
-let escapingBraces = false;
+/** Whether import escapes the reserved characters of the equation it reads
+ *  now, as ommlToLatex decides for each (see holdsLatexText) */
+let escapingReserved = false;
+
+/** Whether the run import reads now is in a row of an equation array, as
+ *  of aligned or cases, and in no matrix's cell in that row */
+let inEquationArray = false;
+
+/** `read()` with inEquationArray as `inRow`, as for an equation array's
+ *  rows or a matrix's cells */
+function inArrayRow<T>(inRow: boolean, read: () => T): T {
+  const outer = inEquationArray;
+  inEquationArray = inRow;
+  try {
+    return read();
+  } finally {
+    inEquationArray = outer;
+  }
+}
 
 /**
- * A bare run's `text` with each { and } escaped, as \{ and \}, which export
- * writes as Word's { and } (see parseCommand in latex-to-omml.ts), in an
- * equation whose Word text holds no LaTeX. As they were, export read Word's
- * characters as a group's braces and dropped them: {x} came back as a
- * group, and x{y as one that x{y's export dropped. With no backslash in the
- * equation's text, no brace there is escaped already, or a command's
- * argument, and with no %, none is a comment's.
+ * A bare run's `text` with each {, } and _ escaped, as \{, \} and \_, and
+ * each # and & as \# and \&, which export writes as Word's characters (see
+ * parseCommand in latex-to-omml.ts), in an equation whose Word text holds
+ * no LaTeX. As they were, export read them as LaTeX: Word's {x} came back
+ * as a group, whose braces export dropped, and x{y as one, a_b as a
+ * subscript, and a&b in a matrix's cell as two cells. With no backslash in
+ * the equation's text, none is escaped already, or a command's argument,
+ * and with no %, none is a comment's. A # or an & in a row of an equation
+ * array stays as it is, as before: Word reads it there as the row's number
+ * or its alignment point (see rowNumber and translateEqArray).
  */
-function escapeBraces(text: string): string {
-  return escapingBraces ? text.replace(/[{}]/g, brace => '\\' + brace) : text;
+function escapeReserved(text: string): string {
+  if (!escapingReserved) return text;
+  return text.replace(inEquationArray ? /[{}_]/g : /[{}_#&]/g, ch => '\\' + ch);
 }
 
 /**
  * Whether the text of an equation's bare runs, `nodes` and all in them,
  * holds LaTeX: a \ or a %, as the \begin{array}{cc} or \foo that export
- * writes as text does. Import keeps such an equation's braces as they are,
- * as before, as which of them are LaTeX's, as an argument's, and which
- * Word's is LaTeX's reading of the text, across runs Word may split it
- * into; export writes its \{ and \} as written to match (see
- * holdsLatexText in latex-to-omml.ts). A comment's run is no bare run.
+ * writes as text does. Import keeps such an equation's reserved characters
+ * as they are, as before, as which of them are LaTeX's, as an argument's
+ * braces, and which Word's is LaTeX's reading of the text, across runs
+ * Word may split it into; export writes its \{, \}, \_, \# and \& as
+ * written to match (see holdsLatexText in latex-to-omml.ts). A comment's
+ * run is no bare run.
  */
 function holdsLatexText(nodes: XmlNode[]): boolean {
   return nodes.some(node => Object.keys(node).some(key => {
@@ -977,7 +998,7 @@ function translateDelimiter(children: XmlNode[]): string {
       const eqArrChildren = findChild(eChildren, 'm:eqArr');
       if (eqArrChildren.length > 0 && isSoleContent(eChildren, 'm:eqArr')) {
         const rows = findAllChildren(eqArrChildren, 'm:e');
-        return latexEnvironment('cases', rows.map(rowChildren => unbracedToLatex(rowChildren)));
+        return latexEnvironment('cases', rows.map(rowChildren => inArrayRow(true, () => unbracedToLatex(rowChildren))));
       }
     }
 
@@ -1101,7 +1122,7 @@ function translateMatrix(children: XmlNode[]): string {
   for (const rowChildren of rows) {
     // Each row contains m:e cells
     const cells = findAllChildren(rowChildren, 'm:e');
-    rowStrings.push(joinLatexParts(cells.map(cell => unbracedToLatex(cell)), ' & '));
+    rowStrings.push(joinLatexParts(cells.map(cell => inArrayRow(false, () => unbracedToLatex(cell))), ' & '));
   }
   return latexEnvironment('matrix', rowStrings);
 }
@@ -1207,7 +1228,7 @@ function translateEqArray(children: XmlNode[]): string {
 
   rows.forEach((rowChildren, k) => {
     const number = numbers[k];
-    let rowLatex = unbracedToLatex(number ? number.equation : rowChildren);
+    let rowLatex = inArrayRow(true, () => unbracedToLatex(number ? number.equation : rowChildren));
     if (number) rowLatex = rowLatex ? rowLatex + (endsInLatexComment(rowLatex) ? '\n' : ' ') + number.tag : number.tag;
     rowStrings.push(rowLatex);
     if (/(?<!\\)&/.test(rowLatex)) hasAlignment = true;
@@ -1644,13 +1665,15 @@ let displayEquation = false;
  */
 export function ommlToLatex(children: XmlNode[], display = false): string {
   const outerDisplay = displayEquation;
-  const outerEscaping = escapingBraces;
+  const outerEscaping = escapingReserved;
+  const outerArray = inEquationArray;
   // An equation highlighted whole is in a highlight, which converter.ts
   // writes around it (see mathHighlight there), not in {==...==} in it
   const whole = partDepth === 0 && highlightedWhole(children);
   if (partDepth === 0) {
     displayEquation = display;
-    escapingBraces = !holdsLatexText(children);
+    escapingReserved = !holdsLatexText(children);
+    inEquationArray = false;
   }
   if (whole) highlightDepth++;
   partDepth++;
@@ -1661,7 +1684,8 @@ export function ommlToLatex(children: XmlNode[], display = false): string {
     partDepth--;
     if (whole) highlightDepth--;
     displayEquation = outerDisplay;
-    escapingBraces = outerEscaping;
+    escapingReserved = outerEscaping;
+    inEquationArray = outerArray;
   }
 }
 
