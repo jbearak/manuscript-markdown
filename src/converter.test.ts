@@ -11421,6 +11421,50 @@ describe('A citation whose key comes after a prefix, right before a bracket', ()
     expect(markdowns).toEqual([before + '{++[see @roe2019]++}{++[^1]++} e.\n\n[^1]: n\n', before + '{++[see @roe2019][^1]++} e.\n\n[^1]: n\n']);
     expect(views).toEqual(['S ' + text + '[see @roe2019]^ e.', 'S ' + text + '«(see Roe, 2019)»^ e.', 'S ' + text + '[see @roe2019]^ e.']);
   });
+
+  test.each([
+    ['an equation', 'S [$a @roe2019]$](https://e.org) e.', '', 'S ⟨$a @roe2019]$⟩ e.'],
+    ['an equation between text', 'S [see $a @roe2019]$ b](https://e.org) e.', '', 'S ⟨see $a @roe2019]$ b⟩ e.'],
+    ['an equation, before a defined label', 'S [$a @roe2019]$][x] e.\n\n[x]: https://e.org', 'S [$a @roe2019]$](https://e.org) e.', 'S ⟨$a @roe2019]$⟩ e.'],
+    ['code', 'S [`a @roe2019]`](https://e.org) e.', '', 'S ⟨a @roe2019]⟩ e.'],
+    ['an equation, before a code span and a ` left open', 'S [see $a @roe2019]$](https://e.org) and `code` with `open e.', 'S [see $a @roe2019]$](https://e.org) and `code` with \\`open e.', 'S ⟨see $a @roe2019]$⟩ and code with `open e.'],
+  ])('reads a link whose text holds %s from a prefix past a key\'s ]', async (_name, md, imported, view) => {
+    // Export read a citation to the ], with the token's start in its
+    // prefix, and the rest as text, which lost the link and the equation
+    const { views, markdowns } = await trips(md);
+    expect(markdowns[0]).toBe((imported || md) + '\n');
+    expect(markdowns[1]).toBe(markdowns[0]);
+    expect(views[0]).toBe(view);
+    expect(views[1]).toBe(views[0]);
+    expect(views[2]).toBe(views[0]);
+  });
+
+  test.each([
+    ['a citation with a prefix and a locator', 'S [see @roe2019, p. 2] e.', '', 'S «(see Roe, 2019, p. 2)» e.'],
+    ['a citation after an equation', 'S $a$ [@roe2019] e.', '', 'S $a$ «(Roe, 2019)» e.'],
+    ['a citation whose locator is an equation', 'S [@roe2019, $y$] e.', 'S [@roe2019, p. $y$] e.', 'S «(Roe, 2019, p. $y$)» e.'],
+    ['a citation before a price', 'S [@roe2019] costs $5 e.', '', 'S «(Roe, 2019)» costs $5 e.'],
+    // An equation from a prefix past the ], which no link's text holds
+    ['an equation from a prefix, before no link', 'S [$a @roe2019]$ e.', 'S [\\$a @roe2019]$ e.', 'S «($a Roe, 2019)»$ e.'],
+    ['an equation from a prefix, before text', 'S [see $x @roe2019] y$ e.', 'S [see \\$x @roe2019] y$ e.', 'S «(see $x Roe, 2019)» y$ e.'],
+    // From a locator, which is read as written
+    ['an equation from a locator, before a link\'s ]', 'S [see @roe2019, $a]$](https://e.org) e.', 'S [see @roe2019, p. $a]$](https://e.org) e.', 'S «(see Roe, 2019, p. $a)»$](⟨https://e.org⟩) e.'],
+    // As import writes a prefix's $
+    ['an escaped $ in a prefix, before a link\'s ]', 'S [\\$a @roe2019]$](https://e.org) e.', '', 'S «($a Roe, 2019)»$](⟨https://e.org⟩) e.'],
+    // Word's [ before an equation and a link's ], which import escapes
+    ['text before an equation and a ]', 'S \\[$a @roe2019]$\\](https://e.org) e.', 'S \\[$a @roe2019]$](https://e.org) e.', 'S [$a @roe2019]$](⟨https://e.org⟩) e.'],
+    // Whose scan for a link's text read the ` left open, which marked the
+    // code span before it as having no closer
+    ['an equation from a prefix, before a code span and a ` left open', 'S [see $a @roe2019]$ and `code` with `open e.', 'S [see \\$a @roe2019]$ and `code` with \\`open e.', 'S «(see $a Roe, 2019)»$ and code with `open e.'],
+    ['a code span before a ` left open', 'S and `code` with `open e.', 'S and `code` with \\`open e.', 'S and code with `open e.'],
+  ])('leaves %s as main does', async (_name, md, imported, view) => {
+    const { views, markdowns } = await trips(md);
+    expect(markdowns[0]).toBe((imported || md) + '\n');
+    expect(markdowns[1]).toBe(markdowns[0]);
+    expect(views[0]).toBe(view);
+    expect(views[1]).toBe(views[0]);
+    expect(views[2]).toBe(views[0]);
+  });
 });
 
 describe('HTML table cells', () => {

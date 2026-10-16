@@ -878,6 +878,46 @@ describe('citation prefixes', () => {
     expect(run!.prefixes).toEqual([prefix]);
   });
 
+  it.each([
+    // The scan for a link's text past the equation read the ` left open,
+    // which marked the code span before it as having no closer
+    ['a citation whose prefix starts an equation past its ]', '[see $a @smith2020]$ and `code` with `open', true, false],
+    ['a link whose text holds such an equation', '[see $a @smith2020]$](u) and `code` with `open', false, true],
+    ['no citation', 'see and `code` with `open', false, false],
+  ])('keeps the code span after %s, before a ` left open', (_name, md, cites, links) => {
+    const runs = parseMd(md).flatMap(t => t.runs);
+    expect(runs.filter(r => r.code).map(r => r.text)).toEqual(['code']);
+    expect(findCitationRun(parseMd(md)) !== undefined).toBe(cites);
+    expect(runs.some(r => r.href === 'u')).toBe(links);
+  });
+
+  it.each([
+    ['CriticMarkup', '[see {++a @smith2020]++}](u)'],
+    ['a tag', '[see <span title=" @smith2020]">a](u)'],
+    ['an equation, then another in the link\'s text', '[see $a @smith2020]$ $b$](u)'],
+  ])('reads a citation whose prefix starts %s past its ], as main does', (_name, md) => {
+    // The scan for a link's text reads only equations, code, escapes and
+    // plain text, so each citation's reads its own part of the text
+    expect(findCitationRun(parseMd(md))?.keys).toEqual(['smith2020']);
+  });
+
+  it.each([
+    // Each scan ran markdown-it's rule for <? on the rest of the text
+    ['a <? left open', (n: number) => '[see <?a @x] '.repeat(n)],
+    ['a $ left open', (n: number) => '[see $a @x] '.repeat(n)],
+    ['a ` left open', (n: number) => '[see `a @x] '.repeat(n)],
+    ['a {++ left open', (n: number) => '[see {++a @x] '.repeat(n)],
+  ])('reads citations whose prefix has %s in time linear in their number', (_name, input) => {
+    expect(findCitationRun(parseMd(input(2)))?.keys).toEqual(['x']);
+    const time = (n: number) => {
+      const text = input(n);
+      return fastestRun(() => parseMd(text));
+    };
+    time(8000);
+    const small = time(8000);
+    expect(time(32000) / small).toBeLessThan(8);
+  }, 60000);
+
   it('treats the key as opaque, so underscores in it are not emphasis', () => {
     const run = findCitationRun(parseMd('[see @_smith2020_]'));
     expect(run!.keys).toEqual(['_smith2020_']);

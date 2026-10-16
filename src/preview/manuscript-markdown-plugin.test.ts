@@ -2743,6 +2743,80 @@ describe('Citations in the preview', () => {
     // seconds here searched again from each [
     expect(performance.now() - start).toBeLessThan(3000);
   });
+
+  describe('with an equation or code from a prefix past its ]', () => {
+    // As VS Code's math extension reads $...$, before the rules that read
+    // a citation
+    const render = (markdown: string) => {
+      const md = new MarkdownIt({ html: true });
+      md.inline.ruler.after('escape', 'test_host_math', (state: any, silent: boolean) => {
+        if (state.src.charAt(state.pos) !== '$') return false;
+        const close = state.src.indexOf('$', state.pos + 1);
+        if (close === -1) return false;
+        if (!silent) {
+          const token = state.push('math_inline', 'math', 0);
+          token.content = state.src.slice(state.pos + 1, close);
+        }
+        state.pos = close + 1;
+        return true;
+      });
+      md.renderer.rules.math_inline = (tokens, idx) => '<katex>' + escapeHtml(tokens[idx].content) + '</katex>';
+      md.use(manuscriptMarkdownPlugin);
+      return md.render(markdown);
+    };
+
+    it.each([
+      ['an equation', 'P [$a @x]$](u) Q.', '<p>P <a href="u"><katex>a @x]</katex></a> Q.</p>'],
+      ['an equation between text', 'P [see $a @x]$ b](u) Q.', '<p>P <a href="u">see <katex>a @x]</katex> b</a> Q.</p>'],
+      ['code', 'P [`a @x]`](u) Q.', '<p>P <a href="u"><code>a @x]</code></a> Q.</p>'],
+    ])('shows a link whose text holds %s, as export reads it', (_name, md, html) => {
+      // It showed the citation's text, which took the token's start
+      expect(render(md)).toContain(html);
+    });
+
+    it.each([
+      ['before no link', 'P [$a @x]$ Q.', '<p>P [$a @x]$ Q.</p>'],
+      ['from a locator', 'P [see @x, $a]$](u) Q.', '<p>P [see @x, $a]$](u) Q.</p>'],
+      ['escaped', 'P [\\$a @x]$](u) Q.', '<p>P [$a @x]$](u) Q.</p>'],
+    ])('shows a citation with an equation %s as text, as main does', (_name, md, html) => {
+      expect(render(md)).toContain(html);
+    });
+
+    it.each([
+      ['CriticMarkup', 'P [see {++a @x]++}](u) Q.', '<p>P [see {++a @x]++}](u) Q.</p>'],
+      ['a tag', 'P [see <span title=" @x]">a](u) Q.', '<p>P [see &lt;span title=&quot; @x]&quot;&gt;a](u) Q.</p>'],
+      ['an equation, then another in the link\'s text', 'P [see $a @x]$ $b$](u) Q.', '<p>P [see $a @x]'],
+    ])('shows a citation whose prefix starts %s past its ] as text, as main does', (_name, md, html) => {
+      expect(render(md)).toContain(html);
+    });
+
+    it.each([
+      // Each scan ran markdown-it's rule for <? on the rest of the text
+      ['a <? left open', (n: number) => '[see <?a @x] '.repeat(n)],
+      ['a $ left open', (n: number) => '[see $a @x] '.repeat(n)],
+      ['a ` left open', (n: number) => '[see `a @x] '.repeat(n)],
+      ['a {++ left open', (n: number) => '[see {++a @x] '.repeat(n)],
+    ])('renders citations whose prefix has %s in time linear in their number', (_name, input) => {
+      expect(render(input(2))).toContain('[see ');
+      const time = (n: number) => {
+        const text = input(n);
+        return fastestRun(() => render(text));
+      };
+      time(8000);
+      const small = time(8000);
+      expect(time(32000) / small).toBeLessThan(8);
+    }, 60000);
+
+    it.each([
+      ['a citation whose prefix starts an equation past its ]', 'P [see $a @x]$ and `code` with `open', '<p>P [see $a @x]$ and <code>code</code> with `open</p>'],
+      ['a link whose text holds such an equation', 'P [see $a @x]$](u) and `code` with `open', '<p>P <a href="u">see <katex>a @x]</katex></a> and <code>code</code> with `open</p>'],
+      ['no citation', 'P and `code` with `open', '<p>P and <code>code</code> with `open</p>'],
+    ])('keeps the code span after %s, before a ` left open', (_name, md, html) => {
+      // The scan for a link's text past the equation read the ` left open,
+      // which marked the code span before it as having no closer
+      expect(render(md)).toContain(html);
+    });
+  });
 });
 
 describe('CriticMarkup without its closers in the preview', () => {

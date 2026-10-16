@@ -800,8 +800,12 @@ let noteKeyMd: MarkdownIt | undefined;
  *  as export reads one, but without the document's link definitions, or -1 */
 export function citationEndInText(text: string, start: number): number {
   citationTextMd ??= createMarkdownIt();
-  return citationEnd({ src: text, md: citationTextMd, env: {} }, start);
+  // One state for the text each search of it in turn reads, whose scans
+  // the next search keeps (see opensLinkPast)
+  if (citationTextState?.src !== text || citationTextState.md !== citationTextMd) citationTextState = { src: text, md: citationTextMd, env: {} };
+  return citationEnd(citationTextState, start);
 }
+let citationTextState: { src: string; md: MarkdownIt; env: object } | undefined;
 
 /** The ] that ends the label of the image Markdown `markdown` starts with,
  *  at its ![, as export reads one, past brackets it nests and a ] in its
