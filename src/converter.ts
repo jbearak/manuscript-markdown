@@ -15029,11 +15029,14 @@ function buildMarkdownOnce(
   // joinSpansAtTrackedBreaks writes as references, and so do those of an
   // HTML block, which keeps them and its backslashes as they are, as one
   // the text starts with or one a line of it after a line break starts.
-  const withoutEndSpaces = (text: string): string => {
+  // But a `heading`'s text starts none, after its # on its line, or after
+  // an equation's closing fence in its paragraph, so Markdown drops them
+  // there after a comment the text starts with too.
+  const withoutEndSpaces = (text: string, heading = false): string => {
     let space = text.length;
     while (space > 0 && (text[space - 1] === ' ' || text[space - 1] === '\t')) space--;
     if (space === text.length || (breakMarks && afterTrackedBreakSpan(text, space, breakMarks))
-        || (text.includes('<') && isInsideCodeRegion(Math.max(space - 1, 0), computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions))) return text;
+        || (!heading && text.includes('<') && isInsideCodeRegion(Math.max(space - 1, 0), computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions))) return text;
     let slashes = 0;
     while (slashes < space && text[space - 1 - slashes] === '\\') slashes++;
     return text.slice(0, space) + (slashes % 2 === 1 ? '\\' : '');
@@ -17017,7 +17020,15 @@ function buildMarkdownOnce(
       && /^<!--[\s\S]*?-->\s*$/.test(text.trim());
     // Whether the text is the runs alone, but for whitespace
     const runsAlone = (text: string) => text.replace(/\s/g, '') === payloads.join('').replace(/\s/g, '');
+    // A heading's text ends at an equation in its paragraph, which goes
+    // after the heading's line (see the math branch), as text after one
+    // equation ends at the next, which goes after it too
+    const headingEnds = paragraphHeading && isInParagraphMath(next);
     const withEdges = (text: string) => {
+      // Whitespace alone on the heading's line goes too, which as references
+      // would be the heading's text, and the next import drops from a heading
+      // of whitespace alone (see dropBlankParagraphText)
+      if (headingEnds && /^[ \t]*$/.test(text) && mergedContent[i - 1]?.type !== 'math') return '';
       const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(text)?.[0] ?? '' : '';
       let indentColumns = 0;
       if (indent) {
@@ -17037,7 +17048,10 @@ function buildMarkdownOnce(
         : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + text.slice(htmlIndent.length)) && !inline()
           ? htmlIndent + keepParagraphWhitespace(text.slice(htmlIndent.length), true, atEnd)
           : referenced;
-      const ended = atEnd && !isInParagraphMath(next) ? withoutEndSpaces(edged) : edged;
+      // Where a heading's text ends at an equation, the spaces and tabs
+      // export wrote before it, which Word shows nothing for at the end of
+      // the heading's line, go, as Markdown would drop them on the next trip
+      const ended = atEnd && (headingEnds || !isInParagraphMath(next)) ? withoutEndSpaces(edged, paragraphHeading) : edged;
       return mathFollows ? beforeParagraphMath(ended) : ended;
     };
     // Comments that start the text of a heading, with text after them on

@@ -7138,6 +7138,41 @@ describe('A heading whose text ends in #', () => {
   });
 });
 
+// A heading whose text starts with an HTML comment kept the spaces and tabs
+// at its end, as # <!-- c --> a and a space, as import read its text as an
+// HTML block's, which keeps them. A heading's line starts with its #, so
+// it's no block, and the next trip dropped them, as Markdown trims a
+// heading's text, so the Markdown changed on the second trip
+describe('A heading whose text starts with an HTML comment', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+
+  test.each([
+    ['# <!-- c -->&#32;\n', '# <!-- c -->\n'],
+    ['# <!-- c --> a&#32;\n', '# <!-- c --> a\n'],
+    ['### <!-- a --><!-- b -->&#9;\n\nAfter.\n', '### <!-- a --><!-- b -->\n\nAfter.\n'],
+  ])('drops the spaces and tabs at the end of %j', async (md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+  });
+
+  // As on main: a heading with no space at its end, one whose comment ends
+  // it, and the HTML block of a paragraph, a list item or a quote, which
+  // keeps the space as a reference
+  test.each([
+    ['# <!-- c -->\n', '# <!-- c -->\n'],
+    ['# <!-- c --> a\n', '# <!-- c --> a\n'],
+    ['# a <!-- c -->&#32;\n', '# a <!-- c -->\n'],
+    ['a\n\n<!-- c --> a&#32;\n\nAfter.\n', 'a\n\n<!-- c --> a&#32;\n\nAfter.\n'],
+    ['- <!-- c --> a&#32;\n', '- <!-- c --> a&#32;\n'],
+    ['> <!-- c --> a&#32;\n', '> <!-- c --> a&#32;\n'],
+  ])('keeps %j as on main', async (md, expected) => {
+    const back = await roundTrip(md);
+    expect(back).toBe(expected);
+    expect(await roundTrip(back)).toBe(back);
+  });
+});
+
 describe('A template whose built-in styles Word named in another language', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
   /** styles.xml of `styles` */
