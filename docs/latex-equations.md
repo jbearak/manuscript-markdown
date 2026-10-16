@@ -447,6 +447,8 @@ $$
 
 All environments listed in the table above are recognized as bare environments, plus the matrix variants (`matrix`, `smallmatrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`). Bare environments are not recognized inside code blocks, HTML comments, CriticMarkup spans, or existing `$$` blocks.
 
+A bare environment in a quote, an alert or a list item is recognized at the start of a line of the quote's or the item's text, as `> \begin{equation}`, and its `$$` go on the lines of its `\begin` and its `\end`, inside the quote or the item. It stays as written where its paragraph has a line without the quote's `>` or the item's indent, where it runs past the paragraph, in a quote in a list item in a quote, where another environment in its paragraph stays as written, or where a link, an image, a citation, a tag, a URL, a highlight or CriticMarkup comes before it in its paragraph.
+
 On round-trip through DOCX, bare environments are converted to the `$$`-wrapped form.
 
 ### Aligned equations (with `&` alignment points)

@@ -8,12 +8,14 @@
  * Only recognized display-math environments are wrapped. Code regions, HTML
  * comments, CriticMarkup spans, and existing `$$` blocks are treated as
  * "inert zones" and skipped. In a simple paragraph, its own parse decides
- * instead, where it confirms the decision (see decideParagraphs).
+ * instead, where it confirms the decision (see decideParagraphs). One in a
+ * quote's or a list item's paragraph, past its prefix, is wrapped inside it
+ * where that paragraph's own parse is sure of it (see decideContainers).
  */
 
 import MarkdownIt from 'markdown-it';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { computeLineStarts, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
+import { computeLineStarts, computeMarkdownRegions, isInsideCodeRegion, type ContainedParagraph } from './code-regions';
 import { exportsLiterally } from './html-blocks';
 import { criticCloserSearch, preprocessCriticMarkupWithLines } from './critic-markup';
 import { linearInlineComments } from './inline-html-comments';
@@ -51,7 +53,7 @@ export function computeInertZones(text: string): Zone[] {
  *  and for decideParagraphs, the zones of steps 1 to 3 alone, sorted and
  *  merged, those of step 4, in order, and the lines of each paragraph and
  *  heading (see inlineBlocks in code-regions.ts) */
-function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Zone[]; steps: Zone[]; fences: FenceZone[]; inlineBlocks: Zone[] } {
+function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Zone[]; steps: Zone[]; fences: FenceZone[]; inlineBlocks: Zone[]; contained: ContainedParagraph[] } {
 	const zones: Zone[] = [];
 
 	// 1. Code regions (fenced blocks + inline code spans), as export reads
@@ -60,7 +62,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 	// export writes as text, as a <pre> or a <div>, but not one it reads
 	// tables from, in which it reads an environment as display math (see
 	// markWrappedLatexBlocks in md-to-docx.ts)
-	const { codeRegions, blockCodeRegions, literalHtmlRegions, inlineBlocks } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally, inlineBlocks: true });
+	const { codeRegions, blockCodeRegions, literalHtmlRegions, inlineBlocks, containedParagraphs } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally, inlineBlocks: true, containedParagraphs: true });
 	for (const r of codeRegions) {
 		zones.push({ start: r.start, end: r.end });
 	}
@@ -172,7 +174,7 @@ function inertZonesAndLiteralHtml(text: string): { zones: Zone[]; literalHtml: Z
 		}
 	}
 
-	return { zones: mergeZones(zones), literalHtml: literalHtmlRegions, steps, fences, inlineBlocks };
+	return { zones: mergeZones(zones), literalHtml: literalHtmlRegions, steps, fences, inlineBlocks, contained: containedParagraphs };
 }
 
 /** A zone of step 4, from a fence to past the next, which closes it, or,
@@ -272,9 +274,20 @@ interface Replacement {
 function latexReplacements(text: string): Replacement[] {
 	// Fast path: no \begin{ means nothing to do
 	if (!text.includes('\\begin{')) return [];
-	const { zones, literalHtml, steps, fences, inlineBlocks } = inertZonesAndLiteralHtml(text);
+	const { zones, literalHtml, steps, fences, inlineBlocks, contained } = inertZonesAndLiteralHtml(text);
 	const byMain = bareEnvironments(text, (begin, end) => holdsEither(begin, end, zones), literalHtml);
-	return toReplacements(text, confirmInPreview(text, decideParagraphs(text, byMain, steps, fences, inlineBlocks, literalHtml)));
+	const environments = bareEnvironments(text, (begin, end) => holdsEither(begin, end, steps), literalHtml);
+	const units = environments.length > 0 || contained.length > 0 ? exportUnits(text, inlineBlocks) : [];
+	const sure = fenceIsSure(text, steps, units, environments);
+	const decided = confirmInPreview(text, decideParagraphs(text, byMain, environments, units, { fences, steps, sure }));
+	const inContainers = decideContainers(text, contained, units, [environments, byMain], { fences, steps });
+	if (inContainers.length === 0) return toReplacements(text, decided);
+	// The top level's, as decided, which hold, and each container
+	// paragraph's, which takes main's decision, to wrap none, where the
+	// preview reads it otherwise with them all
+	const pieces: Decision[] = decided.map(e => ({ environments: [e] }));
+	const inOrder = pieces.concat(inContainers).sort((a, b) => (a.override?.unit.start ?? a.environments[0].start) - (b.override?.unit.start ?? b.environments[0].start));
+	return toReplacements(text, confirmInPreview(text, inOrder));
 }
 
 function toReplacements(text: string, environments: BareEnvironment[]): Replacement[] {
@@ -334,11 +347,8 @@ interface Decision {
  * each paragraph's decision is to be the preview's reading too (see
  * confirmInPreview). Elsewhere main's decisions hold.
  */
-function decideParagraphs(text: string, byMain: BareEnvironment[], steps: Zone[], fences: FenceZone[], inlineBlocks: Zone[], literalHtml: Zone[]): Decision[] {
-	const environments = bareEnvironments(text, (begin, end) => holdsEither(begin, end, steps), literalHtml);
+function decideParagraphs(text: string, byMain: BareEnvironment[], environments: BareEnvironment[], units: Zone[], zonesOf: { fences: FenceZone[]; steps: Zone[]; sure: FenceIsSure }): Decision[] {
 	if (environments.length === 0) return [{ environments: byMain }];
-	const units = exportUnits(text, inlineBlocks);
-	const zonesOf = { fences, steps, sure: fenceIsSure(text, steps, units, environments) };
 	const decisions: Decision[] = [];
 	let next = 0;
 	let main = 0;
@@ -886,9 +896,9 @@ export function paragraphEquations(text: string): Array<Zone & { simple: boolean
 }
 
 interface BareEnvironment {
-	/** Where its line starts, its indent, of up to three spaces, before its
-	 *  \begin{...}, its text, from past that to its \end{...}, and its end,
-	 *  past that */
+	/** Where its line starts, its indent, of up to three spaces, or in a
+	 *  container, its line's prefix too, before its \begin{...}, its text,
+	 *  from past that to its \end{...}, and its end, past that */
 	start: number;
 	indent: number;
 	contentStart: number;
@@ -929,17 +939,7 @@ function bareEnvironments(text: string, inert: (begin: Zone, end: Zone) => boole
 	// Find bare \begin{env} at start of line (up to 3 spaces indent)
 	const beginRe = /^([ ]{0,3})\\begin\{([a-zA-Z*]+)\}/gm;
 	let match: RegExpExecArray | null;
-	// For each environment, where the last search for its end went from and
-	// what it found, -1 for none, which a search from a later start before
-	// it finds again, so that no part of the text is searched twice for one
-	const ends = new Map<string, { from: number; at: number }>();
-	const endOf = (endMarker: string, from: number): number => {
-		const last = ends.get(endMarker);
-		if (last && from >= last.from && (last.at === -1 || from <= last.at)) return last.at;
-		const at = text.indexOf(endMarker, from);
-		ends.set(endMarker, { from, at });
-		return at;
-	};
+	const endOf = endFinder(text);
 
 	while ((match = beginRe.exec(text)) !== null) {
 		const envName = match[2];
@@ -963,4 +963,246 @@ function bareEnvironments(text: string, inert: (begin: Zone, end: Zone) => boole
 	}
 
 	return environments;
+}
+
+/** The first `marker` of `text` at or after `from`, or -1, as each
+ *  environment searches for its \end{...}, in order: for each marker, where
+ *  the last search went from and what it found, -1 for none, which a search
+ *  from a later start before it finds again, so that no part of the text is
+ *  searched twice for one */
+function endFinder(text: string): (marker: string, from: number) => number {
+	const ends = new Map<string, { from: number; at: number }>();
+	return (marker, from) => {
+		const last = ends.get(marker);
+		if (last && from >= last.from && (last.at === -1 || from <= last.at)) return last.at;
+		const at = text.indexOf(marker, from);
+		ends.set(marker, { from, at });
+		return at;
+	};
+}
+
+/**
+ * The environments to wrap in the paragraphs of list items and quotes, an
+ * alert's too, each a paragraph's own decision (see readContainedParagraph).
+ *
+ * Main finds a bare environment only at a line's start, after up to three
+ * spaces, so one in a quote, after its marker, or in a list item four
+ * spaces in or more, as in a nested item or after a wide marker, went to
+ * Word as text, as import keeps it. Export reads each such paragraph's text
+ * past the quotes' markers and the items' indents, so an environment at a
+ * line's start in it, after up to three spaces, is display math once
+ * wrapped, with its fences on the lines of its \begin{...} and its
+ * \end{...}, inside the container. One that main finds there, as in an item
+ * two spaces in, is main's to decide, and so is each in a paragraph that
+ * holds one of main's, or part of one.
+ *
+ * Main wraps none of these, so its decision, to leave each as it is, holds
+ * where any of this is uncertain: in a paragraph with a line that goes on
+ * it lazily, which export ends the quote before and VS Code's preview
+ * doesn't, with a tab in a line's prefix, in a quote in an item in a quote
+ * or deeper, or which CriticMarkup joins to another (see exportUnits), and
+ * for an environment whose \end{...} is past the paragraph's end. And each
+ * is to be read as display math after its wrap, by export and the preview,
+ * as the paragraphs of the top level are (see readParagraphOnItsOwn and
+ * confirmInPreview).
+ */
+function decideContainers(text: string, contained: ContainedParagraph[], units: Zone[], ofTopLevel: BareEnvironment[][], zonesOf: { fences: FenceZone[]; steps: Zone[] }): Decision[] {
+	if (contained.length === 0 || text.includes('\r')) return [];
+	const decisions: Decision[] = [];
+	const endOf = endFinder(text);
+	const readsAlerts = !ALERT_REFERENCE.test(text);
+	for (const paragraph of contained) {
+		if (paragraph.lazy || !paragraph.lines || !readsContainers(paragraph.containers)) continue;
+		if (ofTopLevel.some(environments => overlapsAnyZone(paragraph.start, paragraph.end, environments))) continue;
+		const unit = units[firstEndingAfter(units, paragraph.start)];
+		if (!unit || unit.start !== paragraph.start || unit.end !== paragraph.end) continue;
+		const environments = containedEnvironments(text, paragraph, endOf, zonesOf.steps);
+		if (environments.length === 0) continue;
+		const decision = readContainedParagraph(text, paragraph, environments, zonesOf, readsAlerts);
+		if (decision) decisions.push(decision);
+	}
+	return decisions;
+}
+
+/** Whether decideContainers reads a paragraph in `containers`, outermost
+ *  first: quotes, items, quotes in items or items in quotes, but not a
+ *  quote in an item in a quote, nor an item in a quote in an item */
+function readsContainers(containers: Array<'item' | 'quote'>): boolean {
+	let changes = 0;
+	for (let i = 1; i < containers.length; i++) if (containers[i] !== containers[i - 1]) changes++;
+	return changes <= 1;
+}
+
+/** The first of `zones`, sorted and apart, that ends after `offset` */
+function firstEndingAfter(zones: Zone[], offset: number): number {
+	let lo = 0;
+	let hi = zones.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (zones[mid].end <= offset) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
+}
+
+/** A \begin{...} at a line's start in a paragraph's text, after up to three
+ *  spaces past the container's prefix */
+const CONTAINED_BEGIN = /( {0,3})\\begin\{([a-zA-Z*]+)\}/y;
+
+/** The bare environments of a paragraph in a container, in order: each
+ *  \begin{...} of a display math environment at a line's start in its text,
+ *  after up to three spaces, but in one before it, to its \end{...} in the
+ *  paragraph, out of the zones of steps 1 to 3, `steps`. None where one
+ *  isn't, nor where main finds one, nor where a line's prefix holds a tab:
+ *  a paragraph's environments are wrapped together or not at all, as a
+ *  dollar sign in one that stays text may pair with one in another */
+function containedEnvironments(text: string, paragraph: ContainedParagraph, endOf: (marker: string, from: number) => number, steps: Zone[]): BareEnvironment[] {
+	const { content } = paragraph;
+	const lines = paragraph.lines!;
+	const lastLine = lines[lines.length - 1];
+	const textEnd = lastLine.source + content.length - lastLine.content;
+	const environments: BareEnvironment[] = [];
+	for (const line of lines) {
+		const lineStart = text.lastIndexOf('\n', line.source - 1) + 1;
+		const prefix = text.slice(lineStart, line.source);
+		if (prefix.includes('\t')) return [];
+		CONTAINED_BEGIN.lastIndex = line.content;
+		const match = CONTAINED_BEGIN.exec(content);
+		if (!match || !DISPLAY_MATH_ENVIRONMENTS.has(match[2])) continue;
+		const begin = line.source + match[1].length;
+		if (environments.length > 0 && begin < environments[environments.length - 1].end) continue;
+		// One main's search finds, after up to three spaces alone
+		if (/^ {0,3}$/.test(prefix + match[1])) return [];
+		const marker = '\\end{' + match[2] + '}';
+		const contentStart = begin + match[0].length - match[1].length;
+		const at = endOf(marker, contentStart);
+		if (at === -1 || at + marker.length > textEnd) return [];
+		const end = at + marker.length;
+		if (holdsEither({ start: begin, end: contentStart }, { start: at, end }, steps)) return [];
+		environments.push({ start: lineStart, indent: begin - lineStart, contentStart, contentEnd: at, end });
+	}
+	return environments;
+}
+
+/** An alert's marker, as the first line of its paragraph's text, which
+ *  export reads as text, but where the text defines a reference of its
+ *  name (see ALERT_REFERENCE) */
+const ALERT_MARKER_LINE = /^\[!(?:note|tip|important|warning|caution)\][ \t]*(?=\n|$)/i;
+const ALERT_REFERENCE = /\[![A-Za-z]+\]:/;
+
+/**
+ * The environments of a paragraph in a container to wrap, where its own
+ * read, of its text as export reads it, past the prefixes of its lines,
+ * reads them in no display math, and as display math, and each other
+ * equation as before, with them wrapped, and where main's zones over each,
+ * of step 4, are wrong (see mainZoneIsWrong). As readParagraphOnItsOwn, but
+ * where main wraps none, and a fence out of the paragraph is sure only in a
+ * zone of steps 1 to 3. An alert's marker line is read as the text it is,
+ * where `readsAlerts`: the text defines no reference of its name.
+ */
+function readContainedParagraph(text: string, paragraph: ContainedParagraph, environments: BareEnvironment[], zonesOf: { fences: FenceZone[]; steps: Zone[] }, readsAlerts: boolean): Decision | undefined {
+	const lines = paragraph.lines!;
+	if (CRITIC_MARKUP.test(paragraph.content)) return undefined;
+	const alert = readsAlerts ? ALERT_MARKER_LINE.exec(paragraph.content) : null;
+	const content = alert ? 'x'.repeat(alert[0].length) + paragraph.content.slice(alert[0].length) : paragraph.content;
+	// The offset in `content` of one of the text on a line's text
+	const toContent = (offset: number) => {
+		let lo = 0;
+		let hi = lines.length - 1;
+		while (lo < hi) {
+			const mid = (lo + hi + 1) >>> 1;
+			if (lines[mid].source <= offset) lo = mid;
+			else hi = mid - 1;
+		}
+		return lines[lo].content + offset - lines[lo].source;
+	};
+	const begins = environments.map(e => toContent(e.start + e.indent));
+	const ends = environments.map(e => toContent(e.end));
+	// Each environment's text as x, but its line ends, so a dollar sign or a
+	// backtick in it opens and closes nothing out of it, as once wrapped
+	const masked: string[] = [];
+	let from = 0;
+	for (const e of environments) {
+		const contentStart = toContent(e.contentStart);
+		const contentEnd = toContent(e.contentEnd);
+		masked.push(content.slice(from, contentStart), content.slice(contentStart, contentEnd).replace(/[^\n]/g, 'x'));
+		from = contentEnd;
+	}
+	masked.push(content.slice(from));
+	const last = ends[ends.length - 1];
+	const before = readParagraph(masked.join(''), last);
+	if (before.unsimple !== -1) return undefined;
+	const displays = before.equations.filter(e => e.display);
+	const wrapped = environments.map((_e, i) => i).filter(i => !holdsEither({ start: begins[i], end: toContent(environments[i].contentStart) }, { start: toContent(environments[i].contentEnd), end: ends[i] }, displays));
+	if (wrapped.length === 0) return undefined;
+	// Main's zone over each, which main left, is to be wrong. A fence of the
+	// paragraph is sure where this read reads it in inline math
+	const inlineMath = before.equations.filter(e => !e.display);
+	const sure = (offset: number) => overlapsAnyZone(offset, offset + 2, zonesOf.steps)
+		|| paragraph.start <= offset && offset < paragraph.end && inEquation(inlineMath, toContent(offset));
+	if (wrapped.some(i => !mainZoneIsWrong(environments[i], zonesOf.fences, sure))) return undefined;
+
+	// The paragraph's text with those wrapped, the offsets before which a
+	// fence goes, and each wrap's display math
+	const parts: string[] = [];
+	const fencesAt: number[] = [];
+	const wraps: Equation[] = [];
+	let length = 0;
+	from = 0;
+	for (const i of wrapped) {
+		const slice = content.slice(from, begins[i]);
+		const wrap = '$' + '$' + content.slice(begins[i], ends[i]) + '$' + '$';
+		parts.push(slice, wrap);
+		wraps.push({ start: length + slice.length, end: length + slice.length + wrap.length, display: true });
+		length += slice.length + wrap.length;
+		fencesAt.push(begins[i], ends[i]);
+		from = ends[i];
+	}
+	parts.push(content.slice(from));
+	const moved = (offset: number, atToo: boolean) => offset + 2 * countBefore(fencesAt, offset, atToo);
+	const withWraps = parts.join('');
+	const after = readParagraph(withWraps, moved(last, true));
+	if (after.unsimple !== -1) return undefined;
+	const expected = before.equations.map(e => ({ start: moved(e.start, true), end: moved(e.end, false), display: e.display }))
+		.concat(wraps).sort((a, b) => a.start - b.start);
+	const same = expected.length === after.equations.length && expected.every((e, i) => {
+		const read = after.equations[i];
+		return e.start === read.start && e.end === read.end && e.display === read.display;
+	});
+	if (!same) return undefined;
+
+	// Each display equation, by its lines, as confirmInPreview reads them:
+	// at the start of each of its first and last lines in the paragraph's
+	// lines with the wraps, which put no line in or out
+	const contentLines = computeLineStarts(withWraps);
+	const lineOf = (offset: number) => {
+		let lo = 0;
+		let hi = contentLines.length - 1;
+		while (lo < hi) {
+			const mid = (lo + hi + 1) >>> 1;
+			if (contentLines[mid] <= offset) lo = mid;
+			else hi = mid - 1;
+		}
+		return lo;
+	};
+	const sourceFences = wrapped.flatMap(i => [environments[i].start + environments[i].indent, environments[i].end]);
+	const lineStartIn = (line: number) => {
+		const lineStart = text.lastIndexOf('\n', lines[line].source - 1) + 1;
+		return lineStart - paragraph.start + 2 * countBefore(sourceFences, lineStart, false);
+	};
+	const shown = after.equations.filter(e => e.display).map(e => ({ start: lineStartIn(lineOf(e.start)), end: lineStartIn(lineOf(e.end - 1)) + 1, display: true }));
+	return { environments: wrapped.map(i => environments[i]), override: { unit: { start: paragraph.start, end: paragraph.end }, byMain: [], displays: shown } };
+}
+
+/** How many of `offsets`, sorted, are before `offset`, or at it too where
+ *  `atToo` */
+function countBefore(offsets: number[], offset: number, atToo: boolean): number {
+	let lo = 0;
+	let hi = offsets.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (offsets[mid] < offset || atToo && offsets[mid] === offset) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
 }
