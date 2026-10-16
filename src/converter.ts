@@ -5239,23 +5239,25 @@ function trailingBreakOf(before: string, piece: string, after: string): Trailing
  *  blocks end the paragraph, whose break is then at its end, as <br>, as
  *  at any paragraph's end, where a \ would be text, and each starts after
  *  a blank line. The index of the last item they hold is returned, and
- *  true */
+ *  true. Last is the Markdown written for the comments, which the
+ *  Markdown returned ends with, so they're read without the rest of it
+ *  (see noteHiddenComments) */
 function breakBeforeComment(out: string, trailing: TrailingBreak | undefined, opts: InlineRangeOpts | undefined, comment: string, rest: () => { line: string; raw: string; payloads: string[]; last: number }, block = comment,
-  blocks?: () => { text: string; through: number } | undefined): [string, number, boolean?] {
-  if (!trailing || trailing.after !== out) return [out + comment, -1];
+  blocks?: () => { text: string; through: number } | undefined): [string, number, boolean | undefined, string] {
+  if (!trailing || trailing.after !== out) return [out + comment, -1, undefined, comment];
   const { line, raw, payloads, last } = rest();
-  if (opts?.cell) return [out + payloads[0], last];
+  if (opts?.cell) return [out + payloads[0], last, undefined, payloads[0]];
   // The spaces and tabs the line starts with, which go as references,
   // after which no block starts (see lineStartsAfterBreaks)
-  if (/^[ \t]/.test(raw) && lineStartsAfterBreaks('x\\\n' + raw).includes(3)) return [out + comment, -1];
+  if (/^[ \t]/.test(raw) && lineStartsAfterBreaks('x\\\n' + raw).includes(3)) return [out + comment, -1, undefined, comment];
   if (readsCommentsInline((opts?.heading ? '# ' : '') + 'x<br>' + line, payloads, false, opts?.heading) && !/\S/.test(outsideComments(payloads.join('')))) {
-    return [trailing.before + '<br>' + payloads[0], last];
+    return [trailing.before + '<br>' + payloads[0], last, undefined, payloads[0]];
   }
   const forms = opts?.forms;
   const held = forms && blocks?.();
-  if (!forms || !held) return [out + block, -1];
+  if (!forms || !held) return [out + block, -1, undefined, block];
   forms.used = true;
-  return [trailing.before + '<br>\n\n' + held.text, held.through, true];
+  return [trailing.before + '<br>\n\n' + held.text, held.through, true, held.text];
 }
 
 /** The hidden comments of segment[from] to `end`, the end of its
@@ -9059,13 +9061,70 @@ function criticSpanStart(text: string, opener: string, closer: string, from: num
   return -1;
 }
 
+/** The hidden comments of a paragraph's Markdown, which Word hides: where
+ *  each starts, by where it ends (see lastVisibleChar), and one the Markdown
+ *  leaves open at its end, while it does: where it starts and ends, its
+ *  Markdown, and the last three characters of that, which an end may start
+ *  in. The next comment's Markdown, written right after it, goes on in it,
+ *  as the two comments Word split <!-- x<!-- a --> into read as one. */
+interface HiddenComments { starts: Map<number, number>; open?: { start: number; end: number; text: string; tail: string } }
+
+/** Notes in `hidden` the comments in `written`, the Markdown of a hidden
+ *  comment just written at `at` in a paragraph's, as export reads them,
+ *  which hides them: each from its <!-- to its end as markdown-it reads it
+ *  inline, past a -> or --!> in it, and in an HTML table's cell as the
+ *  browser reads it, to a --> or --!>. Text outside them shows, as the x of
+ *  <!-- a -->x<!-- b --> does, and so does a <!-- that has no end there,
+ *  as of <!-- a --->, which markdown-it reads as text, after which none in
+ *  `written` is noted. One with nothing that may end it after it waits for
+ *  the next comment's Markdown, which goes on in it where it comes right
+ *  after, and is read from its <!-- only once one may, so a run of comments
+ *  Word split one into is read once. Only `written` is read, not the
+ *  paragraph's Markdown, which reading would join for each comment. */
+function noteHiddenComments(hidden: HiddenComments, written: string, at: number): void {
+  const commentEnd = (text: string, start: number): number => {
+    if (!readsMarkdown) {
+      const piece = htmlPieceAt(text, start);
+      return piece.kind === 'comment' && !piece.rest ? piece.end : -1;
+    }
+    HTML_TAG_AT.lastIndex = start;
+    return HTML_TAG_AT.test(text) ? HTML_TAG_AT.lastIndex : -1;
+  };
+  const mayEnd = readsMarkdown ? /-->/ : /--!?>/;
+  const open = hidden.open;
+  hidden.open = undefined;
+  let from = 0;
+  if (open && open.end === at) {
+    const text = open.text + written;
+    if (!mayEnd.test(open.tail + written)) {
+      hidden.open = { start: open.start, end: at + written.length, text, tail: (open.tail + written).slice(-3) };
+      return;
+    }
+    const end = commentEnd(text, 0);
+    if (end !== -1) {
+      hidden.starts.set(open.start + end, open.start);
+      from = Math.max(0, end - open.text.length);
+    }
+  }
+  for (let start = written.indexOf('<!--', from); start !== -1; start = written.indexOf('<!--', from)) {
+    const end = commentEnd(written, start);
+    if (end === -1) {
+      if (!mayEnd.test(written.slice(start + 4))) hidden.open = { start: at + start, end: at + written.length, text: written.slice(start), tail: written.slice(-3) };
+      return;
+    }
+    hidden.starts.set(at + end, at + start);
+    from = end;
+  }
+}
+
 /**
  * The last character of `markdown` between `from` and `to` with its tracked
- * changes accepted or rejected, skipping comments, an ID comment's markers
- * and the spans that view drops. Only the CriticMarkup at the end of the
- * range is read.
+ * changes accepted or rejected, skipping comments, an ID comment's markers,
+ * hidden comments, whose starts `hidden` has by their ends (see
+ * noteHiddenComments), and the spans that view drops. Only the CriticMarkup
+ * at the end of the range is read.
  */
-function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = markdown.length): string {
+function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = markdown.length, hidden?: ReadonlyMap<number, number>): string {
   let end = to;
   while (end > from) {
     end = textEnd(markdown, from, end);
@@ -9074,6 +9133,12 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
     const marker = /\{[#/][a-zA-Z0-9_-]+\}$/.exec(markdown.slice(Math.max(from, end - 72), end));
     if (marker) {
       end -= marker[0].length;
+      continue;
+    }
+    // A hidden comment, as <!-- c -->, which Word doesn't show
+    const comment = hidden?.get(end);
+    if (comment !== undefined && comment >= from) {
+      end = comment;
       continue;
     }
     const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
@@ -9088,7 +9153,7 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
       closer[1] === '--' ? [inner, accepted ? inner : innerEnd] :
       closer[1] === '~~' ? (split < 0 ? [inner, innerEnd] : accepted ? [split + 2, innerEnd] : [inner, split]) :
       closer[1] === '==' ? [inner, innerEnd] : [inner, inner];
-    const last = lastVisibleChar(markdown, accepted, visibleFrom, visibleTo);
+    const last = lastVisibleChar(markdown, accepted, visibleFrom, visibleTo, hidden);
     if (last) return last;
     end = start;
   }
@@ -9161,8 +9226,10 @@ function textEnd(markdown: string, from: number, end: number): number {
  *  two, as in Seen {++a ++}[@key], or when there is none before it on its
  *  line, after a line break or a tracked paragraph break. A view
  *  without the space then keeps the citation against its text, as Word has it
- *  there. */
-function citationSeparator(precedingMarkdown: string, citation: Extract<ContentItem, { type: 'citation' }>, last?: RevisionSpan): string {
+ *  there. A hidden comment the Markdown ends with shows nothing, so the
+ *  text before it decides (`hidden`, see noteHiddenComments): a <!-- c -->
+ *  gets none before [@key], as Word shows the space before the comment. */
+function citationSeparator(precedingMarkdown: string, citation: Extract<ContentItem, { type: 'citation' }>, last?: RevisionSpan, hidden?: ReadonlyMap<number, number>): string {
   // Where Word starts a paragraph with it, as after a tracked break the
   // view drops, as in a{--\n\n--}{++[@key]++}, a space would be one at the
   // paragraph's start
@@ -9177,7 +9244,7 @@ function citationSeparator(precedingMarkdown: string, citation: Extract<ContentI
   return views.some(accepted => [' ', '', '\n'].includes(
     span?.revision.type === (accepted ? 'addition' : 'deletion')
       ? lastTextChar(precedingMarkdown, span.start, textEnd(precedingMarkdown, span.start, span.end - 3))
-      : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
+      : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length, hidden)
   )) ? '' : ' ';
 }
 
@@ -9349,10 +9416,12 @@ function heldGroupEnd(segment: ContentItem[], start: number, end: number, rangeE
 const heldGroups = new WeakMap<ContentItem[], { length: number; byEnd: Map<number, Map<number, number>> }>();
 
 /** The highlight group from `start` to `end` (highlightGroupEnd) as
- *  Markdown, after `precedingMarkdown`, which ends with the span `last`, in
+ *  Markdown, after `precedingMarkdown`, which ends with the span `last` and
+ *  holds the hidden comments `hidden` has (see citationSeparator), in
  *  the range of runs ending at `rangeEnd`, which its text reads up to. */
 function renderHighlightGroup(
   segment: ContentItem[], start: number, end: number, rangeEnd: number, precedingMarkdown: string, noteLabels?: Map<string, string>, last?: RevisionSpan,
+  hidden?: ReadonlyMap<number, number>,
 ): string {
   let inner = '';
   // The separator before a citation that opens the group, which goes
@@ -9375,7 +9444,7 @@ function renderHighlightGroup(
       inner += inlineMathMarkdown(item.latex);
       mathEnd = inner.length;
     } else if (item.type === 'citation') {
-      if (g === start) lead = citationSeparator(precedingMarkdown, item, last);
+      if (g === start) lead = citationSeparator(precedingMarkdown, item, last, hidden);
       inner += (g === start ? '' : citationSeparator(inner, item)) + citationText(item);
     }
   }
@@ -9395,13 +9464,14 @@ function renderHighlightGroup(
 
 /** `out` with the highlight group from `start` to `end` appended as one span
  *  of its revision, as appendRevised appends an item, and the span it ends
- *  with. A citation first in it is spaced from `precedingMarkdown`. */
+ *  with. A citation first in it is spaced from `precedingMarkdown`, past
+ *  the hidden comments in it that `hidden` has. */
 function appendHighlightGroup(
   out: string, segment: ContentItem[], start: number, end: number, rangeEnd: number, last: RevisionSpan | undefined,
-  noteLabels?: Map<string, string>, precedingMarkdown = out,
+  noteLabels?: Map<string, string>, precedingMarkdown = out, hidden?: ReadonlyMap<number, number>,
 ): [string, RevisionSpan | undefined] {
   const items = segment.slice(start, end) as InlineRevisionItem[];
-  const text = renderHighlightGroup(segment, start, end, rangeEnd, precedingMarkdown, noteLabels, last);
+  const text = renderHighlightGroup(segment, start, end, rangeEnd, precedingMarkdown, noteLabels, last, hidden);
   return appendRevised(out, text, items[0], last, combinedSpanJoin(items));
 }
 
@@ -9418,8 +9488,11 @@ function combinedSpanJoin(items: InlineRevisionItem[], afterItem?: (k: number) =
  *  before the rest of its side, `after` (see escapeMarkdownChars), with
  *  its highlight around the rest of its formatting where it joins its
  *  neighbours' (`joinsHighlight`, see joinHighlights), at the start of a
- *  line where an item of the side before it ends one (`lineStart`). */
-function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter, joinsHighlight = false, lineStart = false): string {
+ *  line where an item of the side before it ends one (`lineStart`), past
+ *  the hidden comments `precedingText` holds that `hidden` has (see
+ *  citationSeparator). */
+function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter, joinsHighlight = false, lineStart = false,
+  hidden?: ReadonlyMap<number, number>): string {
   // A note reference or an equation in a link, in the link, around its
   // highlight, as linkGroup writes one
   if ((item.type === 'footnote_ref' || item.type === 'math') && item.href) {
@@ -9427,7 +9500,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   }
   const color = highlightColorOf(item);
   if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
-    const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after);
+    const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after, false, false, hidden);
     // The separator before a citation goes before the highlight
     const lead = item.type === 'citation' && text.startsWith(' ') ? ' ' : '';
     return text.includes('==') ? text : lead + wrapHighlight(text.slice(lead.length), color);
@@ -9438,7 +9511,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
     const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
     return markdownLink(text, item.href);
   }
-  if (item.type === 'citation') return citationSeparator(precedingText, item) + citationText(item);
+  if (item.type === 'citation') return citationSeparator(precedingText, item, undefined, hidden) + citationText(item);
   // In the substitution's span
   return item.display
     ? displayMathBlock(item.latex, true)
@@ -9535,19 +9608,22 @@ function resolvedCloserItem(side: string, starts: number[]): number {
  *  an addition are adjacent with matching author/date. The two can differ in
  *  type, as when export writes a deleted citation as its [@key] text.
  *  Returns the substitution string, or `null` if the pair cannot be rendered
- *  as a substitution (e.g. display math paired with another type). */
+ *  as a substitution (e.g. display math paired with another type). A
+ *  citation on a side is spaced from `precedingText`, past the hidden
+ *  comments in it that `hidden` has. */
 function tryRenderSubstitution(
   deletion: SubstitutionItem,
   addition: SubstitutionItem,
   precedingText: string,
   noteLabels?: Map<string, string>,
+  hidden?: ReadonlyMap<number, number>,
 ): string | null {
   const display = (item: SubstitutionItem) => item.type === 'math' && item.display;
   if (deletion.type !== addition.type && (display(deletion) || display(addition))) return null;
   // Each side reads apart, so its emphasis resolves apart, and before the
   // check, as a mark hid the ~> of a struck >a: {~~~~>a~~~>b~~}
-  const oldText = resolveSide(substitutionItemText(deletion, precedingText, noteLabels));
-  const newText = resolveSide(substitutionItemText(addition, precedingText, noteLabels));
+  const oldText = resolveSide(substitutionItemText(deletion, precedingText, noteLabels, undefined, false, false, hidden));
+  const newText = resolveSide(substitutionItemText(addition, precedingText, noteLabels, undefined, false, false, hidden));
   if (oldText && newText && substitutionHolds(oldText, newText)) {
     return '{~~' + oldText + '~>' + newText + '~~}';
   }
@@ -9588,6 +9664,7 @@ function renderSubstitutionRun(
   precedingText: string,
   eligible: (item: ContentItem) => boolean,
   noteLabels?: Map<string, string>,
+  hidden?: ReadonlyMap<number, number>,
 ): { text: string; nextIndex: number } | undefined {
   const first = segment[start];
   const revision = isSubstitutionItem(first) ? first.revision : undefined;
@@ -9615,14 +9692,16 @@ function renderSubstitutionRun(
       }
       const highlightEnd = highlightGroupEnd(segment, j, to, item.commentIds);
       if (highlightEnd > j) {
-        text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels);
+        // The hidden comments `precedingText` holds, before the side's
+        // first item
+        text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels, undefined, text ? undefined : hidden);
         j = highlightEnd;
       } else {
         // After a line break in the side, as the span of one would have it
         const prev = segment[j - 1];
         const lineStart = j > from && prev.type === 'text' && endsLine(prev.text);
         text += escapeBracketAfterCitation(textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to),
-          joinsHighlight(segment, j, from, to), lineStart), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text), segment, j, text, true);
+          joinsHighlight(segment, j, from, to), lineStart, text ? undefined : hidden), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text), segment, j, text, true);
         if (item.type === 'math' && !item.display) mathEnd = text.length;
         j++;
       }
@@ -10724,6 +10803,9 @@ function renderInlineRange(
     return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap, renderOpts?.emittedIdCommentBodies, renderOpts?.noteLabels, renderOpts?.imageFormatMapping, renderOpts?.timezone, renderOpts?.openIdComments, renderOpts?.lastCommentItem);
   }
   let lastSpan: RevisionSpan | undefined;
+  // The hidden comments the Markdown holds, which a citation's space reads
+  // past (see citationSeparator)
+  const hidden: HiddenComments = { starts: new Map() };
 
   while (i < segment.length) {
     const item = segment[i];
@@ -10736,7 +10818,7 @@ function renderInlineRange(
     if (isSubstitutionItem(item) && item.revision?.type === 'deletion' && item.commentIds.size === 0
         && !partlyRevisedLinkAt(segment, i, segmentEnd, NO_COMMENTS)) {
       const eligible = (candidate: ContentItem) => candidate.type !== 'para' && 'commentIds' in candidate && candidate.commentIds.size === 0;
-      const run = renderSubstitutionRun(segment, i, segmentEnd, out, eligible, renderOpts?.noteLabels);
+      const run = renderSubstitutionRun(segment, i, segmentEnd, out, eligible, renderOpts?.noteLabels, hidden.starts);
       if (run) {
         out += run.text;
         i = run.nextIndex;
@@ -10750,7 +10832,7 @@ function renderInlineRange(
           next.commentIds.size === 0 &&
           pairStandsAlone(segment, i, eligible)) {
 
-        const result = tryRenderSubstitution(item, next, out, renderOpts?.noteLabels);
+        const result = tryRenderSubstitution(item, next, out, renderOpts?.noteLabels, hidden.starts);
         if (result !== null) {
           out += result;
           i += 2;
@@ -10761,14 +10843,14 @@ function renderInlineRange(
 
     const highlightEnd = highlightGroupEnd(segment, i, segmentEnd, new Set());
     if (highlightEnd > i) {
-      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, segmentEnd, lastSpan, renderOpts?.noteLabels);
+      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, segmentEnd, lastSpan, renderOpts?.noteLabels, out, hidden.starts);
       i = highlightEnd;
       continue;
     }
 
     // A citation in a comment's range goes in its anchor, below
     if (item.type === 'citation' && item.commentIds.size === 0) {
-      const citeText = citationSeparator(out, item, lastSpan) + citationText(item);
+      const citeText = citationSeparator(out, item, lastSpan, hidden.starts) + citationText(item);
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
       continue;
@@ -10836,8 +10918,10 @@ function renderInlineRange(
         const inParagraph = opts?.cell ? comment : keepCommentInParagraph(comment, lineBeforeComment(segment, i), opts?.listLinePrefix);
         let last: number;
         let held: boolean | undefined;
-        [out, last, held] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
+        let written: string;
+        [out, last, held, written] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
           () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment, () => commentBlocks(segment, i, segmentEnd));
+        noteHiddenComments(hidden, written, out.length - written.length);
         // The blocks hold the rest of the paragraph
         if (held) i = last;
         else inlineThrough = Math.max(inlineThrough, last);
@@ -10903,13 +10987,13 @@ function renderInlineRange(
       let j = i;
       // The space import adds before a citation that opens the range goes
       // before the range, which Word's doesn't cover
-      const lead = item.type === 'citation' ? citationSeparator(out, item, lastSpan) : '';
+      const lead = item.type === 'citation' ? citationSeparator(out, item, lastSpan, hidden.starts) : '';
 
       while (j < segment.length) {
         const seg = segment[j];
         const highlightEnd = highlightGroupEnd(segment, j, segmentEnd, commentSet);
         if (highlightEnd > j) {
-          [anchorText, anchorSpan] = appendHighlightGroup(anchorText, segment, j, highlightEnd, segmentEnd, anchorSpan, renderOpts?.noteLabels, anchorText || out + lead);
+          [anchorText, anchorSpan] = appendHighlightGroup(anchorText, segment, j, highlightEnd, segmentEnd, anchorSpan, renderOpts?.noteLabels, anchorText || out + lead, anchorText ? undefined : hidden.starts);
           j = highlightEnd;
           continue;
         }
@@ -10954,7 +11038,7 @@ function renderInlineRange(
           continue;
         }
         if (seg.type === 'citation') {
-          const citeText = citationSeparator(anchorText || out + lead, seg, anchorSpan) + citationText(seg);
+          const citeText = citationSeparator(anchorText || out + lead, seg, anchorSpan, anchorText ? undefined : hidden.starts) + citationText(seg);
           [anchorText, anchorSpan] = appendRevised(anchorText, citeText, seg, anchorSpan);
           j++;
           continue;
@@ -11093,6 +11177,9 @@ function renderInlineRangeWithIds(
   let rangeStartsOnly = true;
   let i = startIndex;
   let lastSpan: RevisionSpan | undefined;
+  // The hidden comments the Markdown holds, which a citation's space reads
+  // past (see citationSeparator)
+  const hidden: HiddenComments = { starts: new Map() };
   // A comment that spans paragraphs stays open from the one before
   let prevCommentIds = new Set<string>(openIdComments);
   const collectedBodies = new Set<string>();
@@ -11147,7 +11234,7 @@ function renderInlineRangeWithIds(
         && !partlyRevisedLinkAt(segment, i, segmentEnd, item.commentIds)) {
       enterComments(item.commentIds);
       const eligible = (candidate: ContentItem) => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds);
-      const run = renderSubstitutionRun(segment, i, segmentEnd, out, eligible, noteLabels);
+      const run = renderSubstitutionRun(segment, i, segmentEnd, out, eligible, noteLabels, hidden.starts);
       if (run) {
         out += run.text;
         i = run.nextIndex;
@@ -11162,7 +11249,7 @@ function renderInlineRangeWithIds(
           commentSetsEqual(next.commentIds, prevCommentIds) &&
           pairStandsAlone(segment, i, eligible)) {
 
-        const result = tryRenderSubstitution(item, next, out, noteLabels);
+        const result = tryRenderSubstitution(item, next, out, noteLabels, hidden.starts);
         if (result !== null) {
           out += result;
           i += 2;
@@ -11175,7 +11262,7 @@ function renderInlineRangeWithIds(
     if (highlightEnd > i && 'commentIds' in item) {
       const currentIds = item.commentIds;
       enterComments(currentIds);
-      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, segmentEnd, lastSpan, noteLabels);
+      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, segmentEnd, lastSpan, noteLabels, out, hidden.starts);
       i = highlightEnd;
       continue;
     }
@@ -11184,7 +11271,7 @@ function renderInlineRangeWithIds(
       const currentIds = item.commentIds;
       enterComments(currentIds);
 
-      const citeText = citationSeparator(out, item, lastSpan) + citationText(item);
+      const citeText = citationSeparator(out, item, lastSpan, hidden.starts) + citationText(item);
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
       continue;
@@ -11265,8 +11352,10 @@ function renderInlineRangeWithIds(
         const inParagraph = opts?.cell ? comment : keepCommentInParagraph(comment, before === undefined ? undefined : before + markers, opts?.listLinePrefix);
         let last: number;
         let held: boolean | undefined;
-        [out, last, held] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
+        let written: string;
+        [out, last, held, written] = breakBeforeComment(out, trailingBreak, opts, i <= inlineThrough ? withoutSpaceOutsideComments(inParagraph) : inParagraph,
           () => lineAfterBreak(segment, i, segmentEnd, inParagraph, opts?.listLinePrefix), comment, () => commentBlocks(segment, i, segmentEnd));
+        noteHiddenComments(hidden, written, out.length - written.length);
         // The blocks hold the rest of the paragraph
         if (held) i = last;
         else inlineThrough = Math.max(inlineThrough, last);
