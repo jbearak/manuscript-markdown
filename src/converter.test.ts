@@ -25615,7 +25615,6 @@ describe('a citation right after a hidden HTML comment', () => {
     ['a comment with what look like its end in it', 'a <!-- x -> y --!> z -- w -->[@doe2020] b.'],
     ['a comment with another\'s start in it', 'a <!-- x <!-- y -->[@doe2020] b.'],
     ['a comment and a Word comment on no text', 'a <!-- h -->{>>c<<}[@doe2020] b.'],
-    ['a comment and an ID comment\'s closer', 'x {#c1}a <!-- h -->{/c1}[@doe2020] b.\n{#c1>>@A | b<<}'],
     ['a comment, before an inserted citation', 'a <!-- h -->{++[@doe2020]++} b.'],
     ['a comment, before a highlighted citation', 'a <!-- h -->==[@doe2020]== b.'],
     // Word's text here leaves out what's deleted
@@ -25649,6 +25648,8 @@ describe('a citation right after a hidden HTML comment', () => {
     ['a comment with no end', 'a <!-- h [@doe2020] b.', 'a \\<!-- h [@doe2020] b.'],
     ['a comment markdown-it reads as text', 'a <!-- h --->[@doe2020] b.', 'a \\<!-- h ---> [@doe2020] b.'],
     ['a comment\'s end alone', 'a -->[@doe2020] b.', 'a --> [@doe2020] b.'],
+    // After ID syntax, which is Markdown other than Word's text
+    ['a comment in an ID comment\'s range', 'x {#c1}a <!-- h -->{/c1}[@doe2020] b.\n{#c1>>@A | b<<}', 'x {#c1}a <!-- h -->{/c1} [@doe2020] b.\n{#c1>>@A | b<<}'],
     // An HTML block, which shows the comment as text (known)
     ['a comment at a paragraph\'s start', '<!-- h -->[@doe2020] b.', ''],
     ['a comment at a list item\'s start', '- <!-- h -->[@doe2020] b.', ''],
@@ -25720,6 +25721,35 @@ describe('a citation right after a hidden HTML comment', () => {
     const comments = new Map([['c1', { author: 'A', text: 'x', date: '2025-01-01T00:00:00Z' }]]);
     const markdown = buildMarkdown([plain('a '), ranged(comment('<!-- a -->` ')), ranged(comment('<!-- b `x -->')), ranged(citation()), plain(' b')], comments, { alwaysUseCommentIds: true });
     expect(markdown).toContain('a {#1}<!-- a -->` <!-- b `x --> [@doe2020]{/1} b');
+  });
+
+  const unembedded = (markdown: string): ContentItem => ({ type: 'image', rId: '', src: '', alt: '', widthPx: 0, heightPx: 0, commentIds: new Set(), markdown });
+  test.each([
+    ['an image export couldn\'t embed', unembedded('![i](x.png)\u200B'), 'a ![i](x.png)'],
+    ['one that holds code', unembedded('![i](x.png)`\u200B'), 'a ![i](x.png)`'],
+    ['math', { type: 'math', latex: 'x', display: false, commentIds: new Set() } as ContentItem, 'a $x$'],
+    ['a link', { ...plain('l'), href: 'http://x/' } as ContentItem, 'a [l](http://x/)'],
+    ['an insertion', { ...plain('i'), revision: { type: 'addition', author: 'A', date: '' } } as ContentItem, 'a {++i++}'],
+  ])('keeps the space after a hidden comment after %s and a space, as before', (_name, item, written) => {
+    // Markdown other than Word's text, which can leave what a later <!--
+    // is read in open, as an image's Markdown, Word's hidden text as it is,
+    // can, so no comment after it is read past
+    expect(buildMarkdown([plain('a '), item, plain(' '), comment('<!-- h -->'), citation(), plain(' b')], new Map()).trim()).toBe(written + ' <!-- h --> [@doe2020] b');
+  });
+
+  test.each([
+    ['code', '` ', 'b `x', 'a ![i](x.png)` <!-- b `x --> [@doe2020] b.'],
+    ['an insertion', '{++ ', 'b ++}', 'a ![i](x.png){++ <!-- b ++} --> [@doe2020] b.'],
+    ['math', ' $x ', 'b$', 'a ![i](x.png) $x <!-- b$ --> [@doe2020] b.'],
+  ])('keeps the space after a hidden comment after Word\'s hidden Markdown of an image that holds %s, as before', async (_name, rest, inComment, expected) => {
+    // Import writes the image's Markdown as Word has it, so what that
+    // opens goes on into the comment's, which export then shows
+    const zip = await JSZip.loadAsync((await convertMdToDocx('a ![i](x.png)<!-- ' + inComment + ' -->[@doe2020] b.\n', { bibtex })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain('(x.png)\u200B');
+    zip.file('word/document.xml', xml.replace('(x.png)\u200B', '(x.png)' + rest + '\u200B'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected + '\n');
   });
 
   test('writes no space after hidden runs of comments alone', () => {
