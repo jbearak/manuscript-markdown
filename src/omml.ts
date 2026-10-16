@@ -1678,7 +1678,9 @@ function trimPart(latex: string): string {
  *  the number's, as Word can write 2 x. Export writes a space LaTeX ignores
  *  as a run too, but in Markdown one follows a number there only after
  *  what exports as nothing, as in 2{} x, since $2 and a space read as
- *  currency; \ keeps it an equation. */
+ *  currency; \ keeps it an equation. A space of another kind, as a
+ *  no-break space, is written as the character after {}, as 2{} x, since
+ *  \ would export as a space. */
 export function apartFromCurrency(latex: string, children: XmlNode[]): string {
   const [, number, spaces] = /^(\d[\d,.]*)(\s+)/.exec(latex) ?? [];
   if (!spaces) return latex;
@@ -1687,7 +1689,7 @@ export function apartFromCurrency(latex: string, children: XmlNode[]): string {
   const after = spaces.slice(shown);
   const rest = latex.slice(number.length + spaces.length);
   const commands = [...after].every(ch => SPACE_COMMANDS.has(ch) || /[ \t\r\n]/.test(ch)) ? spaceCommands(after) : '';
-  if (!commands) return head + after + rest;
+  if (!commands) return head + (shown ? '' : '{}') + after + rest;
   // A space LaTeX ignores is kept as one, and a command named with letters
   // ends before whatever follows, as a CriticMarkup span whose text would
   // run into it once accepted, as \quad{++x++} would, as \quadx

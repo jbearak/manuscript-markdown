@@ -2500,3 +2500,87 @@ describe('a fraction without a bar', () => {
     await expectTrips(inline(latex), inline(back));
   });
 });
+
+
+// A space Word holds after a number that starts an inline equation, other
+// than a space or tab, which import writes as \ , or one a spacing command
+// exports as, as a no-break space, made $2 x$ with the character, which
+// export read as currency, so Word got the text $2 x$ and lost the equation
+describe('a number and a space of another kind at the start of an inline equation', () => {
+  const preserved = (t: string) => '<m:r><m:t xml:space="preserve">' + t + '</m:t></m:r>';
+  const inline = (latex: string) => 'A $' + latex + '$ B.\n';
+  const table = (cell: string) => '| h |\n| --- |\n| ' + cell + ' |\n';
+
+  /** A document from Word with `markdown`'s first equation as `omml` */
+  async function wordDocx(omml: string, markdown: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** The equations Word gets for `markdown` */
+  async function equations(markdown: string): Promise<string[]> {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]);
+  }
+
+  /** The text of an equation's runs */
+  const shown = (omml: string) => [...omml.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1]).join('');
+
+  /** `omml` from Word comes back as `markdown`, whose equation Word gets
+   *  as `text`, and the next trip gives both again */
+  async function expectFromWord(omml: string, base: string, markdown: string, text: string): Promise<void> {
+    expect((await convertDocx(await wordDocx(omml, base))).markdown).toBe(markdown);
+    const once = await equations(markdown);
+    expect(once.map(shown)).toEqual([text]);
+    const twice = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(twice).toBe(markdown);
+    expect(await equations(twice)).toEqual(once);
+  }
+
+  test.each([
+    ['a no-break space', '\u00a0', 'x'],
+    ['an en space', '\u2002', 'x'],
+    ['a narrow no-break space', '\u202f', 'x'],
+    ['an ideographic space', '\u3000', 'x'],
+    ['a no-break space before +', '\u00a0', '+x'],
+    ['a no-break space before α', '\u00a0', 'α'],
+    ['a no-break space before (', '\u00a0', '(x)'],
+  ])('%s after the number, from Word, keeps it an equation, and again', (_name, space, rest) => {
+    const latex = '2{}' + space + rest.replace('α', '\\alpha');
+    return expectFromWord(preserved('2' + space + rest), inline('x'), inline(latex), '2' + space + rest);
+  });
+
+  test('a no-break space after the number, in a table cell, from Word, keeps it an equation, and again', () =>
+    expectFromWord(preserved('2\u00a0x'), table('A $x$ B.'), table('A $2{}\u00a0x$ B.'), '2\u00a0x'));
+
+  // As on main
+  test.each([
+    ['a space', preserved('2 x'), inline('2\\ x'), '2 x'],
+    ['two spaces', preserved('2  x'), inline('2\\ \\ x'), '2  x'],
+    ['a tab', preserved('2\tx'), inline('2\\ x'), '2 x'],
+    ['an em space', preserved('2\u2003x'), inline('2\\quad x'), '2\u2003 x'],
+    ['nothing', run('2'), inline('2'), '2'],
+  ])('%s after the number, from Word, comes back as before, and again', (_name, omml, markdown, text) =>
+    expectFromWord(omml, inline('x'), markdown, text));
+
+  test('a no-break space after the number, in display math, from Word, comes back as before, and again', async () => {
+    const display = (latex: string) => '$'.repeat(2) + '\n' + latex + '\n' + '$'.repeat(2) + '\n';
+    expect((await convertDocx(await wordDocx(preserved('2\u00a0x'), display('x')))).markdown).toBe(display('2\u00a0x'));
+    expect((await convertDocx((await convertMdToDocx(display('2\u00a0x'))).docx)).markdown).toBe(display('2\u00a0x'));
+  });
+
+  test.each([
+    ['A $2 and $3 B.\n', 0],
+    ['It costs $5.\n', 0],
+    ['A $2+3$ B.\n', 1],
+    ['A $2\\ x$ B.\n', 1],
+    ['A $2$ B.\n', 1],
+  ])('%j comes back as before, and again', async (markdown, count) => {
+    expect(await equations(markdown)).toHaveLength(count);
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(markdown);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(markdown);
+  });
+});

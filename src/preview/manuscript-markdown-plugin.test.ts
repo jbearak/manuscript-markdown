@@ -2787,3 +2787,35 @@ describe('CriticMarkup without its closers in the preview', () => {
     expect(time(6000) / small).toBeLessThan(8);
   }, 60000);
 });
+
+// Import writes a number and a space of another kind at the start of an
+// inline equation as 2{} and the space, which the currency rule reads as an
+// equation, where 2 and the space read as currency
+describe('a number and a no-break space at the start of an inline equation', () => {
+  function render(markdown: string): string {
+    const md = new MarkdownIt({ html: true });
+    md.inline.ruler.after('escape', 'test_host_math', (state: any, silent: boolean) => {
+      if (state.src.charAt(state.pos) !== '$') return false;
+      const close = state.src.indexOf('$', state.pos + 1);
+      if (close === -1) return false;
+      if (!silent) {
+        const token = state.push('math_inline', 'math', 0);
+        token.content = state.src.slice(state.pos + 1, close);
+      }
+      state.pos = close + 1;
+      return true;
+    });
+    md.renderer.rules.math_inline = (tokens, idx) => '<katex>' + tokens[idx].content + '</katex>';
+    md.use(manuscriptMarkdownPlugin);
+    return md.render(markdown);
+  }
+
+  it('gives KaTeX 2{} and the space as an equation', () => {
+    expect(render('A $2{}\u00a0x$ B.')).toContain('<katex>2{}\u00a0x</katex>');
+  });
+
+  // As on main
+  it('leaves $2 and the space as text', () => {
+    expect(render('A $2\u00a0x$ B.')).not.toContain('<katex>');
+  });
+});
