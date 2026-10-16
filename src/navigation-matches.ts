@@ -68,19 +68,24 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
   // The end of each match the scan read before, by its start, found once
   // where the scan first reads as before
   let before: Map<number, number> | undefined;
-  // Whether the scan read the match from `at` to `end` before
-  const readBefore = (at: number, end: number): boolean => {
+  // Whether the scan read the match from `at` to `end` before, or with no
+  // `end`, one from `at`
+  const readBefore = (at: number, end?: number): boolean => {
     if (!before) {
       before = new Map();
       for (const match of navigationMatches(pattern, text)) before.set(match.start, match.end);
     }
-    return before.get(at) === end;
+    return end === undefined ? before.has(at) : before.get(at) === end;
   };
   const matches: Array<{ start: number; end: number }> = [];
   for (let at = 0; at < text.length; at++) {
     const ch = text.charCodeAt(at);
     if (ch !== 0x7B && ch !== 0x3D && ch !== 0x7E && ch !== 0x3C) continue; // { = ~ <
     if ((ch === 0x7B || ch === 0x3C) && unclosed(at)) continue;
+    // A match that must be one the scan read before, from where it read
+    // none, is none, before the pattern runs on to a closer far off, as
+    // past many openers in code to the one closer after them (see blocks)
+    if (blocks && (ch === 0x3D ? blocks.inertMarks(at) || blocks.unsure(at, at + 1) : blocks.inertOpener(at)) && !readBefore(at)) continue;
     sticky.lastIndex = at;
     const match = sticky.exec(text);
     if (match === null) continue;

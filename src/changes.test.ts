@@ -693,6 +693,8 @@ describe('Navigation pairs no highlight past its paragraph', () => {
     ['an == before a link whose destination holds one', 'x == y\n\n[l](u==v) ==real==', ['==real==']],
     ['an == before an HTML comment that holds one', 'x == y\n\na <!-- == --> ==real==', ['<!-- == -->', '==real==']],
     ['a highlight after a fenced block a span\'s fence line opens', '==\n\n{--a\n--}\n```\n==\n```\n==l==', ['{--a\n--}', '==l==']],
+    // An autolink, after which export reads on
+    ['an == before an email address\'s autolink and a highlight', 'x == y\n\n<a@b.co> ==r==', ['==r==']],
   ])('reads %s as export does', (_name, text, expected) => {
     expect(stops(text)).toEqual(expected);
   });
@@ -719,6 +721,19 @@ describe('Navigation pairs no highlight past its paragraph', () => {
     ['the spans after a substitution\'s opener in code before a ~~~}', '`{~~` ~~~} {++added++} {~~old~>new~~}', ['{++added++}', '{~~old~>new~~}']],
     ['the insertion in a comment with no closer of its own after an == in code', 'a `c== ` {>> `==a` {++b++} {>>b<<} c', ['{++b++}', '{>>b<<}']],
     ['the spans after an opener in code that a highlight took before', '```\nx == y\n{++\n```\n\n`==a==` {++i++}\n==g=={blue}', ['{++i++}', '==g=={blue}']],
+    // A comment's <<}, after which export reads on, and whose } the
+    // pattern's highlight reads none past. An == that export reads as text, in a URL that
+    // linkify links, in a link's destination past a ( ) in it, or in its
+    // title past a ), in a link's text past a [ ] in it, or in an autolink,
+    // which a lone == before it closed before, and an opener in a URL
+    ['an == before a comment and a highlight', 'x == y\n\np {>>q<<} ==r==', ['{>>q<<}', '==r==']],
+    ['an == in code before a URL that holds one', '`x == y`\n\nhttps://example.com/?q==yes==', []],
+    ['an == in code before a URL that holds one and a highlight', '`x == y`\n\nhttps://e.com/?q==a ==b==', ['==b==']],
+    ['an == in code before a link whose destination holds one after a ( )', '`x == y`\n\n[a](u(x)==y) ==d==', ['==d==']],
+    ['an == in code before a link whose title holds one after a )', '`x == y`\n\n[a](u "x ) == y") ==d==', ['==d==']],
+    ['an == in code before a citation that holds one after a [ ]', '`x == y`\n\n[see [x] == @key] ==d==', ['==d==']],
+    ['an == in code before an autolink that holds one', '`x == y`\n\n<https://e.com/?q==a> ==r==', ['==r==']],
+    ['an insertion\'s opener in a URL', '`x == y`\n\nhttps://e.com/{++x} {++y++}', ['{++x} {++y++}']],
   ])('reads %s as before', (_name, text, expected) => {
     expect(stops(text)).toEqual(expected);
   });
@@ -745,6 +760,10 @@ describe('Navigation pairs no highlight past its paragraph', () => {
     ['many paragraphs that hold an == in code, each after a lone ==', n => 'x == y\n\n`==` ==a==\n\n'.repeat(n)],
     ['many paragraphs that hold an == after a <, a [ or a $', n => 'x == y\n\na <b ==c [d ==e] $f == g\n\n'.repeat(n)],
     ['many openers in code, each in a highlight before', n => 'x == `{++` y\n\n==a== {++b++}\n\n'.repeat(n)],
+    ['many paragraphs that hold an == in a URL or a link', n => 'x == y\n\na https://e.com/?q==b [c](d(e)==f) ==g==\n\n'.repeat(n)],
+    // Each such opener ran the pattern on to the one closer, past the rest
+    // of the text, before the scan found it read no match there before
+    ['many paragraphs that hold an opener in code, before one closer', n => 'x == y\n\n' + 'a `{++` b\n\n'.repeat(n) + '==z== {++end++}'],
   ])('finds the stops in %s in linear time', (_name, input) => {
     const text = input(100_000);
     expect(fastestRun(() => navigationRanges(combinedPattern, text))).toBeLessThan(1000);
@@ -758,6 +777,8 @@ describe('Navigation pairs no highlight past its paragraph', () => {
     expect(stops('x == y\n\n`==` ==a==\n\n'.repeat(2))).toEqual(['==a==', '==a==']);
     expect(stops('x == y\n\na <b ==c [d ==e] $f == g\n\n'.repeat(2))).toEqual(['==e] $f ==', '==e] $f ==']);
     expect(stops('x == `{++` y\n\n==a== {++b++}\n\n'.repeat(2))).toEqual(['==a==', '{++b++}', '==a==', '{++b++}']);
+    expect(stops('x == y\n\na https://e.com/?q==b [c](d(e)==f) ==g==\n\n'.repeat(2))).toEqual(['==f) ==', '==b [c](d(e)==', '==g==']);
+    expect(stops('x == y\n\n' + 'a `{++` b\n\n'.repeat(2) + '==z== {++end++}')).toEqual(['==z==', '{++end++}']);
   });
 });
 

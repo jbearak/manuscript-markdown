@@ -84,6 +84,25 @@ describe('editorBlocks', () => {
 			.toBe('a `x == y` b\n.........e <f> ==\n.[g ==] h\n.[i](j==) k\n.$l$ m ==\n...........A `\n.b `c\n..........');
 	});
 
+	// One for each inline rule that may read an == as text but code and
+	// inline HTML (see inertMarks): a URL that linkify links, a link's text
+	// in brackets in brackets, its destination past a ( ) in it, its title
+	// past a ), an autolink and a setext heading's underline, and none in a
+	// comment's closer, nor after a link, an autolink or a URL
+	test('reads the paragraphs that hold an == in a URL, a link or an autolink, or that may underline a heading', () => {
+		const text = 'a https://e.com/?q==b c\n\nx ==y== https://e.com/z\n\n[d [e] == f](g)\n\n[h](i(j)==k)\n\n[l](m "n ) == o")\n\np {>>q<<} ==r==\n\n<s@t.u> ==\n\n<https://e.com/?q==a>\n\nV ==w\n==\n\n[x](y) ==z==\n';
+		const blocks = editorBlocks(text);
+		expect(marked(text, blocks.inertMarks))
+			.toBe('a https://e.com/?q==b c\n..........................[d [e] == f](g)\n.[h](i(j)==k)\n.[l](m "n ) == o")\n..............................<https://e.com/?q==a>\n.......==\n..............');
+	});
+
+	test('reads the openers export may read as text in a URL and in a link\'s destination and title', () => {
+		const text = 'a https://e.com/{++b} {++c++}\n\n[d](e "{--") {--f--}\n\n[g](h(i){==j) {>>k<<}\n\n[l](m) {++n++}\n';
+		const blocks = editorBlocks(text);
+		expect(marked(text, blocks.inertOpener))
+			.toBe('................{.....................{......................{.............................');
+	});
+
 	test('reads the openers export may read as text', () => {
 		const text = 'a `{++` {++b++} <!-- {-- --> [{>>] ~~ `~~` $ {#c>> `<!--` {==\n\nd {/c}\n';
 		const blocks = editorBlocks(text);
@@ -117,6 +136,9 @@ describe('editorBlocks', () => {
 		['a list item\'s marker before a long run of quote markers', n => '- ' + ' >'.repeat(n) + 'x\n'],
 		['table rows with many cells', n => '| a | b |\n|---|---|\n' + '| ==x | y== \\| z |\n'.repeat(n)],
 		['code spans and HTML that hold == and openers', n => 'a `x == {++` <b ==c {--> [d ==] $e ~~\n\n'.repeat(n)],
+		['URLs, links, comments\' closers and autolinks that hold == and openers, and setext headings', n => 'a https://e.com/?q==b{++c} {>>d<<} [e [f]](g(h) "i)") == <j@k.l> ==\nV ==w\n==\n\n'.repeat(n)],
+		['< before addresses with no > after them', n => '<}' + 'a@b<}'.repeat(n) + ' ==x=='],
+		['unclosed brackets, parens and quotes in a link\'s destination', n => '[a](b "c' + ' [(d'.repeat(n) + ' ==x=='],
 	])('reads %s in linear time', (_name, input) => {
 		const text = input(50_000);
 		expect(fastestRun(() => {

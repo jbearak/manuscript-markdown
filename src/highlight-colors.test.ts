@@ -529,6 +529,9 @@ describe('Editor decorations pair no highlight past its paragraph', () => {
     ['an == before an equation that holds one', 'x == y\n\n$a == b$ ==real==', ['yellow: ==real==']],
     ['an == before a link whose destination holds one', 'x == y\n\n[l](u==v) ==real==', ['yellow: ==real==']],
     ['an == before an HTML comment that holds one', 'x == y\n\na <!-- == --> ==real==', ['yellow: ==real==']],
+    // A comment's <<} and an autolink, after which export reads on
+    ['an == before a comment and a highlight', 'x == y\n\np {>>q<<} ==r==', ['comment: q', 'yellow: ==r==']],
+    ['an == before an email address\'s autolink and a highlight', 'x == y\n\n<a@b.co> ==r==', ['yellow: ==r==']],
   ])('reads %s as export does', (_name, text, expected) => {
     expect(painted(text)).toEqual(expected);
   });
@@ -554,6 +557,16 @@ describe('Editor decorations pair no highlight past its paragraph', () => {
     ['an == in code before an HTML comment that holds one', '`x == y` <!-- == --> ==real==', ['yellow: ==real==']],
     ['an == before a paragraph that holds one in code', 'x == y\n\n`==` ==real==', ['yellow: ==real==']],
     ['an insertion and a comment after an == in code', 'a `c== ` {>> `==a` {++b++} {>>b<<} c', ['addition: b', 'comment: b']],
+    // An == that export reads as text, in a URL that linkify links, in a
+    // link's destination past a ( ) in it, or in its title past a ), in a
+    // link's text past a [ ] in it, or in an autolink, which a lone ==
+    // before it closed before
+    ['an == in code before a URL that holds one', '`x == y`\n\nhttps://example.com/?q==yes==', []],
+    ['an == in code before a URL that holds one and a highlight', '`x == y`\n\nhttps://e.com/?q==a ==b==', ['yellow: ==b==']],
+    ['an == in code before a link whose destination holds one after a ( )', '`x == y`\n\n[a](u(x)==y) ==d==', ['yellow: ==d==']],
+    ['an == in code before a link whose title holds one after a )', '`x == y`\n\n[a](u "x ) == y") ==d==', ['yellow: ==d==']],
+    ['an == in code before a citation that holds one after a [ ]', '`x == y`\n\n[see [x] == @key] ==d==', ['yellow: ==d==']],
+    ['an == in code before an autolink that holds one', '`x == y`\n\n<https://e.com/?q==a> ==r==', ['yellow: ==r==']],
   ])('reads %s as before', (_name, text, expected) => {
     expect(painted(text)).toEqual(expected);
   });
@@ -579,6 +592,8 @@ describe('Editor decorations pair no highlight past its paragraph', () => {
     ['many table rows with highlights across cells', n => '| a | b |\n|---|---|\n' + '| ==x | y== and ==z== |\n'.repeat(n)],
     ['many paragraphs that hold an == in code, each after a lone ==', n => 'x == y\n\n`==` ==a==\n\n'.repeat(n)],
     ['many paragraphs that hold an == after a <, a [ or a $', n => 'x == y\n\na <b ==c [d ==e] $f == g\n\n'.repeat(n)],
+    ['many paragraphs that hold an == in a URL or a link', n => 'x == y\n\na https://e.com/?q==b [c](d(e)==f) ==g==\n\n'.repeat(n)],
+    ['many paragraphs that hold an opener in code, before one closer', n => 'x == y\n\n' + 'a `{++` b\n\n'.repeat(n) + '==z== {++end++}'],
   ])('decorates %s in linear time', (_name, input) => {
     const text = input(100_000);
     expect(fastestRun(() => editorDecorationRanges(text, 'yellow'))).toBeLessThan(1000);
@@ -591,6 +606,8 @@ describe('Editor decorations pair no highlight past its paragraph', () => {
     expect(painted('| a | b |\n|---|---|\n' + '| ==x | y== and ==z== |\n'.repeat(2))).toEqual(['yellow: == and ==', 'yellow: == and ==']);
     expect(painted('x == y\n\n`==` ==a==\n\n'.repeat(2))).toEqual(['yellow: ==a==', 'yellow: ==a==']);
     expect(painted('x == y\n\na <b ==c [d ==e] $f == g\n\n'.repeat(2))).toEqual(['yellow: ==e] $f ==', 'yellow: ==e] $f ==']);
+    expect(painted('x == y\n\na https://e.com/?q==b [c](d(e)==f) ==g==\n\n'.repeat(2))).toEqual(['yellow: ==f) ==', 'yellow: ==b [c](d(e)==', 'yellow: ==g==']);
+    expect(painted('x == y\n\n' + 'a `{++` b\n\n'.repeat(2) + '==z== {++end++}')).toEqual(['yellow: ==z==']);
   });
 });
 

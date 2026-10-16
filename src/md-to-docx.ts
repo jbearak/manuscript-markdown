@@ -922,12 +922,8 @@ export function linkifiedColons(markdown: string): number[] {
   citationTextMd ??= createMarkdownIt();
   const colons: number[] = [];
   for (let at = markdown.indexOf('://'); at !== -1; at = markdown.indexOf('://', at + 1)) {
-    let start = at;
-    while (start > 0 && /[a-z0-9.+-]/i.test(markdown[start - 1])) start--;
-    let backslashes = 0;
-    while (markdown[start - 1 - backslashes] === '\\') backslashes++;
-    if (backslashes % 2 === 1) start++;
-    if (!/^[a-z]/i.test(markdown.slice(start, at))) continue;
+    const start = linkSchemeStart(markdown, at);
+    if (start === -1) continue;
     // To the end of its host, which settles whether it's linked, not the
     // whole URL, whose path each check would scan again
     AUTHORITY_END_RE.lastIndex = at + 3;
@@ -936,6 +932,52 @@ export function linkifiedColons(markdown: string): number[] {
     if (link && link.url.length > at - start) colons.push(at);
   }
   return colons;
+}
+
+/** The start of the scheme that markdown-it's own linkify rule reads before
+ *  the :// at `colon` in Markdown `markdown` (see linkifiedColons), from
+ *  `from` on, where the text that rule reads it in starts, or -1. It reads
+ *  back over a run of a scheme's characters, which holds no colon, so the
+ *  colons of a text are read in time linear in it. */
+function linkSchemeStart(markdown: string, colon: number, from = 0): number {
+  let start = colon;
+  while (start > from && /[a-z0-9.+-]/i.test(markdown[start - 1])) start--;
+  let backslashes = 0;
+  while (markdown[start - 1 - backslashes] === '\\') backslashes++;
+  if (backslashes % 2 === 1) start++;
+  return /^[a-z]/i.test(markdown.slice(start, colon)) ? start : -1;
+}
+
+/** The text that markdown-it's own linkify rule links in Markdown
+ *  `markdown`, as export and the preview read it (see linkifiedColons),
+ *  for each URL, from its scheme's start, in order, which export reads as
+ *  a link's text, an == or a CriticMarkup opener in it too. Each is read as
+ *  that rule reads it, from the start of its scheme, after the last URL's
+ *  end, to the next space or control character, which no URL holds, and
+ *  the rule takes as many characters as the URL it finds has, but the *
+ *  at its end. The search goes on from there, as that rule's does. */
+export function linkifiedUrls(markdown: string): Array<{ start: number; end: number }> {
+  citationTextMd ??= createMarkdownIt();
+  const linkify = citationTextMd.linkify;
+  linkifySeparatorRe ??= new RegExp('(?:' + (linkify.re as unknown as Record<string, string>).src_ZCc + ')', 'g');
+  const urls: Array<{ start: number; end: number }> = [];
+  // The next separator at or after the colon, which only moves on
+  let separator = -1;
+  for (let at = markdown.indexOf('://'); at !== -1; at = markdown.indexOf('://', at + 1)) {
+    const start = linkSchemeStart(markdown, at, urls.at(-1)?.end ?? 0);
+    if (start === -1) continue;
+    if (separator < at) {
+      linkifySeparatorRe.lastIndex = at;
+      separator = linkifySeparatorRe.exec(markdown)?.index ?? markdown.length;
+    }
+    const url = linkify.matchAtStart(markdown.slice(start, separator))?.url ?? '';
+    if (url.length <= at - start) continue;
+    let length = url.length;
+    while (length > 0 && url.charCodeAt(length - 1) === 0x2A) length--;
+    urls.push({ start, end: start + length });
+    at = Math.max(at, start + length - 1);
+  }
+  return urls;
 }
 
 /** The text of the link linkify makes of a URL, or an email address

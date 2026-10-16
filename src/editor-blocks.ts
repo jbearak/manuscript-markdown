@@ -7,6 +7,7 @@
 import { type CodeRegion, codeOverlapTest, computeLineStarts, computeMarkdownRegions, formatHighlightLimit, mergeRegions } from './code-regions';
 import { preprocessBlocks } from './block-preprocess';
 import { preprocessCriticMarkupWithLines } from './critic-markup';
+import { linkifiedUrls } from './md-to-docx';
 import { normalizeNewlines } from './newlines';
 
 /** How the editor's decorations and navigation read a document's blocks
@@ -26,11 +27,12 @@ export interface EditorBlocks {
 	unsure(start: number, end: number): boolean;
 	/** Whether the paragraph's text that holds `offset`, which ends where
 	 *  its line's limitAt does, holds an == that export may read as text:
-	 *  one in code, or in what may be inline HTML, an autolink, a link's text
-	 *  or destination, or math (see inertMarks), or whether it is the text
-	 *  of a block that a code span whose backticks the parse pairs across
-	 *  blocks starts or ends in, whose code spans export pairs in that block
-	 *  alone (see editorBlocks) */
+	 *  one in code, or in what may be a URL that linkify links, an autolink,
+	 *  inline HTML, a link's text, destination or title, or math, or on a
+	 *  line that may underline a heading (see inertMarks), or whether it is
+	 *  the text of a block that a code span whose backticks the parse pairs
+	 *  across blocks starts or ends in, whose code spans export pairs in that
+	 *  block alone (see editorBlocks) */
 	inertMarks(offset: number): boolean;
 	/** Whether `offset` starts a CriticMarkup opener, an HTML comment's or
 	 *  a ~~ that export may read as text, as inertMarks reads an == */
@@ -96,25 +98,64 @@ export function editorBlocks(text: string): EditorBlocks {
 
 /**
  * The marks of `text` that export may read as text: each in code, of
- * `codeRegions`, or after an unescaped <, as in inline HTML or an
- * autolink, or after a tag, which the preview pairs no highlight across
- * where export does, after a [ with no ] after it, as in a link's text,
- * after a ]( with no ) after it, as in a link's destination, or after an
- * unescaped $, as in math, each outside code and in that mark's paragraph.
- * For each paragraph, by its paragraphAt (see sharedLimit), whether it
- * holds such an ==, and for each offset, whether it starts such an opener
- * of a CriticMarkup span or an HTML comment, or such a ~~ (see isOpener).
- * Each character is read once.
+ * `codeRegions`, in a URL that linkify links (see linkifiedUrls), in an
+ * autolink, after an unescaped < that may open inline HTML (see htmlEnd),
+ * as in a comment or a tag, which the preview pairs no highlight across
+ * where export does, in a [ ] pair or after a [ with no ] after it, as in a
+ * link's text, in a link's destination and title, from its ]( to the )
+ * that closes its (, outside quotes, or after an unescaped $, as in math,
+ * each outside code and in that mark's paragraph, and an == on a line that
+ * may underline a setext heading. For each paragraph, by its paragraphAt
+ * (see sharedLimit), whether it holds such an ==, and for each offset,
+ * whether it starts such an opener of a CriticMarkup span or an HTML
+ * comment, or such a ~~ (see isOpener). Each character is read once, and
+ * each URL once more.
+ *
+ * The rules that export's markdown-it (createMarkdownIt in md-to-docx.ts)
+ * and the preview's (manuscriptMarkdownPlugin, with VS Code's linkify) run,
+ * by their ruler, and whether one may read an == or an opener as text:
+ *
+ *   inline: text, newline, emphasis | no: text stops at = { ~ <, and the others read delimiters
+ *   strikethrough                   | no: its ~~ are delimiters, and the text between reads as any other
+ *   linkify                         | in a URL, as https://e.com/?q==a== | here, as export finds it
+ *   escape                          | \= \{ \~ \<: the pair scans skip an escaped == or opener, as before
+ *   backticks                       | in a code span | here
+ *   para_placeholder, and the preview's critic escaped break placeholder | no: preprocessing's
+ *   comment_range, critic_markup, and the preview's manuscript_markdown | in a span's or a comment's
+ *                                     text: the scans read spans and comments as before
+ *   colored_highlight, and the preview's format highlight | the pair scans themselves
+ *   footnote_ref                    | no: its label is [A-Za-z0-9_-]+, in [ ] too
+ *   citation, and the preview's     | in its [ ] | here
+ *   math, and the preview's critic math | in $ $ | here, to the paragraph's end
+ *   link, image                     | in its label, destination or title | here
+ *   autolink                        | in < > | here, to its >
+ *   html_inline                     | in < > | here, to the paragraph's end
+ *   entity                          | no: &...; holds no = { ~ <
+ *   ruler2: balance_pairs, strikethrough, emphasis, fragments_join | no: they pair delimiters
+ *   core, after inline: linkify's search of text, as for an email address,
+ *     replacements, smartquotes, text_join and the plugins' | no: every == is read by then
+ *   core, before inline, and block: normalize, preprocessing, table, code,
+ *     fence, html_block, reference, lheading | see editorBlocks: cells,
+ *     code and unsure, and here an == on a line that may underline a heading
  */
 function inertMarks(text: string, lineStarts: readonly number[], codeRegions: readonly CodeRegion[], paragraphAt: (offset: number) => number): { paragraphs: Uint8Array; openers: Uint8Array } {
 	const paragraphs = new Uint8Array(lineStarts.length + 1);
 	const openers = new Uint8Array(text.length);
 	const code = new Uint8Array(text.length);
 	for (const { start, end } of codeRegions) code.fill(1, start, end);
+	// The URLs that linkify links, which hold no == or opener export reads
+	const linked = new Uint8Array(text.length);
+	if (text.includes('://')) for (const { start, end } of linkifiedUrls(text)) linked.fill(1, start, end);
 	let paragraph = -1;
 	let html = false;
-	let bracket = false;
+	// The end of the last autolink
+	let autolinkEnd = -1;
+	// The [ open, with no ] after them
+	let brackets = 0;
+	// In a link's destination and title, the ( open, and the quote open
 	let destination = false;
+	let parens = 0;
+	let quote = 0;
 	let math = false;
 	// The backslashes just before
 	let backslashes = 0;
@@ -122,33 +163,87 @@ function inertMarks(text: string, lineStarts: readonly number[], codeRegions: re
 		const at = lineStarts[line];
 		if (paragraphAt(at) !== paragraph) {
 			paragraph = paragraphAt(at);
-			html = bracket = destination = math = false;
+			html = destination = math = false;
+			brackets = parens = quote = 0;
 		}
 		const lineEnd = lineStarts[line + 1] ?? text.length;
+		SETEXT_EQUALS_RE.lastIndex = at;
+		if (SETEXT_EQUALS_RE.test(text)) paragraphs[paragraph] = 1;
 		for (let k = at; k < lineEnd; k++) {
 			const ch = text.charCodeAt(k);
-			if (code[k] === 1 || code[k + 1] === 1 || html || bracket || destination || math) {
+			if (code[k] === 1 || code[k + 1] === 1 || linked[k] === 1 || k < autolinkEnd || html || brackets > 0 || destination || math) {
 				if (ch === 0x3D && text.charCodeAt(k + 1) === 0x3D) paragraphs[paragraph] = 1;
 				else if (isOpener(text, k)) openers[k] = 1;
 			}
 			if (code[k] === 1) {
 				backslashes = 0;
+				// Code the editor reads in a destination, where markdown-it
+				// reads none, keeps it to the paragraph's end
+				if (destination) parens = Infinity;
 				continue;
 			}
 			const escaped = backslashes % 2 === 1;
 			backslashes = ch === 0x5C ? backslashes + 1 : 0;
 			if (escaped) continue;
-			if (ch === 0x3C) html = true; // <
-			else if (ch === 0x5B) bracket = true; // [
+			if (destination) {
+				if (quote !== 0) {
+					if (ch === quote) quote = 0;
+				} else if (ch === 0x22 || ch === 0x27) quote = ch; // " '
+				else if (ch === 0x28) parens++; // (
+				else if (ch === 0x29 && --parens <= 0) destination = false; // )
+			}
+			if (ch === 0x3C && !html) { // <
+				const end = htmlEnd(text, k);
+				if (end === Infinity) html = true;
+				else autolinkEnd = Math.max(autolinkEnd, end);
+			} else if (ch === 0x5B) brackets++; // [
 			else if (ch === 0x5D) { // ]
-				bracket = false;
-				if (text.charCodeAt(k + 1) === 0x28) destination = true; // (
-			} else if (ch === 0x29) destination = false; // )
-			else if (ch === 0x24) math = true; // $
+				if (brackets > 0) brackets--;
+				if (text.charCodeAt(k + 1) === 0x28 && !destination) { // (
+					destination = true;
+					parens = quote = 0;
+				}
+			} else if (ch === 0x24) math = true; // $
 		}
 	}
 	return { paragraphs, openers };
 }
+
+/** What the < at `at` of `text` may open, as markdown-it's autolink and
+ *  html_inline rules read one: an autolink, a URL's or an email address's
+ *  with no space, control character up to a space's code nor < in it (see
+ *  AUTOLINK_RE and EMAIL_RE), whose end, after its >, this is, or inline
+ *  HTML, a tag or a comment, with an ASCII letter, a !, a / or a ? after
+ *  the <, which reads on to the paragraph's end (Infinity), or neither
+ *  (-1), as a comment's <<}. Each is read to the next <, space or >, so
+ *  each character of a text once. */
+function htmlEnd(text: string, at: number): number {
+	let end = at + 1;
+	while (end < text.length) {
+		const ch = text.charCodeAt(end);
+		if (ch === 0x3C || ch === 0x3E || ch <= 0x20) break; // < >
+		end++;
+	}
+	if (text.charCodeAt(end) === 0x3E) { // >
+		const address = text.slice(at + 1, end);
+		if (AUTOLINK_RE.test(address) || EMAIL_RE.test(address)) return end + 1;
+	}
+	const next = text.charCodeAt(at + 1) | 0x20;
+	return (next >= 0x61 && next <= 0x7A) || next === 0x21 || next === 0x2F || next === 0x3F ? Infinity : -1; // a-z ! / ?
+}
+
+/** The text of an autolink, between its < and >, a URL's or an email
+ *  address's, as markdown-it's autolink rule reads one, in text with no
+ *  space nor control character up to a space's code, which htmlEnd reads
+ *  none past */
+const AUTOLINK_RE = /^([a-zA-Z][a-zA-Z0-9+.-]{1,31}):([^<>]*)$/;
+const EMAIL_RE = /^([a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)$/;
+
+/** A line of = that may underline a setext heading, past a quote's markers
+ *  and the spaces of a list item's text, which markdown-it reads as no
+ *  text, read from the line's start. It reads one line, with no part of it
+ *  that overlaps another */
+const SETEXT_EQUALS_RE = /[ \t>]*==+[ \t]*(?:\r?\n|\r|$)/y;
 
 /** Whether `text` has at `at` a ~~, or the opener of a CriticMarkup span or
  *  an HTML comment */
