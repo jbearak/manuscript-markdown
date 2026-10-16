@@ -1,14 +1,15 @@
 import { describe, test, expect } from 'bun:test';
-import { equationZones } from './latex-env-preprocess';
+import { displayZones } from './latex-env-preprocess';
 import { createMarkdownIt } from './md-to-docx';
 import { preprocessBlocks } from './block-preprocess';
 import { preprocessCriticMarkup, PARA_PLACEHOLDER, LINE_PLACEHOLDER } from './critic-markup';
 
-// The equations the wrapper reads to leave the environments in them as they
-// are (see step 4 of computeInertZones in latex-env-preprocess.ts), against
-// those export's own parse reads, as the source ranges of its math tokens,
-// over generated paragraphs of inline constructs nested two or three deep,
-// with dollar signs and fences in each and line ends between them: links,
+// The fences of the display math the wrapper reads to leave the
+// environments in it as they are (see step 4 of computeInertZones in
+// latex-env-preprocess.ts), against those of the display math export's own
+// parse reads, as the source offsets of its math tokens' fences, over
+// generated paragraphs of inline constructs nested two or three deep, with
+// dollar signs and fences in each and line ends between them: links,
 // images, highlights, CriticMarkup, citations, autolinks, URLs, code spans,
 // comments and HTML. None holds a bare environment, so export reads the text
 // the wrapper read. Each difference was a shape of the text where the
@@ -16,7 +17,7 @@ import { preprocessCriticMarkup, PARA_PLACEHOLDER, LINE_PLACEHOLDER } from './cr
 // time: a citation whose prefix held an equation, a highlight's text in a
 // link, a substitution without its ~>, and others. Where the wrapper can't
 // read export's state with certainty, it reads the text as main did, with
-// its fences paired, and so no equation in it, which this counts apart
+// its fences paired, which this counts apart
 
 const D = '$' + '$';
 
@@ -33,7 +34,8 @@ function random(seed: number): () => number {
 }
 
 const leaves = [
-	'a', 'b c', '$x$', '$a+b$', '$', ' $ ', D, D + 'x' + D, D + '\nw x\n' + D, '$\nw y\n$', '\\$', '$5', 'x$y',
+	'a', 'b c', '$x$', '$a+b$', '$', ' $ ', D, D + 'x' + D, D + '\nw x\n' + D, D + D, D + ' y ' + D, '$x' + D + 'y$', '\\' + D + 'x' + D,
+	'$\nw y\n$', '\\$', '$5', 'x$y',
 	'`$`', '`' + D + '`', '`', '``$``',
 	'http://x.org/$y', 'http://x.org/' + D, '<http://x/$y>', '<a$b@x.org>',
 	'<span title="$">', '<span title=' + D + '>', '</span>', '<a href="u">', '</a>', '<b>', '</b>',
@@ -157,8 +159,8 @@ function sourceOffsets(processed: string, raw: string): number[] | null {
 
 interface Range { start: number; end: number }
 
-/** The source range of each math token export's parse of `processed` reads
- *  in a text whose offsets in `text` are known: a paragraph's or a
+/** The source range of each display math token export's parse of
+ *  `processed` reads in a text whose offsets in `text` are known: a paragraph's or a
  *  heading's, a link's text, which markdown-it reads with that state, and a
  *  highlight's text or an image's alt, which it reads in a state of its own
  *  at an offset in that one. And how many it read in others, as a citation's
@@ -208,7 +210,8 @@ function exportEquations(processed: string): { ranges: Range[]; unplaced: number
 	md.inline.ruler.at('math', (state, silent) => {
 		const start = state.pos;
 		const read = math(state, silent);
-		if (read && !silent) {
+		// Display math's, from a fence of two dollar signs
+		if (read && !silent && (state as unknown as { src: string }).src.startsWith('$' + '$', start)) {
 			const place = places.get(state);
 			if (!place) unplaced++;
 			else ranges.push({ start: place.map[place.offset + start], end: place.map[place.offset + state.pos] });
@@ -243,22 +246,12 @@ function exportEquations(processed: string): { ranges: Range[]; unplaced: number
 	return { ranges, unplaced, unmapped };
 }
 
-/** `ranges` sorted, with those that overlap or touch merged */
-function merged(ranges: Range[]): Range[] {
-	const out: Range[] = [];
-	for (const r of ranges.slice().sort((a, b) => a.start - b.start || a.end - b.end)) {
-		const last = out[out.length - 1];
-		if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
-		else out.push({ start: r.start, end: r.end });
-	}
-	return out;
-}
-
-/** How the wrapper's equations in each of `docs` compare with export's */
+/** How the fences of the wrapper's display math in each of `docs` compare
+ *  with export's */
 function compare(docs: string[]) {
 	let compared = 0;
 	let fellBack = 0;
-	let equations = 0;
+	let displays = 0;
 	const differences: string[] = [];
 	for (const raw of docs) {
 		const { deLazified, output } = preprocessBlocks(raw);
@@ -272,34 +265,35 @@ function compare(docs: string[]) {
 		if (found.unmapped) continue;
 		compared++;
 		const exported = found.ranges.map(r => offsets ? { start: offsets[r.start], end: offsets[r.end] } : r);
-		const { equations: read, fallbacks } = equationZones(text);
+		const { displays: read, fallbacks } = displayZones(text);
 		if (fallbacks.length > 0) fellBack++;
 		// Out of the texts the wrapper read as main did, which hold none of
-		// its equations
+		// its display math
 		const outside = exported.filter(r => !fallbacks.some(f => f.start < r.end && r.start < f.end));
-		equations += outside.length;
-		const key = (r: Range) => text.slice(r.start, r.end) + ' at ' + r.start;
-		const ours = merged(read).map(key);
-		const theirs = merged(outside).map(key);
+		displays += outside.length;
+		// Its opening fence and its closing one
+		const fences = (ranges: Range[]) => ranges.slice().sort((a, b) => a.start - b.start).map(r => text.slice(r.start, r.end) + ' with fences at ' + r.start + ' and ' + (r.end - 2));
+		const ours = fences(read);
+		const theirs = fences(outside);
 		if (ours.join('\n') !== theirs.join('\n') && differences.length < 5) {
 			differences.push(JSON.stringify(text) + '\n  export: ' + JSON.stringify(theirs) + '\n  wrapper: ' + JSON.stringify(ours));
 		}
 	}
-	return { compared, fellBack, equations, differences };
+	return { compared, fellBack, displays, differences };
 }
 
-describe('the equations the wrapper reads around a bare environment, against export\'s parse', () => {
+describe('the display math the wrapper reads around a bare environment, against export\'s parse', () => {
 	test.each([
 		['without line ends in CriticMarkup', 1, false, false],
 		['with line ends in CriticMarkup, in quotes and list items', 2, true, true],
 	])('are export\'s in documents of nested constructs %s', (_name, seed, criticLines, blocks) => {
 		const count = 2000;
-		const { compared, fellBack, equations, differences } = compare(documents(seed, count, criticLines, blocks));
+		const { compared, fellBack, displays, differences } = compare(documents(seed, count, criticLines, blocks));
 		expect(differences).toEqual([]);
-		// Nearly all are compared, with an equation in most, and few are read
+		// Nearly all are compared, with display math in many, and few are read
 		// as main read them
 		expect(compared).toBeGreaterThan(count * 0.97);
-		expect(equations).toBeGreaterThan(count / 3);
+		expect(displays).toBeGreaterThan(count / 6);
 		expect(fellBack).toBeLessThan(count * 0.05);
 	}, 60000);
 });

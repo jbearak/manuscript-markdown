@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { wrapBareLatexEnvironments, wrapBareLatexEnvironmentsWithLines, DISPLAY_MATH_ENVIRONMENTS, equationZones } from './latex-env-preprocess';
+import { wrapBareLatexEnvironments, wrapBareLatexEnvironmentsWithLines, DISPLAY_MATH_ENVIRONMENTS, displayZones } from './latex-env-preprocess';
 import { fastestRun } from './test-timing';
 import JSZip from 'jszip';
 import { convertMdToDocx } from './md-to-docx';
@@ -345,14 +345,6 @@ describe('a stray fence of two dollar signs before display math', () => {
 		expect(wrapBareLatexEnvironments(md)).toContain(D + '\\begin{equation}\nx\n\\end{equation}' + D);
 	});
 
-	test('leaves an environment in an inline equation over lines as the equation\'s', async () => {
-		// Whose text, wrapped, held two fences, which Word showed
-		const md = 'The matrix $\n\\begin{pmatrix}\na & b\n\\end{pmatrix}\n$ is invertible.\n';
-		expect(wrapBareLatexEnvironments(md)).toBe(md);
-		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
-		expect(once).toBe('The matrix $\\begin{pmatrix} a & b \\end{pmatrix}$ is invertible.\n');
-	});
-
 	test('wraps an environment after a blank line in display math, which export reads as text, as that environment\'s equation', async () => {
 		// The paragraph before it holds the fence before the blank line, as
 		// text, and its own the one after it. Before, the two paired
@@ -414,16 +406,6 @@ describe('dollar signs and backticks as export reads them around a bare environm
 	])('wraps an environment in a paragraph after a dollar sign %s, as before', (_name, before) => {
 		const md = before + '\n' + bare + '\n$\\alpha$ here.\n';
 		expect(wrapBareLatexEnvironments(md)).toBe(before + '\n' + D + bare + D + '\n$\\alpha$ here.\n');
-	});
-
-	// Where export reads one, as the math rule reads on past a link's text
-	// and a tag's end
-	test.each([
-		['in a link\'s text', 'See [a $ b](u)'],
-		['between tags', 'Text <b>cost $</b>'],
-	])('leaves an environment in an inline equation from a dollar sign %s, as before', (_name, before) => {
-		const md = before + '\n' + bare + '\n$\\alpha$ here.\n';
-		expect(wrapBareLatexEnvironments(md)).toBe(md);
 	});
 });
 
@@ -608,19 +590,48 @@ describe('a citation\'s prefix, a highlight in a link and CriticMarkup around a 
 		['in a link\'s destination', '[a](x/{++)$5\n++}$\n'],
 		['in an equation', 'a $x {++b\nc++} y$ d\n'],
 	])('reads a text with a CriticMarkup span\'s line end %s as main did', (_name, md) => {
-		expect(equationZones(md)).toEqual({ equations: [], fallbacks: [{ start: 0, end: md.length }] });
+		expect(displayZones(md)).toEqual({ displays: [], fallbacks: [{ start: 0, end: md.length }] });
 	});
 
 	test.each([
-		['an insertion', '$a$ {++b\nc++} $d$\n'],
-		['a comment', '$a$ {>>b\n\nc<<} $d$\n'],
-		['an insertion in a link\'s text', '$a$ [{++b\nc++}](u) $d$\n'],
-		['an insertion in a highlight', '$a$ =={++b\nc++}== $d$\n'],
-		['an insertion in an image\'s alt', '$a$ ![{++b\nc++}](x.png) $d$\n'],
-	])('reads the equations around %s over lines, which it reads as CriticMarkup', (_name, md) => {
-		const { equations, fallbacks } = equationZones(md);
+		['an insertion', '{++b\nc++}'],
+		['a comment', '{>>b\n\nc<<}'],
+		['an insertion in a link\'s text', '[{++b\nc++}](u)'],
+		['an insertion in a highlight', '=={++b\nc++}=='],
+		['an insertion in an image\'s alt', '![{++b\nc++}](x.png)'],
+	])('reads the display math around %s over lines, which it reads as CriticMarkup', (_name, between) => {
+		const md = D + 'a' + D + ' ' + between + ' ' + D + 'd' + D + '\n';
+		const { displays, fallbacks } = displayZones(md);
 		expect(fallbacks).toEqual([]);
-		expect(equations.map(e => md.slice(e.start, e.end))).toEqual(['$a$', '$d$']);
+		expect(displays.map(e => md.slice(e.start, e.end))).toEqual([D + 'a' + D, D + 'd' + D]);
+	});
+});
+
+describe('dollar signs in and around a bare environment, as export reads them once it is wrapped', () => {
+	const bare = '\\begin{equation}\nx\n\\end{equation}';
+	const word = async (md: string) => {
+		const { docx } = await convertMdToDocx(md);
+		const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+		return {
+			text: [...xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '').matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join(''),
+			equations: [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]),
+		};
+	};
+
+	// The read of the text before the wrap took the dollar sign in the
+	// environment's comment, or the one before it, and the one after it, for
+	// an inline equation's, whose zone held the environment. Wrapped, it is
+	// display math, which holds the dollar sign, and no inline equation's
+	// zone holds anything now
+	test.each([
+		['a dollar sign in a comment in it, before inline math', '\\begin{equation}\nx=1 % $\n\\end{equation}\nThen $\\alpha$\n', '\\begin{equation}\nx=1 % $\n\\end{equation}', 2],
+		['dollar signs around it in an image\'s alt with a citation in it', '![[http://x/$\n' + bare + '\n$ [see @ref]](x.png)\n', bare, 1],
+	])('wraps an environment with %s, as before', async (_name, md, environment, count) => {
+		expect(wrapBareLatexEnvironments(md)).toContain('$' + '$' + environment + '$' + '$');
+		const { text, equations } = await word(md);
+		expect(text).not.toContain('begin{equation}');
+		expect(equations).toHaveLength(count);
+		expect(equations.every(m => /<m:t[^>]*>[^<]*\S/.test(m))).toBe(true);
 	});
 });
 
@@ -658,6 +669,7 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		['highlights in links in one paragraph', '[==a $x$==](u) ', 0],
 		['CriticMarkup spans over lines in one paragraph', '{++a\nb++} $x$ ', 0],
 		['CriticMarkup spans over lines in citations\' keys in one paragraph', '[@{++]$5\n++} ', 0],
+		['environments with dollar signs in them', '\\begin{equation}\na $ b % $\n\\end{equation}\n\n', 1],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		const count = (text: string) => wrapBareLatexEnvironments(text).split(D + '\\begin').length - 1;
 		expect(count(unit.repeat(2))).toBe(wrapped * 2);
