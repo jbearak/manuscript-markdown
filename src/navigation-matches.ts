@@ -40,8 +40,10 @@ function isIdChar(ch: number): boolean {
  * line, is none: the scan goes on at the character after its opener's
  * first, as where the pattern doesn't match. A match from an opener before
  * code still reads the code's text for its closer, as export's search does.
+ * A comment's match runs to its matching <<}, as export's comment does, and
+ * one with none is none.
  */
-export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<EditorBlocks, 'inCode' | 'codeEnd' | 'limitAt' | 'unsure'>): Array<{ start: number; end: number }> {
+export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<EditorBlocks, 'inCode' | 'codeEnd' | 'limitAt' | 'unsure' | 'unsureMarks'>): Array<{ start: number; end: number }> {
   const sticky = new RegExp(pattern.source, pattern.flags.replace('g', '') + 'y');
   const lastAddition = text.lastIndexOf('++}');
   const lastDeletion = text.lastIndexOf('--}');
@@ -98,6 +100,14 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
     const closeAt = closers.next(closer, from);
     return closeAt === -1 ? -1 : closeAt + 3;
   };
+  // The end of the {>> or {#id>> at `at`, or -1 where it starts neither
+  const commentContentStart = (at: number): number => {
+    if (text.charCodeAt(at + 1) === 0x3E) return text.charCodeAt(at + 2) === 0x3E ? at + 3 : -1;
+    if (text.charCodeAt(at + 1) !== 0x23) return -1;
+    let end = at + 2;
+    while (isIdChar(text.charCodeAt(end))) end++;
+    return end > at + 2 && text.charCodeAt(end) === 0x3E && text.charCodeAt(end + 1) === 0x3E ? end + 2 : -1;
+  };
   // The first --> at or after the last offset asked for, as they only go up
   let commentClose = -1;
   // The end of the match from the <!-- at `at` to the first --> after it,
@@ -117,9 +127,12 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
   let hiddenEnd = 0;
   const beforeClosers = new Set<number>();
   // Whether a match from `at` to `end`, as before, which differs from what
-  // the scan reads now, holds what export may read otherwise, so the scan
-  // reads it as before (see unsure in EditorBlocks), where it started one
-  const readsAsBefore = (at: number, end: number): boolean => blocks !== undefined && at >= hiddenEnd && blocks.unsure(at, end);
+  // the scan reads now, starts or ends in what export may read otherwise,
+  // or, from code, holds an opener or an == there, which it hid, so the
+  // scan reads it as before (see unsure and unsureMarks in EditorBlocks),
+  // where it started one
+  const readsAsBefore = (at: number, end: number, fromCode: boolean): boolean => blocks !== undefined && at >= hiddenEnd
+    && (blocks.unsure(at, at + 1) || blocks.unsure(end - 1, end) || (fromCode && blocks.unsureMarks(at, end)));
   // The == that closes a highlight's match from `at` to `end`
   const highlightCloser = (end: number): number => text.charCodeAt(end - 1) === 0x7D ? text.lastIndexOf('==', end - 1) : end - 2;
   const matches: Array<{ start: number; end: number }> = [];
@@ -144,7 +157,7 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
       }
       if (end === -1) continue;
       if (ch === 0x3D && beforeClosers.has(at)) continue;
-      if (readsAsBefore(at, end)) {
+      if (readsAsBefore(at, end, true)) {
         matches.push({ start: at, end });
         at = end - 1;
         continue;
@@ -167,21 +180,37 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
     sticky.lastIndex = at;
     const match = sticky.exec(text);
     if (match === null) continue;
+    let end = at + match[0].length;
     // A format highlight's match, the only one that starts with an =, which
     // the scan reads as before where it takes what export may read
     // otherwise, and an == it took as a closer before opened none
     if (ch === 0x3D && blocks) {
-      const end = at + match[0].length;
       const now = end <= blocks.limitAt(at);
       const before = at >= hiddenEnd && !beforeClosers.has(at);
-      if (now !== before && readsAsBefore(at, end) ? !before : !now) {
+      if (now !== before && readsAsBefore(at, end, false) ? !before : !now) {
         if (before) beforeClosers.add(highlightCloser(end));
         continue;
       }
     }
-    matches.push({ start: at, end: at + match[0].length });
+    // A comment's match runs to the first <<} after it, where export and the
+    // decorations read one whose text holds another comment's opener to its
+    // own <<}, each closing the innermost open, and one with none as text.
+    // But as before where its opener or either closer is in what export may
+    // read otherwise
+    if (ch === 0x7B && blocks && text.startsWith('<<}', end - 3)) {
+      const contentStart = commentContentStart(at);
+      if (contentStart !== -1) {
+        closers ??= criticCloserSearch(text);
+        const closeAt = closers.matching(contentStart);
+        if (closeAt + 3 !== end && !readsAsBefore(at, end, false) && !(closeAt !== -1 && readsAsBefore(at, closeAt + 3, false))) {
+          if (closeAt === -1) continue;
+          end = closeAt + 3;
+        }
+      }
+    }
+    matches.push({ start: at, end });
     // Each alternative matches at least its opener and closer
-    at += match[0].length - 1;
+    at = end - 1;
   }
   return matches;
 }

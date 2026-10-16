@@ -54,15 +54,22 @@ describe('editorBlocks', () => {
 		expect(reach(text)(0)).toBe(text);
 	});
 
-	test('reads HTML blocks, the lines from a link\'s definition to a blank line, and code spans whose backticks pair across blocks as unsure', () => {
+	test('reads HTML blocks, the lines from a link\'s definition to a blank line, and the text of the blocks a code span whose backticks pair across them starts and ends in as unsure', () => {
 		const text = '<div>\nx\n</div>\n\n[1]: u\n  "t"\n\n[^2]: n\n\nA `\n\nb `c\n\n`e` f\n\n```\ng\n```\n';
 		const blocks = editorBlocks(text);
 		expect(marked(text, offset => blocks.unsure(offset, offset + 1)))
-			.toBe('<div>\nx\n</div>\n.[1]: u\n  "t"\n.[^2]: n\n...`\n\nb `' + '.'.repeat(text.length - text.indexOf('c\n\n`e`')));
+			.toBe('<div>\nx\n</div>\n.[1]: u\n  "t"\n.[^2]: n\n.A `\n\nb `c\n' + '.'.repeat(text.length - text.indexOf('\n`e`')));
 		expect(blocks.unsure(0, text.length)).toBe(true);
 		// A definition before an HTML block
 		expect(editorBlocks('[1]: u\n\n<div>\n</div>\n').unsure(0, 1)).toBe(true);
 		expect(blocks.unsure(text.indexOf('`e`'), text.length)).toBe(false);
+	});
+
+	test('reads the unsure regions that hold a CriticMarkup opener or an == as holding marks', () => {
+		const text = '<div>\nx\n</div>\n\n<div>\n{++a++}\n</div>\n\n<!--\n==b\n-->\n\n[1]: u\n';
+		const blocks = editorBlocks(text);
+		expect(marked(text, offset => blocks.unsureMarks(offset, offset + 1)))
+			.toBe('.'.repeat(text.indexOf('<div>\n{')) + '<div>\n{++a++}\n</div>\n.<!--\n==b\n-->\n' + '.'.repeat(text.length - text.indexOf('\n[1]')));
 	});
 
 	// Each offset is read from arrays made once, and each block's end, each
@@ -80,6 +87,7 @@ describe('editorBlocks', () => {
 			for (let offset = 0; offset < text.length; offset += 7) {
 				blocks.limitAt(offset);
 				blocks.unsure(offset, offset + 7);
+				blocks.unsureMarks(offset, offset + 7);
 			}
 			blocks.codeEnd(0);
 		})).toBeLessThan(2000);

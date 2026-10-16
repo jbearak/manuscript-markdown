@@ -810,13 +810,25 @@ describe('Navigation reads as before where export may read the text otherwise', 
     expect(stops(text)).toEqual(expected);
   });
 
+  // Where neither what navigation reads nor what it read before starts or
+  // ends in such a block, but what it read before held one
+  it.each<[string, string, string[]]>([
+    ['an == in a paragraph before an HTML comment\'s block and a paragraph with highlights', 'If x == y.\n\n<!-- note -->\n\nSee ==a== and ==b==.', ['<!-- note -->', '==a==', '==b==']],
+    ['an insertion\'s opener in a code span before an HTML comment\'s block', '`{++`\n\n<!-- note -->\n\nSee {++a++}.', ['<!-- note -->', '{++a++}']],
+    ['an opener and a closer an HTML block apart', '==b\n\n<div>\n\nc== d', []],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
   // Where the span or the highlight that an opener in code or a lone ==
-  // took before holds an HTML block, which export reads as HTML, as what it
-  // hid, export doesn't read either
+  // took before ends in an HTML block, or, from code, holds one with an
+  // opener or an == in it, which export reads as HTML, as what it hid,
+  // export doesn't read either
   it.each<[string, string, string[]]>([
     ['an insertion in an HTML block after an opener in code', '`{++`\n\n<div>\n{++b++}\n</div>', []],
     ['a highlight in an HTML block after an == in code', '`x == y`\n\n<div>\n==h==\n</div>', []],
     ['an HTML comment\'s block after a lone == in a list item', '- a == `b`\n\n<!--\n==h==\n-->', []],
+    ['an insertion in an HTML comment\'s block in a comment from code', '`{#x>>`\n\n<!--\n{++i++}\n-->\n\n```\n<<}\n```', []],
   ])('reads %s as before', (_name, text, expected) => {
     expect(stops(text)).toEqual(expected);
   });
@@ -837,6 +849,7 @@ describe('Navigation reads as before where export may read the text otherwise', 
     ['many openers in code before HTML blocks', 50_000, n => '`{++`\n\n<div>\n{++b++}\n</div>\n\n'.repeat(n)],
     ['many == in code before HTML blocks', 50_000, n => '`x == y`\n\n<div>\n==h==\n</div>\n\n'.repeat(n)],
     ['many lone == before an HTML block', 100_000, n => 'x == y\n\n'.repeat(n) + '<div>\n==h==\n</div>'],
+    ['many lone == each before an HTML comment\'s block and a highlight', 50_000, n => 'x == y\n\n<!-- c -->\n\n==a==\n\n'.repeat(n)],
     ['many code spans whose backticks pair across blocks', 100_000, n => '`{>>` x ` b\n\n'.repeat(n) + '<<}'],
     ['many HTML comments\' openers in code before HTML blocks', 50_000, n => '`<!--`\n\n<div>\n-->\n</div>\n\n'.repeat(n)],
   ])('finds the stops in %s in linear time', (_name, n, input) => {
@@ -850,5 +863,49 @@ describe('Navigation reads as before where export may read the text otherwise', 
     expect(stops('x == y\n\n'.repeat(2) + '<div>\n==h==\n</div>')).toEqual(['==h==']);
     expect(stops('`{>>` x ` b\n\n'.repeat(2) + '<<}')).toEqual([]);
     expect(stops('`<!--`\n\n<div>\n-->\n</div>\n\n'.repeat(2))).toEqual([]);
+    expect(stops('x == y\n\n<!-- c -->\n\n==a==\n\n'.repeat(2))).toEqual(['<!-- c -->', '==a==', '<!-- c -->', '==a==']);
+  });
+});
+
+describe('Navigation reads a comment whose text holds another to its matching closer, as export does', () => {
+  /** The text of each range navigation stops at, as getAllMatches finds them */
+  const stops = (text: string) => navigationRanges(combinedPattern, text).map(({ start, end }) => text.slice(start, end));
+
+  // Each <<} closes the innermost comment still open, so one with none
+  // left is text, as to export and the decorations. Before, its match ran
+  // to the first <<} after it, and held what export reads after it
+  it.each<[string, string, string[]]>([
+    ['a comment with no closer of its own, whose text holds a comment', '{>> x {++b++} {>>b<<} y', ['{++b++}', '{>>b<<}']],
+    ['a comment whose text holds a comment', '{>>a {>>b<<} c<<} {++d++}', ['{>>a {>>b<<} c<<}', '{++d++}']],
+    ['a comment with an ID whose text holds a comment', '{#c1>>a {>>b<<} c<<} {++d++}', ['{#c1>>a {>>b<<} c<<}', '{++d++}']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  // A lone == in code took the comment's opener before, as a highlight's
+  // text, which held code. And one after a backtick that the parse of code
+  // spans pairs across blocks, which export reads in a code span, reads to
+  // the first <<} after it, as before, which holds code
+  it.each<[string, string, string[]]>([
+    ['the insertion in a comment with no closer of its own after an == in code', 'a `c== ` {>> `==a` {++b++} {>>b<<} c', ['{++b++}', '{>>b<<}']],
+    ['comments that hold none', '{>>a<<} {#c1>>b<<} {>>c<<}', ['{>>a<<}', '{#c1>>b<<}', '{>>c<<}']],
+    ['a comment\'s opener after a backtick a code span\'s parse pairs across blocks', '` b\n\n`{>>`\n`==a==` {>>m\n# n<<}', []],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  // Each comment's matching <<} comes from one pass over the openers and
+  // closers (see criticCloserSearch)
+  it.each<[string, (n: number) => string]>([
+    ['many comments with no closer of their own, each holding a comment', n => '{>> x {>>b<<} '.repeat(n)],
+    ['many comments that hold a comment', n => '{>>a {>>b<<} c<<} '.repeat(n)],
+  ])('finds the stops in %s in linear time', (_name, input) => {
+    const text = input(100_000);
+    expect(fastestRun(() => navigationRanges(combinedPattern, text))).toBeLessThan(1000);
+  }, 120000);
+
+  it('reads what those texts hold', () => {
+    expect(stops('{>> x {>>b<<} '.repeat(2))).toEqual(['{>>b<<}', '{>>b<<}']);
+    expect(stops('{>>a {>>b<<} c<<} '.repeat(2))).toEqual(['{>>a {>>b<<} c<<}', '{>>a {>>b<<} c<<}']);
   });
 });

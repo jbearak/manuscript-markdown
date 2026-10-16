@@ -28,8 +28,14 @@ export interface EditorBlocks {
 	/** Whether [start, end) holds what export may read otherwise than the
 	 *  text's parse does: an HTML block, which export reads as HTML, a line
 	 *  that may be a link's definition, to the next blank line, or a code
-	 *  span whose backticks the parse pairs across blocks (see editorBlocks) */
+	 *  span whose backticks the parse pairs across blocks, with the text of
+	 *  the paragraphs or other blocks it starts and ends in, whose code
+	 *  spans export pairs in each block's text alone (see editorBlocks) */
 	unsure(start: number, end: number): boolean;
+	/** Whether [start, end) holds what unsure reads that holds a
+	 *  CriticMarkup opener or an ==, which the editor read before where a
+	 *  span or a highlight from code didn't hide it */
+	unsureMarks(start: number, end: number): boolean;
 }
 
 /**
@@ -52,11 +58,14 @@ export interface EditorBlocks {
  * to export, so a highlight before it reads its opener as text.
  *
  * Where the editor reads an opener in code or a highlight otherwise than it
- * did before, and what either reading takes holds what export may read
- * otherwise than the text's parse (see unsure), it reads it as before. The
- * span an opener in code took before hid what it held, and where that is an
- * HTML block, export doesn't read it either (see extractAllDecorationRanges
- * and navigationMatches).
+ * did before, and the opener, or the closer either reading takes, is in
+ * what export may read otherwise than the text's parse (see unsure), it
+ * reads it as before. So does an opener in code whose span or highlight
+ * before held an opener or an == there (see unsureMarks): it hid them, and
+ * where they are in an HTML block, export doesn't read them either. A lone
+ * == before an HTML block still pairs with nothing, where before it took a
+ * highlight's opener past the block (see extractAllDecorationRanges and
+ * navigationMatches).
  */
 export function editorBlocks(text: string): EditorBlocks {
 	const { codeRegions, blockCodeRegions, inlineBlocks } = computeMarkdownRegions(text, { inlineBlocks: true });
@@ -65,6 +74,7 @@ export function editorBlocks(text: string): EditorBlocks {
 	for (const { start, end } of codeRegions) code.fill(1, start, end);
 	// For each offset, the end of the run of code from it, found once
 	let runEnds: Int32Array | undefined;
+	const unsure = unsureRegions(text, lineStarts, codeRegions, blockCodeRegions, inlineBlocks);
 	return {
 		codeRegions,
 		inCode: offset => code[offset] === 1,
@@ -77,15 +87,22 @@ export function editorBlocks(text: string): EditorBlocks {
 			return runEnds[offset];
 		},
 		limitAt: sharedLimit(text, lineStarts, inlineBlocks),
-		unsure: codeOverlapTest(unsureRegions(text, lineStarts, codeRegions, blockCodeRegions, inlineBlocks)),
+		unsure: codeOverlapTest(unsure),
+		// Each region is read once, as none overlaps another
+		unsureMarks: codeOverlapTest(unsure.filter(({ start, end }) => MARK_RE.test(text.slice(start, end)))),
 	};
 }
+
+/** A CriticMarkup opener or an == */
+const MARK_RE = /\{(?:\+\+|--|~~|==|>>|#)|==/;
 
 /** The HTML blocks of `text`, whose lines start at `lineStarts`, the lines
  *  from one that may be a link's definition to the next blank line, and
  *  each of `codeRegions` that is in no code block, of `blockCodeRegions`,
  *  nor in one paragraph's or other block's text, of `inlineBlocks`, nor on
- *  one line, sorted and merged (see unsure in EditorBlocks) */
+ *  one line, from the start of the text of the one of `inlineBlocks` it
+ *  starts in to the end of the one it ends in, sorted and merged (see unsure
+ *  in EditorBlocks) */
 function unsureRegions(text: string, lineStarts: readonly number[], codeRegions: readonly CodeRegion[], blockCodeRegions: readonly CodeRegion[], inlineBlocks: readonly CodeRegion[]): CodeRegion[] {
 	const regions = text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions : [];
 	const blank = new RegExp(BLANK_LINE_RE.source, 'g');
@@ -100,12 +117,16 @@ function unsureRegions(text: string, lineStarts: readonly number[], codeRegions:
 	}
 	for (const region of codeRegions) {
 		const within = (outer: CodeRegion | undefined) => outer !== undefined && region.end <= outer.end;
-		if (within(blockCodeRegions[before(blockCodeRegions, region.start, r => r.start)])
-			|| within(inlineBlocks[before(inlineBlocks, region.start, r => r.start)])) continue;
+		const startBlock = inlineBlocks[before(inlineBlocks, region.start, r => r.start)];
+		if (within(blockCodeRegions[before(blockCodeRegions, region.start, r => r.start)]) || within(startBlock)) continue;
 		// The start of the line after the region's first
 		const next = lineStarts[before(lineStarts, region.start, start => start) + 1] ?? text.length;
 		if (region.end <= next) continue;
-		regions.push(region);
+		const endBlock = inlineBlocks[before(inlineBlocks, region.end - 1, r => r.start)];
+		regions.push({
+			start: startBlock !== undefined && startBlock.end > region.start ? startBlock.start : region.start,
+			end: endBlock !== undefined && endBlock.end >= region.end ? endBlock.end : region.end,
+		});
 	}
 	return mergeRegions(regions);
 }
