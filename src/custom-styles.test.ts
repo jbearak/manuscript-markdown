@@ -1513,6 +1513,106 @@ describe('Custom Styles — Blocks Word can\'t style', () => {
     expect(await trip(back)).toBe(back);
   });
 
+  // A quote last of what import writes of the body, past what Word gets
+  // nothing of, as a style block's fences or a comment's body, before the
+  // definitions of notes or links, which import writes after the body, has
+  // no empty paragraph after it, as at the end. Export wrote one, which
+  // import wrote as blank lines before the definitions, and the next export
+  // dropped
+  it.each([
+    ['a quote alone in a style block, before a note\'s definition', 'T[^1].\n\n<!-- style: box -->\n> q\n<!-- /style -->\n\n[^1]: a\n', 'T[^1].\n\n> q\n\n[^1]: a\n', 'T.\n\n> q\n'],
+    ['a quote alone in a style block with blank lines, before a note\'s definition', 'T[^1].\n\n<!-- style: box -->\n\n> q\n\n<!-- /style -->\n\n[^1]: a\n', 'T[^1].\n\n> q\n\n[^1]: a\n', 'T.\n\n> q\n'],
+    ['an alert alone in a style block, before a note\'s definition', 'T[^1].\n\n<!-- style: box -->\n\n> [!NOTE]\n> q\n\n<!-- /style -->\n\n[^1]: a\n', 'T[^1].\n\n> [!NOTE]\n> q\n\n[^1]: a\n', 'T.\n\n> [!NOTE]\n> q\n'],
+    ['a quote alone in a style block, before a definition no reference uses', 'T.\n\n<!-- style: box -->\n> q\n<!-- /style -->\n\n[^1]: a\n', 'T.\n\n> q\n', 'T.\n\n> q\n'],
+    ['a quote alone in a style block, before a link\'s definition', 'T [l].\n\n<!-- style: box -->\n\n> q\n\n<!-- /style -->\n\n[l]: http://x.org\n', 'T [l](http://x.org).\n\n> q\n', 'T.\n\n> q\n'],
+    ['a quote, then a comment\'s body and a note\'s definition', 'x {#c1}a{/c1}[^1]\n\n> q\n\n{#c1>>@A | body<<}\n\n[^1]: n\n', 'x {==a==}{>>@A | body<<}[^1]\n\n> q\n\n[^1]: n\n', 'x {#c1}a{/c1}\n\n> q\n\n{#c1>>@A | body<<}\n'],
+    ['a quote, then a note\'s definition and a comment\'s body', 'x {#c1}a{/c1}[^1]\n\n> q\n\n[^1]: n\n\n{#c1>>@A | body<<}\n', 'x {==a==}{>>@A | body<<}[^1]\n\n> q\n\n[^1]: n\n', 'x {#c1}a{/c1}\n\n> q\n\n{#c1>>@A | body<<}\n'],
+  ])('gives Word the paragraphs of %s on the first trip as at the end, and on the next', async (_name, md, expected, end) => {
+    const back = await trip(md);
+    expect(back).toBe(expected);
+    // Those of the quote at the end, with its border's two
+    const atEnd = await paragraphs(end);
+    expect(await paragraphs(md)).toBe(atEnd);
+    expect(await paragraphs(back)).toBe(atEnd);
+    expect(await trip(back)).toBe(back);
+    expect(await trip(await trip(back))).toBe(back);
+  });
+
+  // A quote last in a block a paragraph of its style is in, whose fences
+  // import writes, keeps the empty paragraph export writes after it, as at
+  // the end, before a note's definition. Import wrote that paragraph after
+  // the blank lines export recorded after the closing fence, and then the
+  // definition after a blank line of its own, so the blank lines grew on
+  // each trip
+  it.each([
+    ['a quote in a list item', '<!-- style: box -->\n\n- x\n  > q\n\n<!-- /style -->'],
+    ['an alert in a list item', '<!-- style: box -->\n\n- x\n  > [!NOTE]\n  > q\n\n<!-- /style -->'],
+    ['a paragraph, then a quote in a list item', '<!-- style: box -->\n\np\n\n- x\n  > q\n\n<!-- /style -->'],
+    ['a paragraph, then a quote', '<!-- style: box -->\n\np\n\n> q\n\n<!-- /style -->'],
+  ])('keeps the Markdown and Word\'s paragraphs of a style block that ends with %s, before a note\'s definition, on each trip', async (_name, block) => {
+    const md = 'T[^1].\n\n' + block + '\n\n[^1]: a\n';
+    const atEnd = await paragraphs('T.\n\n' + block + '\n');
+    let back = md;
+    for (let k = 0; k < 3; k++) {
+      expect(await paragraphs(back)).toBe(atEnd);
+      back = await trip(back);
+      expect(back).toBe(md);
+    }
+  });
+
+  // Where Word gets a block after the quote, or it's at the end, or past
+  // code or a table, the paragraphs are as before
+  const table = '| a |\n|---|\n| b |';
+  it.each([
+    ['a quote at the end', 'T.\n\n> q\n', 4],
+    ['a quote alone in a style block at the end', 'T.\n\n<!-- style: box -->\n\n> q\n\n<!-- /style -->\n', 4],
+    ['a quote in a list item last in a style block at the end', 'T.\n\n<!-- style: box -->\n\n- x\n  > q\n\n<!-- /style -->\n', 6],
+    ['a quote in a list item, before a note\'s definition', 'T[^1].\n\n- x\n  > q\n\n[^1]: a\n', 5],
+    ['a quote, before a note\'s definition', 'T[^1].\n\n> q\n\n[^1]: a\n', 4],
+    ['a quote alone in a style block, before a paragraph', 'T.\n\n<!-- style: box -->\n> q\n<!-- /style -->\n\nP\n', 6],
+    ['a quote alone in a style block, before a note\'s definition and a paragraph', 'T[^1].\n\n<!-- style: box -->\n> q\n<!-- /style -->\n\n[^1]: a\n\nP\n', 6],
+    ['a quote last in a style block, before a paragraph', 'T.\n\n<!-- style: box -->\n\np\n\n> q\n\n<!-- /style -->\n\nP\n', 7],
+    ['a quote, then a comment\'s body, a paragraph and a note\'s definition', 'x {#c1}a{/c1}[^1]\n\n> q\n\n{#c1>>@A | body<<}\n\nr\n\n[^1]: n\n', 6],
+    // The paragraph of a space, which import drops, as before
+    ['a quote, then a paragraph of a space and a note\'s definition', 'T[^1].\n\n> q\n\n&#32;\n\n[^1]: a\n', 6],
+    ['code last in a style block, before a note\'s definition', 'T[^1].\n\n<!-- style: box -->\n\np\n\n' + code + '\n\n<!-- /style -->\n\n[^1]: a\n', 3],
+    ['code alone in a style block, before a note\'s definition', 'T[^1].\n\n<!-- style: box -->\n\n' + code + '\n\n<!-- /style -->\n\n[^1]: a\n', 2],
+    ['a table last in a style block, before a note\'s definition', 'T[^1].\n\n<!-- style: box -->\n\np\n\n' + table + '\n\n<!-- /style -->\n\n[^1]: a\n', 4],
+    ['a table alone in a style block, before a note\'s definition', 'T[^1].\n\n<!-- style: box -->\n\n' + table + '\n\n<!-- /style -->\n\n[^1]: a\n', 3],
+  ])('gives Word the paragraphs of %s, as before', async (_name, md, count) => {
+    expect(await paragraphs(md)).toBe(count);
+  });
+
+  /** Import's Markdown for the export of `md` with `count` empty paragraphs
+   *  after the last of its body, as Word writes them */
+  const withEmptyAtEnd = async (md: string, count: number) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(twoStyles + md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:sectPr');
+    zip.file('word/document.xml', xml.slice(0, at) + '<w:p/>'.repeat(count) + xml.slice(at));
+    const docx = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+    return (await convertDocx(docx)).markdown.slice(twoStyles.length);
+  };
+
+  it.each([1, 2])('writes a note\'s definition a blank line after a style block\'s closing fence that %i empty paragraphs follow, as at the end', async count => {
+    const md = 'T[^1].\n\n<!-- style: box -->\n\np\n\n<!-- /style -->\n\n[^1]: a\n';
+    expect(await withEmptyAtEnd(md, count)).toBe(md);
+    expect(await withEmptyAtEnd('T.\n\n<!-- style: box -->\n\np\n\n<!-- /style -->\n', count)).toBe('T.\n\n<!-- style: box -->\n\np\n\n<!-- /style -->\n');
+  });
+
+  it('writes the empty paragraphs after a quote at the body\'s end, before a note\'s definition, as before', async () => {
+    // With no fence between, as blank lines, which the next export drops
+    expect(await withEmptyAtEnd('T[^1].\n\n> q\n\n[^1]: a\n', 1)).toBe('T[^1].\n\n> q\n\n\n\n[^1]: a\n');
+  });
+
+  it('finds the quotes last of what import writes of the body in linear time', () => {
+    // Four times as many take about four times as long, not sixteen
+    const md = (n: number) => Array.from({ length: n }, (_, k) => 'x {#c' + k + '}a{/c' + k + '}\n\n<!-- style: box -->\n> q\n<!-- /style -->\n\n{#c' + k + '>>@A | b<<}\n').join('\n') + '\n[l]: http://x.org\n';
+    const [small, large] = [md(1000), md(4000)];
+    expect(fastestRun(() => parseMd(large)) / fastestRun(() => parseMd(small))).toBeLessThan(8);
+  }, 30000);
+
   it.each([
     ['a paragraph', '> a\n\n<!-- style: box -->\n> b\n<!-- style: box -->\np\n<!-- /style -->\n'],
     ['a block on one line', '> a\n\n<!-- style: box -->\n> b\n<!-- style: box -->p<!-- /style -->\n'],

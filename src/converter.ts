@@ -16155,6 +16155,22 @@ function buildMarkdownOnce(
           nextStructuralIdx++;
         }
 
+        // After a section's or style block's fence, those that end the body
+        // write nothing, as at the document's end, where its blank lines go.
+        // Before the notes' definitions, which go after a blank line of
+        // their own, they wrote the blank lines export recorded after the
+        // fence and their own, which the next trip recorded, so they grew on
+        // each, as after a quote in a list item that ends a style block,
+        // whose empty paragraph after it export writes as at the end. Not
+        // one that holds a tracked break (see joinTrackedParagraphBreaks)
+        if (afterSentinel && nextStructuralIdx >= mergedContent.length) {
+          let tracked = false;
+          for (let k = i; k < nextStructuralIdx && !tracked; k++) tracked = !!(mergedContent[k] as ParaItem).breakRevision;
+          if (!tracked) {
+            i = nextStructuralIdx;
+            continue;
+          }
+        }
         const nextCandidate = nextStructuralIdx < mergedContent.length ? mergedContent[nextStructuralIdx] : undefined;
         const nextPara = nextCandidate?.type === 'para'
           ? nextCandidate
