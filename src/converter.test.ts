@@ -8802,7 +8802,7 @@ describe('A page or column break Word puts in a paragraph', () => {
   // ends, as endComment's has. An earlier draft's had the other's too, which
   // then went on over it. It takes ID syntax, as written inline its body
   // went right after the other's, which export read as that one's reply
-  // (see pointsAfterRanges)
+  // (see pointsTakingIdSyntax)
   test.each([
     ['in the body', '{#1}one {#2}two{/1}{/2}\n\n{#1>>@A | outer<<}\n{#2>>@A | inner<<}\n', 'word/document.xml', '{#1}one {/1}{#2}{/2}\n{#1>>@A | outer<<}\n{#2>>@A | inner<<}\n'],
     ['in a note', 'a[^1]\n\n[^1]: {#1}one {#2}two{/1}{/2}\n\n    {#1>>@A | outer<<}\n    {#2>>@A | inner<<}\n', 'word/footnotes.xml', 'a[^1]\n\n[^1]: {#1}one {/1}{#2}{/2}\n    {#1>>@A | outer<<}\n    {#2>>@A | inner<<}\n'],

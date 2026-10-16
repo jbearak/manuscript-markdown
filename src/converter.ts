@@ -10116,19 +10116,29 @@ export function globallyOverlappingComments(items: ContentItem[]): Set<string> {
   return overlappingCommentRanges(commentRangesAcross(items));
 }
 
-/** The comments on no text right after the last run of another comment's
- *  range, in `items` and their tables' cells, which take ID syntax. Without
- *  it, import wrote the comment's body right after the range's, as
- *  {==t==}{>>a<<}{>>c<<}, which export reads as a comment and its reply, as
- *  it reads each {>>...<<} right after a {==...==} anchor's body. With it,
- *  the paragraph goes as {#1}t{/1}{#2}{/2}, each body after it. Not where
- *  anything is between them, as a space, which goes between the bodies, nor
- *  after a comment on no text, as {>>a<<}{>>c<<}, which export reads as two
- *  comments, nor after an HTML comment's comment, whose body follows it with
- *  no anchor, nor after a display equation's, which takes ID syntax outside
- *  a table, nor after a run that holds no ID markers (see
- *  holdsCommentMarkers), as code's. Runs of no text and no comment write
- *  nothing, so they're skipped.
+/** The comments on no text, in `items` and their tables' cells, that take
+ *  ID syntax, as export reads their bodies written inline as other than
+ *  they are: one right after the last run of another comment's range, and
+ *  one whose replies are written one after another (`repliesFollow`).
+ *
+ *  Right after a range, import wrote the comment's body right after the
+ *  range's, as {==t==}{>>a<<}{>>c<<}, which export reads as a comment and
+ *  its reply, as it reads each {>>...<<} right after a {==...==} anchor's
+ *  body. With ID syntax, the paragraph goes as {#1}t{/1}{#2}{/2}, each body
+ *  after it. Not where anything is between them, as a space, which goes
+ *  between the bodies, nor after a comment on no text, as {>>a<<}{>>c<<},
+ *  which export reads as two comments, nor after an HTML comment's comment,
+ *  whose body follows it with no anchor, nor after a display equation's,
+ *  which takes ID syntax outside a table, nor after a run that holds no ID
+ *  markers (see holdsCommentMarkers), as code's. Runs of no text and no
+ *  comment write nothing, so they're skipped.
+ *
+ *  With replies written one after another, import wrote the comment and its
+ *  replies as {>>c<<}{>>r<<}, which export reads as two comments on no
+ *  text, as it reads replies so only after an anchor's body or an ID body.
+ *  With ID syntax, the paragraph goes as {#1}{/1}, with {#1>>c<<}{>>r<<}
+ *  after it, which export reads as a comment and its reply. Not in a code
+ *  block, which holds no ID markers.
  *
  *  Nor where export reads ID markers as text, where they stay inline as
  *  before: in the cells of a table that can't hold a range, by its index
@@ -10150,7 +10160,7 @@ export function globallyOverlappingComments(items: ContentItem[]): Set<string> {
  *  goes on after the span's closer, on its line. After a section's fence or
  *  the like, the paragraph is no heading, as one would start with a para
  *  item. */
-function pointsAfterRanges(items: ContentItem[], takesNoRanges: (table: TableItem, index: number) => boolean, firstIndex = 0, headings = false): string[] {
+function pointsTakingIdSyntax(items: ContentItem[], takesNoRanges: (table: TableItem, index: number) => boolean, repliesFollow: (id: string) => boolean, firstIndex = 0, headings = false): string[] {
   const points: string[] = [];
   let index = firstIndex;
   const visit = (list: ContentItem[], inTable: boolean, noRanges: boolean) => {
@@ -10180,7 +10190,8 @@ function pointsAfterRanges(items: ContentItem[], takesNoRanges: (table: TableIte
       if (item.type === 'text' && item.text === '' && !item.revision && item.commentIds.size === 0) continue;
       const ranged = before && 'commentIds' in before && before.type !== 'html_comment' && !(before.type === 'math' && before.display)
         && !(before.type === 'text' && before.text === '') && holdsCommentMarkers(before, inCodeBlock, inTable) ? before.commentIds : undefined;
-      if (!noRanges && !block && item.type === 'text' && isCommentPoint(item) && ranged?.size && ![...item.commentIds].some(id => ranged.has(id))) {
+      if (!noRanges && !block && item.type === 'text' && isCommentPoint(item)
+        && (ranged?.size && ![...item.commentIds].some(id => ranged.has(id)) || !inCodeBlock && [...item.commentIds].some(repliesFollow))) {
         pushAll(points, item.commentIds);
       }
       before = item;
@@ -15615,11 +15626,16 @@ function buildMarkdownOnce(
     for (const id of globallyOverlappingComments(items)) forceIdCommentIds.add(id);
   }
   // A comment on no text right after another's range, whose body would
-  // follow the range's as its reply (see pointsAfterRanges), in the runs
-  // as they render
+  // follow the range's as its reply, or with replies written one after
+  // another, which would follow it as comments of their own (see
+  // pointsTakingIdSyntax), in the runs as they render
+  const repliesFollow = (id: string) => {
+    const c = comments.get(id);
+    return !!c?.consecutiveReplies && !!c.replies?.length;
+  };
   let tablesBefore = 0;
   for (const items of [mergedContent, ...noteBodies.values()]) {
-    for (const id of pointsAfterRanges(items, takesNoRanges, tablesBefore, items === mergedContent)) forceIdCommentIds.add(id);
+    for (const id of pointsTakingIdSyntax(items, takesNoRanges, repliesFollow, tablesBefore, items === mergedContent)) forceIdCommentIds.add(id);
     for (const item of items) if (item.type === 'table') tablesBefore++;
   }
   // Over an HTML comment, a range takes ID syntax, as {#1}<!-- a -->{/1},

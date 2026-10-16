@@ -551,6 +551,149 @@ describe('A comment on no text right after a range', () => {
   });
 });
 
+/** Word's comments, each as its text, the text its range holds in [ ],
+ *  after a < the text of the comment it replies to, and its author and
+ *  date */
+async function wordComments(docx: Uint8Array): Promise<string[]> {
+  const zip = await JSZip.loadAsync(docx);
+  const commentsXml = await zip.file('word/comments.xml')!.async('string');
+  const extXml = (await zip.file('word/commentsExtended.xml')?.async('string')) ?? '';
+  let body = '';
+  for (const part of ['word/document.xml', 'word/footnotes.xml']) body += (await zip.file(part)?.async('string')) ?? '';
+  const texts = (xml: string) => [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('');
+  const parents = new Map([...extXml.matchAll(/w15:paraId="(\w+)" w15:paraIdParent="(\w+)"/g)].map(([, paraId, parent]) => [paraId, parent]));
+  const comments = [...commentsXml.matchAll(/<w:comment w:id="(\d+)"([^>]*)>((?:(?!<\/w:comment>)[^])*)/g)]
+    .map(([, id, attrs, xml]) => ({ id, attrs, paraId: /w14:paraId="(\w+)"/.exec(xml)?.[1] ?? '', text: texts(xml) }));
+  return comments.map(c => {
+    const parent = comments.find(p => p.paraId === parents.get(c.paraId));
+    const range = body.split('<w:commentRangeStart w:id="' + c.id + '"/>')[1]?.split('<w:commentRangeEnd w:id="' + c.id + '"/>')[0] ?? '';
+    const author = /w:author="([^"]*)"/.exec(c.attrs)?.[1];
+    const date = /w:date="([^"]*)"/.exec(c.attrs)?.[1];
+    return c.text + ' [' + texts(range) + ']' + (parent ? ' < ' + parent.text : '') + (author ? ' by ' + author : '') + (date ? ' at ' + date : '');
+  }).sort();
+}
+
+describe('A comment on no text with replies written one after another', () => {
+  // Import wrote it inline as {>>c<<}{>>r<<}, which export reads as two
+  // comments on no text, so from the next export on the reply was a
+  // comment of its own
+  const body = '{#c2>>@B (2024-01-15 11:30) | c<<}{>>@C (2024-01-15 12:30) | r<<}';
+  const containers: [string, (point: string, bodies: string) => string][] = [
+    ['a paragraph', (p, b) => 'P ' + p + ' Q\n\n' + b],
+    ['a list item', (p, b) => '- P ' + p + ' Q\n\n' + b],
+    ['a quote', (p, b) => '> P ' + p + ' Q\n\n' + b],
+    ['an alert', (p, b) => '> [!NOTE]\n> P ' + p + ' Q\n\n' + b],
+    ['a heading', (p, b) => '# P ' + p + ' Q\n\n' + b],
+    ['a note', (p, b) => 'T.[^1]\n\n[^1]: P ' + p + ' Q\n    ' + b],
+    ['a table cell', (p, b) => '| h |\n| --- |\n| P ' + p + ' Q |\n\n' + b],
+  ];
+  const withoutDates = (comments: string[]) => comments.map(c => c.replace(/ at \S+$/, ''));
+
+  /** Checks that `word`'s comments are `threads`, but their dates, and
+   *  that import's Markdown gives Word the same comments, dates too, and
+   *  comes back the same. Returns that Markdown */
+  async function keepsComments(word: Uint8Array, threads: string[]): Promise<string> {
+    const comments = await wordComments(word);
+    expect(withoutDates(comments)).toEqual(threads);
+    const imported = (await convertDocx(word)).markdown;
+    const second = await convertMdToDocx(imported);
+    expect(await wordComments(second.docx)).toEqual(comments);
+    expect((await convertDocx(second.docx)).markdown).toBe(imported);
+    return imported;
+  }
+
+  test.each(containers)('keeps its reply in %s', async (_name, wrap) => {
+    await keepsComments((await convertMdToDocx(wrap('{#c2}{/c2}', body))).docx, ['c [] by B', 'r [] < c by C']);
+  });
+
+  const at = (md: string) => 'P ' + md + ' Q\n\n';
+  test.each([
+    ['two replies', at('{#c2}{/c2}') + body + '{>>@D (2024-01-15 13:30) | s<<}', ['c [] by B', 'r [] < c by C', 's [] < c by D']],
+    ['no authors or dates', at('{#c2}{/c2}') + '{#c2>>c<<}{>>r<<}', ['c []', 'r [] < c']],
+    ['authors and no dates', at('{#c2}{/c2}') + '{#c2>>@B | c<<}{>>@C | r<<}', ['c [] by B', 'r [] < c by C']],
+    ['it at the paragraph\'s start', '{#c2}{/c2} P\n\n' + body, ['c [] by B', 'r [] < c by C']],
+    ['it at the paragraph\'s end', 'P {#c2}{/c2}\n\n' + body, ['c [] by B', 'r [] < c by C']],
+    ['it between letters', 'P{#c2}{/c2}Q\n\n' + body, ['c [] by B', 'r [] < c by C']],
+    ['it after a range and a space', at('{#c1}t{/c1} {#c2}{/c2}') + '{#c1>>@A (2024-01-15 10:30) | a<<}\n' + body, ['a [t] by A', 'c [] by B', 'r [] < c by C']],
+    ['another comment on no text after it', at('{#c2}{/c2}{#c3}{/c3}') + body + '\n{#c3>>@D (2024-01-15 13:30) | d<<}', ['c [] by B', 'd [] by D', 'r [] < c by C']],
+    ['it in emphasis', at('**a {#c2}{/c2} b**') + body, ['c [] by B', 'r [] < c by C']],
+    ['it in an addition', at('{++a {#c2}{/c2} b++}') + body, ['c [] by B', 'r [] < c by C']],
+  ])('keeps its replies with %s', async (_name, md, threads) => {
+    await keepsComments((await convertMdToDocx(md)).docx, threads);
+  });
+
+  test('writes it in ID syntax, with its body and replies after the paragraph', async () => {
+    const md = 'P {#c2}{/c2} Q\n\n{#c2>>c<<}{>>r<<}';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe('P {#c2}{/c2} Q\n{#c2>>c<<}{>>r<<}\n');
+  });
+
+  /** Word's document for `md`, export's, with comment c by B on no text and
+   *  its reply r by C as Word writes them, the reply's parent in
+   *  commentsExtended.xml, with Word's paraIds and no IDs export named, and
+   *  where `consecutive`, the record export keeps of replies written one
+   *  after another, which Word keeps with the document's other properties */
+  async function inWord(md: string, consecutive: boolean): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const part = md.includes('[^1]:') ? 'word/footnotes.xml' : 'word/document.xml';
+    expect(await zip.file(part)!.async('string')).toContain('<w:commentRangeStart w:id="0"/><w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="0"/>');
+    const comment = (id: string, author: string, date: string, paraId: string, text: string) => '<w:comment w:id="' + id + '" w:author="' + author
+      + '" w:date="' + date + '" w:initials="' + author + '"><w:p w14:paraId="' + paraId + '" w14:textId="77777777"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr>'
+      + '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>' + text + '</w:t></w:r></w:p></w:comment>';
+    zip.file('word/comments.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">'
+      + comment('0', 'B', '2024-01-15T11:30:00Z', '3A1F0C01', 'c') + comment('1', 'C', '2024-01-15T12:30:00Z', '3A1F0C02', 'r') + '</w:comments>');
+    zip.file('word/commentsExtended.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">'
+      + '<w15:commentEx w15:paraId="3A1F0C01" w15:done="0"/><w15:commentEx w15:paraId="3A1F0C02" w15:paraIdParent="3A1F0C01" w15:done="0"/></w15:commentsEx>');
+    const custom = await zip.file('docProps/custom.xml')!.async('string');
+    const property = (name: string) => new RegExp('<property [^>]*name="' + name + '"[^>]*>(?:(?!</property>)[^])*</property>');
+    expect(custom).toMatch(property('MANUSCRIPT_CONSECUTIVE_REPLY_COMMENTS'));
+    const record = consecutive ? '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="3" name="MANUSCRIPT_CONSECUTIVE_REPLY_COMMENTS"><vt:lpwstr>3A1F0C01</vt:lpwstr></property>' : '';
+    zip.file('docProps/custom.xml', custom.replace(property('MANUSCRIPT_CONSECUTIVE_REPLY_COMMENTS'), record).replace(property('MANUSCRIPT_COMMENT_IDS_\\d+'), ''));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  test.each(containers)('keeps the reply Word has to it in %s', async (_name, wrap) => {
+    const imported = await keepsComments(await inWord(wrap('{#c2}{/c2}', body), true), ['c [] by B', 'r [] < c by C']);
+    expect(imported).toMatch(/\{#1\}\{\/1\}[^]*\{#1>>@B \([^)]*\) \| c<<\}\{>>@C \([^)]*\) \| r<<\}/);
+  });
+
+  test.each(containers)('keeps Word\'s own reply to a comment on no text in %s, nested as before', async (_name, wrap) => {
+    // With no record of the form, import nests it in the comment's body,
+    // which export reads as its reply
+    const imported = await keepsComments(await inWord(wrap('{#c2}{/c2}', body), false), ['c [] by B', 'r [] < c by C']);
+    expect(imported).toMatch(/\| c\n[ >]*\{>>@C \([^)]*\) \| r<<\}\n[ >]*<<\}/);
+  });
+
+  test.each([
+    ['a nested reply', 'P {>>@B (2024-01-15 11:30) | c\n  {>>@C (2024-01-15 12:30) | r<<}\n<<} Q'],
+    ['no reply', 'P {>>@B (2024-01-15 11:30) | c<<} Q'],
+    ['a comment on no text after it', 'P {>>@B (2024-01-15 11:30) | c<<}{>>@C (2024-01-15 12:30) | r<<} Q'],
+    ['a range and a reply', 'P {==t==}{>>@B (2024-01-15 11:30) | c<<}{>>@C (2024-01-15 12:30) | r<<} Q'],
+  ])('leaves a comment with %s as it was', async (_name, md) => {
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md + '\n');
+  });
+
+  /** `xml` with `pattern` replaced by `to`, where it's found */
+  const edited = (pattern: RegExp | string, to: string) => (xml: string) => {
+    expect(xml).toMatch(pattern);
+    return xml.replace(pattern, to);
+  };
+  test.each([
+    // The header row's two cells as one, which only an HTML table holds
+    ['an HTML table\'s cell', '| P {#c2}{/c2} Q | i |\n| --- | --- |\n| y | z |\n\n' + body,
+      edited(/(<w:tc><w:tcPr>)((?:(?!<\/w:tc>)[^])*?<\/w:tc>)<w:tc>(?:(?!<\/w:tc>)[^])*?<\/w:tc>/, '$1<w:gridSpan w:val="2"/>$2')],
+    // The X out, so the paragraph starts with an HTML comment
+    ['a paragraph that starts with an HTML comment', 'X<!-- h -->P {#c2}{/c2} Q\n\n' + body, edited('<w:r><w:t>X</w:t></w:r>', '')],
+  ])('writes it in %s inline as before, where export reads ID syntax as text', async (_name, md, edit) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    zip.file('word/document.xml', edit(await zip.file('word/document.xml')!.async('string')));
+    const imported = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(imported).toContain('P {>>@B (2024-01-15 11:30) | c<<}{>>@C (2024-01-15 12:30) | r<<} Q');
+    expect(imported).not.toContain('{#');
+  });
+});
+
 describe('Multi-level reply chain flattening', () => {
   test('deep reply chains are flattened to root parent', () => {
     const comments = new Map<string, Comment>([
