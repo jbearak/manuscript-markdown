@@ -68,6 +68,8 @@ Typing `:` after a known key automatically opens its value choices, and the list
 
 For comma-separated and inline-array font fields, accepting a suggestion replaces only the item under the cursor.
 
+An item of a YAML block list, as `  - Georgia` after `header-font:`, gets the same value completions, hover and checks as a value written after its key.
+
 ### Hover
 
 Hovering on a recognized key shows its description, accepted values, and aliases.
@@ -78,6 +80,8 @@ Hovering on a recognized key shows its description, accepted values, and aliases
 |----------|-----------|
 | Error | Invalid value for a known key (e.g., `line-spacing: triple`) |
 | Warning | Duplicate key (except `title`, which allows repeats) |
+| Warning | An item past the first in a block list under a key that takes one value (`author:` then `- A` and `- B`), of which export uses only one |
+| Warning | An item of a block list that's a mapping (`- name: Jane`), which export doesn't read |
 | Warning | CSL style not found locally (the converter will download it automatically) |
 | Warning | Bibliography file not found |
 | Information | Unknown key closely resembling a known one ("Did you mean `font-size`?") |

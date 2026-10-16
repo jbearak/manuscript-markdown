@@ -122,6 +122,21 @@ title: [Main Title, Subtitle]
 ---
 ```
 
+A YAML block list works too, for `title` and for the keys that take an inline array:
+
+```yaml
+---
+title:
+  - Main Title
+  - "Subtitle: With a Colon"
+header-font:
+  - Georgia
+  - Palatino
+---
+```
+
+Export reads each item as it reads a value written after the key, in quotes or not: a `title` list as `title` repeated, an item with no value as an empty title paragraph, and a list of `header-font`, `header-font-size`, `header-font-style`, `title-font`, `title-font-size`, `title-font-style` or `table-col-widths` as its inline array. Blank lines and comments can go between the items, and an item can go on over more lines, indented past its `-`. A list under a key that takes one value, as `author:` then `- Jane Doe`, gives that key the value it would get written as the key repeated, one item per key: the last for `author`, the first for `bibliography`. With more than one item, export warns that it used only one. An item with `: ` in it, as `- Main Title: A Subtitle`, is a mapping, as YAML reads it, not text: export leaves it out and warns, so put such an item in quotes. Import writes a title as repeated `title` keys and the other keys as before, which export reads the same way.
+
 Valid font style values: `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, `center`, `normal`, or hyphenated combinations (e.g., `bold-italic`, `bold-center`, `bold-smallcaps`). `smallcaps` and `allcaps` are mutually exclusive. `normal` means no bold, no italic, no underline — useful for headings, which default to bold. `normal` may only appear alone (not in hyphenated combinations). Hyphenated combinations are order-independent.
 
 On import, `header-font-style` and `title-font-style` give the font style each heading and title style shows in Word, including what a style inherits from the style it's based on, or else from the document defaults, where it doesn't set bold, italic, underline, caps or alignment itself. A style that turns on small caps and inherits all caps, or the reverse, reads as `allcaps`. Export also writes each title's font style on its runs and its centering on its paragraph, which Word shows over the Title style's, so `title-font-style` gives each title what it sets itself first: a toggle all its runs set alike, and the alignment of its paragraph. On export with a template, a heading or title style keeps its own explicit off, such as `<w:i w:val="0"/>` or a `<w:jc>` that doesn't center, for what its font style leaves out. Where it has none, and its font style leaves out something the style it's based on, or the document defaults, turn on, it gets that property turned off explicitly, so Word shows the font style the frontmatter gives. Export finds the style it's based on as import does: by the template's ID for a built-in style, as `berschrift1` for Heading 1 in a template from German Word, or by an ID that differs only in case, and with a style written as `<w:style .../>`, which has no content, as its tag alone.
