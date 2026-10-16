@@ -21,6 +21,17 @@ import { preprocessCriticMarkup, PARA_PLACEHOLDER, LINE_PLACEHOLDER } from './cr
 
 const D = '$' + '$';
 
+// The link definitions the documents' links read, after their text, or, for a
+// note's body, which export parses on its own, from the document's, as
+// parseMd in md-to-docx.ts reads them
+const DEFINITIONS = '[r]: u\n[a$b]: v\n';
+const NOTE_DEFINITIONS: Record<string, unknown> = {};
+{
+	const env: { references?: Record<string, unknown> } = {};
+	createMarkdownIt().parse(DEFINITIONS, env);
+	Object.assign(NOTE_DEFINITIONS, env.references);
+}
+
 /** mulberry32, in 32-bit integer arithmetic throughout, so each seed gives
  *  its own documents */
 function random(seed: number): () => number {
@@ -75,8 +86,10 @@ const wraps: Array<{ critic: boolean; wrap: (a: string, b: string) => string }> 
 
 /** Documents of one or two paragraphs or headings, in a quote or a list
  *  item where `blocks` is, with line ends in CriticMarkup where
- *  `criticLines` is, and the link definitions their links read */
-function documents(seed: number, count: number, criticLines: boolean, blocks: boolean): string[] {
+ *  `criticLines` is, and the link definitions their links read, but where
+ *  each is a note's body, `inNote`, which reads the document's (see
+ *  NOTE_DEFINITIONS) */
+function documents(seed: number, count: number, criticLines: boolean, blocks: boolean, inNote = false): string[] {
 	const rnd = random(seed);
 	const pick = <T,>(xs: T[]) => xs[Math.floor(rnd() * xs.length)];
 	const items = (depth: number, lines: boolean): string => {
@@ -110,7 +123,7 @@ function documents(seed: number, count: number, criticLines: boolean, blocks: bo
 		const paragraphs: string[] = [];
 		const k = 1 + Math.floor(rnd() * 2);
 		for (let i = 0; i < k; i++) paragraphs.push(contain((rnd() < 0.15 ? '# H ' : 'P ') + items(1 + Math.floor(rnd() * 3), true)));
-		docs.push(paragraphs.join('\n\n') + '\n\n[r]: u\n[a$b]: v\n');
+		docs.push(paragraphs.join('\n\n') + (inNote ? '\n' : '\n\n' + DEFINITIONS));
 	}
 	return docs;
 }
@@ -165,8 +178,9 @@ interface Range { start: number; end: number }
  *  highlight's text or an image's alt, which it reads in a state of its own
  *  at an offset in that one. And how many it read in others, as a citation's
  *  item, and whether an inline text's lines didn't line up with those of
- *  `processed` */
-function exportEquations(processed: string): { ranges: Range[]; unplaced: number; unmapped: boolean } {
+ *  `processed`. With `linkDefinitions`, as of a note's body, which its
+ *  links read after its own */
+function exportEquations(processed: string, linkDefinitions?: Record<string, unknown>): { ranges: Range[]; unplaced: number; unmapped: boolean } {
 	const md = createMarkdownIt();
 	const ranges: Range[] = [];
 	let unplaced = 0;
@@ -242,30 +256,30 @@ function exportEquations(processed: string): { ranges: Range[]; unplaced: number
 			inlineMap = undefined;
 		}
 	});
-	md.parse(processed, {});
+	md.parse(processed, linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {});
 	return { ranges, unplaced, unmapped };
 }
 
 /** How the fences of the wrapper's display math in each of `docs` compare
- *  with export's */
-function compare(docs: string[]) {
+ *  with export's, each read with `linkDefinitions` after its own */
+function compare(docs: string[], linkDefinitions?: Record<string, unknown>) {
 	let compared = 0;
 	let fellBack = 0;
 	let displays = 0;
 	const differences: string[] = [];
 	for (const raw of docs) {
-		const { deLazified, output } = preprocessBlocks(raw);
+		const { deLazified, output } = preprocessBlocks(raw, linkDefinitions);
 		// No environment to wrap, so export reads the text the wrapper does
 		expect(output).toBe(deLazified);
 		const text = deLazified;
 		const processed = preprocessCriticMarkup(output);
 		const offsets = processed === text ? null : sourceOffsets(processed, text);
 		if (processed !== text && !offsets) continue;
-		const found = exportEquations(processed);
+		const found = exportEquations(processed, linkDefinitions);
 		if (found.unmapped) continue;
 		compared++;
 		const exported = found.ranges.map(r => offsets ? { start: offsets[r.start], end: offsets[r.end] } : r);
-		const { displays: read, fallbacks } = displayZones(text);
+		const { displays: read, fallbacks } = displayZones(text, linkDefinitions);
 		if (fallbacks.length > 0) fellBack++;
 		// Out of the texts the wrapper can't read for certain, which hold
 		// none of its display math
@@ -284,14 +298,17 @@ function compare(docs: string[]) {
 
 describe('the display math the wrapper reads around a bare environment, against export\'s parse', () => {
 	test.each([
-		['without line ends in CriticMarkup', 1, false, false],
-		['with line ends in CriticMarkup, in quotes and list items', 2, true, true],
-	])('are export\'s in documents of nested constructs %s', (_name, seed, criticLines, blocks) => {
+		['without line ends in CriticMarkup', 1, false, false, false],
+		['with line ends in CriticMarkup, in quotes and list items', 2, true, true, false],
+		// Which export parses each on its own, with the document's link
+		// definitions after its own, as the read reads it
+		['as notes\' bodies, with the document\'s link definitions', 3, true, true, true],
+	])('are export\'s in documents of nested constructs %s', (_name, seed, criticLines, blocks, inNote) => {
 		const count = 2000;
-		const { compared, fellBack, displays, differences } = compare(documents(seed, count, criticLines, blocks));
+		const { compared, fellBack, displays, differences } = compare(documents(seed, count, criticLines, blocks, inNote), inNote ? NOTE_DEFINITIONS : undefined);
 		expect(differences).toEqual([]);
-		// Nearly all are compared, with display math in many, and few are read
-		// as main read them
+		// Nearly all are compared, with display math in many, and few have a
+		// text the read can't read for certain
 		expect(compared).toBeGreaterThan(count * 0.97);
 		expect(displays).toBeGreaterThan(count / 6);
 		expect(fellBack).toBeLessThan(count * 0.05);

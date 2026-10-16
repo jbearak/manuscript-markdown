@@ -2,7 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import { wrapBareLatexEnvironments, wrapBareLatexEnvironmentsWithLines, DISPLAY_MATH_ENVIRONMENTS, displayZones } from './latex-env-preprocess';
 import { fastestRun } from './test-timing';
 import JSZip from 'jszip';
-import { convertMdToDocx } from './md-to-docx';
+import { convertMdToDocx, createMarkdownIt } from './md-to-docx';
 import { convertDocx } from './converter';
 import { renderWithPlugin } from './test-helpers';
 
@@ -710,6 +710,63 @@ describe('a bare environment the read leaves otherwise than main, as main left i
 	});
 });
 
+describe('a bare environment in a note, whose reference links read the document\'s link definitions', () => {
+	const D = '$' + '$';
+	const bare = '\\begin{equation}\nx\n\\end{equation}';
+	// A URL with a fence in a link's label, the environment, and the
+	// closing fence. Export parses a note's body on its own, with the
+	// document's link definitions after its own, and reads a link there, as
+	// it names one, and in its text, where linkify reads no URL, display
+	// math. The read read the note with its own definitions alone, so it
+	// read no link, and the URL's fence as the URL's, and wrapped the
+	// environment, which broke that display math
+	const label = 'http://x.org/' + D + '\n' + bare + '\n' + D;
+	const definitions: Record<string, unknown> = {};
+	{
+		const env: { references?: Record<string, unknown> } = {};
+		createMarkdownIt().parse('[r]: u\n[' + label.replace(/\n/g, ' ') + ']: u\n', env);
+		Object.assign(definitions, env.references);
+	}
+	const footnotes = async (md: string) => {
+		const { docx } = await convertMdToDocx(md);
+		const xml = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+		return {
+			text: [...xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '').matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join(''),
+			equations: [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]),
+		};
+	};
+
+	test('leaves an environment in display math in a reference link\'s text in a note as it is, through Word', async () => {
+		const md = 'Text[^n].\n\n[r]: u\n\n[^n]: [' + label.replace(/\n/g, '\n    ') + '][r]\n';
+		const { text, equations } = await footnotes(md);
+		expect(text).not.toContain('begin{equation}');
+		expect(equations).toHaveLength(1);
+		expect(equations[0]).toMatch(/<m:t[^>]*>[^<]*x/);
+	});
+
+	// A full reference, a collapsed one and a shortcut one, of a link and of
+	// an image
+	const references: Array<[string, string]> = [
+		['a full reference link', '[' + label + '][r]\n'],
+		['a collapsed reference link', '[' + label + '][]\n'],
+		['a shortcut reference link', '[' + label + ']\n'],
+		['a full reference image', '![' + label + '][r]\n'],
+		['a collapsed reference image', '![' + label + '][]\n'],
+		['a shortcut reference image', '![' + label + ']\n'],
+		['a full reference link after text', 'See [' + label + '][r] b.\n'],
+	];
+	test.each(references)('leaves an environment in display math in %s as it is, with the document\'s link definitions', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md, '', definitions)).toBe(md);
+	});
+
+	// Where the read's definitions don't name the label's reference, export's
+	// may, as they did a note's, so the read isn't certain of the paragraph,
+	// and main's decision holds (see environmentDecider)
+	test.each(references)('leaves an environment in display math in %s as main left it, without them', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+});
+
 describe('wrapBareLatexEnvironments with stray fences in time linear in the text', () => {
 	const D = '$' + '$';
 	const env = '\\begin{equation}\nx\n\\end{equation}\n\n';
@@ -749,6 +806,11 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 		// Which main's fences leave every other one of, and which the read
 		// of the paragraph with the wraps confirms, in one read of it
 		['fences in code spans before environments in one paragraph', '`' + D + '` x\n\\begin{equation}\nx\n\\end{equation}\n', 1],
+		// Each of whose labels is read again, to see that it names a reference
+		// the read's definitions don't hold
+		['links that name no reference in one paragraph', '[a $] ', 0],
+		['images that name no reference in one paragraph', '![a $] ', 0],
+		['full references that name no definition in one paragraph', '[a $][b] ', 0],
 	])('wraps a text of %s', (_name, unit, wrapped) => {
 		const count = (text: string) => wrapBareLatexEnvironments(text).split(D + '\\begin').length - 1;
 		expect(count(unit.repeat(2))).toBe(wrapped * 2);
@@ -762,10 +824,12 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 	}, 60000);
 
 	// Each alt was parsed in the image rule, and read again on its own, so
-	// an alt in an alt was read again for each image around it
+	// an alt in an alt was read again for each image around it. And a link's
+	// label that names no reference is read again, once
 	test.each([
 		['images', '![', '](x.png)'],
 		['highlights in links', '[==a ', '==](u)'],
+		['brackets that name no reference', '[', ']'],
 	])('wraps a text of %s nested in each other', (_name, open, close) => {
 		const time = (n: number) => {
 			const text = open.repeat(n) + '$x$' + close.repeat(n) + '\n\n' + env;

@@ -14,6 +14,7 @@
 
 import MarkdownIt from 'markdown-it';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
+import link from 'markdown-it/lib/rules_inline/link.mjs';
 import { computeLineStarts, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { exportsLiterally } from './html-blocks';
 import { criticCloserSearch, criticCloserSearchOf, preprocessCriticMarkupWithLines } from './critic-markup';
@@ -57,10 +58,11 @@ export function computeInertZones(text: string): Zone[] {
 /** The display math step 4 of computeInertZones reads in `text`, as export
  *  reads it, each from its opening fence to past its closing one, and the
  *  texts it can't read for certain, in which it finds none, for the test
- *  that checks them against the display math of export's own parse */
-export function displayZones(text: string): DisplaysFound {
+ *  that checks them against the display math of export's own parse. With
+ *  `linkDefinitions`, as of a note's body (see wrapBareLatexEnvironments) */
+export function displayZones(text: string, linkDefinitions?: Record<string, unknown>): DisplaysFound {
 	const found: DisplaysFound = { displays: [], fallbacks: [] };
-	inertZonesAndLiteralHtml(text, found);
+	inertZonesAndLiteralHtml(text, found, linkDefinitions);
 	return found;
 }
 
@@ -88,8 +90,11 @@ interface InertReading {
 
 /** The inert zones of `text`, and the HTML blocks export writes as text,
  *  with step 4's display math, and the texts it can't read for certain,
- *  added to `found`'s */
-function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound): InertReading {
+ *  added to `found`'s. Its reference links resolve with its own link
+ *  definitions, and then with `linkDefinitions`, as export resolves those
+ *  of a note's body, which it parses on its own, with the document's (see
+ *  parseMd in md-to-docx.ts) */
+function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound, linkDefinitions?: Record<string, unknown>): InertReading {
 	const zones: Zone[] = [];
 
 	// 1. Code regions (fenced blocks + inline code spans), as export reads
@@ -98,7 +103,8 @@ function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound): InertRea
 	// export writes as text, as a <pre> or a <div>, but not one it reads
 	// tables from, in which it reads an environment as display math (see
 	// markWrappedLatexBlocks in md-to-docx.ts)
-	const { codeRegions, blockCodeRegions, htmlRegions, literalHtmlRegions, inlineBlocks, references } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally, inlineBlocks: true });
+	const { codeRegions, blockCodeRegions, htmlRegions, literalHtmlRegions, inlineBlocks, references: own } = computeMarkdownRegions(text, { html: 'all', literalHtml: exportsLiterally, inlineBlocks: true });
+	const references = linkDefinitions ? { ...linkDefinitions, ...own } : own;
 	for (const r of codeRegions) {
 		zones.push({ start: r.start, end: r.end });
 	}
@@ -213,7 +219,7 @@ function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound): InertRea
 	const { source, masked } = text.includes('\\begin{') ? withEnvironmentsMasked(text, mergeZones(zones), literalHtmlRegions) : { source: text, masked: [] };
 	const read: EquationRead = {
 		zones, found, references, from: 0, top: undefined, uncertain: false, apart: [], critics: [], runState: undefined, runAt: -1, runEnd: -1,
-		certainDisplays: [], certainInline: [], alts: [], unread: [],
+		certainDisplays: [], certainInline: [], alts: [], unread: [], unresolved: [],
 	};
 	{
 		let code = 0;
@@ -249,13 +255,15 @@ function inertZonesAndLiteralHtml(text: string, found?: DisplaysFound): InertRea
  *  math among them, and the texts it can't read for certain, where a test
  *  asks for those (see displayZones), the link definitions, which
  *  markdown-it's link rule reads from its env, as export's reads the
- *  document's, where the text read starts, the state that reads it,
- *  whether that text is in an image's alt, the texts in it to read on
- *  their own after it, the CriticMarkup read in the text, and the run of
- *  dollar signs read last, and the state that read it. And for
- *  environmentDecider, the display math and the inline math read outside
- *  images' alts, the alts, and the texts it can't read for certain, where
- *  main's decisions hold */
+ *  document's, and a note's body's its own and then the document's, where
+ *  the text read starts, the state that reads it, whether that text is in
+ *  an image's alt, the texts in it to read on their own after it, the
+ *  CriticMarkup read in the text, and the run of dollar signs read last,
+ *  and the state that read it. And for environmentDecider, the display
+ *  math and the inline math read outside images' alts, the alts, the texts
+ *  it can't read for certain, and where a link's or an image's label names
+ *  a reference its link definitions don't hold, where main's decisions
+ *  hold */
 interface EquationRead {
 	zones: Zone[];
 	found: DisplaysFound | undefined;
@@ -272,6 +280,7 @@ interface EquationRead {
 	certainInline: Zone[];
 	alts: Zone[];
 	unread: Zone[];
+	unresolved: Zone[];
 }
 
 /** A text that export's parse reads on its own, as a highlight's or an
@@ -300,17 +309,25 @@ type LinkState = StateInline & { linkLevel: number };
  *  Only the state readEquations reads its text with records a zone, at
  *  offsets in that text: its display math, a link's text's too, which
  *  markdown-it reads with that state, but not in its scans for a link's or
- *  an image's label, which record nothing. Not the parses of other texts, as a citation's first item, which
- *  citationEnd parses to see whether its prefix is plain text, nor
- *  citationEnd's scans ahead, in a state of their own. A highlight's text
- *  and an image's alt, which export parses as texts of their own, are read
- *  after the text, each on its own, a highlight's at the link level it is
- *  at, an alt's at none, at their offsets in the text. A reference link
- *  reads the document's link definitions, as export's does */
+ *  an image's label, which record nothing. Not the parses of other texts,
+ *  as a citation's first item, which citationEnd parses to see whether its
+ *  prefix is plain text, nor citationEnd's scans ahead, in a state of
+ *  their own. A highlight's text and an image's alt, which export parses
+ *  as texts of their own, are read after the text, each on its own, a
+ *  highlight's at the link level it is at, an alt's at none, at their
+ *  offsets in the text. A reference link reads the document's link
+ *  definitions, as export's does, and a note's body its own and then the
+ *  document's. Where a label names a reference those don't hold, the read
+ *  is not certain of the text (see unresolvedReference) */
 const equationReader = new MarkdownIt({ html: true, linkify: true });
 equationReader.linkify.set({ fuzzyLink: false });
 equationReader.linkify.add('//', null);
 equationReader.use(linearInlineComments);
+equationReader.inline.ruler.at('link', (state, silent) => {
+	if (link(state, silent)) return true;
+	if (!silent) unresolvedReference(state, state.pos, state.pos);
+	return false;
+});
 {
 	const image = imageRuleWithSpaces(equationReader);
 	// As a scan for a label reads it, which parses no alt, as the read reads
@@ -319,7 +336,10 @@ equationReader.use(linearInlineComments);
 	// again for each, which took time in the cube of their depth
 	equationReader.inline.ruler.at('image', (state, silent) => {
 		const start = state.pos;
-		if (!image(state, true)) return false;
+		if (!image(state, true)) {
+			if (!silent && state.src.charCodeAt(start) === 0x21) unresolvedReference(state, start, start + 1);
+			return false;
+		}
 		if (!silent) {
 			const labelEnd = equationReader.helpers.parseLinkLabel(state, start + 1, false);
 			state.push('image', 'img', 0);
@@ -388,11 +408,43 @@ equationReader.inline.ruler.before('emphasis', 'citation', (state, silent) => {
 	// read wraps an environment in it, as no zone holds it, and main left it,
 	// the parse after the wrap reads no display math there, so main's
 	// decision holds (see rejectedWraps)
-	if (!silent) state.push('citation', '', 0);
+	if (!silent) {
+		state.push('citation', '', 0);
+		// One with a prefix, which citationEnd reads as a link instead where
+		// a definition names its text as a reference, as one the read may not
+		// hold (see unresolvedReference)
+		if (!/^-?@/.test(state.src.slice(state.pos + 1, state.pos + 3))) unresolvedAt(state, state.pos);
+	}
 	state.pos = end + 1;
 	return true;
 });
 equationReader.inline.ruler.before('emphasis', 'math', readMath);
+
+/** Records, where the link's label at `labelStart` in `state`'s text, the
+ *  [ at `start` opens, or the image's, the ! at `start` opens, ends with a
+ *  ], that the read is not certain of the text from `start`. Its link rule
+ *  read no link there, so the label names a reference the read's link
+ *  definitions don't hold, or the link's destination is not one. Where
+ *  export's hold more, as for a note's body, which it parses on its own,
+ *  with the document's after its own (see wrapBareLatexEnvironments), its
+ *  parse reads a link there, whose text it reads apart, with no URL in it,
+ *  where the read reads what comes after the [ as it would any text, and
+ *  may read a fence in a URL that export reads in an equation */
+function unresolvedReference(state: StateInline, start: number, labelStart: number): void {
+	if (state.src.charCodeAt(labelStart) !== 0x5B) return;
+	if (equationReader.helpers.parseLinkLabel(state, labelStart, labelStart === start) < 0) return;
+	unresolvedAt(state, start);
+}
+
+/** Records that the read is not certain of `state`'s text from `start`, or
+ *  where it reads the text when `state` is that of another text, as of a
+ *  citation's first item, which citationEnd parses on its own */
+function unresolvedAt(state: StateInline, start: number): void {
+	const read = state.env as EquationRead;
+	if (!read.top) return;
+	const at = read.from + (state === read.top ? start : read.top.pos);
+	read.unresolved.push({ start: at, end: at + 1 });
+}
 
 /** Where the comment's range or text, or the CriticMarkup span, that the {
  *  at `start` in `state`'s text opens ends, past its closer, as export's
@@ -641,9 +693,13 @@ function overlapsAnyZone(start: number, end: number, zones: Zone[]): boolean {
  *
  * Blank lines inside the wrapped block are collapsed to single newlines so
  * markdown-it doesn't split them into separate paragraphs.
+ *
+ * `linkDefinitions` are those a note's body, which export parses on its
+ * own, resolves its reference links with after its own: the document's
+ * (see parseMd in md-to-docx.ts).
  */
-export function wrapBareLatexEnvironments(text: string, mark = ''): string {
-	return withReplacements(text, latexReplacements(text), mark);
+export function wrapBareLatexEnvironments(text: string, mark = '', linkDefinitions?: Record<string, unknown>): string {
+	return withReplacements(text, latexReplacements(text, linkDefinitions), mark);
 }
 
 /** `text` with each of `replacements`, in order, and `mark` before each,
@@ -665,10 +721,10 @@ function withReplacements(text: string, replacements: Replacement[], mark = ''):
  * `wrapBareLatexEnvironments(text)`, with the line of `text` each of its
  * lines comes from: all but the blank lines it collapses in a block.
  */
-export function wrapBareLatexEnvironmentsWithLines(text: string): { output: string; lines: number[] } {
+export function wrapBareLatexEnvironmentsWithLines(text: string, linkDefinitions?: Record<string, unknown>): { output: string; lines: number[] } {
 	const lineStarts = [0];
 	for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) lineStarts.push(i + 1);
-	const replacements = latexReplacements(text);
+	const replacements = latexReplacements(text, linkDefinitions);
 	const lines: number[] = [];
 	let k = 0;
 	for (let line = 0; line < lineStarts.length; line++) {
@@ -688,10 +744,10 @@ interface Replacement {
 }
 
 /** The bare environments of `text`, each with its block wrapped, in order */
-function latexReplacements(text: string): Replacement[] {
+function latexReplacements(text: string, linkDefinitions?: Record<string, unknown>): Replacement[] {
 	// Fast path: no \begin{ means nothing to do
 	if (!text.includes('\\begin{')) return [];
-	const reading = inertZonesAndLiteralHtml(text);
+	const reading = inertZonesAndLiteralHtml(text, undefined, linkDefinitions);
 	const decider = environmentDecider(text, reading);
 	// Each environment's decision, by where its line starts, and those the
 	// read wraps where main left them
@@ -774,7 +830,7 @@ function rejectedWraps(text: string, reading: InertReading, environments: BareEn
 		const paragraph = parts.join('');
 		const read: EquationRead = {
 			zones: [], found: undefined, references: reading.read.references, from: 0, top: undefined, uncertain: false, apart: [], critics: [], runState: undefined, runAt: -1, runEnd: -1,
-			certainDisplays: [], certainInline: [], alts: [], unread: [],
+			certainDisplays: [], certainInline: [], alts: [], unread: [], unresolved: [],
 		};
 		// Each text between blank lines on its own, as export's block parse
 		// reads them
@@ -787,7 +843,10 @@ function rejectedWraps(text: string, reading: InertReading, environments: BareEn
 			piece = gap ? gap.index + gap[0].length : paragraph.length;
 		}
 		const displays = new Set(read.certainDisplays.map(d => d.start + ':' + d.end));
-		if (!confirmable || fences.some(f => !displays.has(f.start + ':' + f.end))) {
+		// Nor where a label before the last of them names a reference the
+		// read's link definitions don't hold (see unresolvedReference)
+		const lastFence = fences.length > 0 ? fences[fences.length - 1].end : 0;
+		if (!confirmable || fences.some(f => !displays.has(f.start + ':' + f.end)) || read.unresolved.some(u => u.start < lastFence)) {
 			for (let i = first; i < last; i++) rejected.add(unconfirmed[i].start);
 		}
 		first = last;
@@ -827,7 +886,9 @@ function holdsEither(begin: Zone, end: Zone, zones: Zone[]): boolean {
  *  - Its paragraph, to its \end{...}, is read for certain: none of it is a
  *    text the read can't read (see readEquations), with no fence in an
  *    image's alt, which the scan for the image's label reads on into the
- *    paragraph, as into an environment wrapped after it, and no
+ *    paragraph, as into an environment wrapped after it, no link's or
+ *    image's label that names a reference the read's link definitions
+ *    don't hold, which export's may (see unresolvedReference), and no
  *    environment's text with a dollar sign or a backtick in it, which the
  *    read takes for display math's (see withEnvironmentsMasked), as it may
  *    not be.
@@ -847,7 +908,7 @@ function environmentDecider(text: string, reading: InertReading): { decide: (beg
 	const mainZones = mergeZones(steps.concat(main.zones));
 	const displays = mergeZones(read.certainDisplays);
 	const inline = mergeZones(read.certainInline);
-	const uncertain = mergeZones(read.unread.concat(masked));
+	const uncertain = mergeZones(read.unread.concat(masked, read.unresolved));
 	// Main's fences in an image's alt, in order
 	const alts = mergeZones(read.alts);
 	const altFences: number[] = [];
