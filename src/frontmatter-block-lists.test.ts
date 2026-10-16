@@ -112,16 +112,30 @@ describe('a block list in frontmatter', () => {
     ['an item with no value, as the key with none', 'title:\n  - One\n  -\n  - Two', read('title: One\ntitle:\ntitle: Two').metadata.title],
     ['items indented more', 'title:\n    - One\n    - Two', ['One', 'Two']],
     ['items at the key\'s indentation', 'title:\n- One\n- Two\nauthor: A', ['One', 'Two']],
-    ['an item over two lines', 'title:\n  - A long title\n    that goes on\n  - Two', ['A long title that goes on', 'Two']],
-    ['a quoted item over two lines', 'title:\n  - "A long\n    title"', ['A long title']],
-    ['an item\'s text on the line after its -', 'title:\n  -\n    One', ['One']],
-    ['an item more indented than the one before, as more of it', 'title:\n  - One\n    - Two', ['One - Two']],
+    ['a comment line more indented than an item', 'title:\n  - "One"\n    # 1 of 2\n  - Two', ['One', 'Two']],
     ['a comment as the key\'s value', 'title: # the title\n  - One', ['One']],
     ['CRLF line ends', 'title:\r\n  - One\r\n  - Two\r', ['One', 'Two']],
   ])('reads %s', (_, yaml, expected) => {
     const { metadata, warnings } = read(yaml as string);
     expect(metadata.title).toEqual(expected as string[]);
     expect(warnings).toBeUndefined();
+  });
+
+  it.each([
+    ['an item over two lines', 'title:\n  - A long title\n    that goes on\n  - Two', 'title: A long title\n    that goes on\ntitle: Two'],
+    ['a quoted item over two lines', 'title:\n  - "A long\n    title"', 'title: "A long\n    title"'],
+    ['a quoted item that goes on over a line that starts with #', 'title:\n  - "Results\n    #1 of 3"', 'title: "Results\n    #1 of 3"'],
+    ['a quoted item that goes on over a blank line', 'title:\n  - "Results\n\n    in full"\n  - Two', 'title: "Results\n\n    in full"\ntitle: Two'],
+    ['a quote its line doesn\'t close', 'title:\n  - \'90s Music', 'title: \'90s Music'],
+    ['an item\'s text on the line after its -', 'title:\n  -\n    One', 'title:\n    One'],
+    ['an item more indented than the one before', 'title:\n  - One\n    - Two', 'title: One\n    - Two'],
+    ['a line with a colon after an item', 'title:\n  - One\n    font: Arial', 'title: One\n    font: Arial'],
+    ['heading fonts over two lines', 'header-font:\n  - Times\n    New Roman\n  - Arial', 'header-font: [Times, Arial]\n    New Roman'],
+  ])('reads %s as a value after the key that goes on is read, its line alone, and warns', (_, yaml, written) => {
+    const { metadata, warnings } = read(yaml);
+    expect(metadata).toEqual(read(written).metadata);
+    expect(warnings).toHaveLength(1);
+    expect(warnings![0]).toContain('goes on past its line');
   });
 
   it('reads no mapping as an item, as before, and warns', () => {
@@ -177,12 +191,15 @@ describe('a block list in frontmatter', () => {
   }, 30000);
 
   it('finds an item\'s text in its line', () => {
-    expect(blockListAfter(['title:', '  -   "One"  ', '  -', '    more'], 0)).toEqual({
+    expect(blockListAfter(['title:', '  -   "One"  ', '  -', '    more', '  - ', '  - "a', '  # b"'], 0)).toEqual({
       items: [
-        { line: 1, start: 6, end: 11, more: [], text: '"One"', mapping: false },
-        { line: 2, start: 3, end: 3, more: [3], text: 'more', mapping: false },
+        { line: 1, start: 6, end: 11, more: [], text: '"One"', mapping: false, continued: false },
+        { line: 2, start: 3, end: 3, more: [3], text: '', mapping: false, continued: true },
+        // Past the space after the `-`
+        { line: 4, start: 4, end: 4, more: [], text: '', mapping: false, continued: false },
+        { line: 5, start: 4, end: 6, more: [], text: '"a', mapping: false, continued: true },
       ],
-      last: 3,
+      last: 5,
     });
     expect(blockListAfter(['  title:', '  - One'], 0)).toBeUndefined();
     expect(blockListAfter(['title: One', '  - Two'], 0)).toBeUndefined();

@@ -80,20 +80,26 @@ export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
 export interface BlockListItem {
   /** The index of its line among the frontmatter's */
   line: number;
-  /** The offset in that line of its text, past the `-` and the spaces after it */
+  /** The offset in that line of its text, past the `-` and the spaces after it, those that end the line too */
   start: number;
   /** The offset in that line past its text, before the spaces that end the line */
   end: number;
-  /** The indices of the lines after its first that are more of it */
-  more: number[];
   /**
-   * Its text: its first line's, then each of the rest's, joined by a space,
-   * as YAML reads a value written over several lines. A mapping's is its
-   * first line's with text.
+   * The indices of the lines after it more indented than its `-`. They're
+   * no value: export reads them as it reads the lines after a key's value,
+   * each as a key's line where it has a colon.
    */
+  more: number[];
+  /** Its text, on its line, as a value is after a key: an item is one line */
   text: string;
   /** Whether it's a mapping, as `- name: Jane`, not text */
   mapping: boolean;
+  /**
+   * Whether it's text YAML would read on past its line: it has lines in
+   * `more`, or it opens a quote its line doesn't close, which YAML would
+   * close on a later line, past blank lines and lines that start with #
+   */
+  continued: boolean;
 }
 
 /** A line's indentation, of spaces and tabs */
@@ -109,6 +115,20 @@ function isListItem(content: string): boolean {
 }
 
 /**
+ * For text that starts with a quote, the index of the quote that closes
+ * it, past \" in double quotes and '' in single, or -1 where none does
+ */
+function closingQuoteAt(text: string): number {
+  const quote = text[0];
+  for (let k = 1; k < text.length; k++) {
+    if (quote === '"' && text[k] === '\\') k++;
+    else if (text[k] === quote && quote === "'" && text[k + 1] === "'") k++;
+    else if (text[k] === quote) return k;
+  }
+  return -1;
+}
+
+/**
  * Whether an item's text is a mapping, as YAML reads it: a key, plain or
  * quoted, then a `:` before a space, a tab or the end, as `name: Jane` or
  * `"a": b`. A `:` inside quotes, as in `"a: b"`, or in a comment, after a
@@ -116,21 +136,14 @@ function isListItem(content: string): boolean {
  * before other text, as in `https://x.org`.
  */
 function isMappingItem(text: string): boolean {
-  let k = 0;
-  const quote = text[0];
-  if (quote === '"' || quote === "'") {
-    // Past the closing quote, after \" in double quotes and '' in single
-    for (k = 1; k < text.length; k++) {
-      if (quote === '"' && text[k] === '\\') k++;
-      else if (text[k] === quote && quote === "'" && text[k + 1] === "'") k++;
-      else if (text[k] === quote) break;
-    }
-    if (k >= text.length) return false;
+  if (text[0] === '"' || text[0] === "'") {
+    let k = closingQuoteAt(text);
+    if (k < 0) return false;
     k++;
     while (text[k] === ' ' || text[k] === '\t') k++;
     return text[k] === ':' && (k + 1 === text.length || text[k + 1] === ' ' || text[k + 1] === '\t');
   }
-  for (; k < text.length; k++) {
+  for (let k = 0; k < text.length; k++) {
     const c = text[k];
     // A comment, which a space before the item's text starts too
     if (c === '#' && (k === 0 || text[k - 1] === ' ' || text[k - 1] === '\t')) return false;
@@ -144,7 +157,7 @@ function isMappingItem(text: string): boolean {
  * the key's value is empty or a comment, as `title:` then `  - One` and
  * `  - Two`: the lines after the key of its items, each a `-` then a space
  * or the line's end, with blank lines and comments between them. A line
- * more indented than an item's `-` is more of that item. Returns the items
+ * more indented than an item's `-` goes with that item. Returns the items
  * and the index of the list's last line, or undefined where no item
  * follows the key. A key indented, as in a mapping, opens none, nor does
  * a comment or an item.
@@ -159,8 +172,6 @@ export function blockListAfter(lines: readonly string[], at: number): { items: B
   const colon = header.indexOf(':');
   if (colon <= 0 || !/^(?:[ \t]*|[ \t]+#.*)$/.test(header.slice(colon + 1))) return undefined;
   const items: BlockListItem[] = [];
-  // Each item's text on each of its lines
-  const texts: string[][] = [];
   let last = at;
   // The indentation of the last item's `-`
   let dash = -1;
@@ -172,24 +183,19 @@ export function blockListAfter(lines: readonly string[], at: number): { items: B
     if (!content.trim() || content[0] === '#') continue;
     if (items.length > 0 && indent > dash) {
       items[items.length - 1].more.push(k);
-      texts[texts.length - 1].push(content.trim());
       last = k;
       continue;
     }
     if (!isListItem(content)) break;
-    const after = content.slice(1);
-    const start = indent + 1 + indentOf(after);
-    items.push({ line: k, start, end: Math.max(start, indent + content.length), more: [], text: '', mapping: false });
-    texts.push([after.trim()]);
+    const start = indent + 1 + indentOf(line.slice(indent + 1));
+    const text = content.slice(1).trim();
+    items.push({ line: k, start, end: Math.max(start, indent + content.length), more: [], text, mapping: isMappingItem(text), continued: false });
     dash = indent;
     last = k;
   }
   if (items.length === 0) return undefined;
-  for (let n = 0; n < items.length; n++) {
-    const parts = texts[n].filter(part => part.length > 0);
-    // A mapping starts on its first line with text
-    items[n].mapping = parts.length > 0 && isMappingItem(parts[0]);
-    items[n].text = items[n].mapping ? parts[0] : parts.join(' ');
+  for (const item of items) {
+    item.continued = !item.mapping && (item.more.length > 0 || ((item.text[0] === '"' || item.text[0] === "'") && closingQuoteAt(item.text) < 0));
   }
   return { items, last };
 }
@@ -198,11 +204,13 @@ export function blockListAfter(lines: readonly string[], at: number): { items: B
  * The lines a block list in frontmatter stands for, which parseFrontmatter
  * then reads, as a key's lines: for a key in ARRAY_KEYS, the inline array of
  * its items, and for another key, as `title`, the key once for each item,
- * each as the key written with that value is read. An item that's a
- * mapping is no value: its lines are read as before, each as a key's line,
- * and where no item is text, the key is as written. `warnings` gets what
- * export reads differently from what the list holds: a mapping, under a
- * key it reads, and more than one value for a key that takes one.
+ * each as the key written with that value is read. An item is its line:
+ * the lines after it that go with it are read as before, as the lines
+ * after a key's value are, and so are a mapping's, which is no value.
+ * Where no item is text, the key is as written. `warnings` gets what
+ * export reads differently from what the list holds, under a key it
+ * reads: a mapping, an item that goes on past its line, and more than one
+ * value for a key that takes one.
  */
 function readBlockLists(lines: string[], warnings: string[]): string[] {
   const read: string[] = [];
@@ -224,16 +232,18 @@ function readBlockLists(lines: string[], warnings: string[]): string[] {
     const texts: string[] = [];
     const itemLines: string[] = [];
     for (const item of list.items) {
-      if (!item.mapping) {
+      const shown = '`- ' + (item.text.length > 60 ? item.text.slice(0, 60) + '…' : item.text) + '`';
+      if (item.mapping) {
+        itemLines.push(lines[item.line]);
+        if (known) warnings.push('Frontmatter `' + key + '` has a list item that is a mapping, which export doesn\'t read: ' + shown + '. Put the item in quotes to read it as text.');
+      } else {
         texts.push(item.text);
         if (!array) itemLines.push(key + ': ' + item.text);
-        continue;
       }
-      itemLines.push(lines[item.line]);
       for (const more of item.more) itemLines.push(lines[more]);
-      if (known) {
-        warnings.push('Frontmatter `' + key + '` has a list item that is a mapping, which export doesn\'t read: `- '
-          + (item.text.length > 60 ? item.text.slice(0, 60) + '…' : item.text) + '`. Put the item in quotes to read it as text.');
+      if (item.continued && known) {
+        warnings.push('Frontmatter `' + key + '` has a list item that goes on past its line, or opens a quote that doesn\'t close on it, and export reads only its line: '
+          + shown + '. Write the item on one line, with any quote it opens closed.');
       }
     }
     if (texts.length === 0) {

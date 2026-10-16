@@ -10,7 +10,7 @@ import {
 	STYLES_SUB_PROPS,
 	type FrontmatterValidationCallbacks,
 } from './frontmatter-language';
-import { ARRAY_KEYS, SINGLE_VALUE_KEYS } from '../frontmatter';
+import { ARRAY_KEYS, SINGLE_VALUE_KEYS, parseFrontmatter } from '../frontmatter';
 import { fastestRunAsync } from '../test-timing';
 
 // ---------------------------------------------------------------------------
@@ -1204,13 +1204,48 @@ describe('block lists', () => {
 	test('reads the lists of many keys, of many lines, in linear time', async () => {
 		// Each a title, which can be repeated, and many blank lines and
 		// comments after a key with none
-		const text = '---\n' + Array.from({ length: 4000 }, (_, k) => 'title:\n  - T' + k + '\n  # c\n\n  - U' + k + '\n    more').join('\n')
+		const text = '---\n' + Array.from({ length: 4000 }, (_, k) => 'title:\n  - T' + k + '\n  # c\n\n  - U' + k).join('\n')
 			+ '\nauthor:\n' + '\n# c\n'.repeat(20000) + 'title: T\n---\n';
 		let diags: Awaited<ReturnType<typeof validateFrontmatter>> = [];
 		// Quadratic reading took seconds here; linear takes milliseconds
 		expect(await fastestRunAsync(async () => { diags = await validateFrontmatter(text, stubCallbacks); })).toBeLessThan(2000);
 		expect(diags).toEqual([]);
 	}, 30000);
+
+	test('warns of an item that goes on past its line, of which export reads only the line', async () => {
+		const warning = 'warning: Export reads only this item\'s line, as the item goes on past it or opens a quote that doesn\'t close on it. Write the item on one line, with any quote it opens closed.';
+		expect(await messages('---\nheader-font:\n  - Times\n    New Roman\n---\n')).toEqual([warning + ' @ - Times']);
+		expect(await messages('---\ntitle:\n  - "Results\n    #1 of 3"\n---\n')).toEqual([warning + ' @ - "Results']);
+		// Its line read as a value, and the lines after it as before
+		expect(await messages('---\nheader-font-size:\n  - big\n    font-size: small\n---\n')).toEqual([
+			warning + ' @ - big',
+			'error: Expected non-negative numbers. @ big',
+			'error: Expected a non-negative number. @ small',
+		]);
+		expect(await messages('---\ntitle:\n  - "One"\n    # 1 of 2\n---\n')).toEqual([]);
+	});
+
+	test('offers no value for an item that goes on past its line, which the value wouldn\'t end', () => {
+		const text = '---\nheader-font:\n  - Times\n    New Roman\n  - "Ar\n    ial"\n---\n';
+		for (const at of [text.indexOf('Times') + 2, text.indexOf('Ar') + 1]) {
+			expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, at), 'darwin')).toEqual([]);
+		}
+	});
+
+	test('completes an empty item after its space, and gives one a space after a bare -', () => {
+		const apply = (text: string, offset: number): string => {
+			const loc = getFrontmatterLocation(text, offset);
+			const item = getFrontmatterCompletionItems(loc, 'darwin').find(i => i.label === 'Georgia');
+			expect(item).toBeDefined();
+			return text.slice(0, loc.valueStart) + item!.insertText + text.slice(loc.valueEnd);
+		};
+		for (const line of ['  - ', '  -', '  -   ', '- ', '-']) {
+			const text = '---\nheader-font:\n' + line + '\n---\n';
+			const written = apply(text, text.indexOf('\n---\n', 4));
+			expect(written).toBe('---\nheader-font:\n' + line.trimEnd() + (line.endsWith(' ') ? line.slice(line.trimEnd().length) : ' ') + 'Georgia\n---\n');
+			expect(parseFrontmatter(written).metadata.headerFont).toEqual(['Georgia']);
+		}
+	});
 
 	test('locates an item as a value of its key', () => {
 		const text = '---\nheader-font:\n  - Geo\n  - "Arial"\n    more\n---\n';
@@ -1221,9 +1256,9 @@ describe('block lists', () => {
 		expect(getFrontmatterHover(item)?.markdown).toContain('**header-font**');
 		// Inside its quotes
 		expect(getFrontmatterLocation(text, text.indexOf('Arial'))).toMatchObject({ kind: 'value', valueStart: text.indexOf('Arial'), valueEnd: text.indexOf('Arial') + 5 });
-		// Not on the `-`, or on more of an item
+		// Not on the `-`, or on an item that goes on past its line
 		expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('- Geo')), 'darwin')).toEqual([]);
-		expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('more') + 2), 'darwin')).toEqual([]);
+		expect(getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('Arial')), 'darwin')).toEqual([]);
 		// Nor counts as the key declared again
 		const key = getFrontmatterLocation(text, text.indexOf('header-font'));
 		expect(key.currentKeyHasOtherDeclaration).toBe(false);
