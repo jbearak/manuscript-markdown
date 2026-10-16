@@ -649,23 +649,35 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
   };
 
   const len = text.length;
+  // What the editor read before, without blocks, found once where it first
+  // reads as before: the closing == of each format highlight by its
+  // opener, and each span's opener
+  let before: { highlights: Map<number, number>; spans: Set<number> } | undefined;
+  const readBefore = () => {
+    if (before) return before;
+    const all = extractAllDecorationRanges(text, defaultColor);
+    before = { highlights: new Map(), spans: new Set() };
+    for (const [key, list] of all.highlights) {
+      if (key === 'critic') continue;
+      // The == before the end, or before its {color}
+      for (const { start, end } of list) before.highlights.set(start, text.charCodeAt(end - 1) === 0x7D ? text.lastIndexOf('==', end - 1) : end - 2);
+    }
+    for (const list of [all.additionDelimiters, all.deletionDelimiters, all.substitutionDelimiters, all.highlightDelimiters, all.commentDelimiters]) {
+      for (const { start } of list) if (text.charCodeAt(start) === 0x7B) before.spans.add(start);
+    }
+    return before;
+  };
   let i = 0;
-  // The end of the last span from an opener in code that the editor read
-  // before, where none read in it was, and the closing == of each
-  // highlight it read before that it doesn't, which didn't open one (see
-  // the format highlights below)
-  let hiddenEnd = 0;
-  const beforeClosers = new Set<number>();
   while (i < len) {
     readsAsBefore = false;
     // Nothing opens in code (see blocks), but for an opener in what export
     // may read otherwise, or whose closer, as before, is, or whose span, as
-    // before, hid an opener or an == there, which reads as before (see
-    // unsure and unsureMarks there). An == there is read below
+    // before, hid an opener or an == there, which reads as before where the
+    // editor read that span before (see unsure and unsureMarks there). An
+    // == there is read below
     if (text.charCodeAt(i) === 0x7B && inCode(i) && !isEscapedAt(text, i)) {
       const end = spanEnd(i);
-      if (end === -1 || i < hiddenEnd || !(blocks!.unsure(i, i + 1) || blocks!.unsure(end - 1, end) || blocks!.unsureMarks(i, end))) {
-        if (end !== -1 && i >= hiddenEnd) hiddenEnd = end;
+      if (end === -1 || !(blocks!.unsure(i, i + 1) || blocks!.unsure(end - 1, end) || blocks!.unsureMarks(i, end)) || !readBefore().spans.has(i)) {
         i++;
         continue;
       }
@@ -922,29 +934,36 @@ export function extractAllDecorationRanges(text: string, defaultColor: string, b
         let closeAt: number;
         if (!blocks) closeAt = scan(false, len);
         else {
-          // As before, where an opener in code opened, which a span from
-          // code before it didn't hide, nor an == before it take as its
-          // closer, and where what the editor reads and what it read before
-          // differ, and its opener or either's closer is in what export may
-          // read otherwise, or, from code, what it read before held an
-          // opener or an == there (see unsure and unsureMarks there)
-          const unsure = i >= hiddenEnd && blocks.unsure(i, len);
-          let before = -1;
-          if (unsure && !beforeClosers.has(i)) {
-            before = scan(true, len);
+          // The closer this opener's scan read before, where the editor read
+          // one here before
+          const unsure = blocks.unsure(i, len);
+          let local = -1;
+          if (unsure) {
+            local = scan(true, len);
             rollBack();
           }
           // Nothing opens in code, and a highlight holds no text past its
           // paragraph's. A span that ends past that, which preprocessing
           // left as it is, is text (see blocks)
           closeAt = blocks.inCode(i) ? -1 : scan(false, blocks.limitAt(i));
-          if (unsure && before !== closeAt && (blocks.unsure(i, i + 1)
-            || (before !== -1 && blocks.unsure(before + 1, before + 2))
-            || (closeAt !== -1 && blocks.unsure(closeAt + 1, closeAt + 2))
-            || (before !== -1 && blocks.inCode(i) && blocks.unsureMarks(i, before + 2)))) {
-            rollBack();
-            closeAt = before === -1 ? -1 : scan(true, len);
-          } else if (before !== -1 && before !== closeAt) beforeClosers.add(before);
+          // As before, where its opener, or the closer it takes or took
+          // before, is in what export may read otherwise, or, from code, what
+          // it took before held an opener or an == there (see unsure and
+          // unsureMarks there): the highlight the editor read here before,
+          // or none, where it read none
+          const readsBefore = (closer: number) => closer !== -1
+            && (blocks.unsure(closer + 1, closer + 2) || (blocks.inCode(i) && blocks.unsureMarks(i, closer + 2)));
+          if (unsure && (blocks.unsure(i, i + 1) || readsBefore(closeAt) || readsBefore(local))) {
+            const closer = readBefore().highlights.get(i) ?? -1;
+            if (closer !== closeAt && (blocks.unsure(i, i + 1) || readsBefore(closeAt) || readsBefore(closer))) {
+              rollBack();
+              closeAt = closer === -1 ? -1 : scan(true, len);
+              if (closeAt !== closer) {
+                rollBack();
+                closeAt = -1;
+              }
+            }
+          }
         }
         if (closeAt !== -1) {
           const closeEnd = closeAt + 2;

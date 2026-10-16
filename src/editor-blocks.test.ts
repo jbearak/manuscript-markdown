@@ -54,7 +54,7 @@ describe('editorBlocks', () => {
 		expect(reach(text)(0)).toBe(text);
 	});
 
-	test('reads HTML blocks, the lines from a link\'s definition to a blank line, and the text of the blocks a code span whose backticks pair across them starts and ends in as unsure', () => {
+	test('reads HTML blocks, the lines from a link\'s definition to a blank line, the text of the blocks a code span whose backticks pair across them starts and ends in, and a quote\'s lazy line as unsure', () => {
 		const text = '<div>\nx\n</div>\n\n[1]: u\n  "t"\n\n[^2]: n\n\nA `\n\nb `c\n\n`e` f\n\n```\ng\n```\n';
 		const blocks = editorBlocks(text);
 		expect(marked(text, offset => blocks.unsure(offset, offset + 1)))
@@ -62,6 +62,10 @@ describe('editorBlocks', () => {
 		expect(blocks.unsure(0, text.length)).toBe(true);
 		// A definition before an HTML block
 		expect(editorBlocks('[1]: u\n\n<div>\n</div>\n').unsure(0, 1)).toBe(true);
+		// A quote's lazy line, before which export ends the quote
+		const lazy = '> a ==h\nb==\n\n# x\n';
+		const lazyBlocks = editorBlocks(lazy);
+		expect(marked(lazy, offset => lazyBlocks.unsure(offset, offset + 1))).toBe('........b==\n.....');
 		expect(blocks.unsure(text.indexOf('`e`'), text.length)).toBe(false);
 	});
 
@@ -80,6 +84,10 @@ describe('editorBlocks', () => {
 		['HTML blocks and links\' definitions', n => '<div>\n==a== {++b++}\n</div>\n\n[l]: u\n[m]: v\n\n'.repeat(n)],
 		['code spans whose backticks pair across blocks', n => 'a `\n\nb `c` d\n\n'.repeat(n)],
 		['spans over lines with \\r\\n', n => '{++a\r\n# b++} ==c\r\nd==\r\n\r\n'.repeat(n)],
+		// No line that may be a link's definition starts there
+		['quotes with lazy lines', n => '> a ==h\nb==\n\n'.repeat(n)],
+		['a list item\'s marker before a long run of spaces', n => '- ' + ' '.repeat(2 * n) + 'x\n'],
+		['a list item\'s marker before a long run of quote markers', n => '- ' + ' >'.repeat(n) + 'x\n'],
 	])('reads %s in linear time', (_name, input) => {
 		const text = input(50_000);
 		expect(fastestRun(() => {

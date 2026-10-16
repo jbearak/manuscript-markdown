@@ -121,20 +121,23 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
   // The ~~} of each {~~ in code whose span ends past the code, whose ~~
   // the {~~'s match took, so starts no bare ~~'s, as before
   const passedClosers = new Set<number>();
-  // The end of the last match from code, as before, that no longer is,
-  // where none started, and the closing == of each highlight's match, as
-  // before, that no longer is, where none started either (see below)
-  let hiddenEnd = 0;
-  const beforeClosers = new Set<number>();
-  // Whether a match from `at` to `end`, as before, which differs from what
-  // the scan reads now, starts or ends in what export may read otherwise,
-  // or, from code, holds an opener or an == there, which it hid, so the
-  // scan reads it as before (see unsure and unsureMarks in EditorBlocks),
-  // where it started one
-  const readsAsBefore = (at: number, end: number, fromCode: boolean): boolean => blocks !== undefined && at >= hiddenEnd
+  // Whether a match from `at` to `end` starts or ends in what export may
+  // read otherwise, or, from code, holds an opener or an == there, which
+  // it hid, so the scan reads as before there (see unsure and unsureMarks
+  // in EditorBlocks)
+  const readsAsBefore = (at: number, end: number, fromCode: boolean): boolean => blocks !== undefined
     && (blocks.unsure(at, at + 1) || blocks.unsure(end - 1, end) || (fromCode && blocks.unsureMarks(at, end)));
-  // The == that closes a highlight's match from `at` to `end`
-  const highlightCloser = (end: number): number => text.charCodeAt(end - 1) === 0x7D ? text.lastIndexOf('==', end - 1) : end - 2;
+  // The end of each match the scan read before, by its start, found once
+  // where the scan first reads as before
+  let before: Map<number, number> | undefined;
+  // Whether the scan read the match from `at` to `end` before
+  const readBefore = (at: number, end: number): boolean => {
+    if (!before) {
+      before = new Map();
+      for (const match of navigationMatches(pattern, text)) before.set(match.start, match.end);
+    }
+    return before.get(at) === end;
+  };
   const matches: Array<{ start: number; end: number }> = [];
   for (let at = 0; at < text.length; at++) {
     const ch = text.charCodeAt(at);
@@ -146,7 +149,7 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
     // opens. Another bare ~~ there still does, as before
     if (blocks && (ch !== 0x7E || isSubstitutionMarker(at)) && blocks.inCode(at)) {
       if (ch === 0x7E || (ch === 0x7B && isEscapedAt(text, at))) continue;
-      // The end of the match from here, as before
+      // The end of the pattern's match from here
       let end: number;
       if (ch === 0x7B) end = matchEnd(at);
       else if (ch === 0x3C) end = commentEnd(at);
@@ -156,17 +159,12 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
         end = highlight === null ? -1 : at + highlight[0].length;
       }
       if (end === -1) continue;
-      if (ch === 0x3D && beforeClosers.has(at)) continue;
-      if (readsAsBefore(at, end, true)) {
+      // As before, where the scan read that match before (see readsAsBefore)
+      if (readsAsBefore(at, end, true) && readBefore(at, end)) {
         matches.push({ start: at, end });
         at = end - 1;
         continue;
       }
-      if (ch === 0x3D) {
-        if (at >= hiddenEnd) beforeClosers.add(highlightCloser(end));
-        continue;
-      }
-      if (at >= hiddenEnd) hiddenEnd = end;
       if (ch !== 0x7B) continue;
       if (end > blocks.codeEnd(at)) {
         if (text.charCodeAt(at + 1) === 0x7E && text.charCodeAt(at + 2) === 0x7E) passedClosers.add(end - 3);
@@ -177,37 +175,38 @@ export function navigationMatches(pattern: RegExp, text: string, blocks?: Pick<E
       if (span !== null) at += span[0].length - 1;
       continue;
     }
-    sticky.lastIndex = at;
-    const match = sticky.exec(text);
-    if (match === null) continue;
-    let end = at + match[0].length;
-    // A format highlight's match, the only one that starts with an =, which
-    // the scan reads as before where it takes what export may read
-    // otherwise, and an == it took as a closer before opened none
-    if (ch === 0x3D && blocks) {
-      const now = end <= blocks.limitAt(at);
-      const before = at >= hiddenEnd && !beforeClosers.has(at);
-      if (now !== before && readsAsBefore(at, end, false) ? !before : !now) {
-        if (before) beforeClosers.add(highlightCloser(end));
-        continue;
-      }
-    }
     // A comment's match runs to the first <<} after it, where export and the
     // decorations read one whose text holds another comment's opener to its
     // own <<}, each closing the innermost open, and one with none as text.
     // But as before where its opener or either closer is in what export may
-    // read otherwise
-    if (ch === 0x7B && blocks && text.startsWith('<<}', end - 3)) {
+    // read otherwise. Each is found before the pattern runs, whose search
+    // for a closer read on where no match was
+    if (ch === 0x7B && blocks && !isEscapedAt(text, at)) {
       const contentStart = commentContentStart(at);
       if (contentStart !== -1) {
         closers ??= criticCloserSearch(text);
+        const first = matchEnd(at);
         const closeAt = closers.matching(contentStart);
-        if (closeAt + 3 !== end && !readsAsBefore(at, end, false) && !(closeAt !== -1 && readsAsBefore(at, closeAt + 3, false))) {
-          if (closeAt === -1) continue;
-          end = closeAt + 3;
+        const nested = closeAt === -1 ? -1 : closeAt + 3;
+        if (first !== -1 && nested !== first) {
+          const end = readsAsBefore(at, first, false) || (nested !== -1 && readsAsBefore(at, nested, false))
+            ? (readBefore(at, first) ? first : -1)
+            : nested;
+          if (end === -1) continue;
+          matches.push({ start: at, end });
+          at = end - 1;
+          continue;
         }
       }
     }
+    sticky.lastIndex = at;
+    const match = sticky.exec(text);
+    if (match === null) continue;
+    const end = at + match[0].length;
+    // A format highlight's match, the only one that starts with an =, runs
+    // in its paragraph's text, but as before where it starts or ends in what
+    // export may read otherwise
+    if (ch === 0x3D && blocks && !(readsAsBefore(at, end, false) ? readBefore(at, end) : end <= blocks.limitAt(at))) continue;
     matches.push({ start: at, end });
     // Each alternative matches at least its opener and closer
     at = end - 1;

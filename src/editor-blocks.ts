@@ -5,7 +5,9 @@
  */
 
 import { type CodeRegion, codeOverlapTest, computeLineStarts, computeMarkdownRegions, formatHighlightLimit, mergeRegions } from './code-regions';
+import { preprocessBlocks } from './block-preprocess';
 import { preprocessCriticMarkupWithLines } from './critic-markup';
+import { pushAll } from './arrays';
 import { normalizeNewlines } from './newlines';
 
 /** How the editor's decorations and navigation read a document's blocks
@@ -30,7 +32,9 @@ export interface EditorBlocks {
 	 *  that may be a link's definition, to the next blank line, or a code
 	 *  span whose backticks the parse pairs across blocks, with the text of
 	 *  the paragraphs or other blocks it starts and ends in, whose code
-	 *  spans export pairs in each block's text alone (see editorBlocks) */
+	 *  spans export pairs in each block's text alone, or a line export's
+	 *  block preprocessing rewrites, as a quote's lazy line, which it ends
+	 *  the quote before (see editorBlocks) */
 	unsure(start: number, end: number): boolean;
 	/** Whether [start, end) holds what unsure reads that holds a
 	 *  CriticMarkup opener or an ==, which the editor read before where a
@@ -62,9 +66,12 @@ export interface EditorBlocks {
  * what export may read otherwise than the text's parse (see unsure), it
  * reads it as before. So does an opener in code whose span or highlight
  * before held an opener or an == there (see unsureMarks): it hid them, and
- * where they are in an HTML block, export doesn't read them either. A lone
- * == before an HTML block still pairs with nothing, where before it took a
- * highlight's opener past the block (see extractAllDecorationRanges and
+ * where they are in an HTML block, export doesn't read them either. As
+ * before is what the editor read before over the whole text, read once:
+ * the span or highlight it read from that opener, or none, where it read
+ * that opener as text or as another's closer. A lone == before an HTML
+ * block still pairs with nothing, where before it took a highlight's
+ * opener past the block (see extractAllDecorationRanges and
  * navigationMatches).
  */
 export function editorBlocks(text: string): EditorBlocks {
@@ -115,6 +122,7 @@ function unsureRegions(text: string, lineStarts: readonly number[], codeRegions:
 		definitionsEnd = end ? end.index + 1 : text.length;
 		regions.push({ start: match.index, end: definitionsEnd });
 	}
+	pushAll(regions, blockRewrites(text, lineStarts));
 	for (const region of codeRegions) {
 		const within = (outer: CodeRegion | undefined) => outer !== undefined && region.end <= outer.end;
 		const startBlock = inlineBlocks[before(inlineBlocks, region.start, r => r.start)];
@@ -131,6 +139,33 @@ function unsureRegions(text: string, lineStarts: readonly number[], codeRegions:
 	return mergeRegions(regions);
 }
 
+/** The lines of `text`, whose lines start at `lineStarts`, that export's
+ *  block preprocessing rewrites, drops or puts a line before (see
+ *  preprocessBlocks), as a quote's lazy line, before which it ends the
+ *  quote, a grid table's or a bare LaTeX environment's */
+function blockRewrites(text: string, lineStarts: readonly number[]): CodeRegion[] {
+	const normalized = normalizeNewlines(text);
+	const blocks = preprocessBlocks(normalized);
+	if (blocks.output === normalized) return [];
+	const lines = normalized.split('\n');
+	const outLines = blocks.output.split('\n');
+	// For each line, how many lines are written for it, and whether one of
+	// them differs from it
+	const written = new Uint32Array(lines.length);
+	const rewritten = new Uint8Array(lines.length);
+	for (let at = 0; at < outLines.length; at++) {
+		const line = blocks.lines[at];
+		written[line]++;
+		if (outLines[at] !== lines[line]) rewritten[line] = 1;
+	}
+	const regions: CodeRegion[] = [];
+	for (let line = 0; line < lines.length; line++) {
+		if (written[line] === 1 && rewritten[line] === 0) continue;
+		regions.push({ start: lineStarts[line] ?? text.length, end: lineStarts[line + 1] ?? text.length });
+	}
+	return regions;
+}
+
 /** The index of the last of `sorted` whose `start` is at or before
  *  `offset`, or -1, by binary search */
 function before<T>(sorted: readonly T[], offset: number, start: (item: T) => number): number {
@@ -145,8 +180,11 @@ function before<T>(sorted: readonly T[], offset: number, start: (item: T) => num
 }
 
 /** A line that may be a link's definition, as [1]: https://example.com,
- *  past a quote's and a list item's markers, or a note's */
-const DEFINITION_RE = /^[ \t>]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+[ \t>]*)?\[[^\]\n]*\]:/gm;
+ *  past a quote's and a list item's markers, or a note's. The spaces after
+ *  a list item's marker and the quote markers after them are read by
+ *  repetitions that don't overlap, so a line that isn't one is rejected in
+ *  time linear in it */
+const DEFINITION_RE = /^[ \t>]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+(?:>[ \t>]*)?)?\[[^\]\n]*\]:/gm;
 /** A blank line, from the line end before it */
 const BLANK_LINE_RE = /\n[ \t>]*(?:\r?\n|$)/;
 

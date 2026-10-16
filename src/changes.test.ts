@@ -823,12 +823,14 @@ describe('Navigation reads as before where export may read the text otherwise', 
   // Where the span or the highlight that an opener in code or a lone ==
   // took before ends in an HTML block, or, from code, holds one with an
   // opener or an == in it, which export reads as HTML, as what it hid,
-  // export doesn't read either
+  // export doesn't read either. And a highlight that ends on a quote's lazy
+  // line, before which export ends the quote
   it.each<[string, string, string[]]>([
     ['an insertion in an HTML block after an opener in code', '`{++`\n\n<div>\n{++b++}\n</div>', []],
     ['a highlight in an HTML block after an == in code', '`x == y`\n\n<div>\n==h==\n</div>', []],
     ['an HTML comment\'s block after a lone == in a list item', '- a == `b`\n\n<!--\n==h==\n-->', []],
     ['an insertion in an HTML comment\'s block in a comment from code', '`{#x>>`\n\n<!--\n{++i++}\n-->\n\n```\n<<}\n```', []],
+    ['a highlight from a quote\'s line to a lazy line after an == in code', '```\nx == 1\n```\n\n> q ==h\ni==', []],
   ])('reads %s as before', (_name, text, expected) => {
     expect(stops(text)).toEqual(expected);
   });
@@ -836,6 +838,16 @@ describe('Navigation reads as before where export may read the text otherwise', 
   it('reads the highlight after one before a span across a table\'s rows, as before', () => {
     // Its opener's scan read past the row's end
     expect(stops('| x == y |\n|---|\n| ==b {++c |\n| d++} ==e== |')).toContain('==e==');
+  });
+
+  // An == in an HTML block that closed a highlight before, which navigation
+  // reads as before, closes none and opens none, as before
+  it('reads the highlight after an HTML block whose == closed one before, as before', () => {
+    expect(stops('x == y\n\n==a==\n\n<div>\n==\n</div>\n\n==b==')).toContain('==b==');
+  });
+
+  it('reads the highlights around an HTML block whose == closed one before as export does', () => {
+    expect(stops('x == y\n\n==a==\n\n<div>\n==\n</div>\n\n==b==')).toEqual(['==a==', '==b==']);
   });
 
   it('reads the rows of a table with a span across them as export does', () => {
@@ -850,6 +862,8 @@ describe('Navigation reads as before where export may read the text otherwise', 
     ['many == in code before HTML blocks', 50_000, n => '`x == y`\n\n<div>\n==h==\n</div>\n\n'.repeat(n)],
     ['many lone == before an HTML block', 100_000, n => 'x == y\n\n'.repeat(n) + '<div>\n==h==\n</div>'],
     ['many lone == each before an HTML comment\'s block and a highlight', 50_000, n => 'x == y\n\n<!-- c -->\n\n==a==\n\n'.repeat(n)],
+    ['many highlights each before an HTML block that holds an ==', 50_000, n => 'x == y\n\n==a==\n\n<div>\n==\n</div>\n\n'.repeat(n)],
+    ['many quotes with a lazy line', 50_000, n => '> a ==h\nb==\n\n'.repeat(n)],
     ['many code spans whose backticks pair across blocks', 100_000, n => '`{>>` x ` b\n\n'.repeat(n) + '<<}'],
     ['many HTML comments\' openers in code before HTML blocks', 50_000, n => '`<!--`\n\n<div>\n-->\n</div>\n\n'.repeat(n)],
   ])('finds the stops in %s in linear time', (_name, n, input) => {
@@ -864,6 +878,7 @@ describe('Navigation reads as before where export may read the text otherwise', 
     expect(stops('`{>>` x ` b\n\n'.repeat(2) + '<<}')).toEqual([]);
     expect(stops('`<!--`\n\n<div>\n-->\n</div>\n\n'.repeat(2))).toEqual([]);
     expect(stops('x == y\n\n<!-- c -->\n\n==a==\n\n'.repeat(2))).toEqual(['<!-- c -->', '==a==', '<!-- c -->', '==a==']);
+    expect(stops('x == y\n\n==a==\n\n<div>\n==\n</div>\n\n'.repeat(2))).toEqual(['==a==', '==a==']);
   });
 });
 
@@ -899,6 +914,8 @@ describe('Navigation reads a comment whose text holds another to its matching cl
   it.each<[string, (n: number) => string]>([
     ['many comments with no closer of their own, each holding a comment', n => '{>> x {>>b<<} '.repeat(n)],
     ['many comments that hold a comment', n => '{>>a {>>b<<} c<<} '.repeat(n)],
+    ['many comments\' openers with one closer after them', n => '{>>'.repeat(n) + 'x<<}'],
+    ['many comments\' openers with IDs with one closer after them', n => '{#a>>'.repeat(n) + 'x<<}'],
   ])('finds the stops in %s in linear time', (_name, input) => {
     const text = input(100_000);
     expect(fastestRun(() => navigationRanges(combinedPattern, text))).toBeLessThan(1000);
@@ -907,5 +924,7 @@ describe('Navigation reads a comment whose text holds another to its matching cl
   it('reads what those texts hold', () => {
     expect(stops('{>> x {>>b<<} '.repeat(2))).toEqual(['{>>b<<}', '{>>b<<}']);
     expect(stops('{>>a {>>b<<} c<<} '.repeat(2))).toEqual(['{>>a {>>b<<} c<<}', '{>>a {>>b<<} c<<}']);
+    expect(stops('{>>'.repeat(2) + 'x<<}')).toEqual(['{>>x<<}']);
+    expect(stops('{#a>>'.repeat(2) + 'x<<}')).toEqual(['{#a>>x<<}']);
   });
 });
