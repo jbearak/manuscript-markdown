@@ -362,7 +362,7 @@ describe('CriticMarkup\'s markers in a pipe table\'s cells', () => {
     // Export reads a run of more than two dollars as a display delimiter
     // too, where the math spans, of two alone, read none
     ['in a display equation closed with $$$', '$$\nx {++a | b\n--- | ---\nc | d++}\n$$$', '$$\nx {++a | b\n--- | ---\nc | d++}\n$$$'],
-    ['in a display equation opened and closed with $$$', '$$$\nx {++a | b\n--- | ---\nc | d++}\n$$$', '$$\n$\nx {++a | b\n--- | ---\nc | d++}\n$$$'],
+    ['in a display equation opened and closed with $$$', '$$$\nx {++a | b\n--- | ---\nc | d++}\n$$$', '$$\n\\$\nx {++a | b\n--- | ---\nc | d++}\n$$$'],
     ['in a display equation after $$ in a code block', '```\n$$\n```\n\n$$\nx {++a | b\n--- | ---\nc | d++}\n$$', '```\n$$\n```\n\n$$\nx {++a | b\n--- | ---\nc | d++}\n$$'],
   ])('keeps an insertion whose lines look like a table %s in the equation, as before', async (_name, md, expected) => {
     // The block parse, which reads no math, read a table there, and the

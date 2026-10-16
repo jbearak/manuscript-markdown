@@ -628,7 +628,9 @@ class Parser {
       return onlyWhitespace ? change.replace(/^<w:(?:ins|del)\b/, open => open + WHITESPACE_CHANGE_MARK) : change;
     }
 
-    const escaped = this.mode === 'math' ? undefined : TEXT_ESCAPES.get(cmd);
+    // In math, \$ alone, which is how import writes Word's $ there (see
+    // escapeDollars in omml.ts); the others export as written, as before
+    const escaped = this.mode === 'math' ? (cmd === '\\$' ? '$' : undefined) : TEXT_ESCAPES.get(cmd);
     if (escaped !== undefined) {
       return makeRun(escaped);
     }

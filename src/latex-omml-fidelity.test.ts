@@ -2265,11 +2265,13 @@ describe('a highlight inside an equation', () => {
     return zip.generateAsync({ type: 'uint8array' });
   }
 
-  /** `markdown` comes back as `back`, and again */
-  async function expectTrips(markdown: string, back = markdown): Promise<void> {
+  /** `markdown` comes back as `back`, then as `again`, and again */
+  async function expectTrips(markdown: string, back = markdown, again = back): Promise<void> {
     const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
     expect(once).toBe(back);
-    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(back);
+    const twice = (await convertDocx((await convertMdToDocx(once)).docx)).markdown;
+    expect(twice).toBe(again);
+    if (again !== back) expect((await convertDocx((await convertMdToDocx(twice)).docx)).markdown).toBe(again);
   }
 
   // Each with how import writes it, inline and in display math. At an inline
@@ -2330,29 +2332,32 @@ describe('a highlight inside an equation', () => {
 
   // In a highlight, which an equation with a highlight inside doesn't take,
   // it's split at its CriticMarkup, as on main, and each piece takes the
-  // highlight around it
+  // highlight around it. The pieces come back side by side, as $a$$b$,
+  // which export reads as one equation, a$$b, as on main, whose dollar
+  // signs come back as \$
   test.each([
-    ['a green highlight', 'A ==$a{==b==}c$=={green} B.\n', ['a', 'b', 'c'].map(t => marked(t).replace('yellow', 'green')), 'A ==$a$$b$$c$=={green} B.\n'],
-    ['a highlight', 'A ==$a{==b==}c$== B.\n', ['a', 'b', 'c'].map(marked), 'A ==$a$$b$$c$== B.\n'],
-    ['a highlight, beside an insertion', 'A ==$a{==b==}{++c++}d$== B.\n', [marked('a'), marked('b'), run('c'), marked('d')], 'A ==$a$$b$=={++$c$++}==$d$== B.\n'],
-  ])('in %s, is split at its CriticMarkup, as on main, and comes back, and again', async (_name, markdown, omml, back) => {
+    ['a green highlight', 'A ==$a{==b==}c$=={green} B.\n', ['a', 'b', 'c'].map(t => marked(t).replace('yellow', 'green')), 'A ==$a$$b$$c$=={green} B.\n', 'A ==$a\\$\\$b\\$\\$c$=={green} B.\n'],
+    ['a highlight', 'A ==$a{==b==}c$== B.\n', ['a', 'b', 'c'].map(marked), 'A ==$a$$b$$c$== B.\n', 'A ==$a\\$\\$b\\$\\$c$== B.\n'],
+    ['a highlight, beside an insertion', 'A ==$a{==b==}{++c++}d$== B.\n', [marked('a'), marked('b'), run('c'), marked('d')], 'A ==$a$$b$=={++$c$++}==$d$== B.\n', 'A ==$a\\$\\$b$=={++$c$++}==$d$== B.\n'],
+  ])('in %s, is split at its CriticMarkup, as on main, and comes back, and again', async (_name, markdown, omml, back, again) => {
     expect(await equations(markdown)).toEqual(omml);
-    await expectTrips(markdown, back);
+    await expectTrips(markdown, back, again);
   });
 
   // With a % comment in it, whose hidden run export doesn't highlight, so
   // import wouldn't read the highlight back, it's split at its CriticMarkup,
-  // as on main; a comment outside it doesn't matter
+  // as on main; a comment outside it doesn't matter. Pieces side by side
+  // come back as one equation, as above
   test.each([
-    ['in a fraction', 'A $a{==\\frac{b % c\n}{c}==}d$ B.\n', 'A $a$$\\frac{b % c\n}{c}$$d$ B.\n'],
-    ['in a radical', 'A $a{==\\sqrt{b % c\n}==}d$ B.\n', 'A $a$$\\sqrt{b % c\n}$$d$ B.\n'],
-    ['after a run', 'A $a{==b % c\n==}d$ B.\n', 'A $a$==$b % c$==$d$ B.\n'],
-  ])('with a comment in it, %s, is split at its CriticMarkup, as on main, and comes back, and again', async (_name, markdown, back) => {
+    ['in a fraction', 'A $a{==\\frac{b % c\n}{c}==}d$ B.\n', 'A $a$$\\frac{b % c\n}{c}$$d$ B.\n', 'A $a\\$\\$\\frac{b % c\n}{c}\\$\\$d$ B.\n'],
+    ['in a radical', 'A $a{==\\sqrt{b % c\n}==}d$ B.\n', 'A $a$$\\sqrt{b % c\n}$$d$ B.\n', 'A $a\\$\\$\\sqrt{b % c\n}\\$\\$d$ B.\n'],
+    ['after a run', 'A $a{==b % c\n==}d$ B.\n', 'A $a$==$b % c$==$d$ B.\n', undefined],
+  ])('with a comment in it, %s, is split at its CriticMarkup, as on main, and comes back, and again', async (_name, markdown, back, again) => {
     const omml = await equations(markdown);
     expect(omml).toHaveLength(3);
     expect([omml[0], omml[2]]).toEqual([run('a'), run('d')]);
     expect(omml[1]).toContain('<w:vanish/><w:highlight w:val="yellow"/>');
-    await expectTrips(markdown, back);
+    await expectTrips(markdown, back, again);
   });
 
   test.each([
@@ -2577,6 +2582,139 @@ describe('a number and a space of another kind at the start of an inline equatio
     ['A $2+3$ B.\n', 1],
     ['A $2\\ x$ B.\n', 1],
     ['A $2$ B.\n', 1],
+  ])('%j comes back as before, and again', async (markdown, count) => {
+    expect(await equations(markdown)).toHaveLength(count);
+    const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(once).toBe(markdown);
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(markdown);
+  });
+});
+
+// Word's $ in a run of math came back as it is, which can't stand in $...$:
+// at the equation's start or end it closed the equation, as $ $x$ for $x,
+// and in the middle, as $x$y$, it left no equation. Import writes it as \$
+// now, as a style's group does, and export writes \$ in math as Word's $
+describe('a dollar sign in an equation', () => {
+  const inline = (latex: string) => 'c $' + latex + '$ b.\n';
+  const display = (latex: string) => '$'.repeat(2) + '\n' + latex + '\n' + '$'.repeat(2) + '\n';
+  const table = (cell: string) => '| h |\n| --- |\n| ' + cell + ' |\n';
+
+  /** A document from Word with `markdown`'s first equation as `omml` */
+  async function wordDocx(omml: string, markdown: string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + omml + '</m:oMath>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** The equations Word gets for `markdown` */
+  async function equations(markdown: string): Promise<string[]> {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => m[1]);
+  }
+
+  /** The text of an equation's runs */
+  const shown = (omml: string) => [...omml.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1]).join('');
+
+  /** `markdown`'s equation is `text` in Word, and the next trip gives the
+   *  same Markdown and the same equation */
+  async function expectTrips(markdown: string, text: string): Promise<void> {
+    const once = await equations(markdown);
+    expect(once.map(shown)).toEqual([text]);
+    const twice = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(twice).toBe(markdown);
+    expect(await equations(twice)).toEqual(once);
+  }
+
+  test.each([
+    ['at the start', run('$x'), inline('\\$x')],
+    ['at the end', run('x$'), inline('x\\$')],
+    ['at both ends', run('$x') + run('$'), inline('\\$x\\$')],
+    ['alone', run('$'), inline('\\$')],
+    ['twice at the start', run('$'.repeat(2) + 'x'), inline('\\$\\$x')],
+    ['in the middle', run('x$y'), inline('x\\$y')],
+    ['twice in the middle', run('x' + '$'.repeat(2) + 'y'), inline('x\\$\\$y')],
+    ['in a run of its own at the start', run('$') + run('x'), inline('\\$x')],
+    // Not a dollar amount, which a number and a space after $ read as
+    ['before a number', run('$5'), inline('\\$5')],
+    ['after a number', run('5$'), inline('5\\$')],
+    ['before a number and a space', run('$2 x'), inline('\\$2 x')],
+    // Its space written as \ , or after {}, as before
+    ['after a number and a space', run('2 $'), inline('2\\ \\$')],
+    ['after a number and a no-break space', run('2\u00A0$'), inline('2{}\u00A0\\$')],
+    ['in a fraction', '<m:f><m:num>' + run('$') + '</m:num><m:den>' + run('2') + '</m:den></m:f>', inline('\\frac{\\$}{2}')],
+    ['in a superscript', '<m:sSup><m:e>' + run('x') + '</m:e><m:sup>' + run('$') + '</m:sup></m:sSup>', inline('x^\\$')],
+    ['in an accent', '<m:acc><m:e>' + run('$') + '</m:e></m:acc>', inline('\\hat{\\$}')],
+  ])('%s of an inline equation, from Word, is \\$, which export writes as $, and again', async (_name, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
+    await expectTrips(markdown, shown(omml));
+  });
+
+  test('in a matrix\'s cells, from Word, is \\$, which export writes as $, and again', async () => {
+    const omml = '<m:m><m:mr><m:e>' + run('$') + '</m:e><m:e>' + run('x$') + '</m:e></m:mr></m:m>';
+    const markdown = inline('\\begin{matrix} \\$ & x\\$ \\end{matrix}');
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
+    // With the spaces around & that export writes, as on main
+    await expectTrips(markdown, ' $  x$ ');
+  });
+
+  test.each([
+    ['twice in the middle', 'x' + '$'.repeat(2) + 'y', 'x\\$\\$y'],
+    ['twice, alone', '$'.repeat(2), '\\$\\$'],
+  ])('%s of display math, from Word, is \\$, which export writes as $, and again', async (_name, text, latex) => {
+    expect((await convertDocx(await wordDocx(run(text), display('y')))).markdown).toBe(display(latex));
+    await expectTrips(display(latex), text);
+  });
+
+  test('at the start of an equation in a table cell, from Word, is \\$, and again', async () => {
+    expect((await convertDocx(await wordDocx(run('$x'), table('c $y$ b.')))).markdown).toBe(table('c $\\$x$ b.'));
+    await expectTrips(table('c $\\$x$ b.'), '$x');
+  });
+
+  test('at the start of an equation in a footnote, from Word, is \\$, and again', async () => {
+    const note = (latex: string) => 'a[^1]\n\n[^1]: c $' + latex + '$ b.\n';
+    const docx = (await convertMdToDocx(note('y'))).docx;
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    zip.file('word/footnotes.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath>' + run('$x') + '</m:oMath>'));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe(note('\\$x'));
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  test.each([
+    ['at the start', '\\$x', '$x'],
+    ['in the middle', 'x\\$y', 'x$y'],
+    ['at the end', 'x\\$', 'x$'],
+  ])('\\$ %s of an equation in Markdown exports as $, and comes back, and again', async (_name, latex, text) => {
+    expect(latexToOmml(latex)).toContain('<m:t>$</m:t>');
+    await expectTrips(inline(latex), text);
+  });
+
+  // A backslash before it in Word's text, as export wrote for \$ before, or
+  // in the run before, comes back as \$, as on main, which export now
+  // writes as Word's $
+  test.each([
+    ['in its run', run('\\$x'), inline('\\$x'), '$x'],
+    ['in the run before', run('x\\') + run('$y'), inline('x\\$y'), 'x$y'],
+  ])('after a backslash %s, from Word, is \\$, as on main, which export writes as $, and again', async (_name, omml, markdown, text) => {
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
+    await expectTrips(markdown, text);
+  });
+
+  // As on main
+  test.each([
+    ['upright', '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>$x</m:t></m:r>', inline('\\text{\\$x}')],
+    ['in a bold group', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>$x</m:t></m:r>', inline('\\mathbf{\\$x}')],
+  ])('%s, from Word, comes back as before, and again', async (_name, omml, markdown) => {
+    expect((await convertDocx(await wordDocx(omml, inline('y')))).markdown).toBe(markdown);
+    await expectTrips(markdown, '$x');
+  });
+
+  test.each([
+    ['It costs $5 and $x$ more.\n', 1],
+    ['It costs $5 and $6.\n', 0],
+    ['A $\\text{\\$5}$ B.\n', 1],
   ])('%j comes back as before, and again', async (markdown, count) => {
     expect(await equations(markdown)).toHaveLength(count);
     const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;

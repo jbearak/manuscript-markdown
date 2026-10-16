@@ -7411,13 +7411,13 @@ describe('Feature: docx-equation-conversion, Property 1: Delimiter selection mat
 
   // An inline equation whose LaTeX starts or ends with dollar signs, as
   // export reads $ $$ $, went with them in one run, $$$$, an empty display
-  // equation, which the next export dropped, and its text. A space keeps
-  // them apart, which export reads as the equation's, as the first time.
+  // equation, which the next export dropped, and its text. Import writes
+  // Word's dollar signs as \$ now, which export writes as Word's $ again.
   // An escaped one at its end, and dollar signs of text, come back as before
   test.each([
-    ['a $ $' + '$ $ b.', 'a $ $' + '$ $ b.'],
-    ['p ;y $ $' + '$ $@k\\] z.', 'p ;y $ $' + '$ $@k] z.'],
-    ['a $ $' + '$' + '$ $ b.', 'a $ $' + '$' + '$ $ b.'],
+    ['a $ $' + '$ $ b.', 'a $\\$\\$' + '$ b.'],
+    ['p ;y $ $' + '$ $@k\\] z.', 'p ;y $\\$\\$' + '$@k] z.'],
+    ['a $ $' + '$' + '$ $ b.', 'a $\\$\\$\\$' + '$ b.'],
     ['a $' + '$ b.', 'a \\$\\$ b.'],
     ['a $x$ b.', 'a $x$ b.'],
     ['a $x\\$' + '$ b.', 'a $x\\$' + '$ b.'],
@@ -7429,7 +7429,8 @@ describe('Feature: docx-equation-conversion, Property 1: Delimiter selection mat
     const once = (await convertDocx(first)).markdown;
     expect(once).toBe(back + '\n');
     const second = (await convertMdToDocx(once)).docx;
-    expect(await equations(second)).toEqual(await equations(first));
+    // Less the spaces at its edges, which import trims, as of $ x $
+    expect(await equations(second)).toEqual((await equations(first)).map(text => text.trim()));
     expect((await convertDocx(second)).markdown).toBe(once);
   });
 });
