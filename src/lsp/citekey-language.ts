@@ -4,7 +4,7 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, BibtexSourceRange, parseBibtexWithRaw, stripOuterBraces } from '../bibtex-parser';
-import { isCitableKey, isCitationKeyChar, readCitationItems } from '../citation-syntax';
+import { citationClose, isCitableKey, isCitationKeyChar, readCitationItems } from '../citation-syntax';
 import { computeCodeRegions, isInsideCodeRegion, type CodeRegion } from '../code-regions';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
@@ -18,7 +18,6 @@ import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter'
 
 const realpathNativeAsync = promisify(fs.realpath.native);
 
-const CITATION_SEGMENT_RE = /\[[^\]]*@[^\]]*]/g;
 // A segment over more than one line, which export can read as more than one
 // block, as across a blank line, a heading or a blockquote's markers, has
 // its keys read as the server read every key before it read them as export
@@ -29,9 +28,8 @@ const CITEKEY_RE = /@([A-Za-z0-9_:-]+)/g;
 /** The [ of the citation that ends at the ] at `close` in `scanText`, of
  *  the [s from `start`, as export's citationEnd tries them: the first where
  *  the text after it starts with an @ or a -@, or has no other [ before the
- *  ], so in `[text [@smith2020]` the inner one. No [ the segment's regex
- *  reads has a ] after it before `close`, so each citation export reads
- *  from one ends there too. */
+ *  ], so in `[text [@smith2020]` the inner one. Each [ from `start` to
+ *  `close` has its citation end there (see citationClose). */
 function citationOpen(scanText: string, start: number, close: number): number {
 	let at = start;
 	for (;;) {
@@ -204,19 +202,26 @@ function scanBlankedCitationUsages(
 	readMultiline: (inner: string, offset: number) => CitekeyUsage[] = multilineUsages,
 ): CitekeyUsage[] {
 	const usages: CitekeyUsage[] = [];
-	let citationMatch: RegExpExecArray | null;
-
-	CITATION_SEGMENT_RE.lastIndex = 0;
-	while ((citationMatch = CITATION_SEGMENT_RE.exec(scanText)) !== null) {
-		const segment = citationMatch[0];
+	// Each segment: a [, the ] that ends a citation from it, as export reads
+	// one, past a \] that a later ] ends it after (see citationClose), and an
+	// @ between them. Every [ before that ] has its citation end there too,
+	// so the next segment starts after it.
+	const scan = { from: -1, stop: -1 };
+	for (let at = scanText.indexOf('['); at !== -1; at = scanText.indexOf('[', at)) {
+		const end = citationClose(scanText, at, scan);
+		if (end === -1) break;
+		const segmentStart = at;
+		at = end + 1;
+		const segment = scanText.slice(segmentStart, end + 1);
+		if (!segment.includes('@')) continue;
 		if (LINE_END_RE.test(segment)) {
-			for (const usage of readMultiline(segment.slice(1, -1), citationMatch.index + 1)) usages.push(usage);
+			for (const usage of readMultiline(segment.slice(1, -1), segmentStart + 1)) usages.push(usage);
 			continue;
 		}
 		// The citation's own [, which in `[text [@smith2020]` isn't the
 		// segment's first
-		const close = citationMatch.index + segment.length - 1;
-		const open = citationOpen(scanText, citationMatch.index, close);
+		const close = end;
+		const open = citationOpen(scanText, segmentStart, close);
 		const segmentOffset = open + 1;
 		// Each item's key as export reads it (see readCitationItem), where an
 		// @ marks it
@@ -329,6 +334,10 @@ export function getCompletionContextAtOffset(text: string, offset: number): Comp
 	if (atOffset < 0 || text.charAt(atOffset) !== '@') {
 		return undefined;
 	}
+	// Not an @ a backslash escapes, as in \@x, which is text, not a key
+	let slashes = 0;
+	while (text.charAt(atOffset - 1 - slashes) === '\\') slashes++;
+	if (slashes % 2 === 1) return undefined;
 	if (!isInsideCitationSegmentAtOffset(text, atOffset) && !isBareCitationContext(text, atOffset)) {
 		return undefined;
 	}

@@ -1571,3 +1571,24 @@ describe('BibTeX names with a von part or a Jr part', () => {
     expect(xml).toContain('{"family":"van Gogh","given":"Vincent"}');
   });
 });
+
+describe('a citation\'s escapes, as export reads them', () => {
+  // A run of escaped ;, [, ] or @, of backslashes, or of escaped ] among
+  // [, at 16,000 and at 64,000 characters, in and around a citation, read
+  // to its end and its items: linear work takes 4 times as long at 64,000,
+  // where a search past each escaped ] from each [ took 16 times as long
+  it.each(['\\;', '\\[', '\\]', '\\@', '\\', '\\] [', '[x \\] ', '[ ', ' @b\\] '])('reads a long run of %j in linear time', run => {
+    const places = [
+      (text: string) => '[@a, p. 2' + text + ']',
+      (text: string) => '[@a, p. 2' + text,
+      (text: string) => '[see ' + text + ' @a]',
+      (text: string) => text + ' [@a]',
+    ];
+    for (const place of places) {
+      const [small, large] = [16000, 64000].map(length => place(run.repeat(Math.floor(length / run.length))));
+      const [smallTime, largeTime] = [fastestRun(() => parseMd(small)), fastestRun(() => parseMd(large))];
+      expect(largeTime).toBeLessThan(2000);
+      expect(largeTime).toBeLessThan(8 * smallTime + 100);
+    }
+  }, 120000);
+});

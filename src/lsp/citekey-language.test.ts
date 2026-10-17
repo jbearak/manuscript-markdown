@@ -111,6 +111,19 @@ describe('citation keys as export reads them', () => {
 		['items on two lines, with CR', '[@a;\r@b]', ['a', 'b']],
 		['a citation in a blockquote, its ] on the next line', '> [@smith2020\n> ]', ['smith2020']],
 		['items on two lines of a blockquote in a blockquote', '> > [@a;\n> > @b]', ['a', 'b']],
+		// A ;, a [, a ] or an @ a backslash escapes, which ends no item or
+		// citation and starts no key, as Pandoc reads it, where the LSP read
+		// a citation to the first ], escaped or not
+		['an escaped ; in a locator', '[@a, p. 2\\; 5; @b]', ['a', 'b']],
+		['an escaped [ and ] in a locator', '[@a, p. 4 \\[n. 2\\]; @b]', ['a', 'b']],
+		['an escaped ] a later ] ends the citation after', '[@a, x\\] y; @b]', ['a', 'b']],
+		['an escaped [ in a later item\'s prefix', '[@a; see \\[x\\] @b]', ['a', 'b']],
+		// Guards: an escaped @ in a prefix, and an escaped ] that ends the
+		// citation, as before, with no ] after it, before a [, or after a key
+		['an escaped @ in a prefix', '[cf. \\@x @a]', ['a']],
+		['an escaped ] with no ] after it', '[@a, x\\] @b', ['a']],
+		['an escaped ] before a [', '[@a, x\\] and [@b]', ['a', 'b']],
+		['a key that ends with a backslash', '[@a\\] b]', ['a\\']],
 	])('reads %s as export does', (_name, text, keys) => {
 		expect(scanCitationUsages(text).map(usage => [usage.key, text.slice(usage.keyStart, usage.keyEnd)])).toEqual(keys.map(key => [key, key]));
 		const runs = parseMd(text).flatMap(token => token.runs ?? []).filter(item => item.type === 'citation');
@@ -152,6 +165,10 @@ describe('citation keys as export reads them', () => {
 	test.each([
 		['a citation in brackets nested deep', (n: number) => '[x '.repeat(n) + '[@a]' + ']'.repeat(n)],
 		['brackets over many lines', (n: number) => '[@a\n\n'.repeat(n) + ']'],
+		// Each [ read past each escaped ] to the end again
+		['escaped brackets with no ] after them', (n: number) => '[ \\]' + ' \\[ \\]'.repeat(n)],
+		['many escaped ] a far ] ends a citation after', (n: number) => '[@a, ' + 'x \\] '.repeat(n) + ']'],
+		['many [ before many escaped ] and a [', (n: number) => '[x '.repeat(n) + '\\] '.repeat(n) + '[@a]'],
 	])('reads %s in linear time', (_name, text) => {
 		const time = (n: number) => {
 			const input = text(n);
@@ -168,6 +185,16 @@ describe('citation keys as export reads them', () => {
 
 	test('completes a key with a period from all of it', () => {
 		expect(getCompletionContextAtOffset('[@smith.20', 10)?.prefix).toBe('smith.20');
+	});
+
+	// An @ a backslash escapes starts no key (see citationItemEnd), and a
+	// guard: one after a space does
+	test.each(['[cf. \\@x', '[@a; see \\@x', '\\@x'])('completes no key after the escaped @ in %j', text => {
+		expect(getCompletionContextAtOffset(text, text.length)).toBeUndefined();
+	});
+
+	test('completes a key after an @ after a space in a prefix', () => {
+		expect(getCompletionContextAtOffset('[cf. @x', 7)?.prefix).toBe('x');
 	});
 
 	// A key with a ; or a ], which ends the citation's item or the citation

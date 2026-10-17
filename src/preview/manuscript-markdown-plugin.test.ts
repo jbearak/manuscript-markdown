@@ -2890,6 +2890,13 @@ describe('Citations in the preview', () => {
     ['a reference link around it', '[see [@a]][r]\n\n[r]: x', '<a href="x">see [@a]</a>'],
     // Whose source, a placeholder, has no @, which showed none as <>
     ['a grid table around it, the only one', '+---------------+\n| [@smith2020]  |\n+---------------+\n', '<th>[@smith2020]</th>'],
+    // Its items and its end as export reads them: a ; or a ] a backslash
+    // escapes ends neither, so the text after them is a locator's, as it
+    // is, and the citation's, which emphasis doesn't take, but for a ]
+    // with no ] after it, which ends it, as before
+    ['an escaped ; in a locator', 'P [@a, p. 2\\; see \\*x\\* @b] Q.', '<p>P [@a, p. 2\\; see \\*x\\* @b] Q.</p>'],
+    ['an escaped ] a later ] ends it after', 'P [@a, x\\] *y*] Q.', '<p>P [@a, x\\] *y*] Q.</p>'],
+    ['an escaped ] with no ] after it', 'P [@a, x\\] *y* Q.', '<p>P [@a, x\\] <em>y</em> Q.</p>'],
   ])('shows a citation with %s', (_name, md, html) => {
     expect(renderWithPlugin(md, 'github')).toContain(html);
   });

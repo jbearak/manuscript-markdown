@@ -33,7 +33,7 @@ import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 import { findDollarMathAt } from '../math-delimiters';
-import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from '../citation-syntax';
+import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText, splitCitationItems } from '../citation-syntax';
 import { normalizeNewlines } from '../newlines';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
@@ -1379,7 +1379,7 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   if (end === -1) return false;
   // With the line breaks CriticMarkup protected in it, before which a key
   // starts as after a space
-  const items = restoreCriticLineBreaks(state.src.slice(start + 1, end)).split(';').map(item => {
+  const items = splitCitationItems(restoreCriticLineBreaks(state.src.slice(start + 1, end))).map(item => {
     const key = CITATION_ITEM_START_RE.exec(item);
     return key ? citationPrefixText(state, item.slice(0, key.index)) + item.slice(key.index) : item;
   });

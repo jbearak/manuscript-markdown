@@ -382,16 +382,17 @@ describe('Feature: zotero-citation-roundtrip, Property 5: BibTeX special charact
 
 /**
  * Feature: zotero-citation-roundtrip
- * Property 6: Locator sanitization strips Pandoc-sensitive characters
+ * Property 6: Locator escaping keeps Pandoc-sensitive characters
  *
- * Verifies that citationPandocKeys() strips [ ] ; @ from locators
- * so they cannot break Pandoc citation syntax.
+ * Verifies that citationPandocKeys() escapes [ ] ; @ in locators, as
+ * Pandoc reads them, so they neither break Pandoc citation syntax nor
+ * drop out, as main's stripping did.
  *
  * **Validates: Locator safety**
  */
 
-describe('Feature: zotero-citation-roundtrip, Property 6: Locator sanitization', () => {
-  it('strips Pandoc-sensitive characters from locators', () => {
+describe('Feature: zotero-citation-roundtrip, Property 6: Locator escaping', () => {
+  it('escapes Pandoc-sensitive characters in locators', () => {
     const meta: CitationMetadata = {
       authors: [],
       title: 'Test',
@@ -409,10 +410,12 @@ describe('Feature: zotero-citation-roundtrip, Property 6: Locator sanitization',
     const baseKey = keyMap.get(itemIdentifier(meta))!;
 
     const results = citationPandocKeys(citation, keyMap);
-    expect(results).toEqual([`@${baseKey}, p. 20nextpart`]);
+    // Which Pandoc reads as the locator 20 and the rest as a suffix, as
+    // export does, and shows as p. 20];@next[part
+    expect(results).toEqual(['@' + baseKey + ', p. 20\\]\\;\\@next\\[part']);
   });
 
-  it('returns bare key when locator consists entirely of Pandoc-sensitive chars', () => {
+  it('keeps a locator that consists entirely of Pandoc-sensitive chars', () => {
     const meta: CitationMetadata = {
       authors: [],
       title: 'Test2',
@@ -430,7 +433,7 @@ describe('Feature: zotero-citation-roundtrip, Property 6: Locator sanitization',
     const baseKey = keyMap.get(itemIdentifier(meta))!;
 
     const results = citationPandocKeys(citation, keyMap);
-    expect(results).toEqual([`@${baseKey}`]);
+    expect(results).toEqual(['@' + baseKey + ', {p. \\[\\]\\;\\@}']);
   });
 });
 

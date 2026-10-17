@@ -21,8 +21,9 @@
 // Where it differs from Pandoc: Pandoc writes each space as one; here a
 // locator and a suffix keep the whitespace written in them, as a line end,
 // which export kept in a locator before. The text is read as text, but
-// for an escaped brace or backslash (see ESCAPED_RE), and a tag citeproc
-// reads, which is part of a word (see TAG_RE): Pandoc reads Markdown's
+// for an escaped brace or backslash (see ESCAPED_RE), the escapes of a
+// citation's own characters, as \; (see CITATION_ESCAPE_RE), and a tag
+// citeproc reads, which is part of a word (see TAG_RE): Pandoc reads Markdown's
 // formatting in a suffix, which export takes as written, as it does a
 // locator, and Word shows a suffix as written (see AFFIX_MARKUP in
 // md-to-docx-citations.ts).
@@ -146,6 +147,22 @@ const TOKEN_RE = new RegExp('\\s+|(?:' + TAG + '|\\\\[\\\\{}]|[^\\s\\p{P}]|:)+|\
 // character too.
 const ESCAPED_RE = /\\([\\{}])/g;
 const unescaped = (text: string) => text.replace(ESCAPED_RE, (_escape, character: string) => character);
+// A ;, [, ] or @ after a backslash, which is that character as text, as
+// Pandoc reads it, so that it ends no item or citation and starts no key
+// (see citationItemEnd and citationClose in citation-syntax.ts). Read as
+// the character, which the locator's parser reads as punctuation, as Pandoc
+// does, so p. 2\; 5 is the locator 2; 5, before ESCAPED_RE's escapes, which
+// stay escapes, so \\; is a backslash and a ;
+const CITATION_ESCAPE_RE = /\\([\\{}[\];@])/g;
+const withCitationEscapesRead = (text: string) => text.replace(CITATION_ESCAPE_RE, (escape, character: string) => '\\{}'.includes(character) ? escape : character);
+// What import writes escaped always, as \;, with each backslash right
+// before one escaped too, as \\\;, so it reads back as the text
+// (from the start of a run of backslashes only, so a long run is read once,
+// not again from each backslash in it)
+const CITATION_CHARACTERS_RE = /(?<!\\)\\*[;[\]@]/g;
+// An odd run of backslashes at the end
+const TRAILING_ESCAPE_RE = /(?:^|[^\\])(?:\\\\)*\\$/;
+const withCitationCharactersEscaped = (text: string) => text.replace(CITATION_CHARACTERS_RE, run => run.slice(0, -1).replace(/\\/g, '\\\\') + '\\' + run.slice(-1));
 const untagged = (text: string) => text.replace(TAG_RE, '');
 const PUNCTUATION_RE = /^\p{P}/u;
 const DIGIT_RE = /[0-9]/;
@@ -168,7 +185,7 @@ export function readCitationLocator(text: string): CitationLocator {
 function readLocator(text: string, withCompatible: boolean): CitationLocator {
   // As Pandoc gets it: the suffix after the key, from its comma
   const tokens: Token[] = [];
-  for (const match of (', ' + text).matchAll(TOKEN_RE)) tokens.push({ text: match[0], space: /^\s/.test(match[0]) });
+  for (const match of (', ' + withCitationEscapesRead(text)).matchAll(TOKEN_RE)) tokens.push({ text: match[0], space: /^\s/.test(match[0]) });
   const n = tokens.length;
   type Parsed<T> = { value: T; next: number } | undefined;
   // The character of a token of one, as Pandoc's pMatchChar takes
@@ -390,18 +407,18 @@ function knownLabel(label: string | undefined): string {
  *  locator's words wouldn't read as one or the suffix would read as more
  *  of it. Without a locator, the suffix after its comma and space, then
  *  after {}, which reads as no locator, where it would read as one or
- *  starts with neither. With a brace or a backslash in the locator or the
- *  suffix, each of these with its braces and backslashes escaped too, as
- *  p. A\{B, for a brace no other closes.
+ *  starts with neither. A ;, a [, a ] or an @ in the locator or the suffix
+ *  is escaped in each, as p. 2\; 5, as is a backslash right before one.
+ *  With a brace or a backslash in the locator or the suffix, each of these
+ *  with its braces and backslashes escaped too, as p. A\{B, for a brace
+ *  no other closes.
  *  Of these, the first Pandoc reads the same too, else the first export
  *  reads so, as app. A, for a label Pandoc has no term for (see
  *  COMPATIBLE_TERMS). Failing all, with a locator, as one with a backslash
  *  before a brace, the first, the label's term and the locator, as main
  *  wrote it; without, as for a suffix that starts with a digit, the last,
  *  which reads as the suffix with a space before it. Empty where there's
- *  neither.
- *  `locator` and `suffix` hold no ; or ], which would end the item or the
- *  citation. */
+ *  neither. */
 export function citationLocatorText(locator: string | undefined, label: string | undefined, suffix: string | undefined): string {
   const loc = (locator ?? '').trim();
   // Its end as readCitationItem trims it
@@ -409,16 +426,20 @@ export function citationLocatorText(locator: string | undefined, label: string |
   if (!loc && !after) return '';
   const wanted = loc ? knownLabel(label) : undefined;
   const reads = (text: string, withCompatible: boolean) => {
-    // As readCitationItem gives it, trimmed
-    if (text !== text.trim()) return false;
+    // As readCitationItem gives it, trimmed, and with no backslash at its
+    // end that no other escapes, which would escape the ; or the ] after it
+    if (text !== text.trim() || TRAILING_ESCAPE_RE.test(text)) return false;
     const read = readLocator(text, withCompatible);
     const readSuffix = read.suffix ?? '';
     return (read.locator ?? '') === loc && read.label === wanted
       && (readSuffix === after || SPACED_SUFFIX_RE.test(after) && readSuffix === ' ' + after);
   };
-  // The text as written, then with its braces and backslashes escaped,
-  // where it has any, which reads as the text (see ESCAPED_RE)
-  const escapes = (text: string) => /[\\{}]/.test(text) ? [text, text.replace(/[\\{}]/g, character => '\\' + character)] : [text];
+  // The text as written, but with a ;, a [, a ] or an @ escaped always
+  // (see CITATION_CHARACTERS_RE), then with its braces and backslashes
+  // escaped too, where it has any, which reads as the text (see ESCAPED_RE)
+  const escapes = (text: string) => /[\\{}]/.test(text)
+    ? [withCitationCharactersEscaped(text), text.replace(/[\\{};[\]@]/g, character => '\\' + character)]
+    : [withCitationCharactersEscaped(text)];
   let candidates: string[];
   if (loc) {
     const term = LABEL_TERMS.get(wanted!)![pluralLocator(loc) ? 1 : 0];

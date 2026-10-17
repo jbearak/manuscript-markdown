@@ -1195,7 +1195,9 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
   const suppressed = new Set<string>();
   // An item with nothing after its @ is none, so the text, which has it,
   // isn't the one written from the items
-  const items = readCitationItems(inner).map(item => {
+  // As Word's text, whose backslashes import escapes, so they escape none
+  // (see readCitationItems)
+  const items = readCitationItems(inner, false).map(item => {
     if (item.markStart !== -1) raw.push([open + 1 + item.itemStart + item.markStart, open + 1 + item.itemEnd]);
     if (item.locator !== undefined) locators.set(item.key, item.locator);
     if (item.suppressed) suppressed.add(item.key);
@@ -1215,9 +1217,9 @@ function citationKnown(text: string, open: number, close: number): boolean {
 }
 
 /** The keys of the citation between brackets whose text is `inner`, as
- *  citationKeyRanges reads them */
+ *  citationKeyRanges reads them, Word's text */
 function bracketKeys(inner: string): string[] {
-  return readCitationItems(inner).flatMap(item => (item.markStart === -1 ? [] : [item.key]));
+  return readCitationItems(inner, false).flatMap(item => (item.markStart === -1 ? [] : [item.key]));
 }
 
 /** A tracked break's end mark (see joinTrackedParagraphBreaks): a
@@ -1373,7 +1375,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     // With no [ before its ], so each citation's text is read once, nor a
     // ! before it, which makes it an image's
     else if (close !== undefined && (inner === -1 || inner > close) && text[i - 1] !== '!' && /^-?@/.test(text.slice(i + 1, i + 3))
-      && citationEndInText(text, i) === close && citationKeyRanges(text, i, close) && citationKnown(text, i, close)) opens = false;
+      && citationEndInText(text, i, false) === close && citationKeyRanges(text, i, close) && citationKnown(text, i, close)) opens = false;
     else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
     else if (!after) opens = true;
     else {
@@ -1413,7 +1415,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     if (escaped.has(i)) continue;
     const open = text.indexOf('[', i + 1);
     if (open !== -1 && open < close && !/^-?@/.test(text.slice(i + 1, i + 3))) continue;
-    if (citationEndInText(text, i) !== close) continue;
+    if (citationEndInText(text, i, false) !== close) continue;
     const raw = citationKeyRanges(text, i, close);
     if (!raw) {
       escaped.add(i);
@@ -4030,7 +4032,8 @@ function formatHrefForMarkdown(href: string): string {
 /** A link of Markdown `text` to `href`, with a @ that starts the text,
  *  after a - or not, escaped, as export reads [@ as a citation's, even
  *  before a link's ( (see citationEnd). Export ends a citation at the
- *  first ], escaped too, so it reads the text before an escaped ] in the
+ *  first ], escaped too after a key or where no later ] does (see
+ *  citationClose), so it reads the text before an escaped ] in the
  *  text as one where a key's @ comes after a space, as in [see @a\]](u),
  *  whose @ is escaped then, as one escaped starts no key. A key in code
  *  stays as it is, where a backslash would be text. */
@@ -6687,18 +6690,17 @@ function getSurname(meta: CitationMetadata): string {
   return (typeof publisher === 'string' && publisher) || meta.journal || 'unknown';
 }
 
-/** Strip characters that are significant in Pandoc citation syntax. */
-function sanitizeCitationText(text: string | number): string {
-  return String(text).replace(/[\[\];@]/g, '');
-}
-
-/** Backslash-escape what would parse as Markdown formatting in a sanitized
- *  citation prefix (code, emphasis, math, CriticMarkup, highlights,
- *  strikethrough, HTML, escapes; entities can't form without `;`). The exporter
- *  only accepts plain-text prefixes and decodes the escapes, so the Zotero
- *  prefix comes back unchanged. Lone `=`, `~`, and `<` stay as written. */
+/** Backslash-escape what would parse as Markdown formatting in a citation
+ *  prefix (code, emphasis, math, CriticMarkup, highlights, strikethrough,
+ *  HTML, escapes; an entity's `;` is escaped too), and the characters of a
+ *  citation's own syntax: a `[`, a `]`, which would end the citation, a
+ *  `;`, which would end the item, and an `@`, which would start a key, as
+ *  Pandoc reads each (see citationItemEnd and citationClose in
+ *  citation-syntax.ts). The exporter only accepts plain-text prefixes and
+ *  decodes the escapes, so the Zotero prefix comes back unchanged. Lone
+ *  `=`, `~`, and `<` stay as written. */
 function escapeCitationPrefix(prefix: string): string {
-  return prefix.replace(/[\\`*_${]|==|~~|<(?=[A-Za-z\/!?])/g,
+  return prefix.replace(/[\\`*_${[\];@]|==|~~|<(?=[A-Za-z\/!?])/g,
     match => match.split('').map(c => '\\' + c).join(''));
 }
 
@@ -6710,17 +6712,23 @@ export function citationPandocKeys(
   citation: ZoteroCitation,
   keyMap: Map<string, string>
 ): string[] {
-  return citation.items
-    .map(meta => {
-      const k = keyMap.get(itemIdentifier(meta));
-      if (!k) return undefined;
-      const prefix = meta.prefix ? escapeCitationPrefix(sanitizeCitationText(meta.prefix).replace(/\s+/g, ' ').trim()) : '';
-      let item = (prefix ? prefix + ' ' : '') + (meta.suppressAuthor ? '-@' : '@') + k;
-      const after = citationLocatorText(meta.locator ? sanitizeCitationText(meta.locator) : '', meta.label, meta.suffix ? sanitizeCitationText(meta.suffix) : '');
-      if (after) item += ', ' + after;
-      return item;
-    })
-    .filter((k): k is string => k !== undefined);
+  const kept = citation.items.filter(meta => keyMap.has(itemIdentifier(meta)));
+  // Where the first item has a prefix, export reads any [ in the citation,
+  // escaped or not, as starting a later one (see citationEnd), so a [ or a
+  // ] in its items' text is dropped, as before
+  const prefixed = kept.length > 0 && !!kept[0].prefix && String(kept[0].prefix).trim() !== '';
+  const text = (value: unknown) => prefixed ? String(value).replace(/[[\]]/g, '') : String(value);
+  return kept.flatMap(meta => {
+    const k = keyMap.get(itemIdentifier(meta));
+    if (!k) return [];
+    const prefix = meta.prefix ? escapeCitationPrefix(text(meta.prefix).replace(/\s+/g, ' ').trim()) : '';
+    let item = (prefix ? prefix + ' ' : '') + (meta.suppressAuthor ? '-@' : '@') + k;
+    // With the characters of a citation's syntax escaped, as \; (see
+    // citationLocatorText)
+    const after = citationLocatorText(meta.locator ? text(meta.locator) : '', meta.label, meta.suffix ? text(meta.suffix) : '');
+    if (after) item += ', ' + after;
+    return [item];
+  });
 }
 
 // Document content extraction

@@ -112,8 +112,9 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
   });
 
   // A brace or a backslash after a backslash is that character as text,
-  // so a locator can hold a brace no other closes; a backslash before any
-  // other character is text
+  // so a locator can hold a brace no other closes, and so are a ;, a [, a ]
+  // and an @, as Pandoc reads them, so they end no item or citation and
+  // start no key; a backslash before any other character is text
   it.each<[string, CitationLocator]>([
     ['p. A\\{B', { locator: 'A{B', label: 'page' }],
     ['{p. A\\{B}', { locator: 'A{B', label: 'page' }],
@@ -121,6 +122,12 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
     ['{p. A\\\\}', { locator: 'A\\', label: 'page' }],
     ['p. 2, see \\{x\\}', { locator: '2', label: 'page', suffix: ', see {x}' }],
     ['p. 2\\x', { locator: '2', label: 'page', suffix: '\\x' }],
+    ['p. 2\\; 5', { locator: '2; 5', label: 'page' }],
+    ['p. 4\\; also elsewhere', { locator: '4', label: 'page', suffix: '; also elsewhere' }],
+    ['p. 4 \\[n. 2\\]', { locator: '4', label: 'page', suffix: ' [n. 2]' }],
+    ['p. 3 \\]x', { locator: '3', label: 'page', suffix: ' ]x' }],
+    ['via \\@x', { suffix: ', via @x' }],
+    ['p. 2, see \\[^1\\]', { locator: '2', label: 'page', suffix: ', see [^1]' }],
   ])('reads the escapes in %j', (text, expected) => {
     expect(readCitationLocator(text)).toEqual(expected);
   });
@@ -192,7 +199,7 @@ describe('readCitationLocator, as Pandoc reads the text after a key', () => {
   // read and written: linear work takes 4 times as long at 64,000, where a
   // scan that read a run of spaces or backslashes again from each of its
   // characters took 16 times as long, and seconds
-  it.each([' ', '1', ',', '-', '{', '}', '{}', 'i', 'M', '\\', '<sup>', '<i>1</i>'])('reads and writes a long run of %j in linear time', run => {
+  it.each([' ', '1', ',', '-', '{', '}', '{}', 'i', 'M', '\\', '<sup>', '<i>1</i>', ';', '[', ']', '@', '\\;', '\\]'])('reads and writes a long run of %j in linear time', run => {
     const places = [(text: string) => text, (text: string) => 'p. ' + text, (text: string) => '1' + text + '2', (text: string) => '{p. 1' + text + '}'];
     const works = [
       (text: string) => readCitationLocator(text),
@@ -257,6 +264,17 @@ describe('citationLocatorText, as import writes a locator', () => {
     ['A\\', 'page', undefined, '{p. A\\\\}'],
     ['A\\{B', 'page', undefined, '{p. A\\\\\\{B}'],
     ['2', 'page', ', see \\{x', 'p. 2, see \\\\\\{x'],
+    // A ;, a [, a ] and an @, escaped, which main dropped, and a backslash
+    // right before one, escaped too
+    ['2; 5', 'page', undefined, 'pp. 2\\; 5'],
+    ['4', 'page', '; also elsewhere', 'p. 4\\; also elsewhere'],
+    ['3', 'page', ' ]x', 'p. 3 \\]x'],
+    [undefined, undefined, ', via @x', 'via \\@x'],
+    ['2', 'page', ', see [^1]', 'p. 2, see \\[^1\\]'],
+    ['a\\;b', 'page', undefined, '{p. a\\\\\\;b}'],
+    // Which Pandoc, as export, reads as the locator 4 and the suffix
+    // [n. 2], which citeproc shows the same
+    ['4 [n. 2]', 'page', undefined, 'p. 4 \\[n. 2\\]'],
     // A tag, part of the locator's word, as main wrote it, and in a suffix
     ['<sup>2</sup>', 'page', undefined, 'p. <sup>2</sup>'],
     ['<i>iv</i>', 'chapter', undefined, 'chap. <i>iv</i>'],
@@ -270,7 +288,7 @@ describe('citationLocatorText, as import writes a locator', () => {
   it('writes what reads back as the reading of any text', () => {
     const words = ['p.', 'pp.', 'chap.', 'c.', 'ch.', 'sec.', '§', '¶', 's.v.', 'vol.', 'iv', 'mix', 'I', 'x', '33', '3-5', '12a', 'A1', 'A', '2.1', '33ff',
       'emphasis', 'and', 'passim', 'Table', ',', '.', '(', ')', '(1)', '{', '}', '{}', ':', '—', '!', '5', '<sup>2</sup>', '<i>iv</i>', '<i>', '</i>', '2</sup>',
-      '<span class="nocase">'];
+      '<span class="nocase">', ';', '2;', '[', '[n.', ']', '2]', '@', '@x', '\\;', '\\]'];
     let seed = 7;
     const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
     for (let i = 0; i < 3000; i++) {
@@ -348,6 +366,16 @@ type ZoteroCase = { keys: string[]; items: FieldItem[]; text?: string; edited?: 
  *  as `edited` by hand: each one's Markdown at the import, and its field at
  *  the next export, with the text Word showed first */
 async function fromZotero(cases: ZoteroCase[]): Promise<Array<Trip & { shown: string }>> {
+  const { docx, shown } = await zoteroDocument(cases);
+  const imported = await convertDocx(docx);
+  const next = await convertMdToDocx(imported.markdown, { bibtex: imported.bibtex });
+  const [before, markdown, after] = [await fields(docx), paragraphs(imported.markdown), await fields(next.docx)];
+  return cases.map((_c, k) => ({ shown: shown[k], first: before[k], markdown: markdown[k], next: after[k] }));
+}
+
+/** A document with a paragraph for each case, as fromZotero reads, and the
+ *  text Word shows for each one's field */
+async function zoteroDocument(cases: ZoteroCase[]): Promise<{ docx: Uint8Array; shown: string[] }> {
   const md = cases.map(({ keys, text = 'A CITE b.' }, n) => 'P' + n + ' ' + text.replace('CITE', '[' + keys.map(key => '@' + key).join('; ') + ']') + '\n');
   const zip = await JSZip.loadAsync((await convertMdToDocx('---\ncsl: ' + STYLE + '\n---\n\n' + md.join('\n'), { bibtex: BIB })).docx);
   const xml = await zip.file('word/document.xml')!.async('string');
@@ -363,11 +391,22 @@ async function fromZotero(cases: ZoteroCase[]): Promise<Array<Trip & { shown: st
     citation.properties = { ...citation.properties, formattedCitation: shown[n], plainCitation: shown[n], ...(edited ? { dontUpdate: true } : {}) };
     return open + escape(JSON.stringify(citation)) + separate + '<w:r><w:t xml:space="preserve">' + escape(shown[n++]) + '</w:t></w:r>' + end;
   }));
-  const docx = await zip.generateAsync({ type: 'uint8array' });
-  const imported = await convertDocx(docx);
-  const next = await convertMdToDocx(imported.markdown, { bibtex: imported.bibtex });
-  const [before, markdown, after] = [await fields(docx), paragraphs(imported.markdown), await fields(next.docx)];
-  return cases.map((_c, k) => ({ shown: shown[k], first: before[k], markdown: markdown[k], next: after[k] }));
+  return { docx: await zip.generateAsync({ type: 'uint8array' }), shown };
+}
+
+/** Each paragraph's Markdown at each of two imports from `docx`, and its
+ *  field at the export after each */
+async function twoTrips(docx: Uint8Array): Promise<{ markdowns: string[][]; exported: Field[][] }> {
+  const markdowns: string[][] = [];
+  const exported: Field[][] = [];
+  let current = docx;
+  for (let trip = 0; trip < 2; trip++) {
+    const imported = await convertDocx(current);
+    markdowns.push(paragraphs(imported.markdown));
+    current = (await convertMdToDocx(imported.markdown, { bibtex: imported.bibtex })).docx;
+    exported.push(await fields(current));
+  }
+  return { markdowns, exported };
 }
 
 const TERMS: Array<[label: string, term: string]> = [
@@ -710,5 +749,110 @@ describe('guards: citations main wrote as these already', () => {
     const trip = await zoteroTrip(TERMS.length + ZOTERO_SUFFIXES.length + ZOTERO_MORE.length);
     expect(trip.markdown).toBe('A [@doe2020, p. 2] b.\n');
     expect(trip.next.shown).toBe(rendered(['doe2020'], [{ locator: '2', label: 'page' }]));
+  }, 60000);
+});
+
+// A ;, a [, a ] and an @ in a citation's prefix, its locator and its
+// suffix, which import dropped, so Zotero's pp. 2; 5 came back as p. 2 5
+// and cf. @twitter as cf. twitter, and which export had no escape for, so
+// [@doe2020, p. 2\; 5] ended its item at the ; and [@doe2020, p. 4 \[n. 2\]]
+// its citation at the first ]. Escaped, as Pandoc reads them. Each case's
+// field's items, its Markdown at each import, and, where Pandoc reads the
+// locator otherwise, the items export writes, which citeproc shows the same
+const ZOTERO_CHARACTERS: Array<[FieldItem[], string, FieldItem[]?]> = [
+  [[{ locator: '2; 5', label: 'page' }], 'A [@doe2020, pp. 2\\; 5] b.\n'],
+  [[{ locator: '4', label: 'page', suffix: '; also elsewhere' }], 'A [@doe2020, p. 4\\; also elsewhere] b.\n'],
+  [[{ locator: '4 [n. 2]', label: 'page' }], 'A [@doe2020, p. 4 \\[n. 2\\]] b.\n', [{ locator: '4', label: 'page', suffix: ' [n. 2]' }]],
+  [[{ locator: '3', label: 'page', suffix: ' ]x' }], 'A [@doe2020, p. 3 \\]x] b.\n'],
+  [[{ prefix: 'cf. @twitter' }], 'A [cf. \\@twitter @doe2020] b.\n'],
+  [[{ suffix: ', via @x' }], 'A [@doe2020, via \\@x] b.\n'],
+  [[{ locator: '2', label: 'page', suffix: ', see [^1]' }], 'A [@doe2020, p. 2, see \\[^1\\]] b.\n'],
+  [[{ locator: '2; 5', label: 'page' }, { prefix: 'see [also]' }], 'A [@doe2020, pp. 2\\; 5; see \\[also\\] @roe2019] b.\n'],
+];
+
+// Each case's Markdown and its field's items at the first export
+const MARKDOWN_CHARACTERS: Array<[string, FieldItem[]]> = [
+  ['A [@doe2020, pp. 2\\; 5] b.\n', [{ locator: '2; 5', label: 'page' }]],
+  ['A [@doe2020, p. 4\\; also elsewhere] b.\n', [{ locator: '4', label: 'page', suffix: '; also elsewhere' }]],
+  ['A [@doe2020, p. 4 \\[n. 2\\]] b.\n', [{ locator: '4', label: 'page', suffix: ' [n. 2]' }]],
+  ['A [@doe2020, p. 3 \\]x] b.\n', [{ locator: '3', label: 'page', suffix: ' ]x' }]],
+  ['A [cf. \\@twitter @doe2020] b.\n', [{ prefix: 'cf. @twitter' }]],
+  ['A [@doe2020, via \\@x] b.\n', [{ suffix: ', via @x' }]],
+  ['A [@doe2020, pp. 2\\; 5; see \\[also\\] @roe2019] b.\n', [{ locator: '2; 5', label: 'page' }, { prefix: 'see [also]' }]],
+  // A \] that a later ] ends the citation after, with no [ before it, as
+  // Pandoc reads it, where main ended the citation at the \]
+  ['A [@doe2020, p. 3, so\\] y] b.\n', [{ locator: '3', label: 'page', suffix: ', so] y' }]],
+];
+
+// As main read them: a \] that ends the citation where no later ] does, or
+// where a [ no backslash escapes comes first, whose backslash, a suffix's,
+// Word shows. Each one's Markdown and its field's items
+const MARKDOWN_CHARACTER_GUARDS: Array<[string, FieldItem[]]> = [
+  ['A [@doe2020, p. 3\\] b.\n', [{ locator: '3', label: 'page', suffix: '\\' }]],
+  ['A [@doe2020, x\\] and [b](https://e.org) d.\n', [{ suffix: ', x\\' }]],
+  ['A [see @doe2020, p. 2; @roe2019, chap. 3, for more] b.\n', [{ locator: '2', label: 'page', prefix: 'see' }, { locator: '3', label: 'chapter', suffix: ', for more' }]],
+];
+
+// Not fixed: a [ or a ] in a citation whose first item has a prefix,
+// which import drops, as main did, as export reads any [ there, escaped or
+// not, as starting a later citation (see citationEnd): Zotero's field's
+// items, its Markdown at each import, and the items export writes
+const ZOTERO_BRACKETS_DROPPED: Array<[FieldItem[], string, FieldItem[]]> = [
+  [[{ prefix: 'see [also]' }], 'A [see also @doe2020] b.\n', [{ prefix: 'see also' }]],
+  [[{ prefix: 'see', locator: '4 [n. 2]', label: 'page' }], 'A [see @doe2020, {p. 4 n. 2}] b.\n', [{ prefix: 'see', locator: '4 n. 2', label: 'page' }]],
+];
+
+const keysIn = (md: string) => [...md.matchAll(/@(doe2020|roe2019)/g)].map(m => m[1]);
+/** The fields of the first export of a document of these paragraphs'
+ *  Markdown, and each import and export over two trips */
+const markdownTwoTrips = async (paragraphs: string[]) => {
+  const md = paragraphs.map((p, n) => 'P' + n + ' ' + p);
+  const { docx } = await convertMdToDocx('---\ncsl: ' + STYLE + '\n---\n\n' + md.join('\n'), { bibtex: BIB });
+  return { first: await fields(docx), ...(await twoTrips(docx)) };
+};
+const characterTrips = once(() => markdownTwoTrips(MARKDOWN_CHARACTERS.map(([md]) => md)));
+// Apart, so main's fields of the cases above leave theirs in place
+const characterGuardTrips = once(() => markdownTwoTrips(MARKDOWN_CHARACTER_GUARDS.map(([md]) => md)));
+const zoteroCharacterTrips = once(async () => {
+  const { docx, shown } = await zoteroDocument([...ZOTERO_CHARACTERS, ...ZOTERO_BRACKETS_DROPPED].map(([items, written]) => ({ keys: keysIn(written), items })));
+  return { shown, ...(await twoTrips(docx)) };
+});
+
+describe('a citation\'s ;, [, ] and @ through Word, over two trips', () => {
+  it.each(ZOTERO_CHARACTERS.map((c, k) => [c[0], c[1], c[2] ?? c[0], k] as const))('imports Zotero\'s %j escaped, as %j', async (_items, written, items, k) => {
+    const { shown, markdowns, exported } = await zoteroCharacterTrips();
+    expect(markdowns[0][k]).toBe(written);
+    expect(exported[0][k].items).toEqual(items);
+    expect(exported[0][k].shown).toBe(shown[k]);
+    expect(markdowns[1][k]).toBe(written);
+    expect(exported[1][k]).toEqual(exported[0][k]);
+  }, 60000);
+
+  it.each(MARKDOWN_CHARACTERS.map((c, k) => [...c, k] as const))('exports the escapes in %j', async (md, items, k) => {
+    const { first, markdowns, exported } = await characterTrips();
+    expect(first[k].items).toEqual(items);
+    expect(first[k].shown).toBe(rendered(keysIn(md), items));
+    expect(markdowns[0][k]).toBe(md);
+    expect(exported[0][k]).toEqual(first[k]);
+    expect(markdowns[1][k]).toBe(md);
+    expect(exported[1][k]).toEqual(first[k]);
+  }, 60000);
+
+  // Which pass on main too
+  it.each(ZOTERO_BRACKETS_DROPPED.map((c, k) => [...c, ZOTERO_CHARACTERS.length + k] as const))('Not fixed: imports Zotero\'s %j without its brackets, as %j, as main did', async (_items, written, items, k) => {
+    const { markdowns, exported } = await zoteroCharacterTrips();
+    expect(markdowns[0][k]).toBe(written);
+    expect(exported[0][k].items).toEqual(items);
+    expect(markdowns[1][k]).toBe(written);
+    expect(exported[1][k]).toEqual(exported[0][k]);
+  }, 60000);
+
+  // Guards, which pass on main too: the field each export writes
+  it.each(MARKDOWN_CHARACTER_GUARDS.map((c, k) => [...c, k] as const))('exports %j as main did', async (_md, items, k) => {
+    const { first, markdowns, exported } = await characterGuardTrips();
+    expect(first[k].items).toEqual(items);
+    expect(exported[0][k]).toEqual(first[k]);
+    expect(markdowns[1][k]).toBe(markdowns[0][k]);
+    expect(exported[1][k]).toEqual(first[k]);
   }, 60000);
 });

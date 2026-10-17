@@ -3,7 +3,7 @@ import * as formatting from './formatting';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as fc from 'fast-check';
-import { readCitationItems } from './citation-syntax';
+import { citationClose, readCitationItems } from './citation-syntax';
 
 describe('Command Handler Unit Tests', () => {
   
@@ -500,8 +500,8 @@ describe('Syntax grammar citation keys', () => {
     return keys;
   };
   // The keys export reads in it, each with where it starts (see
-  // readCitationItem)
-  const readKeys = (line: string): Array<[number, string]> => readCitationItems(line.slice(1, line.indexOf(']')))
+  // readCitationItem), to the ] that ends it (see citationClose)
+  const readKeys = (line: string): Array<[number, string]> => readCitationItems(line.slice(1, citationClose(line, 0)))
     .filter(item => item.markStart !== -1 && item.key)
     .map(item => [1 + item.itemStart + item.keyStart, item.key]);
 
@@ -516,6 +516,20 @@ describe('Syntax grammar citation keys', () => {
     ['an @ in its locator', '[@a, see @b; @c]'],
     ['an @ after a [ in its locator', '[@a, [ @b]'],
     ['an @ after a [ that starts an item', '[@a; [@b; x [@c]'],
+    // A ;, a [, a ] or an @ a backslash escapes, which ends no item or
+    // citation and starts no key, but a ] no later ] ends it after, or
+    // whose backslash ends a key
+    ['an escaped ; in its locator', '[@a, p. 2\\; 5; @b]'],
+    ['an escaped ; in a prefix', '[see \\; also @a; @b]'],
+    ['an escaped @ in a prefix', '[cf. \\@x @a]'],
+    ['an escaped [ and ] in its locator', '[@a, p. 4 \\[n. 2\\]; @b]'],
+    ['an escaped ] in a prefix', '[see \\] x @a]'],
+    ['an escaped [ in a later item\'s prefix', '[@a; see \\[x\\] @b]'],
+    ['an escaped ] that ends it, no ] after it', '[@a, p. 3\\] @b'],
+    ['an escaped ] that ends it, a [ before the next ]', '[@a, x\\] @b [c]'],
+    ['a key that ends with a backslash', '[@a\\] @b]'],
+    // Whose ] ends the citation, as a key's would, as before
+    ['a word a key could be before an escaped ] in its locator', '[@a, see @b\\] @c]'],
   ])('colors a key with %s as export reads it', (_name, line) => {
     expect(coloredKeys(line)).toEqual(readKeys(line));
     expect(coloredKeys(line).length).toBeGreaterThan(0);
@@ -528,10 +542,19 @@ describe('Syntax grammar citation keys', () => {
    * in a prefix or a locator.
    */
   it('colors each key of a citation as export reads it', () => {
-    const word = fc.array(fc.constantFrom('a', 'Z', '0', '_', '.', '/', ':', '-', '+', "'", '\u00E9', '@', '[', '`', '\\', '#', '$', '&'), { minLength: 1, maxLength: 4 })
-      .map(chars => chars.join(''));
-    const words = fc.array(word, { minLength: 1, maxLength: 3 }).map(parts => parts.join(' '));
-    const item = fc.tuple(fc.option(words, { nil: undefined }), fc.constantFrom('', '-'), fc.constantFrom('', ' '), words, fc.option(words, { nil: undefined }), fc.constantFrom('', ' '))
+    const characters = ['a', 'Z', '0', '_', '.', '/', ':', '-', '+', "'", '\u00E9', '@', '[', '`', '\\', '#', '$', '&'];
+    const wordOf = (alphabet: string[]) => fc.array(fc.constantFrom(...alphabet), { minLength: 1, maxLength: 4 }).map(chars => chars.join(''));
+    const wordsOf = (alphabet: string[]) => fc.array(wordOf(alphabet), { minLength: 1, maxLength: 3 }).map(parts => parts.join(' '));
+    const words = wordsOf(characters);
+    // A prefix with a ;, a [ or an @ a backslash escapes too, and a locator
+    // with those and a ] too, but with no @ a backslash doesn't escape,
+    // which can start a word a key could be: a \] after one ends the
+    // citation where export reads none of it as a key, as in a locator,
+    // which the grammar reads only at its line's next ] (see endsKeyAt).
+    // No key, as a backslash in one escapes nothing.
+    const prefixWords = wordsOf([...characters, '\\;', '\\[', '\\@']);
+    const locatorWords = wordsOf([...characters.filter(c => c !== '@'), '\\;', '\\[', '\\]', '\\@']);
+    const item = fc.tuple(fc.option(prefixWords, { nil: undefined }), fc.constantFrom('', '-'), fc.constantFrom('', ' '), words, fc.option(locatorWords, { nil: undefined }), fc.constantFrom('', ' '))
       .map(([prefix, dash, space, key, locator, pad]) => pad + (prefix ? prefix + ' ' : '') + dash + '@' + space + key + (locator ? ', ' + locator : '') + pad);
     fc.assert(
       fc.property(fc.array(item, { minLength: 1, maxLength: 3 }), items => {

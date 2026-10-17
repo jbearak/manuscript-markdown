@@ -845,13 +845,15 @@ let citationTextMd: MarkdownIt | undefined;
  *  whose text linkify rewrites, as of a %5D, for a note's key */
 let noteKeyMd: MarkdownIt | undefined;
 /** The ] that ends the citation the [ at `start` in Markdown `text` opens,
- *  as export reads one, but without the document's link definitions, or -1 */
-export function citationEndInText(text: string, start: number): number {
+ *  as export reads one, but without the document's link definitions, or -1.
+ *  Where `escapes` is false, as export read one before a backslash escaped
+ *  a ] or a ; in it, for Word's text (see citationEnd). */
+export function citationEndInText(text: string, start: number, escapes = true): number {
   citationTextMd ??= createMarkdownIt();
   // One state for the text each search of it in turn reads, whose scans
   // the next search keeps (see opensLinkPast)
   if (citationTextState?.src !== text || citationTextState.md !== citationTextMd) citationTextState = { src: text, md: citationTextMd, env: {} };
-  return citationEnd(citationTextState, start);
+  return citationEnd(citationTextState, start, escapes);
 }
 let citationTextState: { src: string; md: MarkdownIt; env: object } | undefined;
 

@@ -8,8 +8,9 @@ import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 export const CITATION_ITEM_START_RE = /(^|\s)(-?)@/;
 
 /** A citation item, the text between two `;` of a citation or its
- *  brackets, as export reads it (see readCitationItem). Offsets are in the
- *  item's text. */
+ *  brackets, as export reads it (see readCitationItem), but for a `;` a
+ *  backslash escapes in a prefix or a locator (see citationItemEnd).
+ *  Offsets are in the item's text. */
 export interface CitationItem {
   /** The text before the `@` or `-@`, its spaces trimmed, as written */
   prefix: string;
@@ -52,16 +53,71 @@ export function readCitationItem(item: string): CitationItem | undefined {
 }
 
 /** The items of a citation whose text between its brackets is `inner`, as
- *  export reads them, with where each item starts and ends in `inner` */
-export function readCitationItems(inner: string): Array<CitationItem & { itemStart: number; itemEnd: number }> {
+ *  export reads them, with where each item starts and ends in `inner`. Or,
+ *  where `escapes` is false, as export read them before a backslash
+ *  escaped a ;, for Word's text, which import writes with a backslash
+ *  before each of its own there (see escapeMarkdownChars in converter.ts),
+ *  so that it escapes none. */
+export function readCitationItems(inner: string, escapes = true): Array<CitationItem & { itemStart: number; itemEnd: number }> {
   const items: Array<CitationItem & { itemStart: number; itemEnd: number }> = [];
-  let itemStart = 0;
-  for (const part of inner.split(';')) {
-    const item = readCitationItem(part);
-    if (item) items.push({ ...item, itemStart, itemEnd: itemStart + part.length });
-    itemStart += part.length + 1;
+  for (let itemStart = 0; ;) {
+    const itemEnd = escapes ? citationItemEnd(inner, itemStart) : plainItemEnd(inner, itemStart);
+    const item = readCitationItem(inner.slice(itemStart, itemEnd));
+    if (item) items.push({ ...item, itemStart, itemEnd });
+    if (itemEnd >= inner.length) return items;
+    itemStart = itemEnd + 1;
   }
-  return items;
+}
+
+/** The text of each item of a citation whose text between its brackets is
+ *  `inner`, as readCitationItems reads them, spaces and all, one with no
+ *  key too, so that they join with ; as `inner` */
+export function splitCitationItems(inner: string): string[] {
+  const parts: string[] = [];
+  for (let itemStart = 0; ;) {
+    const itemEnd = citationItemEnd(inner, itemStart);
+    parts.push(inner.slice(itemStart, itemEnd));
+    if (itemEnd >= inner.length) return parts;
+    itemStart = itemEnd + 1;
+  }
+}
+
+/** Where the item of a citation's text `inner` from `from` ends as export
+ *  read it before a backslash escaped a ;: at the next ;, or at the end */
+function plainItemEnd(inner: string, from: number): number {
+  const end = inner.indexOf(';', from);
+  return end === -1 ? inner.length : end;
+}
+
+/** Where the item of a citation's text `inner` from `from` ends: at the
+ *  next ;, or at the end. A backslash escapes the character after it in the
+ *  item's prefix and its locator, so a ; there is text, as in p. 2\; 5, as
+ *  Pandoc reads it, but not in its key, which is read as written, so @a\;
+ *  ends its item, as before. Its key starts as readCitationItem finds it:
+ *  at the first @ or -@ at the start of the item's text or after a space,
+ *  which an escaped @ isn't. */
+function citationItemEnd(inner: string, from: number): number {
+  let phase: 'prefix' | 'key' | 'locator' = 'prefix';
+  // Where the item's text starts, past its spaces, -1 before
+  let first = -1;
+  for (let at = from; at < inner.length; at++) {
+    const ch = inner.charAt(at);
+    if (ch === ';') return at;
+    if (phase === 'key') {
+      if (ch === ',') phase = 'locator';
+      continue;
+    }
+    if (first === -1 && !/\s/.test(ch)) first = at;
+    if (ch === '\\') {
+      at++;
+      continue;
+    }
+    if (phase === 'prefix' && ch === '@') {
+      const mark = inner.charAt(at - 1) === '-' && at - 1 >= from ? at - 1 : at;
+      if (mark === first || mark > from && /\s/.test(inner.charAt(mark - 1))) phase = 'key';
+    }
+  }
+  return inner.length;
 }
 
 /** Whether a character can be in a key that a citation reads whole,
@@ -82,17 +138,100 @@ export function isCitableKey(key: string): boolean {
   return key.length > 0 && [...key].every(isCitationKeyChar);
 }
 // The ] the last search found, for each state searched. It's the first ]
-// for any [ from where that search started up to it, so a run of [ with no
-// ] after them, or one far after, is searched once, not again from each [
+// that ends a citation for any [ from where that search started up to it
+// (see citationClose), so a run of [ with no ] after them, or one far
+// after, is searched once, not again from each [
+// And so for the first ], as export read a citation's end before a
+// backslash escaped one
 const closes = new WeakMap<object, { from: number; close: number }>();
+const plainCloses = new WeakMap<object, { from: number; close: number }>();
+// The last run each state's searches read past an escaped ] (see CloseScan)
+const closeScans = new WeakMap<object, CloseScan>();
 
-/** The first ] after `start` in `state`'s text, or -1 */
-function closeAfter(state: Pick<StateInline, 'src'>, start: number): number {
-  const known = closes.get(state);
+/** The ] that ends a citation from the [ at `start` in `state`'s text, or
+ *  -1 (see citationClose), or the first where `escapes` is false */
+function closeAfter(state: Pick<StateInline, 'src'>, start: number, escapes: boolean): number {
+  const cache = escapes ? closes : plainCloses;
+  const known = cache.get(state);
   if (known && known.from <= start && (known.close === -1 || start < known.close)) return known.close;
-  const close = state.src.indexOf(']', start + 1);
-  closes.set(state, { from: start, close });
+  let scan = closeScans.get(state);
+  if (escapes && !scan) closeScans.set(state, scan = { from: -1, stop: -1 });
+  const close = escapes ? citationClose(state.src, start, scan) : state.src.indexOf(']', start + 1);
+  cache.set(state, { from: start, close });
   return close;
+}
+
+/** Whether an odd run of backslashes comes before `at` in `text`, the last
+ *  of which escapes the character there */
+function escapedAt(text: string, at: number): boolean {
+  let slashes = 0;
+  while (text.charCodeAt(at - 1 - slashes) === 0x5C /* \ */) slashes++;
+  return slashes % 2 === 1;
+}
+
+/**
+ * The ] that ends a citation from the [ at `start` in `text`, or -1: the
+ * first ] after it, but where a backslash escapes it, as in \], which is
+ * text, as Pandoc reads it, and a later ] ends the citation, the first no
+ * backslash escapes, with no [ before it that none escapes, as in
+ * [@a, p. 4 \[n. 2\]]. Otherwise the \] ends it, as before, as in
+ * [@a, p. 3\] with no ] after, or [@a, x\] and [b](c), so a citation that
+ * read so before reads so still. It's the first such ] after any [ up to
+ * it, so it's found from where a search for it starts, whatever [ that is.
+ * A search of the same text in turn that passes `scan` reads past each
+ * escaped ] once, not again from each [ before a far ] or none.
+ */
+export function citationClose(text: string, start: number, scan?: CloseScan): number {
+  const close = text.indexOf(']', start + 1);
+  if (close === -1 || !escapedAt(text, close) || endsKeyAt(text, close - 1)) return close;
+  let stop: number;
+  if (scan && scan.from <= close && close < scan.stop) stop = scan.stop;
+  else {
+    stop = stopAfter(text, close);
+    if (scan) {
+      scan.from = close;
+      scan.stop = stop;
+    }
+  }
+  return text.charCodeAt(stop) === 0x5D /* ] */ ? stop : close;
+}
+
+/** A run of text a search for a citation's ] read past an escaped ] at
+ *  `from`, to `stop`, where stopAfter stopped. stopAfter stops at the same
+ *  place from any escaped ] in the run, as nothing in it stops it, and the
+ *  backslashes before that ] start after `from`, so read in pairs from
+ *  there they escape it there too. */
+export type CloseScan = { from: number; stop: number };
+
+/** The first [ or ] after the escaped ] at `close` in `text` that no
+ *  backslash escapes, or a ] whose backslash ends a key, or the text's end */
+function stopAfter(text: string, close: number): number {
+  let escaped = false;
+  for (let at = close + 1; at < text.length; at++) {
+    const code = text.charCodeAt(at);
+    if (escaped) {
+      escaped = false;
+      if (code === 0x5D /* ] */ && endsKeyAt(text, at - 1)) return at;
+    } else if (code === 0x5C /* \ */) escaped = true;
+    else if (code === 0x5D /* ] */ || code === 0x5B /* [ */) return at;
+  }
+  return text.length;
+}
+
+/** Whether the backslash at `at` in `text` is the last character of a key,
+ *  which is read as written, so it escapes nothing, as in [@a\], whose ]
+ *  ends the citation, as before: whether it ends a run of characters a key
+ *  can have after an @ and any spaces after it (see readCitationItem), at
+ *  the text's start or after a space, a [ or a ;, or after a - there. Each
+ *  search reads back only over the run and the spaces, which no ] is in, so
+ *  each ] is read back from once. */
+function endsKeyAt(text: string, at: number): boolean {
+  let from = at;
+  while (from > 0 && isCitationKeyChar(text.charAt(from - 1))) from--;
+  while (from > 0 && /\s/.test(text.charAt(from - 1))) from--;
+  if (text.charAt(from - 1) !== '@') return false;
+  const mark = text.charAt(from - 2) === '-' ? from - 2 : from - 1;
+  return mark === 0 || /[\s[;]/.test(text.charAt(mark - 1));
 }
 
 // A key start in plain text. Whitespace before `@` and a letter, digit, or `_`
@@ -316,16 +455,21 @@ export function citationPrefixText(state: Pick<StateInline, 'md'>, prefix: strin
   return state.md.utils.unescapeAll(prefix).replace(/\s+/g, ' ');
 }
 
-/** The ] that ends the citation the [ at `start` opens, or -1 */
-export function citationEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: number): number {
+/** The ] that ends the citation the [ at `start` opens, or -1. Or, where
+ *  `escapes` is false, as export read one before a backslash escaped a ]
+ *  or a ; in it, for Word's text (see readCitationItems). */
+export function citationEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: number, escapes = true): number {
   // Match [@key], [-@key] (Pandoc suppress-author form), or [prefix @key]
   if (state.src.charAt(start) !== '[') return -1;
-  const endPos = closeAfter(state, start);
+  const endPos = closeAfter(state, start, escapes);
   if (endPos === -1) return -1;
 
   if (!/^-?@/.test(state.src.slice(start + 1, start + 3))) {
-    // A nested `[` means any citation starts later; `](` or `][` makes this
-    // link text that happens to mention someone (Pandoc parses these as links).
+    // A nested `[` means any citation starts later, an escaped one too, as
+    // before, though Pandoc reads [see \[x @key] as a citation: import writes
+    // Word's text [see [x @a] so, which a citation would take for its own.
+    // `](` or `][` makes this link
+    // text that happens to mention someone (Pandoc parses these as links).
     // Before the text is taken, which for a run of [ before one ] would be
     // taken again for each.
     const open = state.src.indexOf('[', start + 1);
@@ -337,7 +481,7 @@ export function citationEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, star
     // `[label]: url` definition, so a citation here would drop the URL.
     const references = state.env?.references as Record<string, unknown> | undefined;
     if (references && references[state.md.utils.normalizeReference(rawContent)]) return -1;
-    const keyStart = plainPrefixedKeyStart(state, rawContent.split(';')[0]);
+    const keyStart = plainPrefixedKeyStart(state, rawContent.slice(0, escapes ? citationItemEnd(rawContent, 0) : plainItemEnd(rawContent, 0)));
     if (keyStart === -1) return -1;
     if (opensLinkPast(state, start, start + 1 + keyStart, endPos)) return -1;
   }

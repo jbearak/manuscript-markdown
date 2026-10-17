@@ -8294,18 +8294,36 @@ describe('Zotero citation roundtrip', () => {
     expect(keys[1]).not.toContain(', p.');
   });
 
+  // Where the first key comes right after the [, a bracket in a later
+  // item's prefix is escaped, as Pandoc reads it
+  test('citationPandocKeys escapes a bracket in a later item\'s prefix after a first item with none', () => {
+    const citation: ZoteroCitation = {
+      plainCitation: '(A; see [also] B)',
+      items: [
+        { authors: [{ family: 'A', given: 'X' }], title: 'T1', year: '2020', journal: 'J', volume: '1', pages: '1', doi: '10.1/a', type: 'article-journal', fullItemData: {}, locator: '4 [n. 2]' },
+        { authors: [{ family: 'B', given: 'Y' }], title: 'T2', year: '2021', journal: 'J', volume: '2', pages: '2', doi: '10.1/b', type: 'article-journal', fullItemData: {}, prefix: 'see [also]' },
+      ],
+    };
+    const keyMap = buildCitationKeyMap([citation]);
+    const [a, b] = citation.items.map(meta => keyMap.get(itemIdentifier(meta)));
+    expect(citationPandocKeys(citation, keyMap)).toEqual(['@' + a + ', p. 4 \\[n. 2\\]', 'see \\[also\\] @' + b]);
+  });
+
   test('citationPandocKeys writes Zotero prefixes before the key', () => {
     const citation: ZoteroCitation = {
       plainCitation: '(e.g., A; B)',
       items: [
         { authors: [{ family: 'A', given: 'X' }], title: 'T1', year: '2020', journal: 'J', volume: '1', pages: '1', doi: '10.1/a', type: 'article-journal', fullItemData: {}, prefix: 'e.g.,', suppressAuthor: true, locator: '4' },
-        // Pandoc-significant characters and line breaks would change how the item parses
+        // Pandoc-significant characters, which it writes escaped, as Pandoc
+        // reads them, and line breaks would change how the item parses. Its
+        // brackets are dropped, as before, as the first item has a prefix,
+        // where export reads any [ as starting a later citation
         { authors: [{ family: 'B', given: 'Y' }], title: 'T2', year: '2021', journal: 'J', volume: '2', pages: '2', doi: '10.1/b', type: 'article-journal', fullItemData: {}, prefix: 'see [also];\n@here' },
       ],
     };
     const keyMap = buildCitationKeyMap([citation]);
     const [a, b] = citation.items.map(meta => keyMap.get(itemIdentifier(meta)));
-    expect(citationPandocKeys(citation, keyMap)).toEqual(['e.g., -@' + a + ', p. 4', 'see also here @' + b]);
+    expect(citationPandocKeys(citation, keyMap)).toEqual(['e.g., -@' + a + ', p. 4', 'see also\\; \\@here @' + b]);
   });
 
   test('citationPandocKeys escapes only prefix text that would parse as Markdown formatting', () => {
@@ -10390,6 +10408,13 @@ describe('Word text that reads as Markdown', () => {
     '[[@a,p. 2](https://e.com)]',
     // One after a !, which makes it an image
     '![@a](b)', '![@a][b]',
+    // Backslashes before a ;, a [, a ] or an @ in one, which export reads
+    // as escapes there, after a ! and after a backslash too
+    '[@a, p. 2\\; 5]', '[@a, p. 4 \\[n. 2\\]]', '[@a, x\\] y]', '[see \\[x @a]', '[cf. \\@x @a]', '[@a\\]',
+    '![@a, p. 2\\; 5](b)', '\\[see @a, p. 2\\; 5]',
+    // A [ in one whose first item has a prefix, which import escapes, as in
+    // [see \\[x @a], which export reads as text still, as before
+    '[see [x @a]', '[see @a, x [@b]]', '[see @a [b]{.x}]',
     // An autolink past the 256 characters the check read, or with a
     // no-break space, which markdown-it allows in one
     '<urn:' + 'x'.repeat(300) + '>', '<ab:c\u00a0d>',
@@ -11645,6 +11670,10 @@ describe('A citation whose key comes after a prefix, right before a bracket', ()
     ['link text before a note\'s reference in a substitution in a link', 'S [link {~~a~>[see @roe2019][^1]~~}](https://e.org) e.\n\n[^1]: n', 'S [link {~~a~>\\[see @roe2019\\]~~}{++[^1]++}](https://e.org) e.\n\n[^1]: n', 'S ⟨link a[see @roe2019]^⟩ e.'],
     // Whose range import writes outside the link, which it splits, as on main
     ['link text before a note\'s reference in a comment\'s range in a link', 'S [link {==[see @roe2019][^1]==}{>>c<<}](https://e.org) e.\n\n[^1]: n', 'S [link ](https://e.org){==[\\[see @roe2019\\]](https://e.org)[^1]==}{>>c<<} e.\n\n[^1]: n', 'S ⟨link ⟩⟨[see @roe2019]⟩^ e.'],
+    // A [ in its prefix, escaped, which export reads as text, as before,
+    // where Pandoc reads a citation (see citationEnd), with no note of a
+    // missing key
+    ['an escaped [ in its prefix', 'S [see \\[x @nokey] e.', '', 'S [see [x @nokey] e.'],
     ['a citation in a link', 'S [link [@roe2019] b](https://e.org) e.', 'S \\[link [@roe2019] b](https://e.org) e.', 'S [link «(Roe, 2019)» b](⟨https://e.org⟩) e.'],
   ])('leaves %s as it was', async (_name, md, imported, view) => {
     const { views, markdowns } = await trips(md);
