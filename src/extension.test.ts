@@ -517,7 +517,7 @@ describe('Syntax grammar citation keys', () => {
   it.each([
     ['a period', '[@smith.2020]'],
     ['a slash, after a prefix, before a locator', '[see @a/b, p. 3]'],
-    ['letters of another language', '[@été; -@b2]'],
+    ['letters of another language', '[@\u00E9t\u00E9; -@b2]'],
     ['an @ in it, and an @ in a prefix', '[me@x.com @a@b]'],
     ['a space after its @', '[@ smith]'],
     ['an @ in its locator', '[@a, see @b; @c]'],
@@ -587,7 +587,7 @@ describe('Syntax grammar citation keys', () => {
    * at its edges, and none in a prefix or a locator.
    */
   it('colors each key of a citation as export read it', () => {
-    const word = fc.array(fc.constantFrom('a', 'Z', '0', '_', '.', '/', ':', '-', '+', "'", 'é', '@', '[', '`', '\\', '#', '$', '&'), { minLength: 1, maxLength: 4 })
+    const word = fc.array(fc.constantFrom('a', 'Z', '0', '_', '.', '/', ':', '-', '+', "'", '\u00E9', '@', '[', '`', '\\', '#', '$', '&'), { minLength: 1, maxLength: 4 })
       .map(chars => chars.join(''));
     const words = fc.array(word, { minLength: 1, maxLength: 3 }).map(parts => parts.join(' '));
     const item = fc.tuple(fc.option(words, { nil: undefined }), fc.constantFrom('', '-'), fc.constantFrom('', ' '), words, fc.option(words, { nil: undefined }), fc.constantFrom('', ' '))
