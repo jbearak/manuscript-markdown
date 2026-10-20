@@ -1,6 +1,7 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
-import { computeMarkdownRegions, isInsideCodeRegion, lineInRegions } from './code-regions';
+import { type CommentReach, computeMarkdownRegions, isInsideCodeRegion, lineInRegions } from './code-regions';
+import { criticPayloadRanges } from './critic-markup';
 import { exportsLiterally } from './html-blocks';
 import { maxOf, pushAll } from './arrays';
 import type { LineEdit } from './line-map';
@@ -548,7 +549,61 @@ function isHtmlRawTextName(name: string): boolean {
 	return name === 'template' || isGfmDisallowedRawHtml('<' + name + '>');
 }
 
-function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tokens: HtmlSourceToken[]; inertRegions: SourceRange[] } {
+/** How far a comment from the <!-- at `at` can reach, where that's short
+ *  of `firstEnd`, the end of the first --> after it (see commentBounds) */
+type CommentBound = (at: number, firstEnd: number) => number | undefined;
+
+/**
+ * How far a comment can reach from each <!-- of `reaches` whose reach
+ * markdown-it fixes (see CommentReach in code-regions.ts), as export reads
+ * it. Not one in a block a CriticMarkup span joins to the lines after it,
+ * which export reads as one paragraph, as preprocessCriticMarkup writes it,
+ * whose comment can take them, as a directive in them. The spans are found
+ * once, where a bound first ends a comment sooner.
+ */
+function commentBounds(markdown: string, reaches: CommentReach[]): CommentBound {
+	const byOffset = new Map<number, CommentReach>();
+	for (const reach of reaches) byOffset.set(reach.at, reach);
+	let joined: Set<number> | undefined;
+	return (at, firstEnd) => {
+		const found = byOffset.get(at);
+		if (!found || found.reach >= firstEnd) return undefined;
+		joined ??= joinedToNext(markdown, reaches);
+		return joined.has(at) ? undefined : found.reach;
+	};
+}
+
+/** The offsets of `reaches` in a block a CriticMarkup span of `markdown`
+ *  joins to the line after it, as the span's payload holds its last line's
+ *  end */
+function joinedToNext(markdown: string, reaches: CommentReach[]): Set<number> {
+	const joined = new Set<number>();
+	// The spans' payloads, by their starts, and the furthest end of those
+	// that start before a block's end, which comes no sooner than the last's
+	const payloads = criticPayloadRanges(markdown).sort((a, b) => a[0] - b[0]);
+	let next = 0;
+	let furthest = -1;
+	for (const { at, blockEnd } of reaches) {
+		while (next < payloads.length && payloads[next][0] < blockEnd) furthest = Math.max(furthest, payloads[next++][1]);
+		if (furthest >= blockEnd) joined.add(at);
+	}
+	return joined;
+}
+
+/**
+ * The tags and text of `html`, and the comments, raw text and the like in
+ * it, which hold no tag. A comment goes from its <!-- to the first --> after
+ * it, but no further than its `bound` (see commentBounds), and a
+ * <!-- whose bound is itself is text, as export reads one, which pairs with
+ * no --> past its paragraph or its HTML block. But not in a table, whose
+ * comments export's table parse reads. And where the scan then reads, in
+ * the text to that -->, which it read as the comment before, a tag that
+ * reaches past it, as one whose quote no other ends, a table's or a cell's
+ * tag, or what holds the text after it, as a <script>, a processing
+ * instruction, a declaration or CDATA, it reads the comment to that -->
+ * again, so that it reads the rest as before.
+ */
+function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?: CommentBound): { tokens: HtmlSourceToken[]; inertRegions: SourceRange[] } {
 	if (stats) {
 		stats.structuralScans++;
 		stats.structuralCharacters += html.length;
@@ -560,6 +615,41 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tok
 	let rawTextName: string | undefined;
 	let rawTextStart: number | undefined;
 	let closingRawTextName: string | undefined;
+	// The tables open, as the structural index pairs their tags
+	let openTables = 0;
+	// The first --> at or after the offset of the last search for one, which
+	// a later <!-- reads again where it's after that <!--, as a comment that
+	// ends at its bound leaves the scan before it, and each searched on from
+	// its <!-- to the text's end where none was
+	let searchedFrom = Infinity;
+	let found = -1;
+	const closeAfter = (from: number): number => {
+		if (from < searchedFrom || (found !== -1 && found < from)) {
+			found = html.indexOf('-->', from);
+			searchedFrom = from;
+		}
+		return found;
+	};
+	// The first comment the scan reads to its bound, short of its first -->
+	// after it, from `start` to that --> at `end`, and the scan's state at
+	// it, while the scan reads the text to that -->. No raw text is open
+	// there, as a <script> or the like in it reads the comment again
+	let hidden: { start: number; end: number; tokens: number; regions: number; openTables: number;
+		rawTextStart?: number; closingRawTextName?: string } | undefined;
+	// Read that comment to its --> again, as the scan did before, with the
+	// state it had at its <!--
+	const readHidden = (): void => {
+		const { start, end } = hidden!;
+		tokens.length = hidden!.tokens;
+		inertRegions.length = hidden!.regions;
+		openTables = hidden!.openTables;
+		rawTextStart = hidden!.rawTextStart;
+		closingRawTextName = hidden!.closingRawTextName;
+		tokens.push({ raw: html.slice(start, end), tag: true, start, end });
+		inertRegions.push({ start, end });
+		cursor = end;
+		hidden = undefined;
+	};
 	while (cursor < html.length) {
 		if (rawTextName) {
 			if (rawTextName === 'plaintext') {
@@ -589,6 +679,15 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tok
 			break;
 		}
 		if (tagStart > cursor) tokens.push({ raw: html.slice(cursor, tagStart), tag: false, start: cursor, end: tagStart });
+		if (hidden && tagStart >= hidden.end) hidden = undefined;
+		// In that text, one that holds the text after it, to its end, which
+		// can be past the -->, and which a search from each of many there
+		// would look for to the text's end
+		if (hidden && (html.startsWith('<![CDATA[', tagStart) || html.startsWith('<?', tagStart)
+			|| (html[tagStart + 1] === '!' && /[A-Za-z]/.test(html[tagStart + 2] ?? '')))) {
+			readHidden();
+			continue;
+		}
 		if (html.startsWith('<![CDATA[', tagStart)) {
 			const closeStart = html.indexOf(']]>', tagStart + 9);
 			const end = closeStart < 0 ? html.length : closeStart + 3;
@@ -624,8 +723,21 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tok
 			continue;
 		}
 		if (html.startsWith('<!--', tagStart)) {
-			const commentEnd = html.indexOf('-->', tagStart + 4);
-			const end = commentEnd < 0 ? html.length : commentEnd + 3;
+			const close = closeAfter(tagStart + 4);
+			const firstEnd = close < 0 ? html.length : close + 3;
+			const end = (openTables > 0 ? undefined : bound?.(tagStart, firstEnd)) ?? firstEnd;
+			if (hidden && end > hidden.end) { readHidden(); continue; }
+			// Where no --> is after it, the comment took the rest, so nothing
+			// after it reads otherwise
+			if (end < firstEnd && close >= 0 && !hidden) {
+				hidden = { start: tagStart, end: firstEnd, tokens: tokens.length, regions: inertRegions.length, openTables,
+					rawTextStart, closingRawTextName };
+			}
+			if (end === tagStart) {
+				tokens.push({ raw: '<', tag: false, start: tagStart, end: tagStart + 1 });
+				cursor = tagStart + 1;
+				continue;
+			}
 			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
 			inertRegions.push({ start: tagStart, end });
 			cursor = end;
@@ -634,15 +746,19 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tok
 		let quote = '';
 		let end = tagStart + 1;
 		let malformedRestart: number | undefined;
-		for (; end < html.length; end++) {
+		// A tag that the text to the --> doesn't end reaches past it
+		const stop = hidden ? hidden.end : html.length;
+		let ended = false;
+		for (; end < stop; end++) {
 			if (stats) stats.htmlTagCharactersVisited++;
 			const char = html[end];
 			if (quote) {
 				if (char === quote) quote = '';
 			} else if (char === '"' || char === "'") quote = char;
 			else if (char === '<') { malformedRestart = end; break; }
-			else if (char === '>') { end++; break; }
+			else if (char === '>') { end++; ended = true; break; }
 		}
+		if (hidden && malformedRestart === undefined && !ended) { readHidden(); continue; }
 		if (malformedRestart !== undefined) {
 			tokens.push({ raw: html.slice(tagStart, malformedRestart), tag: false, start: tagStart, end: malformedRestart });
 			if (stats) stats.malformedTagRecoveries++;
@@ -661,13 +777,17 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tok
 		let nameEnd = 0;
 		while (nameEnd < inner.length && /[A-Za-z0-9:-]/.test(inner[nameEnd])) nameEnd++;
 		const name = inner.slice(0, nameEnd).toLowerCase() || undefined;
-		tokens.push({ raw, tag: true, name, closing, selfClosing: /\/\s*>$/.test(raw), start: tagStart, end });
+		const selfClosing = /\/\s*>$/.test(raw);
+		const rawText = !closing && !selfClosing && !!name && isHtmlRawTextName(name);
+		if (hidden && (rawText || name === 'table' || name === 'td' || name === 'th')) { readHidden(); continue; }
+		tokens.push({ raw, tag: true, name, closing, selfClosing, start: tagStart, end });
+		if (name === 'table' && !selfClosing) openTables = closing ? Math.max(0, openTables - 1) : openTables + 1;
 		if (closing && name && name === closingRawTextName && rawTextStart !== undefined) {
 			inertRegions.push({ start: rawTextStart, end });
 			rawTextStart = undefined;
 			closingRawTextName = undefined;
 		}
-		if (!closing && !/\/\s*>$/.test(raw) && name && isHtmlRawTextName(name)) {
+		if (rawText) {
 			rawTextName = name;
 			rawTextStart = tagStart;
 		}
@@ -681,9 +801,10 @@ interface OwnedHtmlCellRange extends HtmlElementRange {
 	ownerTableOpenTokenIndex?: number;
 }
 
-function buildHtmlStructuralIndex(markdown: string, codeRegions: SourceRange[], lineOffsets: number[], stats?: TableNumberFormatScanStats): HtmlStructuralIndex {
+function buildHtmlStructuralIndex(markdown: string, codeRegions: SourceRange[], lineOffsets: number[], stats?: TableNumberFormatScanStats,
+	bound?: CommentBound): HtmlStructuralIndex {
 	const masked = maskSourceRanges(markdown, codeRegions);
-	const scanned = scanHtmlSource(masked, stats);
+	const scanned = scanHtmlSource(masked, stats, bound);
 	const tableStack: Array<{ token: HtmlSourceToken; index: number }> = [];
 	const cellStacks = new Map<string, Array<{ token: HtmlSourceToken; index: number; ownerTableOpenTokenIndex?: number }>>();
 	const tableRanges: HtmlElementRange[] = [];
@@ -1311,9 +1432,14 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	// Code as export reads it, with HTML blocks, a fence's line in which
 	// opens no code block, and past whose edges no code span runs, and the
 	// code blocks alone, whose lines hold no table or directive, nor do the
-	// HTML blocks export writes as text, but a directive's own
-	const { codeRegions, blockCodeRegions, literalHtmlRegions } = computeMarkdownRegions(markdown, { html: 'all', literalHtml: exportsLiterally, exportQuotes: true });
-	const structuralIndex = buildHtmlStructuralIndex(markdown, codeRegions, lineOffsets, scanStats);
+	// HTML blocks export writes as text, but a directive's own. And how far
+	// a comment reaches from a <!-- in a paragraph's text or at an HTML
+	// block's start, where a scan of the text alone would pair it with a -->
+	// past its paragraph or block, as a directive's, in which it then read
+	// the directive
+	const { codeRegions, blockCodeRegions, literalHtmlRegions, commentReaches } = computeMarkdownRegions(markdown,
+		{ html: 'all', literalHtml: exportsLiterally, exportQuotes: true, commentReaches: true });
+	const structuralIndex = buildHtmlStructuralIndex(markdown, codeRegions, lineOffsets, scanStats, commentBounds(markdown, commentReaches));
 	const inertRegions = mergeSourceRanges([...codeRegions, ...structuralIndex.inertRegions]);
 	const recordWarnings = (from: number, start: number, end: number) => {
 		for (const message of warnings.slice(from)) warningDetails.push({ message, start, end });

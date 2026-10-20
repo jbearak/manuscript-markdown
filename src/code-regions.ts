@@ -51,6 +51,28 @@ export interface MarkdownRegions {
 	 *  from the start of the first to the start of the line after the last,
 	 *  sorted */
 	inlineBlocks: CodeRegion[];
+	/** With `commentReaches`, how far a comment can reach from each <!--
+	 *  whose reach markdown-it fixes, sorted (see CommentReach) */
+	commentReaches: CommentReach[];
+}
+
+/**
+ * How far a comment from a <!-- at `at` can reach, as markdown-it reads it,
+ * to `reach`, in a block that ends at `blockEnd`, the start of the line
+ * after its last. In a paragraph's or a heading's text, to the end of the
+ * comment html_inline reads from it, which a construct before it, as a
+ * code span, can only leave text, or to `at` itself, where it reads none:
+ * after a backslash, or with no --> after it in the text, which no comment
+ * reads past. And from the start of an HTML block, to the block's end,
+ * which markdown-it puts at the line of its -->, or before, at the end of
+ * the list item or quote it's in. Not one in another HTML block, or in a
+ * table's cell, nor one in the text of a paragraph whose lines aren't the
+ * ends of their lines in the text (see inlineLines).
+ */
+export interface CommentReach {
+	at: number;
+	reach: number;
+	blockEnd: number;
 }
 
 export interface MarkdownRegionOptions {
@@ -67,6 +89,8 @@ export interface MarkdownRegionOptions {
 	inlineHtml?: boolean;
 	/** With it, inlineBlocks */
 	inlineBlocks?: boolean;
+	/** With `html`, commentReaches */
+	commentReaches?: boolean;
 	/** With `html`, read a quote as ending before a line with text that
 	 *  doesn't start as a quote's line does, as export does, which puts a
 	 *  blank line before each (see deLazifyBlockquotesWithLines in
@@ -351,6 +375,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	const tableRegions: CodeRegion[] = [];
 	const inlineHtmlRegions: CodeRegion[] = [];
 	const inlineBlocks: CodeRegion[] = [];
+	const commentReaches: CommentReach[] = [];
 	const outerItemRegions: CodeRegion[] = [];
 	const itemClosedStarts: number[] = [];
 	// The list items and quotes each token is in, innermost last
@@ -394,6 +419,10 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			&& (before?.type === 'paragraph_open' || before?.type === 'heading_open')) {
 			pushInlineHtml(token, text, lineStarts, inlineHtmlRegions);
 		}
+		if (options?.html && options.commentReaches && token.type === 'inline' && token.map && token.content.includes('<!--')
+			&& (before?.type === 'paragraph_open' || before?.type === 'heading_open')) {
+			pushCommentReaches(token, text, lineStarts, commentReaches);
+		}
 		if (options?.includeLists) {
 			if (token.type === 'list_item_close' || token.type === 'blockquote_close') containers.pop();
 			else if (token.type === 'blockquote_open') containers.push('quote');
@@ -411,6 +440,10 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			const region = { start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length };
 			htmlBlockRegions.push(region);
 			if (options.literalHtml?.(token.content)) literalHtmlRegions.push({ ...region, endsAtItsEnd: !!htmlBlockEnd(token.content) });
+			// Its <!-- is the first on its first line, after the markers of
+			// the list items and quotes it's in
+			const at = options.commentReaches && token.content.trimStart().startsWith('<!--') ? text.indexOf('<!--', region.start) : -1;
+			if (at !== -1 && at < region.end) commentReaches.push({ at, reach: region.end, blockEnd: region.end });
 		}
 		const isHtml = options?.html !== undefined && token.type === 'html_block' &&
 			(options.html === 'all' || !HTML_COMMENT_ONLY_RE.test(token.content.trim()));
@@ -453,6 +486,9 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		inlineHtmlRegions,
 		// In the order of the tokens, which is the text's
 		inlineBlocks,
+		// In the order of the tokens, which is the text's, and in a token's
+		// text in its order
+		commentReaches,
 	};
 }
 
@@ -539,6 +575,45 @@ function pushInlineHtml(token: Token, text: string, lineStarts: number[], region
 		} else {
 			at = content.indexOf('<', at + 1);
 		}
+	}
+}
+
+/**
+ * Push to `reaches` how far a comment can reach from each <!-- in an inline
+ * token's text, of a paragraph or a heading, as markdown-it's html_inline
+ * reads it there, in `text`'s offsets (see CommentReach): to the end of the
+ * comment it reads from it, or to the <!-- itself, after a backslash, which
+ * makes the < text, or with no --> after it in the text. A comment ends at
+ * an empty one's >, as in <!-->, which its regex reads first. Not those of
+ * a text whose lines aren't the ends of their lines in `text` (see
+ * inlineLines).
+ */
+function pushCommentReaches(token: Token, text: string, lineStarts: number[], reaches: CommentReach[]): void {
+	const content = token.content;
+	const lines = inlineLines(token, text, lineStarts);
+	if (!lines) return;
+	const ends = commentEnds(content);
+	const blockEnd = lineStarts[token.map![1]] ?? text.length;
+	// The offset in `text` of `at` in the text, by its line, found by binary
+	// search, as a comment's end can be past the next <!--
+	const source = (at: number) => {
+		let lo = 0;
+		let hi = lines.length - 1;
+		while (lo < hi) {
+			const mid = (lo + hi + 1) >>> 1;
+			if (lines[mid].content <= at) lo = mid;
+			else hi = mid - 1;
+		}
+		return lines[lo].source + at - lines[lo].content;
+	};
+	for (let at = content.indexOf('<!--'); at !== -1; at = content.indexOf('<!--', at + 1)) {
+		let backslashes = 0;
+		while (content.charCodeAt(at - 1 - backslashes) === 0x5C) backslashes++;
+		const empty = /^<!---?>/.exec(content.slice(at, at + 6));
+		// The offset of its --> in the text
+		const close = backslashes % 2 === 1 ? -1 : empty ? at + empty[0].length - 3 : ends[at + 4];
+		const start = source(at);
+		reaches.push({ at: start, reach: close === -1 ? start : source(close + 2) + 1, blockEnd });
 	}
 }
 

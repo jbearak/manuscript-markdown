@@ -4,6 +4,7 @@ import { preprocessGridTables, preprocessGridTablesWithSourceMap } from './grid-
 import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
+import { fastestRun } from './test-timing';
 
 describe('table number formatting', () => {
   test('rounds and pads pipe-table values while formatting separators independently', () => {
@@ -831,6 +832,113 @@ describe('table number formatting', () => {
     expect(roundTrip.markdown).toContain('<!-- table-decimal-mark: source -->');
     expect(roundTrip.markdown).toContain('<!-- table-digit-grouping: source -->');
   });
+});
+
+describe('table number directives after a <!-- that opens no comment', () => {
+  const directive = '<!-- table-digits: 1 -->';
+  const table = '| V |\n| --- |\n| 3.14159 |';
+  const lastRow = (markdown: string) => formatTableNumbers(markdown).output.split('\n').pop();
+  const wordCells = async (markdown: string | Uint8Array) => {
+    const docx = typeof markdown === 'string' ? (await convertMdToDocx(markdown)).docx : markdown;
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]);
+  };
+
+  // The scan paired the <!-- with the next --> anywhere, the directive's,
+  // so the directive was in a comment, where export's markdown-it reads
+  // the <!-- as text, as no --> ends it in its paragraph, or reads a
+  // comment block to the end of the list item or quote it's in
+  test.each([
+    ['a <!-- no --> ends in its paragraph', 'a <!-- b'],
+    ['an escaped <!--, as import writes that text', 'a \\<!-- b'],
+    ['a <!-- in a heading', '# a <!-- b'],
+    ['a <!-- in a list item', '- a <!-- b'],
+    ['a <!-- in a quote', '> a <!-- b'],
+    ['an empty comment, <!-->, which is all of its comment', 'a <!--> b'],
+    ['a comment block a quote ends', '> <!-- b'],
+    ['a comment block a list item ends', '- <!-- b'],
+    ['a <!-- in a CriticMarkup span that ends in its paragraph, which joins nothing', '{++a <!-- b++}'],
+  ])('applies a directive after %s', (_name, before) => {
+    expect(lastRow(before + '\n\n' + directive + '\n' + table)).toBe('| 3.1 |');
+    // A --> after the table took the table's rows too
+    expect(formatTableNumbers(before + '\n\n' + directive + '\n' + table + '\n\nc -->').output)
+      .toBe(before + '\n\n' + directive + '\n| V |\n| --- |\n| 3.1 |\n\nc -->');
+  });
+
+  test('applies a directive after a <!-- no --> ends in its paragraph with CRLF line ends', () => {
+    // As the language server reads a document's text
+    const markdown = ('a <!-- b\n\n' + directive + '\n' + table + '\n\nc -->').replace(/\n/g, '\r\n');
+    expect(formatTableNumbers(markdown).output).toContain('| 3.1 |');
+  });
+
+  test('gives Word the directive\'s digits after a <!-- no --> ends, from the first export on, and keeps them over a round trip', async () => {
+    const markdown = 'a <!-- b\n\n' + directive + '\n\n' + table + '\n';
+    const first = await convertMdToDocx(markdown);
+    expect(await wordCells(first.docx)).toEqual(['a &lt;!-- b', 'V', '3.1']);
+    const imported = (await convertDocx(first.docx)).markdown;
+    // Import escapes the <!--, which is text in Word
+    expect(imported).toContain('a \\<!-- b');
+    expect(imported).toContain(directive);
+    expect(await wordCells(imported)).toEqual(['a &lt;!-- b', 'V', '3.1']);
+  });
+
+  // Where the comment is one, as markdown-it reads it, the directive
+  // stays in it, as on main
+  test.each([
+    ['a comment block over a blank line, which only its --> ends', '<!-- b\n\n' + directive + '\n' + table],
+    ['a comment block whose --> comes after the directive', '<!--\n' + directive + '\n-->\n' + table],
+    ['a comment block in a list item, whose --> is the directive\'s', '- <!-- b\n  ' + directive + '\n\n' + table],
+  ])('keeps a directive in %s', (_name, markdown) => {
+    expect(lastRow(markdown)).toBe('| 3.14159 |');
+  });
+
+  test.each([
+    ['a comment over two lines of its paragraph', 'a <!-- b\nc --> d'],
+    ['a <!-- in a code span', '`a <!-- b`'],
+    ['a <!-- in a code block', '```\n<!-- b\n```'],
+  ])('applies a directive after %s', (_name, before) => {
+    expect(formatTableNumbers(before + '\n\n' + directive + '\n' + table + '\n\nc -->').output).toContain('| 3.1 |');
+  });
+
+  test('applies a directive after a <!-- no --> ends with a tag in its paragraph, and reads the HTML table after the --> it was paired with as before', () => {
+    const markdown = 'a <!-- b <span>x</span>\n\n' + directive + '\n' + table + '\n\nc -->\n\n<table><tr><td>2.71828</td></tr></table>';
+    expect(formatTableNumbers(markdown).output).toBe(markdown.replace('3.14159', '3.1'));
+  });
+
+  // What the comment hid before, read now, would reach past its -->, and
+  // take the directive after it, which export reads
+  test.each([
+    ['a <script>, which holds the text to its end tag', '<script>'],
+    ['a table\'s tag', '<table>'],
+    ['a tag whose quote nothing ends', '<i title="x>'],
+    ['a processing instruction', '<?x'],
+  ])('keeps the comment the <!-- was paired with where the text to its --> holds %s', (_name, held) => {
+    const after = '<!-- table-digits: 2 -->\n<table><tr><td>2.71828</td></tr></table>';
+    const markdown = 'a <!-- b ' + held + '\n\n' + directive + '\n' + table + '\n\nc -->\n\n' + after;
+    expect(formatTableNumbers(markdown).output).toBe(markdown.replace('2.71828', '2.72'));
+  });
+
+  test('keeps the directive in the comment where a CriticMarkup span joins the <!--\'s paragraph to the lines after it', () => {
+    // Export reads the span's lines as one paragraph, whose comment takes
+    // the directive, and whose table's rows are the span's text
+    const markdown = '{++a <!-- b\n\n' + directive + '\n' + table + '\n\nc++}';
+    expect(formatTableNumbers(markdown).output).toBe(markdown);
+  });
+
+  test.each([
+    ['a <!-- no --> ends in each paragraph', 'a <!-- b\n\n'],
+    ['a comment block each list item ends', '- <!-- b\n\n'],
+    ['a <!-- before a <script> and a --> in each paragraph', 'a <!-- b <script>\n\nc -->\n\n'],
+  ])('reads %s in linear time', (_name, unit) => {
+    // Each comment's search for its --> from the <!--, which went on to the
+    // text's end where no --> was, would take time in the square of their
+    // number once each ends sooner, as would each <script>'s for its end
+    // tag in the text the comment it's read again for hid
+    const time = (n: number) => fastestRun(() => expect(lastRow(unit.repeat(n) + directive + '\n' + table)).toBe('| 3.1 |'));
+    time(2000);
+    expect(time(32000) / time(8000)).toBeLessThan(8);
+  }, 30000);
 });
 
 describe('table number formatting edits', () => {
