@@ -858,7 +858,6 @@ describe('table number directives after a <!-- that opens no comment', () => {
     ['an empty comment, <!-->, which is all of its comment', 'a <!--> b'],
     ['a comment block a quote ends', '> <!-- b'],
     ['a comment block a list item ends', '- <!-- b'],
-    ['a <!-- in a CriticMarkup span that ends in its paragraph, which joins nothing', '{++a <!-- b++}'],
   ])('applies a directive after %s', (_name, before) => {
     expect(lastRow(before + '\n\n' + directive + '\n' + table)).toBe('| 3.1 |');
     // A --> after the table took the table's rows too
@@ -953,6 +952,7 @@ describe('table number directives after a <!-- that opens no comment', () => {
     ['a table in a list item after a directive the comment hid', 'a <!-- b\n\n' + directive + '\n\n- ' + table.replace(/\n/g, '\n  '), {}],
     ['an HTML table in a list item after a directive the comment hid', 'a <!-- b\n\n' + directive + '\n\n- <table><tr><td>3.14159</td></tr></table>', {}],
     ['lines that only look like a table\'s after a directive the comment hid', 'a <!-- b\n\n' + directive + '\n\n| V | W |\n| --- |\n| 3.14159 |', {}],
+    ['a table in a LaTeX environment that holds the <!--, which preprocessing wraps as display math', '\\begin{equation}\n- a <!-- b\n' + table + '\n\n\\begin{equation}\n' + table + '\n\\end{equation}', { digits: 1 }],
   ])('leaves %s as it was', (_name, markdown, format) => {
     expect(formatTableNumbers(markdown, format).output).toBe(markdown);
   });
@@ -968,6 +968,49 @@ describe('table number directives after a <!-- that opens no comment', () => {
     const markdown = 'a <!-- b\n\n' + directive + '\n\n' + table + '\n- 2.71828 | x';
     expect(formatTableNumbers(markdown).output).toBe(markdown.replace('3.14159', '3.1'));
   });
+
+  // Where the text to the --> the <!-- was paired with holds a CriticMarkup
+  // span's opener or closer, a dollar sign or a LaTeX environment's \begin
+  // or \end, or the <!-- is in such an environment, a span, an equation or
+  // the environment can take what's after it in ways the block parse
+  // doesn't show, so the comment goes to that --> as before
+  test.each([
+    ['a CriticMarkup span\'s closer', '{++a <!-- b++}'],
+    ['a CriticMarkup span\'s opener', 'a <!-- b {>>c<<}'],
+    ['a dollar sign', 'a <!-- b $x$'],
+    ['a LaTeX environment', 'a <!-- b\n\n\\begin{equation}\nx\n\\end{equation}'],
+    ['a LaTeX environment\'s \\end, as the <!-- is in the environment', '\\begin{equation}\na <!-- b\n\n\\end{equation}'],
+  ])('keeps the directive in the comment where the text to its --> holds %s', (_name, before) => {
+    const markdown = before + '\n\n' + directive + '\n' + table;
+    expect(formatTableNumbers(markdown).output).toBe(markdown);
+  });
+
+  test('leaves lines a CriticMarkup span joins, whose closer starts the line that looks like a table\'s header, as written after a <!--', () => {
+    // Export joins the span's lines and reads no table, so 3.14159 is a
+    // paragraph's text in Word
+    const markdown = 'a <!-- b\n\n{++x | y\n\n++}V | W\n--- | ---\n3.14159 | z';
+    expect(formatTableNumbers(markdown, { digits: 1 }).output).toBe(markdown);
+  });
+
+  test('gives a directive the comment hid no say over lines a CriticMarkup span joins, whose closer starts the line that looks like a table\'s header', () => {
+    const markdown = 'a <!-- b\n\n' + directive + '\n\n{++x | y\n\n++}V | W\n--- | ---\n3.14159 | z';
+    expect(formatTableNumbers(markdown).output).toBe(markdown);
+    // The document's digits apply as before
+    expect(formatTableNumbers(markdown, { digits: 2 }).output).toBe(markdown.replace('3.14159', '3.14'));
+  });
+
+  test.each([
+    ['no format', {}, 'a <!-- b\n\n' + table + '\n\n', '| 3.14159 |'],
+    ['the document\'s digits', { digits: 1 }, 'a <!-- b\n\n' + table + '\n\n', '| 3.14159 |'],
+    ['no format, with a --> before the run', {}, 'a <!-- b\n\n' + table + '\n\nc -->\n\n', '| 3.14159 |'],
+    ['the document\'s digits, with a --> before the run', { digits: 1 }, 'a <!-- b\n\n' + table + '\n\nc -->\n\n', '| 3.1 |'],
+  ])('reads a long run of dollar signs after a <!-- and a table in linear time, with %s', (_name, format, before, row) => {
+    // A read of the dollar math that measured the rest of the run from each
+    // dollar sign took time in the square of its length
+    const time = (n: number) => fastestRun(() => expect(formatTableNumbers(before + '$'.repeat(n), format).output.split('\n')[4]).toBe(row));
+    time(4000);
+    expect(time(64000) / time(16000)).toBeLessThan(8);
+  }, 30000);
 
   test.each([
     ['a <!-- no --> ends in each paragraph', 'a <!-- b\n\n'],

@@ -2,7 +2,6 @@ import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-
 import type { HtmlTableCellSource } from './html-table-parser';
 import { type CommentReach, computeMarkdownRegions, isInsideCodeRegion, lineInRegions, regionAt, type TableRegion } from './code-regions';
 import { criticPayloadRanges } from './critic-markup';
-import { computeDollarMathRegions, DOCX_DOLLAR_MATH_OPTIONS } from './math-delimiters';
 import { exportsLiterally } from './html-blocks';
 import { maxOf, pushAll } from './arrays';
 import type { LineEdit } from './line-map';
@@ -557,21 +556,58 @@ function isHtmlRawTextName(name: string): boolean {
  *  of `firstEnd`, the end of the first --> after it (see commentBounds) */
 type CommentBound = (at: number, firstEnd: number) => number | undefined;
 
+/** A CriticMarkup span's opener or closer, a run of dollar signs, or a
+ *  LaTeX environment's \begin or \end, in `end` */
+const SPAN_MARK_RE = /\{(?:\+\+|--|~~|>>|==|#)|(?:\+\+|--|~~|<<|==)\}|\$+|\\(?:begin|(end))\{/g;
+
+/** The first of sorted `offsets` at or after `at` */
+function firstAtOrAfter(offsets: number[], at: number): number {
+	let lo = 0;
+	let hi = offsets.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (offsets[mid] < at) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
+}
+
 /**
  * How far a comment can reach from each <!-- of `reaches` whose reach
  * markdown-it fixes (see CommentReach in code-regions.ts), as export reads
  * it. Not one in a block a CriticMarkup span joins to the lines after it,
  * which export reads as one paragraph, as preprocessCriticMarkup writes it,
- * whose comment can take them, as a directive in them. The spans are found
- * once, where a bound first ends a comment sooner.
+ * whose comment can take them, as a directive in them. Nor one whose text
+ * to its first --> holds a CriticMarkup span's opener or closer, a dollar
+ * sign or a LaTeX environment's \begin or \end, where a span, an equation
+ * or the environment, which preprocessing wraps as display math over its
+ * lines, can take what's after it in ways the block parse doesn't show,
+ * nor one after more \begins than \ends, in such an environment. The spans
+ * and those marks are found once, where a bound first ends a comment
+ * sooner.
  */
 function commentBounds(markdown: string, reaches: CommentReach[]): CommentBound {
 	const byOffset = new Map<number, CommentReach>();
 	for (const reach of reaches) byOffset.set(reach.at, reach);
 	let joined: Set<number> | undefined;
+	// The marks' offsets, and the environments open after each, as many
+	// \begins as \ends after the last time none were
+	let marks: { at: number[]; open: number[] } | undefined;
 	return (at, firstEnd) => {
 		const found = byOffset.get(at);
 		if (!found || found.reach >= firstEnd) return undefined;
+		if (!marks) {
+			marks = { at: [], open: [] };
+			let open = 0;
+			for (const match of markdown.matchAll(SPAN_MARK_RE)) {
+				if (match[0].startsWith('\\')) open = Math.max(0, open + (match[1] ? -1 : 1));
+				marks.at.push(match.index);
+				marks.open.push(open);
+			}
+		}
+		const next = firstAtOrAfter(marks.at, at);
+		if (next < marks.at.length && marks.at[next] < firstEnd) return undefined;
+		if (next > 0 && marks.open[next - 1] > 0) return undefined;
 		joined ??= joinedToNext(markdown, reaches);
 		return joined.has(at) ? undefined : found.reach;
 	};
@@ -1423,20 +1459,13 @@ function maskedSourceRange(source: string, start: number, end: number, ranges: S
 /** Of each of `kinds`, markdown-it's pipe tables or HTML blocks that hold
  *  tables, each sorted, those export writes as tables: those at the top
  *  level, but not one whose lines a CriticMarkup span joins, which export
- *  reads as the span's text, nor one that dollar math over lines reaches,
- *  which export reads as the equation's, as read with the dollar signs in
- *  code and without (see tablesOutsideMath in critic-markup.ts) */
-function tablesExportReads(markdown: string, codeRegions: SourceRange[], ...kinds: TableRegion[][]): SourceRange[][] {
+ *  reads as the span's text, as one whose first line starts with the
+ *  closer the span's payload ends at. An equation, which export reads in a
+ *  paragraph's text, takes no table but over the lines such a span joins */
+function tablesExportReads(markdown: string, ...kinds: TableRegion[][]): SourceRange[][] {
 	const overLines: SourceRange[] = [];
 	for (const [start, end] of criticPayloadRanges(markdown)) {
 		if (/[\r\n]/.test(markdown.slice(start, end))) overLines.push({ start, end });
-	}
-	for (const excluded of [codeRegions, undefined]) {
-		for (const options of [{}, DOCX_DOLLAR_MATH_OPTIONS]) {
-			for (const math of computeDollarMathRegions(markdown, excluded, options)) {
-				if (/[\r\n]/.test(markdown.slice(math.start, math.end))) overLines.push(math);
-			}
-		}
 	}
 	overLines.sort((a, b) => a.start - b.start);
 	return kinds.map(tables => {
@@ -1445,7 +1474,7 @@ function tablesExportReads(markdown: string, codeRegions: SourceRange[], ...kind
 		let reach = -1;
 		return tables.filter(table => {
 			while (next < overLines.length && overLines[next].start < table.end) reach = Math.max(reach, overLines[next++].end);
-			return table.topLevel && reach <= table.start;
+			return table.topLevel && reach < table.start;
 		});
 	});
 }
@@ -1479,10 +1508,15 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	// block's start, where a scan of the text alone would pair it with a -->
 	// past its paragraph or block, as a directive's, in which it then read
 	// the directive, and the pipe tables markdown-it reads and the HTML
-	// blocks export reads tables from
+	// blocks export reads tables from. But only where a number format can
+	// apply, from the document or a directive, as otherwise the step reads
+	// the comment as before, to its first -->, and does what it did
+	const formats = documentFormat.digits !== undefined || documentFormat.decimalMark !== undefined
+		|| documentFormat.digitGrouping !== undefined || /table-(?:digits|decimal-mark|digit-grouping)/i.test(markdown);
 	const { codeRegions, blockCodeRegions, literalHtmlRegions, commentReaches, tableRegions, htmlTableBlocks } = computeMarkdownRegions(markdown,
-		{ html: 'all', literalHtml: exportsLiterally, exportQuotes: true, commentReaches: true, includeTables: true });
-	const structuralIndex = buildHtmlStructuralIndex(markdown, codeRegions, lineOffsets, scanStats, commentBounds(markdown, commentReaches));
+		{ html: 'all', literalHtml: exportsLiterally, exportQuotes: true, commentReaches: formats, includeTables: formats });
+	const structuralIndex = buildHtmlStructuralIndex(markdown, codeRegions, lineOffsets, scanStats,
+		formats ? commentBounds(markdown, commentReaches) : undefined);
 	const inertRegions = mergeSourceRanges([...codeRegions, ...structuralIndex.inertRegions]);
 	// The text of a comment the scan read shorter, or as none, it reads as
 	// before, as a comment's, but for a directive that is an HTML block of
@@ -1496,7 +1530,7 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	// The pipe tables, 0, and the HTML blocks of tables, 1, export writes
 	let exportTables: SourceRange[][] | undefined;
 	const exportsTable = (start: number, kind: 0 | 1) =>
-		!!regionAt(start, (exportTables ??= tablesExportReads(markdown, codeRegions, tableRegions, htmlTableBlocks))[kind]);
+		!!regionAt(start, (exportTables ??= tablesExportReads(markdown, tableRegions, htmlTableBlocks))[kind]);
 	// Whether a line holds text of a comment the scan read shorter
 	const holdsShortened = (line: number): boolean => {
 		if (shortened.length === 0 || line >= lines.length) return false;
