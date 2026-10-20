@@ -926,6 +926,49 @@ describe('table number directives after a <!-- that opens no comment', () => {
     expect(formatTableNumbers(markdown).output).toBe(markdown);
   });
 
+  // The lines after a <!-- that opens no comment, which the comment hid,
+  // hold a table where markdown-it reads one, as a table interrupts a
+  // paragraph, and export ends a quote at a line that doesn't start as a
+  // quote's
+  test.each([
+    ['a paragraph', 'a <!-- b\n' + table],
+    ['a quote', '> a <!-- b\n' + table],
+  ])('formats a table on the lines after a <!-- in %s', (_name, markdown) => {
+    expect(formatTableNumbers(markdown, { digits: 1 }).output).toBe(markdown.replace('3.14159', '3.1'));
+  });
+
+  test('applies a directive after a <!-- no --> ends to an HTML table', () => {
+    const markdown = 'a <!-- b\n\n' + directive + '\n\n<table><tr><td>3.14159</td></tr></table>';
+    expect(formatTableNumbers(markdown).output).toBe(markdown.replace('3.14159', '3.1'));
+  });
+
+  // But not where it reads none, as in a list item's text, which goes on
+  // over the lines, lazy, or where the lines only look like a table's; and
+  // a directive the comment hid applies only to a table export writes, not
+  // to one it drops, as in a list item, nor to such lines after it
+  test.each([
+    ['a list item\'s lazy lines after a <!--', '- a <!-- b\n' + table, { digits: 1 }],
+    ['lines after a <!-- with no delimiter row', 'a <!-- b\n| V |\n| 3.14159 |', { digits: 1 }],
+    ['lines after a <!-- whose header has more cells than the delimiter row', 'a <!-- b\n| V | W |\n| --- |\n| 3.14159 |', { digits: 1 }],
+    ['a table in a list item after a directive the comment hid', 'a <!-- b\n\n' + directive + '\n\n- ' + table.replace(/\n/g, '\n  '), {}],
+    ['an HTML table in a list item after a directive the comment hid', 'a <!-- b\n\n' + directive + '\n\n- <table><tr><td>3.14159</td></tr></table>', {}],
+    ['lines that only look like a table\'s after a directive the comment hid', 'a <!-- b\n\n' + directive + '\n\n| V | W |\n| --- |\n| 3.14159 |', {}],
+  ])('leaves %s as it was', (_name, markdown, format) => {
+    expect(formatTableNumbers(markdown, format).output).toBe(markdown);
+  });
+
+  test('formats lines that only look like a table\'s after a directive the comment hid with the document\'s format, as before', () => {
+    const markdown = 'a <!-- b\n\n' + directive + '\n\n| V | W |\n| --- |\n| 3.14159 |';
+    expect(formatTableNumbers(markdown, { digits: 2 }).output).toBe(markdown.replace('3.14159', '3.14'));
+  });
+
+  test('applies a directive the comment hid to the table export writes, but not to a list item with a | after it', () => {
+    // markdown-it ends the table at the list item, whose line the step reads
+    // as a row
+    const markdown = 'a <!-- b\n\n' + directive + '\n\n' + table + '\n- 2.71828 | x';
+    expect(formatTableNumbers(markdown).output).toBe(markdown.replace('3.14159', '3.1'));
+  });
+
   test.each([
     ['a <!-- no --> ends in each paragraph', 'a <!-- b\n\n'],
     ['a comment block each list item ends', '- <!-- b\n\n'],

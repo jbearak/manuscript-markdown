@@ -41,7 +41,10 @@ export interface MarkdownRegions {
 	itemClosedStarts: number[];
 	/** With `includeTables`, each pipe table's lines, sorted, not merged
 	 *  with one it touches */
-	tableRegions: CodeRegion[];
+	tableRegions: TableRegion[];
+	/** With `includeTables` and `literalHtml`, each HTML block it doesn't
+	 *  hold true of, as one export reads tables from, sorted */
+	htmlTableBlocks: TableRegion[];
 	/** With `inlineHtml`, the raw HTML in a paragraph's or a heading's text
 	 *  that markdown-it reads there whatever comes before it, sorted (see
 	 *  pushInlineHtml) */
@@ -54,6 +57,12 @@ export interface MarkdownRegions {
 	/** With `commentReaches`, how far a comment can reach from each <!--
 	 *  whose reach markdown-it fixes, sorted (see CommentReach) */
 	commentReaches: CommentReach[];
+}
+
+/** A table's lines, and whether it's in no list item or quote, at the top
+ *  level, where export writes it as a table, as it drops one in them */
+export interface TableRegion extends CodeRegion {
+	topLevel: boolean;
 }
 
 /**
@@ -372,7 +381,8 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	const htmlBlockRegions: CodeRegion[] = [];
 	const literalHtmlRegions: HtmlBlockRegion[] = [];
 	const listRegions: CodeRegion[] = [];
-	const tableRegions: CodeRegion[] = [];
+	const tableRegions: TableRegion[] = [];
+	const htmlTableBlocks: TableRegion[] = [];
 	const inlineHtmlRegions: CodeRegion[] = [];
 	const inlineBlocks: CodeRegion[] = [];
 	const commentReaches: CommentReach[] = [];
@@ -440,6 +450,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			const region = { start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length };
 			htmlBlockRegions.push(region);
 			if (options.literalHtml?.(token.content)) literalHtmlRegions.push({ ...region, endsAtItsEnd: !!htmlBlockEnd(token.content) });
+			else if (options.literalHtml && options.includeTables) htmlTableBlocks.push({ ...region, topLevel: token.level === 0 });
 			// Its <!-- is the first on its first line, after the markers of
 			// the list items and quotes it's in
 			const at = options.commentReaches && token.content.trimStart().startsWith('<!--') ? text.indexOf('<!--', region.start) : -1;
@@ -449,7 +460,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			(options.html === 'all' || !HTML_COMMENT_ONLY_RE.test(token.content.trim()));
 		const isList = options?.includeLists === true && token.type === 'list_item_open';
 		if (options?.includeTables && token.type === 'table_open') {
-			tableRegions.push({ start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length });
+			tableRegions.push({ start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length, topLevel: token.level === 0 });
 		}
 		if (!isCode && !isHtml && !isList) continue;
 
@@ -483,6 +494,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		itemClosedStarts,
 		// In the order of the tokens, which is the text's
 		tableRegions,
+		htmlTableBlocks,
 		inlineHtmlRegions,
 		// In the order of the tokens, which is the text's
 		inlineBlocks,

@@ -1,7 +1,8 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
-import { type CommentReach, computeMarkdownRegions, isInsideCodeRegion, lineInRegions } from './code-regions';
+import { type CommentReach, computeMarkdownRegions, isInsideCodeRegion, lineInRegions, regionAt, type TableRegion } from './code-regions';
 import { criticPayloadRanges } from './critic-markup';
+import { computeDollarMathRegions, DOCX_DOLLAR_MATH_OPTIONS } from './math-delimiters';
 import { exportsLiterally } from './html-blocks';
 import { maxOf, pushAll } from './arrays';
 import type { LineEdit } from './line-map';
@@ -495,6 +496,9 @@ interface HtmlStructuralIndex {
 	tableByOpenToken: Map<number, IndexedHtmlTable>;
 	stats?: TableNumberFormatScanStats;
 	inertRegions: SourceRange[];
+	/** The comments the scan read shorter than its first --> after it, or
+	 *  as none, each to that --> (see scanHtmlSource) */
+	shortened: SourceRange[];
 	openTableLines: Set<number>;
 	recoveryEndByStartLine: Array<number | undefined>;
 	collectionEndByLine: Array<number | undefined>;
@@ -601,15 +605,20 @@ function joinedToNext(markdown: string, reaches: CommentReach[]): Set<number> {
  * reaches past it, as one whose quote no other ends, a table's or a cell's
  * tag, or what holds the text after it, as a <script>, a processing
  * instruction, a declaration or CDATA, it reads the comment to that -->
- * again, so that it reads the rest as before.
+ * again, or to the text's end where no --> is after it, so that it reads
+ * the rest as before. Each comment it reads shorter, or as none, it gives
+ * as `shortened`, to that --> or the end.
  */
-function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?: CommentBound): { tokens: HtmlSourceToken[]; inertRegions: SourceRange[] } {
+function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?: CommentBound): {
+	tokens: HtmlSourceToken[]; inertRegions: SourceRange[]; shortened: SourceRange[];
+} {
 	if (stats) {
 		stats.structuralScans++;
 		stats.structuralCharacters += html.length;
 	}
 	const tokens: HtmlSourceToken[] = [];
 	const inertRegions: SourceRange[] = [];
+	const shortened: SourceRange[] = [];
 	const lowerHtml = html.toLowerCase();
 	let cursor = 0;
 	let rawTextName: string | undefined;
@@ -631,9 +640,10 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 		return found;
 	};
 	// The first comment the scan reads to its bound, short of its first -->
-	// after it, from `start` to that --> at `end`, and the scan's state at
-	// it, while the scan reads the text to that -->. No raw text is open
-	// there, as a <script> or the like in it reads the comment again
+	// after it, from `start` to that --> at `end`, or to the text's end, and
+	// the scan's state at it, while the scan reads the text to there. No raw
+	// text is open there, as a <script> or the like in it reads the comment
+	// again
 	let hidden: { start: number; end: number; tokens: number; regions: number; openTables: number;
 		rawTextStart?: number; closingRawTextName?: string } | undefined;
 	// Read that comment to its --> again, as the scan did before, with the
@@ -679,7 +689,10 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 			break;
 		}
 		if (tagStart > cursor) tokens.push({ raw: html.slice(cursor, tagStart), tag: false, start: cursor, end: tagStart });
-		if (hidden && tagStart >= hidden.end) hidden = undefined;
+		if (hidden && tagStart >= hidden.end) {
+			shortened.push({ start: hidden.start, end: hidden.end });
+			hidden = undefined;
+		}
 		// In that text, one that holds the text after it, to its end, which
 		// can be past the -->, and which a search from each of many there
 		// would look for to the text's end
@@ -727,9 +740,7 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 			const firstEnd = close < 0 ? html.length : close + 3;
 			const end = (openTables > 0 ? undefined : bound?.(tagStart, firstEnd)) ?? firstEnd;
 			if (hidden && end > hidden.end) { readHidden(); continue; }
-			// Where no --> is after it, the comment took the rest, so nothing
-			// after it reads otherwise
-			if (end < firstEnd && close >= 0 && !hidden) {
+			if (end < firstEnd && !hidden) {
 				hidden = { start: tagStart, end: firstEnd, tokens: tokens.length, regions: inertRegions.length, openTables,
 					rawTextStart, closingRawTextName };
 			}
@@ -793,8 +804,9 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 		}
 		cursor = end;
 	}
+	if (hidden) shortened.push({ start: hidden.start, end: hidden.end });
 	if (stats) stats.structuralTokens += tokens.length;
-	return { tokens, inertRegions };
+	return { tokens, inertRegions, shortened };
 }
 
 interface OwnedHtmlCellRange extends HtmlElementRange {
@@ -908,7 +920,7 @@ function buildHtmlStructuralIndex(markdown: string, codeRegions: SourceRange[], 
 	});
 	if (stats) stats.completedTables += tables.length;
 	return { tokens: scanned.tokens, tables, tableByOpenToken, stats, inertRegions: scanned.inertRegions,
-		openTableLines, recoveryEndByStartLine, collectionEndByLine };
+		shortened: scanned.shortened, openTableLines, recoveryEndByStartLine, collectionEndByLine };
 }
 
 function parseHtmlTableFormat(openingTag: string): Partial<TableNumberFormat> {
@@ -1408,6 +1420,36 @@ function maskedSourceRange(source: string, start: number, end: number, ranges: S
 	return output + source.slice(cursor, end);
 }
 
+/** Of each of `kinds`, markdown-it's pipe tables or HTML blocks that hold
+ *  tables, each sorted, those export writes as tables: those at the top
+ *  level, but not one whose lines a CriticMarkup span joins, which export
+ *  reads as the span's text, nor one that dollar math over lines reaches,
+ *  which export reads as the equation's, as read with the dollar signs in
+ *  code and without (see tablesOutsideMath in critic-markup.ts) */
+function tablesExportReads(markdown: string, codeRegions: SourceRange[], ...kinds: TableRegion[][]): SourceRange[][] {
+	const overLines: SourceRange[] = [];
+	for (const [start, end] of criticPayloadRanges(markdown)) {
+		if (/[\r\n]/.test(markdown.slice(start, end))) overLines.push({ start, end });
+	}
+	for (const excluded of [codeRegions, undefined]) {
+		for (const options of [{}, DOCX_DOLLAR_MATH_OPTIONS]) {
+			for (const math of computeDollarMathRegions(markdown, excluded, options)) {
+				if (/[\r\n]/.test(markdown.slice(math.start, math.end))) overLines.push(math);
+			}
+		}
+	}
+	overLines.sort((a, b) => a.start - b.start);
+	return kinds.map(tables => {
+		// The furthest end of the spans that start before a table's end
+		let next = 0;
+		let reach = -1;
+		return tables.filter(table => {
+			while (next < overLines.length && overLines[next].start < table.end) reach = Math.max(reach, overLines[next++].end);
+			return table.topLevel && reach <= table.start;
+		});
+	});
+}
+
 function isRangeEnclosed(start: number, end: number, ranges: SourceRange[]): boolean {
 	let index = firstOverlappingRange(ranges, start);
 	while (index < ranges.length && ranges[index].start < end) {
@@ -1436,11 +1478,38 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	// a comment reaches from a <!-- in a paragraph's text or at an HTML
 	// block's start, where a scan of the text alone would pair it with a -->
 	// past its paragraph or block, as a directive's, in which it then read
-	// the directive
-	const { codeRegions, blockCodeRegions, literalHtmlRegions, commentReaches } = computeMarkdownRegions(markdown,
-		{ html: 'all', literalHtml: exportsLiterally, exportQuotes: true, commentReaches: true });
+	// the directive, and the pipe tables markdown-it reads and the HTML
+	// blocks export reads tables from
+	const { codeRegions, blockCodeRegions, literalHtmlRegions, commentReaches, tableRegions, htmlTableBlocks } = computeMarkdownRegions(markdown,
+		{ html: 'all', literalHtml: exportsLiterally, exportQuotes: true, commentReaches: true, includeTables: true });
 	const structuralIndex = buildHtmlStructuralIndex(markdown, codeRegions, lineOffsets, scanStats, commentBounds(markdown, commentReaches));
 	const inertRegions = mergeSourceRanges([...codeRegions, ...structuralIndex.inertRegions]);
+	// The text of a comment the scan read shorter, or as none, it reads as
+	// before, as a comment's, but for a directive that is an HTML block of
+	// its own and a pipe table export writes, as markdown-it reads more there
+	// than the lines alone show: a line of a list item's or a quote's text,
+	// lazy, that looks like a table's is none, nor is one with no delimiter
+	// row after it. The rest of each line, and each line elsewhere, it reads
+	// with the regions it read
+	const { shortened } = structuralIndex;
+	const pairedInertRegions = shortened.length === 0 ? inertRegions : mergeSourceRanges([...inertRegions, ...shortened]);
+	// The pipe tables, 0, and the HTML blocks of tables, 1, export writes
+	let exportTables: SourceRange[][] | undefined;
+	const exportsTable = (start: number, kind: 0 | 1) =>
+		!!regionAt(start, (exportTables ??= tablesExportReads(markdown, codeRegions, tableRegions, htmlTableBlocks))[kind]);
+	// Whether a line holds text of a comment the scan read shorter
+	const holdsShortened = (line: number): boolean => {
+		if (shortened.length === 0 || line >= lines.length) return false;
+		const start = lineOffsets[line];
+		const first = firstOverlappingRange(shortened, start);
+		return first < shortened.length && shortened[first].start <= start + lines[line].length;
+	};
+	const inertFor = (line: number): SourceRange[] => {
+		if (!holdsShortened(line)) return inertRegions;
+		const start = lineOffsets[line];
+		if (parseDirective(lines[line]) && lineInRegions(start, lineOffsets[line + 1] ?? markdown.length, literalHtmlRegions) === 'alone') return inertRegions;
+		return regionAt(start, tableRegions) && exportsTable(start, 0) ? inertRegions : pairedInertRegions;
+	};
 	const recordWarnings = (from: number, start: number, end: number) => {
 		for (const message of warnings.slice(from)) warningDetails.push({ message, start, end });
 	};
@@ -1458,20 +1527,44 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	};
 	let pending: Partial<TableNumberFormat> = {};
 	let pendingInvalid = false;
+	// What's pending but for the directives in the text of a comment the
+	// scan read shorter, which the comment paired with its first --> hid,
+	// and whether one of them is: what they set applies only to a table
+	// export writes, and the rest, as a table in a list item, which export
+	// drops, or lines that only look like a table's, keep the format they
+	// had before, this (see formatFor)
+	let pairedPending = pending;
+	let pairedPendingInvalid = false;
+	let shortenedPending = false;
+	const resetPending = () => {
+		pending = pairedPending = {};
+		pendingInvalid = pairedPendingInvalid = shortenedPending = false;
+	};
+	// The format for a table, or a pipe table's row, at `start`, of `kind`:
+	// `format`, from what's pending, with its `error`, but the one from
+	// pairedPending where a directive only the shorter comment shows is
+	// pending and export writes no table there, and whether to leave the
+	// table as it is, as the one it takes is invalid
+	const formatFor = (start: number, kind: 0 | 1, format: TableNumberFormat, error: string | undefined) => {
+		if (!shortenedPending || exportsTable(start, kind)) return { format, error, skip: pendingInvalid || !!error };
+		const pairedFormat = mergeFormat(documentFormat, pairedPending);
+		const pairedError = validateTableNumberFormat(pairedFormat);
+		if (pairedError) warnings.push(pairedError);
+		return { format: pairedFormat, error: pairedError, skip: pairedPendingInvalid || !!pairedError };
+	};
 	let i = 0;
 	while (i < lines.length) {
 		// Four spaces in, a line is code, or the text of a paragraph it goes
 		// on, which holds no table either, as markdown-it reads none there
 		if (isInsideCodeRegion(lineOffsets[i], blockCodeRegions) || /^ {4}/.test(lines[i])) {
 			output.push(lines[i++]);
-			pending = {};
-			pendingInvalid = false;
+			resetPending();
 			continue;
 		}
 		const literalHtml = lineInRegions(lineOffsets[i], lineOffsets[i + 1] ?? markdown.length, literalHtmlRegions);
 		if (literalHtml && !(literalHtml === 'alone' && parseDirective(lines[i]))) {
 			output.push(lines[i]);
-			if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) { pending = {}; pendingInvalid = false; }
+			if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) resetPending();
 			i++;
 			continue;
 		}
@@ -1480,16 +1573,21 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		// A standalone directive/placeholder is itself an HTML comment. Only an
 		// enclosing inert region (a fence, outer comment, or raw-text element)
 		// should suppress it.
-		const lineIsEnclosedInert = isRangeEnclosed(currentLineStart, currentLineEnd, inertRegions);
+		const lineInert = inertFor(i);
+		const lineIsEnclosedInert = isRangeEnclosed(currentLineStart, currentLineEnd, lineInert);
 		const directive = lineIsEnclosedInert ? undefined : parseDirective(lines[i]);
 		if (directive) {
+			const shortenedText = holdsShortened(i);
 			if (directive.error) {
 				warnings.push(directive.error);
 				warningDetails.push({ message: directive.error, start: lineOffsets[i], end: lineOffsets[i] + lines[i].length });
 				pendingInvalid = true;
+				if (!shortenedText) pairedPendingInvalid = true;
 			} else {
 				pending = { ...pending, ...directive.format };
+				if (!shortenedText) pairedPending = { ...pairedPending, ...directive.format };
 			}
+			if (shortenedText) shortenedPending = true;
 			output.push(lines[i]);
 			i++;
 			continue;
@@ -1497,7 +1595,7 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		const format = mergeFormat(documentFormat, pending);
 		const error = validateTableNumberFormat(format);
 		if (error) warnings.push(error);
-		const detectionLine = maskedSourceRange(markdown, currentLineStart, currentLineEnd, inertRegions);
+		const detectionLine = maskedSourceRange(markdown, currentLineStart, currentLineEnd, lineInert);
 		const opensHtmlTable = structuralIndex.openTableLines.has(i) || /^\s*<table\b/i.test(detectionLine);
 		if (opensHtmlTable) {
 			const candidateEnd = structuralIndex.openTableLines.has(i) ? structuralIndex.collectionEndByLine[i] : undefined;
@@ -1505,13 +1603,13 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 				const tableStart = lineOffsets[i];
 				const lastLine = candidateEnd - 1;
 				const tableEnd = lineOffsets[lastLine] + lines[lastLine].length;
-				write(tableStart, tableEnd, pendingInvalid || error ? markdown.slice(tableStart, tableEnd)
-					: formatIndexedHtmlRange(markdown, tableStart, tableEnd, format, structuralIndex, codeRegions,
+				const table = formatFor(tableStart, 1, format, error);
+				write(tableStart, tableEnd, table.skip ? markdown.slice(tableStart, tableEnd)
+					: formatIndexedHtmlRange(markdown, tableStart, tableEnd, table.format, structuralIndex, codeRegions,
 						warnings, warningDetails));
-				if (error) recordHtmlError(error, tableStart, tableEnd);
+				if (table.error) recordHtmlError(table.error, tableStart, tableEnd);
 				i = candidateEnd;
-				pending = {};
-				pendingInvalid = false;
+				resetPending();
 				continue;
 			}
 			// If collection reaches EOF without balancing, commit only complete
@@ -1521,54 +1619,57 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 				const tableStart = lineOffsets[i];
 				const lastLine = recoveryEnd - 1;
 				const tableEnd = lineOffsets[lastLine] + lines[lastLine].length;
-				write(tableStart, tableEnd, pendingInvalid || error ? markdown.slice(tableStart, tableEnd)
-					: formatIndexedHtmlRange(markdown, tableStart, tableEnd, format, structuralIndex, codeRegions,
+				const table = formatFor(tableStart, 1, format, error);
+				write(tableStart, tableEnd, table.skip ? markdown.slice(tableStart, tableEnd)
+					: formatIndexedHtmlRange(markdown, tableStart, tableEnd, table.format, structuralIndex, codeRegions,
 						warnings, warningDetails));
-				if (error) recordHtmlError(error, tableStart, tableEnd);
+				if (table.error) recordHtmlError(table.error, tableStart, tableEnd);
 				i = recoveryEnd;
-				pending = {};
-				pendingInvalid = false;
+				resetPending();
 				continue;
 			}
 		}
 		if (lines[i].includes(GRID_TABLE_PLACEHOLDER_PREFIX) && !lineIsEnclosedInert) {
 			const warningsBefore = warnings.length;
 			const tableStart = lineOffsets[i];
-			write(tableStart, tableStart + lines[i].length, formatGridPlaceholder(lines[i], pendingInvalid || error ? {} : format, warnings));
-			if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + lines[i].length });
+			const table = formatFor(tableStart, 1, format, error);
+			write(tableStart, tableStart + lines[i].length, formatGridPlaceholder(lines[i], table.skip ? {} : table.format, warnings));
+			if (table.error) warningDetails.push({ message: table.error, start: tableStart, end: tableStart + lines[i].length });
 			recordWarnings(warningsBefore, tableStart, tableStart + lines[i].length);
-			pending = {};
-			pendingInvalid = false;
+			resetPending();
 			i++;
 			continue;
 		}
 		let nextDetectionLine = lines[i + 1] ?? '';
 		if (i + 1 < lines.length) {
 			const nextStart = lineOffsets[i + 1];
-			nextDetectionLine = maskedSourceRange(markdown, nextStart, nextStart + nextDetectionLine.length, inertRegions);
+			nextDetectionLine = maskedSourceRange(markdown, nextStart, nextStart + nextDetectionLine.length, inertFor(i + 1));
 		}
 		if (i + 1 < lines.length && detectionLine.includes('|') && isPipeSeparator(nextDetectionLine)) {
 			const tableStart = lineOffsets[i];
 			const warningsBefore = warnings.length;
-			write(tableStart, tableStart + lines[i].length, formatPipeRow(lines[i], pendingInvalid || error ? {} : format, warnings));
+			// And each row's its own, as a line after the table export writes,
+			// before a blank line, can be a list item's text
+			const table = formatFor(tableStart, 0, format, error);
+			write(tableStart, tableStart + lines[i].length, formatPipeRow(lines[i], table.skip ? {} : table.format, warnings));
 			output.push(lines[i + 1]);
 			i += 2;
 			while (i < lines.length && lines[i].trim() !== '') {
 				if (/^ {4}/.test(lines[i])) break;
 				const rowStart = lineOffsets[i];
-				const rowDetection = maskedSourceRange(markdown, rowStart, rowStart + lines[i].length, inertRegions);
+				const rowDetection = maskedSourceRange(markdown, rowStart, rowStart + lines[i].length, inertFor(i));
 				if (!rowDetection.includes('|')) break;
-				write(rowStart, rowStart + lines[i].length, formatPipeRow(lines[i++], pendingInvalid || error ? {} : format, warnings));
+				const row = formatFor(rowStart, 0, format, error);
+				write(rowStart, rowStart + lines[i].length, formatPipeRow(lines[i++], row.skip ? {} : row.format, warnings));
 			}
 			const tableEnd = lineOffsets[i - 1] + lines[i - 1].length;
-			if (error) warningDetails.push({ message: error, start: tableStart, end: tableEnd });
+			if (table.error) warningDetails.push({ message: table.error, start: tableStart, end: tableEnd });
 			recordWarnings(warningsBefore, tableStart, tableEnd);
-			pending = {};
-			pendingInvalid = false;
+			resetPending();
 			continue;
 		}
 		output.push(lines[i]);
-		if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) { pending = {}; pendingInvalid = false; }
+		if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) resetPending();
 		i++;
 	}
 	return { output: output.join('\n'), warnings: [...new Set(warnings)], warningDetails, edits };
