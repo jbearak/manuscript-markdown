@@ -6,8 +6,10 @@ import {
 	computeCodeRegions,
 	computeMarkdownRegions,
 	isInsideCodeRegion,
+	keepsLazyLine,
 	overlapsCodeRegion,
 } from './code-regions';
+import { fastestRun } from './test-timing';
 import { extractAllDecorationRanges } from './highlight-colors';
 import { navigationMatches } from './navigation-matches';
 
@@ -458,4 +460,23 @@ describe('navigation scanner skips code regions', () => {
 		expect(matchTexts).not.toContain('{==inside highlight==}');
 		expect(matchTexts).not.toContain('{++inside add++}');
 	});
+});
+
+// A lazy line after a quote's line break, past citations and brackets on
+// it, each ] found as export finds a citation's (see citationClose): each
+// [ and each escaped ] is read once
+describe('keepsLazyLine past brackets', () => {
+	test.each([
+		['many escaped ] a far ] ends a citation after', (n: number) => '[@a, ' + 'x \\] '.repeat(n) + ']'],
+		['many [ before one ]', (n: number) => '[x '.repeat(n) + ']'],
+		['many escaped [ in a citation', (n: number) => '[@a, ' + 'x \\[ '.repeat(n) + ']'],
+		['many citations with an escaped ] in each', (n: number) => '[@a, x\\] y] '.repeat(n)],
+	])('reads a line of %s in linear time', (_name, line) => {
+		const time = (n: number) => {
+			const lines = ['> a\\', 'b ' + line(n)];
+			return fastestRun(() => keepsLazyLine(lines, 1, false), 5);
+		};
+		time(4000);
+		expect(time(16000) / time(4000)).toBeLessThan(8);
+	}, 30000);
 });

@@ -3,7 +3,7 @@ import * as formatting from './formatting';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as fc from 'fast-check';
-import { citationClose, readCitationItems } from './citation-syntax';
+import { citationClose, citationOpenAt, readCitationItems } from './citation-syntax';
 import { fastestRun } from './test-timing';
 
 describe('Command Handler Unit Tests', () => {
@@ -506,55 +506,66 @@ describe('Syntax grammar citation keys', () => {
     .filter(item => item.markStart !== -1 && item.key)
     .map(item => [1 + item.itemStart + item.keyStart, item.key]);
 
+  // The keys export read in it before a backslash escaped a ;, a [, a ] or
+  // an @ in a citation, to its first ], as the grammar reads them
+  const mainKeys = (line: string): Array<[number, string]> => readCitationItems(line.slice(1, line.indexOf(']')), false)
+    .filter(item => item.markStart !== -1 && item.key)
+    .map(item => [1 + item.itemStart + item.keyStart, item.key]);
+
   // Which colored a key's letters, digits, _, : and -, so only smith of
   // smith.2020, where export reads a key to its item's comma
   it.each([
     ['a period', '[@smith.2020]'],
     ['a slash, after a prefix, before a locator', '[see @a/b, p. 3]'],
-    ['letters of another language', '[@\u00E9t\u00E9; -@b2]'],
+    ['letters of another language', '[@été; -@b2]'],
     ['an @ in it, and an @ in a prefix', '[me@x.com @a@b]'],
     ['a space after its @', '[@ smith]'],
     ['an @ in its locator', '[@a, see @b; @c]'],
     ['an @ after a [ in its locator', '[@a, [ @b]'],
     ['an @ after a [ that starts an item', '[@a; [@b; x [@c]'],
-    // A ;, a [ or an @ a backslash escapes, which ends no item and starts
-    // no key, and a \] that ends the citation, as export reads one where no
-    // later ] ends it after, or where its backslash ends a key
-    ['an escaped ; in its locator', '[@a, p. 2\\; 5; @b]'],
-    ['an escaped ; in a prefix', '[see \\; also @a; @b]'],
+    // Guards: escapes the grammar reads as main did, where export reads the
+    // same keys: a \] that ends the citation, where no later ] ends it after
+    // or a [ comes first, or where its backslash ends a key
     ['an escaped @ in a prefix', '[cf. \\@x @a]'],
     ['an escaped [ in a later item\'s prefix', '[@a; see \\[x @b]'],
     ['an escaped ] that ends it, no ] after it', '[@a, p. 3\\] @b'],
     ['an escaped ] that ends it, a [ before the next ]', '[@a, x\\] @b [c]'],
     ['a key that ends with a backslash', '[@a\\] @b]'],
-    // Whose ] ends the citation, as a key's would, as before
     ['a word a key could be before an escaped ] in its locator', '[@a, see @b\\] @c]'],
   ])('colors a key with %s as export reads it', (_name, line) => {
     expect(coloredKeys(line)).toEqual(readKeys(line));
     expect(coloredKeys(line).length).toBeGreaterThan(0);
   });
 
-  // Not fixed: a \] that export reads a later ] as the citation's end after
-  // (see citationClose), which ends the citation in the grammar, as before,
-  // as a lookahead for that ] from each \] reads the rest of the line again
-  // for each. Each line, the keys the grammar colors, and those export reads
+  // Not fixed: the grammar reads no escape in a citation, as main did, so a
+  // \; ends an item there and a \] the citation, where export reads each as
+  // text (see citationItemEnd and citationClose): reading them took a
+  // search from each escape that read on through the line, again for each.
+  // Each line, the keys the grammar colors, as main read them, and those
+  // export reads
   it.each([
+    ['an escaped ; in its locator before a key', '[@a, p. 2\\; see @b]', ['a', 'b'], ['a']],
+    ['an escaped ; in a prefix', '[see \\; also @a; @b]', [], ['a', 'b']],
     ['an escaped [ and ] in its locator', '[@a, p. 4 \\[n. 2\\]; @b]', ['a'], ['a', 'b']],
     ['an escaped ] in its locator', '[@a, x\\] y; @b]', ['a'], ['a', 'b']],
     ['an escaped [ and ] in a later item\'s prefix', '[@a; see \\[x\\] @b]', ['a'], ['a', 'b']],
     ['an escaped ] in a prefix', '[see \\] x @a]', [], ['a']],
-  ])('Not fixed: colors the keys of a citation with %s to its \\], as main did', (_name, line, colored, read) => {
+  ])('Not fixed: colors the keys of a citation with %s as main did', (_name, line, colored, read) => {
+    expect(coloredKeys(line)).toEqual(colored.length ? mainKeys(line) : []);
     expect(coloredKeys(line).map(([, key]) => key)).toEqual(colored);
     expect(readKeys(line).map(([, key]) => key)).toEqual(read);
   });
 
-  // Its patterns tried at each place in a line of many \], as vscode-textmate
-  // tries them, where a lookahead from each \] for a later ] read the rest of
-  // the line again for each
-  it('tries its patterns at each place in a line of many escaped ] in linear time', () => {
+  // Its patterns tried at each place in a line of many \] or many \; before
+  // an @, as vscode-textmate tries them, where a search from each \] for a
+  // later ], or from each \; for the @, read the rest of the line again
+  it.each([
+    ['many escaped ]', (n: number) => '[@a, ' + 'x \\] '.repeat(n) + ']'],
+    ['many escaped ; before an @', (n: number) => '[@a, ' + 'x \\; '.repeat(n) + '@b]'],
+  ])('tries its patterns at each place in a line of %s in linear time', (_name, text) => {
     const regexes = [rule.begin, rule.end, ...(rule.patterns as Array<{ match: string }>).map(pattern => pattern.match)].map(source => asRegExp(source, 'yu'));
     const time = (n: number) => {
-      const line = '[@a, ' + 'x \\] '.repeat(n) + ']';
+      const line = text(n);
       return fastestRun(() => {
         for (let at = 0; at < line.length; at++) {
           for (const regex of regexes) {
@@ -569,23 +580,17 @@ describe('Syntax grammar citation keys', () => {
   }, 60000);
 
   /**
-   * The grammar colors each key of a citation on one line as export reads
-   * it (see readCitationItem): after the @ at its item's start or after a
-   * space, to its item's comma, without the spaces at its edges, and none
-   * in a prefix or a locator.
+   * The grammar colors each key of a citation on one line as export read
+   * it before a backslash escaped a ;, a [, a ] or an @ in one (see
+   * readCitationItem and the cases Not fixed above): after the @ at its
+   * item's start or after a space, to its item's comma, without the spaces
+   * at its edges, and none in a prefix or a locator.
    */
-  it('colors each key of a citation as export reads it', () => {
-    const characters = ['a', 'Z', '0', '_', '.', '/', ':', '-', '+', "'", '\u00E9', '@', '[', '`', '\\', '#', '$', '&'];
-    const wordOf = (alphabet: string[]) => fc.array(fc.constantFrom(...alphabet), { minLength: 1, maxLength: 4 }).map(chars => chars.join(''));
-    const wordsOf = (alphabet: string[]) => fc.array(wordOf(alphabet), { minLength: 1, maxLength: 3 }).map(parts => parts.join(' '));
-    const words = wordsOf(characters);
-    // A prefix and a locator with a ;, a [ or an @ a backslash escapes too,
-    // but no \], which the grammar reads as the citation's end, where export
-    // reads a later ] as its end (see the cases Not fixed above). No key, as
-    // a backslash in one escapes nothing.
-    const prefixWords = wordsOf([...characters, '\\;', '\\[', '\\@']);
-    const locatorWords = wordsOf([...characters, '\\;', '\\[', '\\@']);
-    const item = fc.tuple(fc.option(prefixWords, { nil: undefined }), fc.constantFrom('', '-'), fc.constantFrom('', ' '), words, fc.option(locatorWords, { nil: undefined }), fc.constantFrom('', ' '))
+  it('colors each key of a citation as export read it', () => {
+    const word = fc.array(fc.constantFrom('a', 'Z', '0', '_', '.', '/', ':', '-', '+', "'", 'é', '@', '[', '`', '\\', '#', '$', '&'), { minLength: 1, maxLength: 4 })
+      .map(chars => chars.join(''));
+    const words = fc.array(word, { minLength: 1, maxLength: 3 }).map(parts => parts.join(' '));
+    const item = fc.tuple(fc.option(words, { nil: undefined }), fc.constantFrom('', '-'), fc.constantFrom('', ' '), words, fc.option(words, { nil: undefined }), fc.constantFrom('', ' '))
       .map(([prefix, dash, space, key, locator, pad]) => pad + (prefix ? prefix + ' ' : '') + dash + '@' + space + key + (locator ? ', ' + locator : '') + pad);
     fc.assert(
       fc.property(fc.array(item, { minLength: 1, maxLength: 3 }), items => {
@@ -593,12 +598,33 @@ describe('Syntax grammar citation keys', () => {
         // A citation the grammar reads as one, at its [
         if (!asRegExp(rule.begin, 'yu').test(line)) return true;
         const colored = coloredKeys(line);
-        const read = readKeys(line);
+        const read = mainKeys(line);
         if (JSON.stringify(colored) !== JSON.stringify(read)) throw new Error(JSON.stringify(line) + ' colored ' + JSON.stringify(colored) + ', not ' + JSON.stringify(read));
         return true;
       }),
       { numRuns: 3000 }
     );
+  });
+});
+
+// Where the editor suggests a key after a ; it reads the cursor as in a
+// citation, which a ] before it ended, but a \] that a later ] on the line
+// ends the citation after, as export reads one (see citationClose). Each
+// line, the cursor's place in it, and whether it's in a citation
+describe('A cursor in a citation, as the editor suggests a key after a ;', () => {
+  it.each([
+    ['[@a; ', 5, true],
+    ['[@a; ]', 5, true],
+    ['[@a] x; ', 8, false],
+    ['x; ', 3, false],
+    // Which it read as ended at the \]
+    ['[@a, p. 4 \\[n. 2\\]; ]', 19, true],
+    ['[@a, x\\] y; @b]', 12, true],
+    // Guards: a \] with no ] after it, and before a [, which end it
+    ['[@a, x\\] y; ', 12, false],
+    ['[@a, x\\] y; [b]', 12, false],
+  ])('reads %j at %d as in a citation: %p', (line, at, open) => {
+    expect(citationOpenAt(line, at)).toBe(open);
   });
 });
 

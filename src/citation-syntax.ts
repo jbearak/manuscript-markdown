@@ -197,6 +197,17 @@ export function citationClose(text: string, start: number, scan?: CloseScan): nu
   return text.charCodeAt(stop) === 0x5D /* ] */ ? stop : close;
 }
 
+/** Whether `at` in `line` is in a citation that a [ before it starts, as
+ *  export reads one: the last [ before it, whose ] (see citationClose) isn't
+ *  before it, or which has none, as the editor asks before it suggests a
+ *  key after a ; */
+export function citationOpenAt(line: string, at: number): boolean {
+  const open = at > 0 ? line.lastIndexOf('[', at - 1) : -1;
+  if (open === -1) return false;
+  const close = citationClose(line, open);
+  return close === -1 || close >= at;
+}
+
 /** Whether the ] at `close` in `text` is one a backslash escapes, so that a
  *  later ] can end the citation instead (see citationClose) */
 export function escapedClose(text: string, close: number): boolean {

@@ -3909,6 +3909,9 @@ describe('List blockquote round-trip', () => {
     ['a citation, first', '> a\\\n[@doe2020] says', '> a\\\n> [@doe2020] says', 'GitHubBlockquote a|(Doe, 2020) says'],
     ['a note\'s reference', '> a\\\nb[^1]\n\n[^1]: n', '> a\\\n> b[^1]\n\n[^1]: n', 'GitHubBlockquote a|b'],
     ['each, on the quote\'s line', '> **a** $x$ [@doe2020][^1]\\\nb\n\n[^1]: n', '> **a** $x$ [@doe2020][^1]\\\n> b\n\n[^1]: n', 'GitHubBlockquote a x (Doe, 2020)|b'],
+    // Which export read to the \], so the ] after it was text that may end
+    // a link, and it ended the quote before the line
+    ['a citation with a \\] a later ] ends it after', '> a\\\nb [@doe2020, p. 3, so\\] y]', '> a\\\n> b [@doe2020, p. 3, so\\] y]', 'GitHubBlockquote a|b (Doe, 2020, p. 3, so] y)'],
     ['an alert', '> [!NOTE]\n> a\\\nb', '> [!NOTE]\n> a\\\n> b', 'GitHubNote \u203B Note| a|b'],
     ['an alert, after its marker', '> [!NOTE] a\\\nb', '> [!NOTE] a\\\n> b', 'GitHubNote \u203B Note|a|b'],
   ])('keeps a lazy line after a line break, with %s, in the quote', async (_name, md, back, quote) => {

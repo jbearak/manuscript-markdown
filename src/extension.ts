@@ -17,6 +17,7 @@ import * as path from 'path';
 import { parseFrontmatter, normalizeColorScheme, type ColorScheme } from './frontmatter';
 import type { EmbedResolver } from './embed-preprocess';
 import { BUNDLED_STYLE_LABELS } from './csl-loader';
+import { citationOpenAt } from './citation-syntax';
 import { shouldAutoTriggerLspSuggest } from './lsp/auto-suggest';
 import {
 	getOutputBasePath,
@@ -999,8 +1000,10 @@ export function activate(context: vscode.ExtensionContext) {
 			return false;
 		}
 		const cursor = editor.selection.active;
-		const linePrefix = editor.document.lineAt(cursor.line).text.slice(0, cursor.character);
-		return /\[[^\]\n]*;\s*$/.test(linePrefix) && linePrefix.includes('@');
+		const line = editor.document.lineAt(cursor.line).text;
+		const linePrefix = line.slice(0, cursor.character);
+		// In a citation, past a \] that a later ] on the line ends it after
+		return /;\s*$/.test(linePrefix) && linePrefix.includes('@') && citationOpenAt(line, cursor.character);
 	}
 	context.subscriptions.push({
 		dispose: () => {

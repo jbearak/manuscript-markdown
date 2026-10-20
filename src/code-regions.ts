@@ -8,6 +8,7 @@ import MarkdownIt from 'markdown-it';
 import { HTML_OPEN_CLOSE_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import type Token from 'markdown-it/lib/token.mjs';
 import blockquote from 'markdown-it/lib/rules_block/blockquote.mjs';
+import { citationClose } from './citation-syntax';
 import { parseGfmAlertMarker } from './gfm';
 import { commentEnds } from './inline-html-comments';
 import { normalizeNewlines } from './newlines';
@@ -169,20 +170,61 @@ const NO_LINE_BREAK_RE = /[<`$[\]|]/;
  *  NO_LINE_BREAK_RE matches but a < that opens no HTML, and its last $
  *  before no word or $ */
 const LINE_MATH_RE = /(?<![\w$\\])\$(?!\d)(?![^$]*?(?:\{(?:\+\+|--|~~|==|>>|#)|(?:\+\+|--|~~|==|<<)\}))(?:[^$\\`<[\]|]|<(?![A-Za-z/!?])|\\[^$`<[\]|])+\$(?![\w$])/g;
-/** Brackets that end on their line, with nothing NO_LINE_BREAK_RE matches
- *  between them, and no ( after them that a link's may be, nor a
- *  definition's : */
-const LINE_BRACKETS_RE = /\[([^[\]<`$|]*)\](?![(:])/g;
-/** What such brackets hold where they're a citation's, [@a] or [see @a,
- *  p. 1], or a note's reference's, [^1] */
+/** What brackets that end on their line hold where they're a citation's,
+ *  [@a] or [see @a, p. 1], or a note's reference's, [^1] */
 const CITATION_OR_NOTE_RE = /^\^[\w-]+$|(?:^|\s)-?@/;
+/** What NO_LINE_BREAK_RE matches but a bracket */
+const NO_LINE_BREAK_IN_BRACKETS_RE = /[<`$|]/g;
+
+/** `text` with each citation or note's reference that ends on its line a
+ *  space (see CITATION_OR_NOTE_RE): brackets with nothing between them that
+ *  NO_LINE_BREAK_RE matches, but a [ or a ] a backslash escapes, and no (
+ *  after them that a link's may be, nor a definition's :, each ] found as
+ *  export finds a citation's (see citationClose), past a \] that a later ]
+ *  ends it after, as in [@a, p. 4 \[n. 2\]]. From the left, each [ once,
+ *  and each search for what ends brackets from where the last one ended,
+ *  or, for a ], once for all the [ before it. */
+function withoutLineBrackets(text: string): string {
+	let out = '';
+	let from = 0;
+	const scan = { from: -1, stop: -1 };
+	// The next [ no backslash escapes, and the next <, `, $ or |, after the
+	// [ at hand, -1 for none, found again once it's passed (-2 before the
+	// first search)
+	let open = -2;
+	let stop = -2;
+	// The ] that ends a citation from the last [ searched from, which is
+	// that of each [ after it up to it too (see citationClose)
+	let close = -2;
+	for (let at = text.indexOf('['); at !== -1; at = text.indexOf('[', at + 1)) {
+		if (at < from) continue;
+		if (close <= at) close = citationClose(text, at, scan);
+		if (close === -1) break;
+		if (open !== -1 && open <= at) {
+			open = at;
+			for (;;) {
+				open = text.indexOf('[', open + 1);
+				let slashes = 0;
+				while (open > 0 && text[open - 1 - slashes] === '\\') slashes++;
+				if (open === -1 || slashes % 2 === 0) break;
+			}
+		}
+		if (stop !== -1 && stop <= at) {
+			NO_LINE_BREAK_IN_BRACKETS_RE.lastIndex = at + 1;
+			stop = NO_LINE_BREAK_IN_BRACKETS_RE.exec(text)?.index ?? -1;
+		}
+		if ((open !== -1 && open < close) || (stop !== -1 && stop < close) || /[(:]/.test(text[close + 1] ?? '')) continue;
+		out += text.slice(from, at) + (CITATION_OR_NOTE_RE.test(text.slice(at + 1, close)) ? ' ' : text.slice(at, close + 1));
+		from = close + 1;
+	}
+	return out + text.slice(from);
+}
 
 /** Whether `text` may open what NO_LINE_BREAK_RE says, past an equation,
  *  a citation or a note's reference that ends on its line */
 function holdsNoLineBreak(text: string): boolean {
 	if (!NO_LINE_BREAK_RE.test(text)) return false;
-	return NO_LINE_BREAK_RE.test(text.replace(LINE_MATH_RE, ' ')
-		.replace(LINE_BRACKETS_RE, (brackets, inner: string) => CITATION_OR_NOTE_RE.test(inner) ? ' ' : brackets));
+	return NO_LINE_BREAK_RE.test(withoutLineBrackets(text.replace(LINE_MATH_RE, ' ')));
 }
 
 /** Whether export keeps line `at` of `lines` on a quote's paragraph, where

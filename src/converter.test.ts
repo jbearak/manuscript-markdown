@@ -11720,6 +11720,10 @@ describe('A citation whose key comes after a prefix, right before a bracket', ()
     // missing key
     ['an escaped [ in its prefix', 'S [see \\[x @nokey] e.', '', 'S [see [x @nokey] e.'],
     ['a citation in a link', 'S [link [@roe2019] b](https://e.org) e.', 'S \\[link [@roe2019] b](https://e.org) e.', 'S [link «(Roe, 2019)» b](⟨https://e.org⟩) e.'],
+    // A link whose text holds a key after a ] that export reads past, as a
+    // later ] ends the citation after it, whose @ import left as it was, so
+    // the next export read a citation of roe2019\ and text, and no link
+    ['a link whose text holds a key after an escaped ]', 'S [see \\] \\@roe2019\\] x](https://e.org) e.', '', 'S ⟨see ] @roe2019] x⟩ e.'],
   ])('leaves %s as it was', async (_name, md, imported, view) => {
     const { views, markdowns } = await trips(md);
     expect(markdowns[0]).toBe((imported || md) + '\n');
@@ -21339,6 +21343,23 @@ describe('round-trip regression: an image\'s alt text', () => {
   const attr = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   /** The alt text of the document's image, as Word's descr has it */
   const descr = async (docx: Uint8Array) => /descr="([^"]*)"/.exec(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))?.[1];
+
+  // Guards: alt text that holds a key after a ] export reads past, as a
+  // later ] ends a citation after it, an image's and a link's image's,
+  // whose [ starts no citation, as an image's: as main
+  test.each([
+    ['an image', 'A ![x](image.png){width=100 height=100} b', 'A ![see \\] @a\\] x](image.png){width=100 height=100} b'],
+    ['a link\'s image', 'A [![x](image.png){width=100 height=100}](https://e.org) b', 'A [![see \\] @a\\] x](image.png){width=100 height=100}](https://e.org) b'],
+  ])('keeps the alt text of %s that holds a key after a ] as text', async (_name, md, written) => {
+    const alt = 'see ] @a] x';
+    const zip = await JSZip.loadAsync(await toWord(md));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/descr="[^"]*"/, () => 'descr="' + attr(alt) + '"'));
+    const once = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(strip(once)).toBe(written + '\n');
+    const again = await toWord(once);
+    expect(await descr(again)).toBe(attr(alt));
+    expect((await convertDocx(again)).markdown).toBe(once);
+  });
 
   test.each([
     ['a $', 'a $b', 'a \\$b', ' x$ y'],

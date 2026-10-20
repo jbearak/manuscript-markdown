@@ -4057,22 +4057,24 @@ function formatHrefForMarkdown(href: string): string {
 
 /** A link of Markdown `text` to `href`, with a @ that starts the text,
  *  after a - or not, escaped, as export reads [@ as a citation's, even
- *  before a link's ( (see citationEnd). Export ends a citation at the
- *  first ], escaped too after a key or where no later ] does (see
- *  citationClose), so it reads the text before an escaped ] in the
- *  text as one where a key's @ comes after a space, as in [see @a\]](u),
- *  whose @ is escaped then, as one escaped starts no key. A key in code
- *  stays as it is, where a backslash would be text. */
+ *  before a link's ( (see citationEnd). Where export would read a
+ *  citation from the link's [, to the ] it finds as a citation's end (see
+ *  citationClose), as in [see @a\]](u), or in [see \] @a\] x](u), past a
+ *  \] that a later ] ends it after, each key's @ after a space before that
+ *  ] is escaped, as one escaped starts no key. A key in code stays as it
+ *  is, where a backslash would be text. */
 function markdownLink(text: string, href: string): string {
   // In an HTML table's cell, which export reads as HTML, its tag, as
   // renderHtmlCellParagraph writes it
   if (!readsMarkdown) return '<a href="' + escapeHtmlAttr(href) + '">' + text + '</a>';
   const url = formatHrefForMarkdown(href);
   const label = escapeTagLeftOpen(text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@'), url);
-  const close = label.indexOf(']');
-  if (close === -1 || citationEndInText('[' + label + '](' + url + ')', 0) === -1) return '[' + label + '](' + url + ')';
+  const linked = '[' + label + '](' + url + ')';
+  // The ] in the label, as the link's [ is at 0
+  const close = citationEndInText(linked, 0) - 1;
+  if (close < 0) return linked;
   // Each key before the ], at once, as the label is read once
-  const code = computeCodeRegions('[' + label + '](' + url + ')');
+  const code = computeCodeRegions(linked);
   const keys = label.slice(0, close).replace(/(^|\s)(-?)@(?=[\p{L}\p{N}_])/gu, (key, space: string, dash: string, at: number) =>
     isInsideCodeRegion(1 + at + space.length + dash.length, code) ? key : space + dash + '\\@');
   return '[' + keys + label.slice(close) + '](' + url + ')';
