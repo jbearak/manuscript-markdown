@@ -1,7 +1,6 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
-import { type CommentReach, computeMarkdownRegions, isInsideCodeRegion, lineInRegions, regionAt, type TableRegion } from './code-regions';
-import { criticPayloadRanges } from './critic-markup';
+import { type CommentReach, computeMarkdownRegions, isInsideCodeRegion, lineInRegions, regionAt } from './code-regions';
 import { exportsLiterally } from './html-blocks';
 import { maxOf, pushAll } from './arrays';
 import type { LineEdit } from './line-map';
@@ -556,9 +555,19 @@ function isHtmlRawTextName(name: string): boolean {
  *  of `firstEnd`, the end of the first --> after it (see commentBounds) */
 type CommentBound = (at: number, firstEnd: number) => number | undefined;
 
-/** A CriticMarkup span's opener or closer, a run of dollar signs, or a
- *  LaTeX environment's \begin or \end, in `end` */
-const SPAN_MARK_RE = /\{(?:\+\+|--|~~|>>|==|#)|(?:\+\+|--|~~|<<|==)\}|\$+|\\(?:begin|(end))\{/g;
+/** A CriticMarkup span's opener, or its closer, in the first group, or a
+ *  LaTeX environment's \begin, or its \end, in the second */
+const OPEN_MARK_RE = /\{(?:\+\+|--|~~|>>|==)|\{#[A-Za-z0-9_-]+>>|((?:\+\+|--|~~|<<|==)\})|\\(?:begin|(end))\{/g;
+/** A line that starts a block other than a paragraph or a pipe table's
+ *  row: a list item, a quote, a heading, a fence, a thematic break or a
+ *  setext heading's underline, a footnote's definition, or code, or one in
+ *  a list item, four spaces or a tab in */
+const BLOCK_START_RE = /^(?: {0,3}(?:[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|#{1,6}(?:[ \t]|$)|```|~~~|\[\^|(?:-[ \t]*){2,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|=+[ \t]*$)| {4}|[ \t]*\t)/;
+/** Text that can take what's after it in ways the block parse doesn't
+ *  show: a brace, as of CriticMarkup, which joins a span's lines, a dollar
+ *  sign, or a LaTeX environment, which preprocessing wraps as display math
+ *  over its lines */
+const UNPLAIN_RE = /[{}$]|\\(?:begin|end)/;
 
 /** The first of sorted `offsets` at or after `at` */
 function firstAtOrAfter(offsets: number[], at: number): number {
@@ -575,59 +584,88 @@ function firstAtOrAfter(offsets: number[], at: number): number {
 /**
  * How far a comment can reach from each <!-- of `reaches` whose reach
  * markdown-it fixes (see CommentReach in code-regions.ts), as export reads
- * it. Not one in a block a CriticMarkup span joins to the lines after it,
- * which export reads as one paragraph, as preprocessCriticMarkup writes it,
- * whose comment can take them, as a directive in them. Nor one whose text
- * to its first --> holds a CriticMarkup span's opener or closer, a dollar
- * sign or a LaTeX environment's \begin or \end, where a span, an equation
- * or the environment, which preprocessing wraps as display math over its
- * lines, can take what's after it in ways the block parse doesn't show,
- * nor one after more \begins than \ends, in such an environment. The spans
- * and those marks are found once, where a bound first ends a comment
- * sooner.
+ * it, where that's short of its first -->. But only where the text from it
+ * to that --> is all of a kind whose blocks the lines show, and nothing
+ * else (see readsPlainly), and no CriticMarkup span or LaTeX environment is
+ * open at the <!--, as one would take that text. Each other comment goes to
+ * its first --> as before. The spans and environments are found once,
+ * where a bound first ends a comment sooner.
  */
 function commentBounds(markdown: string, reaches: CommentReach[]): CommentBound {
-	const byOffset = new Map<number, CommentReach>();
-	for (const reach of reaches) byOffset.set(reach.at, reach);
-	let joined: Set<number> | undefined;
-	// The marks' offsets, and the environments open after each, as many
-	// \begins as \ends after the last time none were
-	let marks: { at: number[]; open: number[] } | undefined;
+	const byOffset = new Map<number, number>();
+	for (const { at, reach } of reaches) byOffset.set(at, reach);
+	// The marks' offsets, and whether a span or an environment is open after
+	// each, as more openers than closers, or \begins than \ends, come after
+	// the last time none were
+	let marks: { at: number[]; open: boolean[] } | undefined;
+	// The last text read plainly, from its <!-- to its first -->, whose end a
+	// <!-- in it reads to too
+	let plain: { at: number; end: number } | undefined;
 	return (at, firstEnd) => {
-		const found = byOffset.get(at);
-		if (!found || found.reach >= firstEnd) return undefined;
+		const reach = byOffset.get(at);
+		if (reach === undefined || reach >= firstEnd) return undefined;
+		if (plain && plain.end === firstEnd && plain.at <= at) return reach;
 		if (!marks) {
 			marks = { at: [], open: [] };
-			let open = 0;
-			for (const match of markdown.matchAll(SPAN_MARK_RE)) {
-				if (match[0].startsWith('\\')) open = Math.max(0, open + (match[1] ? -1 : 1));
+			let spans = 0;
+			let environments = 0;
+			for (const match of markdown.matchAll(OPEN_MARK_RE)) {
+				if (match[0].startsWith('\\')) environments = Math.max(0, environments + (match[2] ? -1 : 1));
+				else spans = Math.max(0, spans + (match[1] ? -1 : 1));
 				marks.at.push(match.index);
-				marks.open.push(open);
+				marks.open.push(spans > 0 || environments > 0);
 			}
 		}
-		const next = firstAtOrAfter(marks.at, at);
-		if (next < marks.at.length && marks.at[next] < firstEnd) return undefined;
-		if (next > 0 && marks.open[next - 1] > 0) return undefined;
-		joined ??= joinedToNext(markdown, reaches);
-		return joined.has(at) ? undefined : found.reach;
+		const before = firstAtOrAfter(marks.at, at) - 1;
+		if (before >= 0 && marks.open[before]) return undefined;
+		if (!readsPlainly(markdown, at, firstEnd, offset => byOffset.get(offset) === offset)) return undefined;
+		plain = { at, end: firstEnd };
+		return reach;
 	};
 }
 
-/** The offsets of `reaches` in a block a CriticMarkup span of `markdown`
- *  joins to the line after it, as the span's payload holds its last line's
- *  end */
-function joinedToNext(markdown: string, reaches: CommentReach[]): Set<number> {
-	const joined = new Set<number>();
-	// The spans' payloads, by their starts, and the furthest end of those
-	// that start before a block's end, which comes no sooner than the last's
-	const payloads = criticPayloadRanges(markdown).sort((a, b) => a[0] - b[0]);
-	let next = 0;
-	let furthest = -1;
-	for (const { at, blockEnd } of reaches) {
-		while (next < payloads.length && payloads[next][0] < blockEnd) furthest = Math.max(furthest, payloads[next++][1]);
-		if (furthest >= blockEnd) joined.add(at);
+/**
+ * Whether the text of `markdown` from a <!-- at `at` to `end`, the end of
+ * the first --> after it, or the text's end, is all, as lines show it:
+ * - the rest of the <!--'s paragraph, to a blank line, of text whose lines
+ *   start no other block;
+ * - blank lines;
+ * - paragraphs and pipe tables at the top level, after a blank line, with no
+ *   space at their lines' starts, which start no other block;
+ * - and a table number directive on a line of its own after a blank line,
+ *   whose --> is the one at `end`.
+ * The text holds no brace, dollar sign or LaTeX environment, nor a < but a
+ * <!-- that `stray` holds is text, as markdown-it reads it, and the
+ * directive's: not an empty comment, as <!-->, whose --> can be the one at
+ * `end`, which would then open a comment the first --> didn't end. A line ends at \n alone, after a \r or not, and
+ * a \r elsewhere, which markdown-it reads as a line's end, is none of these.
+ */
+function readsPlainly(markdown: string, at: number, end: number, stray: (offset: number) => boolean): boolean {
+	let lineStart = at + 4;
+	let first = true;
+	let afterBlank = false;
+	while (lineStart < end) {
+		const newline = markdown.indexOf('\n', lineStart);
+		const lineEnd = newline === -1 || newline > end ? end : newline;
+		let line = markdown.slice(lineStart, lineEnd);
+		if (line.endsWith('\r') && lineEnd === newline) line = line.slice(0, -1);
+		const start = lineStart;
+		lineStart = lineEnd + 1;
+		if (line.includes('\r')) return false;
+		if (/^[ \t]*$/.test(line)) {
+			if (!first) afterBlank = true;
+			first = false;
+			continue;
+		}
+		if (afterBlank && lineEnd === end && DIRECTIVE_RE.test(line) && line.startsWith('<!--')) return true;
+		if (!first && (BLOCK_START_RE.test(line) || (afterBlank && /^\s/.test(line)))) return false;
+		if (UNPLAIN_RE.test(line)) return false;
+		for (let lt = line.indexOf('<'); lt !== -1; lt = line.indexOf('<', lt + 1)) {
+			if (!line.startsWith('<!--', lt) || !stray(start + lt)) return false;
+		}
+		first = false;
 	}
-	return joined;
+	return true;
 }
 
 /**
@@ -636,14 +674,9 @@ function joinedToNext(markdown: string, reaches: CommentReach[]): Set<number> {
  * it, but no further than its `bound` (see commentBounds), and a
  * <!-- whose bound is itself is text, as export reads one, which pairs with
  * no --> past its paragraph or its HTML block. But not in a table, whose
- * comments export's table parse reads. And where the scan then reads, in
- * the text to that -->, which it read as the comment before, a tag that
- * reaches past it, as one whose quote no other ends, a table's or a cell's
- * tag, or what holds the text after it, as a <script>, a processing
- * instruction, a declaration or CDATA, it reads the comment to that -->
- * again, or to the text's end where no --> is after it, so that it reads
- * the rest as before. Each comment it reads shorter, or as none, it gives
- * as `shortened`, to that --> or the end.
+ * comments export's table parse reads. Each comment it reads shorter, or as
+ * none, it gives as `shortened`, to that --> or the text's end, but not one
+ * in the text of another, which goes to the same -->.
  */
 function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?: CommentBound): {
 	tokens: HtmlSourceToken[]; inertRegions: SourceRange[]; shortened: SourceRange[];
@@ -675,27 +708,6 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 		}
 		return found;
 	};
-	// The first comment the scan reads to its bound, short of its first -->
-	// after it, from `start` to that --> at `end`, or to the text's end, and
-	// the scan's state at it, while the scan reads the text to there. No raw
-	// text is open there, as a <script> or the like in it reads the comment
-	// again
-	let hidden: { start: number; end: number; tokens: number; regions: number; openTables: number;
-		rawTextStart?: number; closingRawTextName?: string } | undefined;
-	// Read that comment to its --> again, as the scan did before, with the
-	// state it had at its <!--
-	const readHidden = (): void => {
-		const { start, end } = hidden!;
-		tokens.length = hidden!.tokens;
-		inertRegions.length = hidden!.regions;
-		openTables = hidden!.openTables;
-		rawTextStart = hidden!.rawTextStart;
-		closingRawTextName = hidden!.closingRawTextName;
-		tokens.push({ raw: html.slice(start, end), tag: true, start, end });
-		inertRegions.push({ start, end });
-		cursor = end;
-		hidden = undefined;
-	};
 	while (cursor < html.length) {
 		if (rawTextName) {
 			if (rawTextName === 'plaintext') {
@@ -725,18 +737,6 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 			break;
 		}
 		if (tagStart > cursor) tokens.push({ raw: html.slice(cursor, tagStart), tag: false, start: cursor, end: tagStart });
-		if (hidden && tagStart >= hidden.end) {
-			shortened.push({ start: hidden.start, end: hidden.end });
-			hidden = undefined;
-		}
-		// In that text, one that holds the text after it, to its end, which
-		// can be past the -->, and which a search from each of many there
-		// would look for to the text's end
-		if (hidden && (html.startsWith('<![CDATA[', tagStart) || html.startsWith('<?', tagStart)
-			|| (html[tagStart + 1] === '!' && /[A-Za-z]/.test(html[tagStart + 2] ?? '')))) {
-			readHidden();
-			continue;
-		}
 		if (html.startsWith('<![CDATA[', tagStart)) {
 			const closeStart = html.indexOf(']]>', tagStart + 9);
 			const end = closeStart < 0 ? html.length : closeStart + 3;
@@ -775,11 +775,7 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 			const close = closeAfter(tagStart + 4);
 			const firstEnd = close < 0 ? html.length : close + 3;
 			const end = (openTables > 0 ? undefined : bound?.(tagStart, firstEnd)) ?? firstEnd;
-			if (hidden && end > hidden.end) { readHidden(); continue; }
-			if (end < firstEnd && !hidden) {
-				hidden = { start: tagStart, end: firstEnd, tokens: tokens.length, regions: inertRegions.length, openTables,
-					rawTextStart, closingRawTextName };
-			}
+			if (end < firstEnd && tagStart >= (shortened[shortened.length - 1]?.end ?? 0)) shortened.push({ start: tagStart, end: firstEnd });
 			if (end === tagStart) {
 				tokens.push({ raw: '<', tag: false, start: tagStart, end: tagStart + 1 });
 				cursor = tagStart + 1;
@@ -793,19 +789,15 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 		let quote = '';
 		let end = tagStart + 1;
 		let malformedRestart: number | undefined;
-		// A tag that the text to the --> doesn't end reaches past it
-		const stop = hidden ? hidden.end : html.length;
-		let ended = false;
-		for (; end < stop; end++) {
+		for (; end < html.length; end++) {
 			if (stats) stats.htmlTagCharactersVisited++;
 			const char = html[end];
 			if (quote) {
 				if (char === quote) quote = '';
 			} else if (char === '"' || char === "'") quote = char;
 			else if (char === '<') { malformedRestart = end; break; }
-			else if (char === '>') { end++; ended = true; break; }
+			else if (char === '>') { end++; break; }
 		}
-		if (hidden && malformedRestart === undefined && !ended) { readHidden(); continue; }
 		if (malformedRestart !== undefined) {
 			tokens.push({ raw: html.slice(tagStart, malformedRestart), tag: false, start: tagStart, end: malformedRestart });
 			if (stats) stats.malformedTagRecoveries++;
@@ -826,7 +818,6 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 		const name = inner.slice(0, nameEnd).toLowerCase() || undefined;
 		const selfClosing = /\/\s*>$/.test(raw);
 		const rawText = !closing && !selfClosing && !!name && isHtmlRawTextName(name);
-		if (hidden && (rawText || name === 'table' || name === 'td' || name === 'th')) { readHidden(); continue; }
 		tokens.push({ raw, tag: true, name, closing, selfClosing, start: tagStart, end });
 		if (name === 'table' && !selfClosing) openTables = closing ? Math.max(0, openTables - 1) : openTables + 1;
 		if (closing && name && name === closingRawTextName && rawTextStart !== undefined) {
@@ -840,7 +831,6 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats, bound?
 		}
 		cursor = end;
 	}
-	if (hidden) shortened.push({ start: hidden.start, end: hidden.end });
 	if (stats) stats.structuralTokens += tokens.length;
 	return { tokens, inertRegions, shortened };
 }
@@ -1456,29 +1446,6 @@ function maskedSourceRange(source: string, start: number, end: number, ranges: S
 	return output + source.slice(cursor, end);
 }
 
-/** Of each of `kinds`, markdown-it's pipe tables or HTML blocks that hold
- *  tables, each sorted, those export writes as tables: those at the top
- *  level, but not one whose lines a CriticMarkup span joins, which export
- *  reads as the span's text, as one whose first line starts with the
- *  closer the span's payload ends at. An equation, which export reads in a
- *  paragraph's text, takes no table but over the lines such a span joins */
-function tablesExportReads(markdown: string, ...kinds: TableRegion[][]): SourceRange[][] {
-	const overLines: SourceRange[] = [];
-	for (const [start, end] of criticPayloadRanges(markdown)) {
-		if (/[\r\n]/.test(markdown.slice(start, end))) overLines.push({ start, end });
-	}
-	overLines.sort((a, b) => a.start - b.start);
-	return kinds.map(tables => {
-		// The furthest end of the spans that start before a table's end
-		let next = 0;
-		let reach = -1;
-		return tables.filter(table => {
-			while (next < overLines.length && overLines[next].start < table.end) reach = Math.max(reach, overLines[next++].end);
-			return table.topLevel && reach < table.start;
-		});
-	});
-}
-
 function isRangeEnclosed(start: number, end: number, ranges: SourceRange[]): boolean {
 	let index = firstOverlappingRange(ranges, start);
 	while (index < ranges.length && ranges[index].start < end) {
@@ -1527,10 +1494,14 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	// with the regions it read
 	const { shortened } = structuralIndex;
 	const pairedInertRegions = shortened.length === 0 ? inertRegions : mergeSourceRanges([...inertRegions, ...shortened]);
-	// The pipe tables, 0, and the HTML blocks of tables, 1, export writes
-	let exportTables: SourceRange[][] | undefined;
-	const exportsTable = (start: number, kind: 0 | 1) =>
-		!!regionAt(start, (exportTables ??= tablesExportReads(markdown, tableRegions, htmlTableBlocks))[kind]);
+	// Whether export writes the pipe table, 0, or the HTML block of tables, 1,
+	// at `start` as a table, as one at the top level, in no list item or
+	// quote. Where the scan read a comment shorter, no CriticMarkup span or
+	// LaTeX environment is open at its <!-- or in its text to its -->, nor
+	// is one between it and a table a directive in that text applies to,
+	// as the lines between, blank or a comment's, open none (see
+	// commentBounds)
+	const exportsTable = (start: number, kind: 0 | 1) => !!regionAt(start, kind === 0 ? tableRegions : htmlTableBlocks)?.topLevel;
 	// Whether a line holds text of a comment the scan read shorter
 	const holdsShortened = (line: number): boolean => {
 		if (shortened.length === 0 || line >= lines.length) return false;
@@ -1542,7 +1513,7 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		if (!holdsShortened(line)) return inertRegions;
 		const start = lineOffsets[line];
 		if (parseDirective(lines[line]) && lineInRegions(start, lineOffsets[line + 1] ?? markdown.length, literalHtmlRegions) === 'alone') return inertRegions;
-		return regionAt(start, tableRegions) && exportsTable(start, 0) ? inertRegions : pairedInertRegions;
+		return exportsTable(start, 0) ? inertRegions : pairedInertRegions;
 	};
 	const recordWarnings = (from: number, start: number, end: number) => {
 		for (const message of warnings.slice(from)) warningDetails.push({ message, start, end });
@@ -1563,10 +1534,13 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	let pendingInvalid = false;
 	// What's pending but for the directives in the text of a comment the
 	// scan read shorter, which the comment paired with its first --> hid,
-	// and whether one of them is: what they set applies only to a table
-	// export writes, and the rest, as a table in a list item, which export
-	// drops, or lines that only look like a table's, keep the format they
-	// had before, this (see formatFor)
+	// and whether that differs from what's pending: what such a directive
+	// sets applies only to a table export writes, and the rest, as a table
+	// in a list item, which export drops, or lines that only look like a
+	// table's, keep the format they had before, this (see formatFor). What
+	// that text reads starts with nothing pending, not a directive before
+	// its <!--, which a line of a comment, as one a list item holds, would
+	// carry over to it
 	let pairedPending = pending;
 	let pairedPendingInvalid = false;
 	let shortenedPending = false;
@@ -1586,8 +1560,17 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		if (pairedError) warnings.push(pairedError);
 		return { format: pairedFormat, error: pairedError, skip: pairedPendingInvalid || !!pairedError };
 	};
+	// The first of `shortened` that starts on or after the line
+	let nextShortened = 0;
 	let i = 0;
 	while (i < lines.length) {
+		while (nextShortened < shortened.length && shortened[nextShortened].start <= lineOffsets[i] + lines[i].length) {
+			if (shortened[nextShortened++].start >= lineOffsets[i]) {
+				pending = {};
+				pendingInvalid = false;
+				shortenedPending = true;
+			}
+		}
 		// Four spaces in, a line is code, or the text of a paragraph it goes
 		// on, which holds no table either, as markdown-it reads none there
 		if (isInsideCodeRegion(lineOffsets[i], blockCodeRegions) || /^ {4}/.test(lines[i])) {

@@ -67,8 +67,7 @@ export interface TableRegion extends CodeRegion {
 
 /**
  * How far a comment from a <!-- at `at` can reach, as markdown-it reads it,
- * to `reach`, in a block that ends at `blockEnd`, the start of the line
- * after its last. In a paragraph's or a heading's text, to the end of the
+ * to `reach`. In a paragraph's or a heading's text, to the end of the
  * comment html_inline reads from it, which a construct before it, as a
  * code span, can only leave text, or to `at` itself, where it reads none:
  * after a backslash, or with no --> after it in the text, which no comment
@@ -81,7 +80,6 @@ export interface TableRegion extends CodeRegion {
 export interface CommentReach {
 	at: number;
 	reach: number;
-	blockEnd: number;
 }
 
 export interface MarkdownRegionOptions {
@@ -454,7 +452,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			// Its <!-- is the first on its first line, after the markers of
 			// the list items and quotes it's in
 			const at = options.commentReaches && token.content.trimStart().startsWith('<!--') ? text.indexOf('<!--', region.start) : -1;
-			if (at !== -1 && at < region.end) commentReaches.push({ at, reach: region.end, blockEnd: region.end });
+			if (at !== -1 && at < region.end) commentReaches.push({ at, reach: region.end });
 		}
 		const isHtml = options?.html !== undefined && token.type === 'html_block' &&
 			(options.html === 'all' || !HTML_COMMENT_ONLY_RE.test(token.content.trim()));
@@ -605,7 +603,6 @@ function pushCommentReaches(token: Token, text: string, lineStarts: number[], re
 	const lines = inlineLines(token, text, lineStarts);
 	if (!lines) return;
 	const ends = commentEnds(content);
-	const blockEnd = lineStarts[token.map![1]] ?? text.length;
 	// The offset in `text` of `at` in the text, by its line, found by binary
 	// search, as a comment's end can be past the next <!--
 	const source = (at: number) => {
@@ -625,7 +622,7 @@ function pushCommentReaches(token: Token, text: string, lineStarts: number[], re
 		// The offset of its --> in the text
 		const close = backslashes % 2 === 1 ? -1 : empty ? at + empty[0].length - 3 : ends[at + 4];
 		const start = source(at);
-		reaches.push({ at: start, reach: close === -1 ? start : source(close + 2) + 1, blockEnd });
+		reaches.push({ at: start, reach: close === -1 ? start : source(close + 2) + 1 });
 	}
 }
 

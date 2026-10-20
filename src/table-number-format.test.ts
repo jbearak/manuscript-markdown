@@ -900,14 +900,12 @@ describe('table number directives after a <!-- that opens no comment', () => {
     expect(formatTableNumbers(before + '\n\n' + directive + '\n' + table + '\n\nc -->').output).toContain('| 3.1 |');
   });
 
-  test('applies a directive after a <!-- no --> ends with a tag in its paragraph, and reads the HTML table after the --> it was paired with as before', () => {
-    const markdown = 'a <!-- b <span>x</span>\n\n' + directive + '\n' + table + '\n\nc -->\n\n<table><tr><td>2.71828</td></tr></table>';
-    expect(formatTableNumbers(markdown).output).toBe(markdown.replace('3.14159', '3.1'));
-  });
-
-  // What the comment hid before, read now, would reach past its -->, and
-  // take the directive after it, which export reads
+  // A tag, or the like, in the text to the --> the <!-- was paired with
+  // keeps the comment to that --> as before, as what it holds, or a quote
+  // in it, can reach past the -->, and take the directive after it, which
+  // export reads
   test.each([
+    ['a tag', '<span>x</span>'],
     ['a <script>, which holds the text to its end tag', '<script>'],
     ['a table\'s tag', '<table>'],
     ['a tag whose quote nothing ends', '<i title="x>'],
@@ -969,19 +967,36 @@ describe('table number directives after a <!-- that opens no comment', () => {
     expect(formatTableNumbers(markdown).output).toBe(markdown.replace('3.14159', '3.1'));
   });
 
-  // Where the text to the --> the <!-- was paired with holds a CriticMarkup
-  // span's opener or closer, a dollar sign or a LaTeX environment's \begin
-  // or \end, or the <!-- is in such an environment, a span, an equation or
-  // the environment can take what's after it in ways the block parse
-  // doesn't show, so the comment goes to that --> as before
+  // Where the text to the --> the <!-- was paired with holds more than
+  // plain paragraphs, pipe tables and the directive at the top level, as a
+  // CriticMarkup span's opener or closer, a dollar sign, a LaTeX
+  // environment or a list item, or a span or an environment is open at the
+  // <!--, export can read that text in ways its lines don't show, so the
+  // comment goes to that --> as before
   test.each([
     ['a CriticMarkup span\'s closer', '{++a <!-- b++}'],
     ['a CriticMarkup span\'s opener', 'a <!-- b {>>c<<}'],
     ['a dollar sign', 'a <!-- b $x$'],
     ['a LaTeX environment', 'a <!-- b\n\n\\begin{equation}\nx\n\\end{equation}'],
     ['a LaTeX environment\'s \\end, as the <!-- is in the environment', '\\begin{equation}\na <!-- b\n\n\\end{equation}'],
+    ['a CriticMarkup span\'s closer, as the <!-- is in a span from a paragraph before', '{++x\n\na <!-- b\n\n++}'],
   ])('keeps the directive in the comment where the text to its --> holds %s', (_name, before) => {
     const markdown = before + '\n\n' + directive + '\n' + table;
+    expect(formatTableNumbers(markdown).output).toBe(markdown);
+  });
+
+  test.each([
+    ['in a list item after it', 'a <!-- b\n\n- Item\n  ' + directive + '\n\n' + table],
+    ['in the list item it\'s in', '- a <!-- b\n\n  ' + directive + '\n\n' + table],
+    ['in a quote after it', 'a <!-- b\n\n> ' + directive + '\n\n' + table],
+  ])('keeps a directive %s in the comment, which export drops from the item or the quote', (_name, markdown) => {
+    expect(formatTableNumbers(markdown).output).toBe(markdown);
+  });
+
+  test('keeps the directive in the comment where a CriticMarkup span from a paragraph before the <!-- goes on past the directive', () => {
+    // Export joins the span's lines, and the comment in them takes the
+    // directive
+    const markdown = '{++x\n\na <!-- b\n\n' + directive + '\n\nc++}\n\n' + table;
     expect(formatTableNumbers(markdown).output).toBe(markdown);
   });
 
@@ -1004,24 +1019,29 @@ describe('table number directives after a <!-- that opens no comment', () => {
     ['the document\'s digits', { digits: 1 }, 'a <!-- b\n\n' + table + '\n\n', '| 3.14159 |'],
     ['no format, with a --> before the run', {}, 'a <!-- b\n\n' + table + '\n\nc -->\n\n', '| 3.14159 |'],
     ['the document\'s digits, with a --> before the run', { digits: 1 }, 'a <!-- b\n\n' + table + '\n\nc -->\n\n', '| 3.1 |'],
+    ['a directive before the table and a CriticMarkup span before the run', {}, 'a <!-- b\n\n' + directive + '\n' + table + '\n\n{++word++}\n\n', '| 3.1 |'],
   ])('reads a long run of dollar signs after a <!-- and a table in linear time, with %s', (_name, format, before, row) => {
-    // A read of the dollar math that measured the rest of the run from each
-    // dollar sign took time in the square of its length
-    const time = (n: number) => fastestRun(() => expect(formatTableNumbers(before + '$'.repeat(n), format).output.split('\n')[4]).toBe(row));
+    // A read of the dollar math, as of CriticMarkup's, that measured the
+    // rest of the run from each dollar sign took time in the square of its
+    // length
+    const time = (n: number) => fastestRun(() => expect(formatTableNumbers(before + '$'.repeat(n), format).output.split('\n').find(line => /^\| \d/.test(line))).toBe(row));
     time(4000);
     expect(time(64000) / time(16000)).toBeLessThan(8);
   }, 30000);
 
   test.each([
-    ['a <!-- no --> ends in each paragraph', 'a <!-- b\n\n'],
-    ['a comment block each list item ends', '- <!-- b\n\n'],
-    ['a <!-- before a <script> and a --> in each paragraph', 'a <!-- b <script>\n\nc -->\n\n'],
-  ])('reads %s in linear time', (_name, unit) => {
+    ['a <!-- no --> ends in each paragraph', 'a <!-- b\n\n', '| 3.1 |'],
+    // The first item's text to the directive's --> holds the next item, so
+    // the comment goes to that -->
+    ['a comment block each list item ends', '- <!-- b\n\n', '| 3.14159 |'],
+    ['a <!-- before a <script> and a --> in each paragraph', 'a <!-- b <script>\n\nc -->\n\n', '| 3.1 |'],
+    ['a <!-- before a list item\'s directive in each paragraph', 'a <!-- b\n\n- Item\n  ' + directive + '\n\n', '| 3.1 |'],
+  ])('reads %s in linear time', (_name, unit, row) => {
     // Each comment's search for its --> from the <!--, which went on to the
     // text's end where no --> was, would take time in the square of their
-    // number once each ends sooner, as would each <script>'s for its end
-    // tag in the text the comment it's read again for hid
-    const time = (n: number) => fastestRun(() => expect(lastRow(unit.repeat(n) + directive + '\n' + table)).toBe('| 3.1 |'));
+    // number once each ends sooner, as would a read of the text to it from
+    // each <!-- in it
+    const time = (n: number) => fastestRun(() => expect(lastRow(unit.repeat(n) + directive + '\n' + table)).toBe(row));
     time(2000);
     expect(time(32000) / time(8000)).toBeLessThan(8);
   }, 30000);
