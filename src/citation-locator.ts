@@ -162,6 +162,16 @@ const withCitationEscapesRead = (text: string) => text.replace(CITATION_ESCAPE_R
 const CITATION_CHARACTERS_RE = /(?<!\\)\\*[;[\]@]/g;
 // An odd run of backslashes at the end
 const TRAILING_ESCAPE_RE = /(?:^|[^\\])(?:\\\\)*\\$/;
+// A ;, a [, a ] or an @ with an even run of backslashes before it, or none,
+// which ends an item or a citation, or starts a key, as an escape no
+// longer escapes where a locator's backslash at its end comes right before
+// a suffix's, as 2\ and \] x make 2\\] x
+const UNESCAPED_CHARACTER_RE = /(?:^|[^\\])(?:\\\\)*[;[\]@]/;
+/** Whether this text after a key would end its item, or the citation, or
+ *  start a key, before its end: at a ;, a [, a ] or an @ no backslash
+ *  escapes, or at the ; or the ] after it, where a backslash at its end
+ *  that no other escapes would escape that */
+const endsEarly = (text: string) => TRAILING_ESCAPE_RE.test(text) || UNESCAPED_CHARACTER_RE.test(text);
 const withCitationCharactersEscaped = (text: string) => text.replace(CITATION_CHARACTERS_RE, run => run.slice(0, -1).replace(/\\/g, '\\\\') + '\\' + run.slice(-1));
 const untagged = (text: string) => text.replace(TAG_RE, '');
 const PUNCTUATION_RE = /^\p{P}/u;
@@ -414,11 +424,12 @@ function knownLabel(label: string | undefined): string {
  *  no other closes.
  *  Of these, the first Pandoc reads the same too, else the first export
  *  reads so, as app. A, for a label Pandoc has no term for (see
- *  COMPATIBLE_TERMS). Failing all, with a locator, as one with a backslash
- *  before a brace, the first, the label's term and the locator, as main
- *  wrote it; without, as for a suffix that starts with a digit, the last,
- *  which reads as the suffix with a space before it. Empty where there's
- *  neither. */
+ *  COMPATIBLE_TERMS). None of these ends the item or the citation before
+ *  its end (see endsEarly). Failing all, of those that don't: with a
+ *  locator, as one with a backslash before a brace, the first not in
+ *  braces, the label's term and the locator, as main wrote it; without, as
+ *  for a suffix that starts with a digit, the last, which reads as the
+ *  suffix with a space before it. Empty where there's neither. */
 export function citationLocatorText(locator: string | undefined, label: string | undefined, suffix: string | undefined): string {
   const loc = (locator ?? '').trim();
   // Its end as readCitationItem trims it
@@ -426,9 +437,9 @@ export function citationLocatorText(locator: string | undefined, label: string |
   if (!loc && !after) return '';
   const wanted = loc ? knownLabel(label) : undefined;
   const reads = (text: string, withCompatible: boolean) => {
-    // As readCitationItem gives it, trimmed, and with no backslash at its
-    // end that no other escapes, which would escape the ; or the ] after it
-    if (text !== text.trim() || TRAILING_ESCAPE_RE.test(text)) return false;
+    // As readCitationItem gives it, trimmed, and as all of the item, to the
+    // ; or the ] after it
+    if (text !== text.trim() || endsEarly(text)) return false;
     const read = readLocator(text, withCompatible);
     const readSuffix = read.suffix ?? '';
     return (read.locator ?? '') === loc && read.label === wanted
@@ -450,6 +461,14 @@ export function citationLocatorText(locator: string | undefined, label: string |
   }
   // As export reads it, and as Pandoc does too where one reads so, as
   // {p. A}, not p. A, which Pandoc reads as text
-  return candidates.find(text => reads(text, true) && reads(text, false)) ?? candidates.find(text => reads(text, true))
-    ?? (loc ? candidates[0] : candidates[candidates.length - 1]);
+  const found = candidates.find(text => reads(text, true) && reads(text, false)) ?? candidates.find(text => reads(text, true));
+  if (found !== undefined) return found;
+  // Of those that would end the item or the citation no earlier (see
+  // endsEarly), as A]\ is written p. A\]\\, not p. A\]\, whose last
+  // backslash would escape the ; after it, so the next item would read as
+  // more of this one, the form with its backslashes escaped too having
+  // none; with a locator, the first not in braces, not {p. A\]\}, whose
+  // last brace is escaped
+  const safe = candidates.filter(text => !endsEarly(text));
+  return (loc ? safe.find(text => !text.startsWith('{')) ?? safe[0] : safe[safe.length - 1]) ?? candidates[0];
 }

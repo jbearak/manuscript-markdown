@@ -179,15 +179,16 @@ function escapedAt(text: string, at: number): boolean {
  * read so before reads so still. It's the first such ] after any [ up to
  * it, so it's found from where a search for it starts, whatever [ that is.
  * A search of the same text in turn that passes `scan` reads past each
- * escaped ] once, not again from each [ before a far ] or none.
+ * escaped ] once, not again from each [ before a far ] or none, whether
+ * each starts after the last or before it.
  */
 export function citationClose(text: string, start: number, scan?: CloseScan): number {
   const close = text.indexOf(']', start + 1);
-  if (close === -1 || !escapedAt(text, close) || endsKeyAt(text, close - 1)) return close;
+  if (close === -1 || !escapedClose(text, close)) return close;
   let stop: number;
   if (scan && scan.from <= close && close < scan.stop) stop = scan.stop;
   else {
-    stop = stopAfter(text, close);
+    stop = stopAfter(text, close, scan);
     if (scan) {
       scan.from = close;
       scan.stop = stop;
@@ -196,18 +197,27 @@ export function citationClose(text: string, start: number, scan?: CloseScan): nu
   return text.charCodeAt(stop) === 0x5D /* ] */ ? stop : close;
 }
 
+/** Whether the ] at `close` in `text` is one a backslash escapes, so that a
+ *  later ] can end the citation instead (see citationClose) */
+export function escapedClose(text: string, close: number): boolean {
+  return escapedAt(text, close) && !endsKeyAt(text, close - 1);
+}
+
 /** A run of text a search for a citation's ] read past an escaped ] at
  *  `from`, to `stop`, where stopAfter stopped. stopAfter stops at the same
  *  place from any escaped ] in the run, as nothing in it stops it, and the
  *  backslashes before that ] start after `from`, so read in pairs from
- *  there they escape it there too. */
+ *  there they escape it there too. So a search from an escaped ] before the
+ *  run that reads on to `from` stops at `stop` too. */
 export type CloseScan = { from: number; stop: number };
 
 /** The first [ or ] after the escaped ] at `close` in `text` that no
- *  backslash escapes, or a ] whose backslash ends a key, or the text's end */
-function stopAfter(text: string, close: number): number {
+ *  backslash escapes, or a ] whose backslash ends a key, or the text's end.
+ *  Read on from `known`'s escaped ] as from that one, once there. */
+function stopAfter(text: string, close: number, known?: CloseScan): number {
   let escaped = false;
   for (let at = close + 1; at < text.length; at++) {
+    if (known && at === known.from) return known.stop;
     const code = text.charCodeAt(at);
     if (escaped) {
       escaped = false;

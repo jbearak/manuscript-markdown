@@ -147,6 +147,44 @@ describe('citation keys as export reads them', () => {
 		expect(runs.flatMap(item => item.keys ?? [])).toEqual(exportKeys);
 	});
 
+	// Which it bounded by the first ] before the cursor, escaped or not, so
+	// it found the key on the line alone, with no [ before it, and no key
+	// for go to definition, references or rename. And a guard: an escaped ]
+	// that ends the citation, as before, before a [
+	test.each([
+		['an escaped [ and ] in a locator', '[@a, p. 4 \\[n. 2\\];\n@b]', ['a', 'b']],
+		['an escaped ] a later ] ends the citation after', '[@a, x\\] y;\n@b]', ['a', 'b']],
+		['an escaped [ in a later item\'s prefix', '[@a;\nsee \\[x\\] @b]', ['a', 'b']],
+		['an escaped ] before a [', '[@a, x\\] and\n[@b]', ['a', 'b']],
+	])('finds each key at the cursor in a citation over two lines with %s', (_name, text, keys) => {
+		const usages = scanCitationUsages(text);
+		expect(usages.map(usage => usage.key)).toEqual(keys);
+		for (const usage of usages) {
+			expect(findCitekeyAtOffset(text, usage.keyStart - 1)).toBe(usage.key);
+			expect(findCitekeyAtOffset(text, usage.keyEnd)).toBe(usage.key);
+		}
+	});
+
+	// Which ended the citation at the first ] before the @, escaped or not,
+	// so only a key after a space or a ; was completed there
+	test('completes a key after a -@ after an escaped ] a later ] ends the citation after', () => {
+		const text = '[@a, x\\] y; -@b]';
+		expect(getCompletionContextAtOffset(text, text.indexOf('b]') + 1)?.prefix).toBe('b');
+		// A guard: one after an escaped ] that ends the citation, as before
+		expect(getCompletionContextAtOffset('[@a, x\\] y -@b', 14)).toBeUndefined();
+	});
+
+	// Each [ before the cursor reads past each escaped ] once
+	test('finds the key at the cursor after many escaped brackets in linear time', () => {
+		const time = (n: number) => {
+			const input = ' \\[ \\]'.repeat(80) + ' @b ' + 'x \\] '.repeat(n) + ']';
+			const at = input.indexOf('@b') + 1;
+			return fastestRun(() => findCitekeyAtOffset(input, at), 5);
+		};
+		time(4000);
+		expect(time(16000) / time(4000)).toBeLessThan(8);
+	}, 30000);
+
 	test('finds the key of a citation in brackets after text at the cursor', () => {
 		const text = '[text [@smith2020]]';
 		expect(findCitekeyAtOffset(text, text.indexOf('smith') + 2)).toBe('smith2020');

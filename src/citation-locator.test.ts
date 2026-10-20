@@ -3,7 +3,8 @@ import JSZip from 'jszip';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { readCitationLocator, citationLocatorText, type CitationLocator } from './citation-locator';
-import { convertMdToDocx } from './md-to-docx';
+import { readCitationItems } from './citation-syntax';
+import { citationEndInText, convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
 import { createCiteprocEngine, generateCitation, generateFallbackText, renderCitationText } from './md-to-docx-citations';
 import { parseBibtex } from './bibtex-parser';
@@ -275,6 +276,12 @@ describe('citationLocatorText, as import writes a locator', () => {
     // Which Pandoc, as export, reads as the locator 4 and the suffix
     // [n. 2], which citeproc shows the same
     ['4 [n. 2]', 'page', undefined, 'p. 4 \\[n. 2\\]'],
+    // Which no text reads back as: not p. A\]\, whose last backslash would
+    // escape the ; or the ] after it, nor {p. A\]\}, whose last brace is
+    // escaped, but with its backslash escaped, which reads as the locator A
+    // and the suffix ]\, which citeproc shows the same
+    ['A]\\', 'page', undefined, 'p. A\\]\\\\'],
+    ['A]\\', 'chapter', 'x\\', 'chap. A\\]\\x\\\\'],
     // A tag, part of the locator's word, as main wrote it, and in a suffix
     ['<sup>2</sup>', 'page', undefined, 'p. <sup>2</sup>'],
     ['<i>iv</i>', 'chapter', undefined, 'chap. <i>iv</i>'],
@@ -301,6 +308,26 @@ describe('citationLocatorText, as import writes a locator', () => {
       const written = citationLocatorText(read.locator, label, read.suffix);
       if (!written) continue;
       expect([text, readCitationLocator(written)]).toEqual([text, { ...(read.locator ? { locator: read.locator, label } : {}), ...(read.suffix ? { suffix: read.suffix } : {}) }]);
+    }
+  });
+
+  it('writes no item that would end at a later ; or ], read back or not', () => {
+    const words = ['A', '2', ']', '[', ';', '@', '\\', '{', '}', ' ', 'x', ','];
+    const labels = [undefined, 'page', 'chapter', 'section'];
+    let seed = 11;
+    const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    const text = () => {
+      let s = '';
+      for (let n = Math.floor(random() * 5); n > 0; n--) s += words[Math.floor(random() * words.length)];
+      return s || undefined;
+    };
+    for (let i = 0; i < 3000; i++) {
+      const locator = text(), suffix = text();
+      const written = citationLocatorText(locator, labels[Math.floor(random() * labels.length)], suffix);
+      if (!written) continue;
+      expect([locator, suffix, readCitationItems('@a, ' + written + '; @b').map(item => item.key)]).toEqual([locator, suffix, ['a', 'b']]);
+      const inner = '@a, ' + written;
+      expect([locator, suffix, citationEndInText('[' + inner + '] x]', 0)]).toEqual([locator, suffix, inner.length + 1]);
     }
   });
 });
@@ -758,8 +785,9 @@ describe('guards: citations main wrote as these already', () => {
 // [@doe2020, p. 2\; 5] ended its item at the ; and [@doe2020, p. 4 \[n. 2\]]
 // its citation at the first ]. Escaped, as Pandoc reads them. Each case's
 // field's items, its Markdown at each import, and, where Pandoc reads the
-// locator otherwise, the items export writes, which citeproc shows the same
-const ZOTERO_CHARACTERS: Array<[FieldItem[], string, FieldItem[]?]> = [
+// locator otherwise, the items export writes, which citeproc shows the same,
+// and the Markdown the next import writes for those, where it differs
+const ZOTERO_CHARACTERS: Array<[FieldItem[], string, FieldItem[]?, string?]> = [
   [[{ locator: '2; 5', label: 'page' }], 'A [@doe2020, pp. 2\\; 5] b.\n'],
   [[{ locator: '4', label: 'page', suffix: '; also elsewhere' }], 'A [@doe2020, p. 4\\; also elsewhere] b.\n'],
   [[{ locator: '4 [n. 2]', label: 'page' }], 'A [@doe2020, p. 4 \\[n. 2\\]] b.\n', [{ locator: '4', label: 'page', suffix: ' [n. 2]' }]],
@@ -768,6 +796,10 @@ const ZOTERO_CHARACTERS: Array<[FieldItem[], string, FieldItem[]?]> = [
   [[{ suffix: ', via @x' }], 'A [@doe2020, via \\@x] b.\n'],
   [[{ locator: '2', label: 'page', suffix: ', see [^1]' }], 'A [@doe2020, p. 2, see \\[^1\\]] b.\n'],
   [[{ locator: '2; 5', label: 'page' }, { prefix: 'see [also]' }], 'A [@doe2020, pp. 2\\; 5; see \\[also\\] @roe2019] b.\n'],
+  // A locator no text reads back as, written with no backslash at its end
+  // that no other escapes, which would escape the ; after it, so the next
+  // export would drop roe2019
+  [[{ locator: 'A]\\', label: 'page' }, {}], 'A [@doe2020, p. A\\]\\\\; @roe2019] b.\n', [{ locator: 'A', label: 'page', suffix: ']\\' }, {}], 'A [@doe2020, {p. A}\\]\\\\; @roe2019] b.\n'],
 ];
 
 // Each case's Markdown and its field's items at the first export
@@ -819,12 +851,12 @@ const zoteroCharacterTrips = once(async () => {
 });
 
 describe('a citation\'s ;, [, ] and @ through Word, over two trips', () => {
-  it.each(ZOTERO_CHARACTERS.map((c, k) => [c[0], c[1], c[2] ?? c[0], k] as const))('imports Zotero\'s %j escaped, as %j', async (_items, written, items, k) => {
+  it.each(ZOTERO_CHARACTERS.map((c, k) => [c[0], c[1], c[2] ?? c[0], c[3] ?? c[1], k] as const))('imports Zotero\'s %j escaped, as %j', async (_items, written, items, next, k) => {
     const { shown, markdowns, exported } = await zoteroCharacterTrips();
     expect(markdowns[0][k]).toBe(written);
     expect(exported[0][k].items).toEqual(items);
     expect(exported[0][k].shown).toBe(shown[k]);
-    expect(markdowns[1][k]).toBe(written);
+    expect(markdowns[1][k]).toBe(next);
     expect(exported[1][k]).toEqual(exported[0][k]);
   }, 60000);
 

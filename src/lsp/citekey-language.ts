@@ -12,7 +12,8 @@ import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter'
 // - BibTeX key offsets: locate keys starting after opening `{`, not first substring match
 //   in whole header
 // - Local scan bounds: findCitekeyAtOffset() must not stop at newlines inside bracketed
-//   citations; use nearest unclosed `[` and matching `]` for multi-line grouped citations
+//   citations; use nearest unclosed `[` and matching `]` for multi-line grouped citations,
+//   each ] as citationClose reads it, past a \] a later ] ends the citation after
 // - Bib reverse-map recovery: on .bib create/change, recheck open markdown docs not yet
 //   in docToBibMap and backfill
 
@@ -257,6 +258,37 @@ export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
 	return scanBlankedCitationUsages(blankCodeRegions(text, computeCodeRegions(text)), multiline).filter(usage => usage.key === key);
 }
 
+/** The segment around `offset` in `text` as scanBlankedCitationUsages finds
+ *  it: the [ at or before it, and before that each [ within `reach` of it
+ *  whose citation ends at or past that [, back to the first, which is that
+ *  segment's, and the ] that ends the citation from it (see citationClose),
+ *  -1 for none. Undefined where none is within `reach`, or where the
+ *  citation ends before the offset. A [ that reaches past the next has the
+ *  same ] as that one (see citationClose), so only a ] between two needs
+ *  another search, and each search after the first reads only to where the
+ *  last started (see CloseScan), so the text is read once. */
+function citationAround(text: string, offset: number, reach: number): { open: number; close: number } | undefined {
+	let open = text.lastIndexOf('[', offset);
+	if (open === -1 || offset - open > reach) return undefined;
+	const scan = { from: -1, stop: -1 };
+	let close = citationClose(text, open, scan);
+	if (close !== -1 && close < offset) return undefined;
+	// The last ] before the [ at hand, found again only once a [ is before it
+	let before = text.lastIndexOf(']', open - 1);
+	for (;;) {
+		const prev = open > 0 ? text.lastIndexOf('[', open - 1) : -1;
+		if (prev === -1 || offset - prev > reach) break;
+		if (before > prev) {
+			const prevClose = citationClose(text, prev, scan);
+			if (prevClose !== -1 && prevClose < open) break;
+			close = prevClose;
+			before = text.lastIndexOf(']', prev - 1);
+		}
+		open = prev;
+	}
+	return { open, close };
+}
+
 export function findCitekeyAtOffset(text: string, offset: number): string | undefined {
 	if (offset < 0 || offset >= text.length) return undefined;
 	// The brackets and keys of the text with its code blanked, as
@@ -269,26 +301,12 @@ export function findCitekeyAtOffset(text: string, offset: number): string | unde
 	let scanStart = offset;
 	let scanEnd = offset;
 
-	// Prefer a nearby bracket-bounded scan (can span newlines).
-	// Walk backward past unclosed '[' to find the outermost one, since
-	// the citation regex [^\]]*@[^\]]*] can match inner '[' characters.
-	let openBracket = scanText.lastIndexOf('[', offset);
-	while (openBracket > 0) {
-		const prevOpen = scanText.lastIndexOf('[', openBracket - 1);
-		const prevClose = scanText.lastIndexOf(']', openBracket - 1);
-		if (prevOpen !== -1 && prevOpen > prevClose && (offset - prevOpen) <= maxScanDistance) {
-			openBracket = prevOpen;
-		} else {
-			break;
-		}
-	}
-	const closeBracketBefore = scanText.lastIndexOf(']', Math.max(0, offset - 1));
-	if (openBracket !== -1 && openBracket > closeBracketBefore && (offset - openBracket) <= maxScanDistance) {
-		const closeBracket = scanText.indexOf(']', offset);
-		if (closeBracket !== -1 && (closeBracket - offset) <= maxScanDistance) {
-			scanStart = openBracket;
-			scanEnd = closeBracket + 1;
-		}
+	// Prefer a nearby bracket-bounded scan (can span newlines): the
+	// citation the offset is in, as scanCitationUsages finds its segment.
+	const around = citationAround(scanText, offset, maxScanDistance);
+	if (around && around.close !== -1 && (around.close - offset) <= maxScanDistance) {
+		scanStart = around.open;
+		scanEnd = around.close + 1;
 	}
 
 	// Fallback: same-line bounded scan when no nearby bracket segment is found.
@@ -478,13 +496,14 @@ export function isInsideCitationSegmentAtOffset(text: string, atOffset: number):
 	if (openBracket === -1) {
 		return false;
 	}
-	const closedBefore = text.lastIndexOf(']', atOffset);
-	if (closedBefore > openBracket) {
+	// The ] that ends the citation, as export reads it, past a \] a later ]
+	// ends it after (see citationClose)
+	const closeBracket = citationClose(text, openBracket);
+	if (closeBracket !== -1 && closeBracket < atOffset) {
 		return false;
 	}
 	const lineEnd = text.indexOf('\n', openBracket + 1);
 	const sameLineEnd = lineEnd !== -1 ? lineEnd : text.length;
-	const closeBracket = text.indexOf(']', openBracket + 1);
 	// Only use ] as segment end if it's on the same line as [
 	const closeBracketOnSameLine = closeBracket !== -1 && closeBracket < sameLineEnd ? closeBracket : -1;
 	const segmentEnd = closeBracketOnSameLine !== -1 ? closeBracketOnSameLine : sameLineEnd;

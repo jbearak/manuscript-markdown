@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as fc from 'fast-check';
 import { citationClose, readCitationItems } from './citation-syntax';
+import { fastestRun } from './test-timing';
 
 describe('Command Handler Unit Tests', () => {
   
@@ -516,15 +517,13 @@ describe('Syntax grammar citation keys', () => {
     ['an @ in its locator', '[@a, see @b; @c]'],
     ['an @ after a [ in its locator', '[@a, [ @b]'],
     ['an @ after a [ that starts an item', '[@a; [@b; x [@c]'],
-    // A ;, a [, a ] or an @ a backslash escapes, which ends no item or
-    // citation and starts no key, but a ] no later ] ends it after, or
-    // whose backslash ends a key
+    // A ;, a [ or an @ a backslash escapes, which ends no item and starts
+    // no key, and a \] that ends the citation, as export reads one where no
+    // later ] ends it after, or where its backslash ends a key
     ['an escaped ; in its locator', '[@a, p. 2\\; 5; @b]'],
     ['an escaped ; in a prefix', '[see \\; also @a; @b]'],
     ['an escaped @ in a prefix', '[cf. \\@x @a]'],
-    ['an escaped [ and ] in its locator', '[@a, p. 4 \\[n. 2\\]; @b]'],
-    ['an escaped ] in a prefix', '[see \\] x @a]'],
-    ['an escaped [ in a later item\'s prefix', '[@a; see \\[x\\] @b]'],
+    ['an escaped [ in a later item\'s prefix', '[@a; see \\[x @b]'],
     ['an escaped ] that ends it, no ] after it', '[@a, p. 3\\] @b'],
     ['an escaped ] that ends it, a [ before the next ]', '[@a, x\\] @b [c]'],
     ['a key that ends with a backslash', '[@a\\] @b]'],
@@ -534,6 +533,40 @@ describe('Syntax grammar citation keys', () => {
     expect(coloredKeys(line)).toEqual(readKeys(line));
     expect(coloredKeys(line).length).toBeGreaterThan(0);
   });
+
+  // Not fixed: a \] that export reads a later ] as the citation's end after
+  // (see citationClose), which ends the citation in the grammar, as before,
+  // as a lookahead for that ] from each \] reads the rest of the line again
+  // for each. Each line, the keys the grammar colors, and those export reads
+  it.each([
+    ['an escaped [ and ] in its locator', '[@a, p. 4 \\[n. 2\\]; @b]', ['a'], ['a', 'b']],
+    ['an escaped ] in its locator', '[@a, x\\] y; @b]', ['a'], ['a', 'b']],
+    ['an escaped [ and ] in a later item\'s prefix', '[@a; see \\[x\\] @b]', ['a'], ['a', 'b']],
+    ['an escaped ] in a prefix', '[see \\] x @a]', [], ['a']],
+  ])('Not fixed: colors the keys of a citation with %s to its \\], as main did', (_name, line, colored, read) => {
+    expect(coloredKeys(line).map(([, key]) => key)).toEqual(colored);
+    expect(readKeys(line).map(([, key]) => key)).toEqual(read);
+  });
+
+  // Its patterns tried at each place in a line of many \], as vscode-textmate
+  // tries them, where a lookahead from each \] for a later ] read the rest of
+  // the line again for each
+  it('tries its patterns at each place in a line of many escaped ] in linear time', () => {
+    const regexes = [rule.begin, rule.end, ...(rule.patterns as Array<{ match: string }>).map(pattern => pattern.match)].map(source => asRegExp(source, 'yu'));
+    const time = (n: number) => {
+      const line = '[@a, ' + 'x \\] '.repeat(n) + ']';
+      return fastestRun(() => {
+        for (let at = 0; at < line.length; at++) {
+          for (const regex of regexes) {
+            regex.lastIndex = at;
+            regex.test(line);
+          }
+        }
+      });
+    };
+    time(4000);
+    expect(time(16000) / time(4000)).toBeLessThan(8);
+  }, 60000);
 
   /**
    * The grammar colors each key of a citation on one line as export reads
@@ -546,14 +579,12 @@ describe('Syntax grammar citation keys', () => {
     const wordOf = (alphabet: string[]) => fc.array(fc.constantFrom(...alphabet), { minLength: 1, maxLength: 4 }).map(chars => chars.join(''));
     const wordsOf = (alphabet: string[]) => fc.array(wordOf(alphabet), { minLength: 1, maxLength: 3 }).map(parts => parts.join(' '));
     const words = wordsOf(characters);
-    // A prefix with a ;, a [ or an @ a backslash escapes too, and a locator
-    // with those and a ] too, but with no @ a backslash doesn't escape,
-    // which can start a word a key could be: a \] after one ends the
-    // citation where export reads none of it as a key, as in a locator,
-    // which the grammar reads only at its line's next ] (see endsKeyAt).
-    // No key, as a backslash in one escapes nothing.
+    // A prefix and a locator with a ;, a [ or an @ a backslash escapes too,
+    // but no \], which the grammar reads as the citation's end, where export
+    // reads a later ] as its end (see the cases Not fixed above). No key, as
+    // a backslash in one escapes nothing.
     const prefixWords = wordsOf([...characters, '\\;', '\\[', '\\@']);
-    const locatorWords = wordsOf([...characters.filter(c => c !== '@'), '\\;', '\\[', '\\]', '\\@']);
+    const locatorWords = wordsOf([...characters, '\\;', '\\[', '\\@']);
     const item = fc.tuple(fc.option(prefixWords, { nil: undefined }), fc.constantFrom('', '-'), fc.constantFrom('', ' '), words, fc.option(locatorWords, { nil: undefined }), fc.constantFrom('', ' '))
       .map(([prefix, dash, space, key, locator, pad]) => pad + (prefix ? prefix + ' ' : '') + dash + '@' + space + key + (locator ? ', ' + locator : '') + pad);
     fc.assert(

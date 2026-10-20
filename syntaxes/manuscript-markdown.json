@@ -145,7 +145,7 @@
 			"name": "constant.character.escape.manuscript-markdown"
 		},
 		"citation_list": {
-			"begin": "\\[(?=\\s*-?@|(?:[^\\[\\];`\\\\]|\\\\[^\\[\\]]|\\\\\\](?=(?:[^\\[\\]\\\\]|\\\\.)*?(?:\\]|(?<![^\\s\\[;])-?@\\s*[^\\s,;\\]@`]*\\\\\\])))*\\s-?@[\\p{L}\\p{N}_](?!(?:[^\\[\\]\\\\]|\\\\[^\\]]|\\\\\\](?=(?:[^\\[\\]\\\\]|\\\\.)*?(?:\\]|(?<![^\\s\\[;])-?@\\s*[^\\s,;\\]@`]*\\\\\\])))*(?:\\\\(?!\\](?=(?:[^\\[\\]\\\\]|\\\\.)*?(?:\\]|(?<![^\\s\\[;])-?@\\s*[^\\s,;\\]@`]*\\\\\\]))))?\\][(\\[]))",
+			"begin": "\\[(?=\\s*-?@|(?:[^\\[\\];`\\\\]|\\\\[^\\[\\]])*\\s-?@[\\p{L}\\p{N}_](?![^\\[\\]]*\\][(\\[]))",
 			"beginCaptures": {
 				"0": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
 			},
@@ -156,8 +156,8 @@
 			"name": "meta.citation.manuscript-markdown",
 			"patterns": [
 				{
-					"comment": "A key as export reads it (see readCitationItem in src/citation-syntax.ts): after the first @ or -@ at its item's start or after a space, past spaces, to its item's comma, without the spaces at its end. An item starts right after the citation's [, where \\G matches, as the begin pattern's match ends there, after a ; it takes, which a backslash doesn't escape (see the escape below), or at a line's start, but not after another [, which is text in an item. A backslash escapes the character after it in the prefix, as in see \\; also or cf. \\@x, and a ] where a later ] ends the citation with no [ before it that none escapes (see citationClose)",
-					"match": "(?:\\G|^|(;))(?:(?:[^;\\]\\\\]|\\\\[^\\]]|\\\\\\](?=(?:[^\\[\\]\\\\]|\\\\.)*?(?:\\]|(?<![^\\s\\[;])-?@\\s*[^\\s,;\\]@`]*\\\\\\])))*?(?<=\\s))??(-?)(@)\\s*([^,;\\]\\s](?:[^,;\\]]*[^,;\\]\\s])?)?",
+					"comment": "A key as export reads it (see readCitationItem in src/citation-syntax.ts): after the first @ or -@ at its item's start or after a space, past spaces, to its item's comma, without the spaces at its end. An item starts right after the citation's [, where \\G matches, as the begin pattern's match ends there, after a ; it takes, which a backslash doesn't escape (see the escape below), or at a line's start, but not after another [, which is text in an item. A backslash escapes the character after it in the prefix, as in see \\; also or cf. \\@x, but a ], as in x\\], ends the citation here, as main read it, where export reads a later ] as its end where one comes with no [ before it that no backslash escapes (see citationClose): a lookahead for that ] from each \\] reads the rest of the line again for each, and the grammar only colours text",
+					"match": "(?:\\G|^|(;))(?:(?:[^;\\]\\\\]|\\\\[^\\]])*?(?<=\\s))??(-?)(@)\\s*([^,;\\]\\s](?:[^,;\\]]*[^,;\\]\\s])?)?",
 					"captures": {
 						"1": { "name": "punctuation.separator.sequence.manuscript-markdown" },
 						"3": { "name": "support.function.citation.manuscript-markdown" },
@@ -165,12 +165,8 @@
 					}
 				},
 				{
-					"comment": "A word a key could be, after an @ or a -@ at a line's start or after a space, a [ or a ;, and spaces, with characters a key can have, that ends with a backslash before a ], which ends the citation, as in [@a, see @b\\], as export reads it (see endsKeyAt in src/citation-syntax.ts), so the escape below takes no ] after it",
-					"match": "(?<![^\\s\\[;])-?@\\s*[^\\s,;\\]@`]*\\\\(?=\\])"
-				},
-				{
-					"comment": "A character a backslash escapes, as \\; in p. 2\\; 5, which ends no item, and a ] where a later ] ends the citation with no [ before it that none escapes, as in p. 4 \\[n. 2\\], as export reads it (see citationItemEnd and citationClose in src/citation-syntax.ts)",
-					"match": "\\\\(?:[^\\]]|\\](?=(?:[^\\[\\]\\\\]|\\\\.)*?(?:\\]|(?<![^\\s\\[;])-?@\\s*[^\\s,;\\]@`]*\\\\\\])))",
+					"comment": "A character a backslash escapes, as \\; in p. 2\\; 5, which ends no item, as export reads it (see citationItemEnd in src/citation-syntax.ts), but not a ], which ends the citation (see the key above)",
+					"match": "\\\\[^\\]]",
 					"name": "constant.character.escape.manuscript-markdown"
 				},
 				{

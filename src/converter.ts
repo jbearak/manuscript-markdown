@@ -16,7 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { readCitationItems } from './citation-syntax';
+import { escapedClose, readCitationItems } from './citation-syntax';
 import { citationLocatorText } from './citation-locator';
 import { bibtexNameParts, citeprocFieldText } from './md-to-docx-citations';
 import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
@@ -1182,7 +1182,11 @@ function hostsIn(markdown: string, text: string, own: RunFormatting, limit: numb
  *  text back; undefined where they don't, as for [@a,p. 2]. Export runs a
  *  prefix's spaces together, and keeps one locator and one - for each key,
  *  the last, so [see  also @a] and [@a, p. 1; @a, p. 2] don't, nor does
- *  one with a line break in it. */
+ *  one with a line break in it. Nor does one whose keys and locators,
+ *  written as they are, export would read with other bounds, now that a
+ *  backslash escapes a ] or a ; there (see citationClose and
+ *  citationItemEnd in citation-syntax.ts), as Word's [@a, x\] *y*], which
+ *  would read to its last ], so its stars, escaped, would be its text. */
 function citationKeyRanges(text: string, open: number, close: number): Array<[number, number]> | undefined {
   const inner = text.slice(open + 1, close);
   // A line break, which export would read as a backslash and a line's end,
@@ -1190,6 +1194,9 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
   // as one, or raw HTML's line end (see RAW_LINE_END), in a tag export
   // would read as a prefix's text
   if (/[\n\r]/.test(inner)) return undefined;
+  // A ] a backslash escapes, as in x\], which a later ] would end the
+  // citation after
+  if (escapedClose(text, close)) return undefined;
   const raw: Array<[number, number]> = [];
   const locators = new Map<string, string>();
   const suppressed = new Set<string>();
@@ -1197,15 +1204,27 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
   // isn't the one written from the items
   // As Word's text, whose backslashes import escapes, so they escape none
   // (see readCitationItems)
+  let rereads = true;
   const items = readCitationItems(inner, false).map(item => {
     if (item.markStart !== -1) raw.push([open + 1 + item.itemStart + item.markStart, open + 1 + item.itemEnd]);
-    if (item.locator !== undefined) locators.set(item.key, item.locator);
+    // A locator whose backslash at its end, which no other escapes, would
+    // escape the ; after it, as in x\; @b, so export would read the next
+    // item as more of this one's locator
+    if (item.locator !== undefined) {
+      const comma = inner.indexOf(',', item.itemStart + item.keyStart);
+      if (item.itemEnd < inner.length && ESCAPE_AT_END_RE.test(inner.slice(comma + 1, item.itemEnd))) rereads = false;
+      locators.set(item.key, item.locator);
+    }
     if (item.suppressed) suppressed.add(item.key);
     return { prefix: item.prefix.replace(/\s+/g, ' '), key: item.key };
   });
-  return '[' + items.map(({ prefix, key }) => (prefix ? prefix + ' ' : '') + (suppressed.has(key) ? '-@' : '@') + key
+  return rereads && '[' + items.map(({ prefix, key }) => (prefix ? prefix + ' ' : '') + (suppressed.has(key) ? '-@' : '@') + key
     + (locators.get(key) ? ', ' + locators.get(key) : '')).join('; ') + ']' === text.slice(open, close + 1) ? raw : undefined;
 }
+
+// An odd run of backslashes at the end, the last of which escapes what
+// comes after
+const ESCAPE_AT_END_RE = /(?:^|[^\\])(?:\\\\)*\\$/;
 
 /** Whether a key of the citation from the [ at `open` to the ] at `close`
  *  in `text` is one export knows (see knownCitationKeys), so it may have

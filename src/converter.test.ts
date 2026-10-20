@@ -10690,6 +10690,9 @@ describe('Word text that reads as Markdown', () => {
     // A citation through a [, which export reads to the ], $x$ and all; a
     // backslash would go into its key, and another each round trip
     '[@[$x$]', '[@a[$x$] b',
+    // A backslash in a locator before a character it doesn't escape there,
+    // and before a [ and an @, which it does, but which end nothing
+    '[@a, x\\y]', '[@a, x\\[y *z*]', '[@a, x\\@y]',
   ])('writes %s, as export writes a citation whose key is missing, as it is', async (text) => {
     const { line, markdown } = await importCited(text);
     expect(line).toBe('P ' + text + ' Q.');
@@ -10721,6 +10724,19 @@ describe('Word text that reads as Markdown', () => {
     const revision = { type: 'deletion' as const, author: 'A', date: '' };
     const items: ContentItem[] = texts.map(text => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision }));
     expect(buildMarkdown(items, new Map()).trim()).toBe(md);
+  });
+
+  test.each([
+    ['[@a, x\\] *y*]', ['a']], ['[@a, x\\; @b]', ['a', 'b']],
+  ])('escapes %s, Word\'s text of a key export knows, whose backslash would escape its ] or a ;', async (text, keys) => {
+    // Its key and its locator were written as they were, so export read
+    // the \] as text, and the citation to the last ], with the stars'
+    // escapes in it, or the \; as text, and @b as more of the locator
+    const { line, markdown } = await importCited(text, '[@a]');
+    expect((await exported(markdown)).text[1]).toBe('P ' + text + ' Q.');
+    expect(await roundTrip(markdown)).toBe(markdown);
+    // No citation export reads in it, or one of the keys Word's text has
+    for (const run of parseMd(line).flatMap(token => token.runs ?? []).filter(run => run.type === 'citation')) expect(run.keys).toEqual(keys);
   });
 
   test('escapes a citation in Word\'s text of one export doesn\'t know, though it knows the inner one\'s key', async () => {
