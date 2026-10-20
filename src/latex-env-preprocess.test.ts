@@ -1012,6 +1012,43 @@ describe('a bare environment in a quote, an alert or a list item', () => {
 		expect(wrapBareLatexEnvironments(md)).toBe(md);
 	});
 
+	// VS Code's preview reads display math from a fence at a line's start to
+	// the next line with a fence, and drops the rest of that line, and reads
+	// a fence after the opening one on its line as closing it only at the
+	// line's end. So prose after a wrap's \end{...}, which Word keeps, went
+	// from the preview, and the equation lost its \end{...}. Prose before a
+	// \begin{...} on its line makes it no environment at a line's start
+	const prose: Array<[string, string]> = [
+		['after its \\end{...} in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation} important prose\n'],
+		['after its \\end{...} in an alert', '> [!NOTE]\n> \\begin{equation}\n> x = 1\n> \\end{equation} important prose\n'],
+		['after its \\end{...} in a nested item', '- a\n  - b\n    \\begin{equation}\n    x = 1\n    \\end{equation} important prose\n'],
+		['after its \\end{...} on its one line in a quote', '> \\begin{equation}x = 1\\end{equation} important prose\n'],
+		['after the \\end{...} of the second environment in its quote\'s paragraph', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n> \\begin{equation}\n> y = 2\n> \\end{equation} important prose\n'],
+		['before its \\begin{...} in a quote', '> important prose \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['before its \\begin{...} in an alert', '> [!NOTE]\n> important prose \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['before its \\begin{...} in a nested item', '- a\n  - b\n    important prose \\begin{equation}\n    x = 1\n    \\end{equation}\n'],
+	];
+	test.each(prose)('leaves a bare environment with prose %s as main leaves it, which the preview shows', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const shown = preview(md);
+		expect(shown.maths).toHaveLength(0);
+		expect(shown.texts).toContain('important prose');
+	});
+
+	test('leaves a bare environment on its one line in a quote, with white space after it, as main leaves it', () => {
+		// Whose closing fence, before the white space, the preview read as
+		// none, and so the fence in its equation
+		const md = '> \\begin{equation}x = 1\\end{equation}  \n';
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('wraps a bare environment in a quote with white space after its \\end{...}, which the preview shows whole', () => {
+		const md = '> \\begin{equation}\n> x = 1\n> \\end{equation}   \n';
+		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{equation}\n> x = 1\n> \\end{equation}' + D + '   \n');
+		expect(preview(md).maths).toEqual(['\\begin{equation}\nx = 1\n\\end{equation}']);
+	});
+
 	test('wraps an environment in a list item two spaces in, which main finds, as main wraps it', () => {
 		const md = '- a\n  \\begin{equation}\n  x = 1\n  \\end{equation}\n';
 		expect(wrapBareLatexEnvironments(md)).toBe('- a\n  ' + D + '\\begin{equation}\n  x = 1\n  \\end{equation}' + D + '\n');
@@ -1050,6 +1087,7 @@ describe('bare environments in quotes, alerts and list items in time linear in t
 		['inline equations and an environment', 'Both $a$ and $b$.\n' + env],
 		['a \\begin with no end', '\\begin{equation}\nx'],
 		['a link and an environment', 'See [a](u)\n' + env],
+		['an environment with prose after its end', env + ' and prose'],
 	];
 	const works: Array<(text: string) => unknown> = [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives, text => wrapBareLatexEnvironmentsWithMap(text)];
 	const linear = (make: (n: number) => string, through: Array<(text: string) => unknown>) => {

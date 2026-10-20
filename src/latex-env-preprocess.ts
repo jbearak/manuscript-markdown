@@ -1001,7 +1001,8 @@ function endFinder(text: string): (marker: string, from: number) => number {
  * it lazily, which export ends the quote before and VS Code's preview
  * doesn't, with a tab in a line's prefix, in a quote in an item in a quote
  * or deeper, or which CriticMarkup joins to another (see exportUnits), and
- * for an environment whose \end{...} is past the paragraph's end. And each
+ * for an environment whose \end{...} is past the paragraph's end, or has
+ * text after it on its line (see containedEnvironments). And each
  * is to be read as display math after its wrap, by export and the preview,
  * as the paragraphs of the top level are (see readParagraphOnItsOwn and
  * confirmInPreview).
@@ -1058,7 +1059,8 @@ const CONTAINED_BEGIN = /( {0,3})\\begin\{([a-zA-Z*]+)\}/y;
  *  dollar sign in one that stays text may pair with one in another. Nor
  *  where one holds nothing but white space, whose empty equation import
  *  writes as a line of the container's indent alone, which the next trip
- *  drops */
+ *  drops, nor where text follows one's \end{...} on its line, which VS
+ *  Code's preview drops */
 function containedEnvironments(text: string, paragraph: ContainedParagraph, endOf: (marker: string, from: number) => number, steps: Zone[]): BareEnvironment[] {
 	const { content } = paragraph;
 	const lines = paragraph.lines!;
@@ -1081,6 +1083,16 @@ function containedEnvironments(text: string, paragraph: ContainedParagraph, endO
 		const at = endOf(marker, contentStart);
 		if (at === -1 || at + marker.length > textEnd) return [];
 		const end = at + marker.length;
+		// The rest of its \end{...}'s line. VS Code's preview reads display
+		// math from a fence at a line's start to the next line with a fence,
+		// and drops the rest of that line, so prose after the closing fence,
+		// which Word keeps, went from the preview, and its equation lost its
+		// \end{...}. And it reads a fence after the opening one on its line as
+		// closing it only at the line's end, so after an environment on one
+		// line, not even white space
+		const lineEnd = text.indexOf('\n', end);
+		const rest = text.slice(end, lineEnd === -1 ? text.length : lineEnd);
+		if (rest !== '' && (!/^[ \t]*$/.test(rest) || text.lastIndexOf('\n', end - 1) < begin)) return [];
 		if (holdsEither({ start: begin, end: contentStart }, { start: at, end }, steps)) return [];
 		if (/^[\s>]*$/.test(text.slice(contentStart, at))) return [];
 		environments.push({ start: lineStart, indent: begin - lineStart, contentStart, contentEnd: at, end });
