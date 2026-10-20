@@ -1035,6 +1035,32 @@ describe('a bare environment in a quote, an alert or a list item', () => {
 		expect(shown.texts).toContain('important prose');
 	});
 
+	// And the preview's display math ends its paragraph there, so the next
+	// line starts a block, as a paragraph's line doesn't: a lone tag's HTML
+	// block, a definition, a list from 2 or an empty item, or a code block
+	// four spaces in, where Word and main's preview read on in the paragraph
+	const next: Array<[string, string]> = [
+		['a lone tag in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n> <b>\n> important prose\n'],
+		['a definition in an alert', '> [!NOTE]\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> [important]: prose\n'],
+		['an item numbered 2 in a nested item', '- a\n  - b\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n    2. important prose\n'],
+		['an empty item in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n> +\n> important prose\n'],
+		['a line four spaces in in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n>     important prose\n'],
+	];
+	test.each(next)('leaves a bare environment with %s on the line after its \\end{...} as main leaves it, which the preview shows', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const shown = preview(md);
+		expect(shown.maths).toHaveLength(0);
+		expect(shown.texts).toContain('important');
+	});
+
+	test('wraps a bare environment in a quote with a tag and text on the line after its \\end{...}, which the preview reads on in a paragraph', () => {
+		const md = '> \\begin{equation}\n> x = 1\n> \\end{equation}\n> <b>important</b> prose\n';
+		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{equation}\n> x = 1\n> \\end{equation}' + D + '\n> <b>important</b> prose\n');
+		const shown = preview(md);
+		expect(shown.maths).toEqual(['\\begin{equation}\nx = 1\n\\end{equation}']);
+		expect(shown.texts).toContain('important');
+	});
+
 	test('leaves a bare environment on its one line in a quote, with white space after it, as main leaves it', () => {
 		// Whose closing fence, before the white space, the preview read as
 		// none, and so the fence in its equation
@@ -1088,6 +1114,7 @@ describe('bare environments in quotes, alerts and list items in time linear in t
 		['a \\begin with no end', '\\begin{equation}\nx'],
 		['a link and an environment', 'See [a](u)\n' + env],
 		['an environment with prose after its end', env + ' and prose'],
+		['an environment with a [ on the line after it', env + '\n[a b'],
 	];
 	const works: Array<(text: string) => unknown> = [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives, text => wrapBareLatexEnvironmentsWithMap(text)];
 	const linear = (make: (n: number) => string, through: Array<(text: string) => unknown>) => {

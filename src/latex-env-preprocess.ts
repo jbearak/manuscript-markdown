@@ -14,6 +14,7 @@
  */
 
 import MarkdownIt from 'markdown-it';
+import { HTML_OPEN_CLOSE_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import { computeLineStarts, computeMarkdownRegions, isInsideCodeRegion, type ContainedParagraph } from './code-regions';
 import { exportsLiterally } from './html-blocks';
@@ -1002,7 +1003,8 @@ function endFinder(text: string): (marker: string, from: number) => number {
  * doesn't, with a tab in a line's prefix, in a quote in an item in a quote
  * or deeper, or which CriticMarkup joins to another (see exportUnits), and
  * for an environment whose \end{...} is past the paragraph's end, or has
- * text after it on its line (see containedEnvironments). And each
+ * text after it on its line, or a line after it that VS Code's preview
+ * reads as a block of its own (see containedEnvironments). And each
  * is to be read as display math after its wrap, by export and the preview,
  * as the paragraphs of the top level are (see readParagraphOnItsOwn and
  * confirmInPreview).
@@ -1060,7 +1062,8 @@ const CONTAINED_BEGIN = /( {0,3})\\begin\{([a-zA-Z*]+)\}/y;
  *  where one holds nothing but white space, whose empty equation import
  *  writes as a line of the container's indent alone, which the next trip
  *  drops, nor where text follows one's \end{...} on its line, which VS
- *  Code's preview drops */
+ *  Code's preview drops, or the line after it starts a block there (see
+ *  startsABlock) */
 function containedEnvironments(text: string, paragraph: ContainedParagraph, endOf: (marker: string, from: number) => number, steps: Zone[]): BareEnvironment[] {
 	const { content } = paragraph;
 	const lines = paragraph.lines!;
@@ -1093,11 +1096,52 @@ function containedEnvironments(text: string, paragraph: ContainedParagraph, endO
 		const lineEnd = text.indexOf('\n', end);
 		const rest = text.slice(end, lineEnd === -1 ? text.length : lineEnd);
 		if (rest !== '' && (!/^[ \t]*$/.test(rest) || text.lastIndexOf('\n', end - 1) < begin)) return [];
+		// And the preview's display math ends the paragraph there, so the line
+		// after it starts a block of its own, as a paragraph's line can't
+		if (startsABlock(content, lineAfter(lines, at))) return [];
 		if (holdsEither({ start: begin, end: contentStart }, { start: at, end }, steps)) return [];
 		if (/^[\s>]*$/.test(text.slice(contentStart, at))) return [];
 		environments.push({ start: lineStart, indent: begin - lineStart, contentStart, contentEnd: at, end });
 	}
 	return environments;
+}
+
+/** Where the line after the one of `lines` an offset of the text is on
+ *  starts in the paragraph's text, or -1 where that is its last */
+function lineAfter(lines: Array<{ content: number; source: number }>, offset: number): number {
+	let lo = 0;
+	let hi = lines.length - 1;
+	while (lo < hi) {
+		const mid = (lo + hi + 1) >>> 1;
+		if (lines[mid].source <= offset) lo = mid;
+		else hi = mid - 1;
+	}
+	return lo + 1 < lines.length ? lines[lo + 1].content : -1;
+}
+
+/** A line's start that a paragraph's line can't have but a block's can: a
+ *  code block's four spaces or tab, a list's marker, which in a paragraph
+ *  is an empty item's or one from a number but 1, and a definition's label,
+ *  of up to 999 characters, as markdown-it's */
+const BLOCK_START = / {4}| {0,3}\t| {0,3}(?:\d{1,9}[.)]|[-+*])(?=[ \t\n]|$)| {0,3}\[(?:[^\\\]]|\\[\s\S]){0,999}\]:/y;
+/** A line of a lone tag, which starts an HTML block that can't break a
+ *  paragraph */
+const LONE_TAG = new RegExp('^ {0,3}(?:' + HTML_OPEN_CLOSE_TAG_RE.source.replace(/^\^/, '') + ')\\s*$');
+
+/**
+ * Whether the line of a paragraph's text from `from`, but -1, starts a
+ * block in VS Code's preview after display math ends the paragraph before
+ * it: one that can't break a paragraph, so that in it, as Word and main's
+ * preview read it, the line went on in the paragraph. A lone tag's HTML
+ * block, as raw HTML, a definition, which shows nothing, a list, or a code
+ * block.
+ */
+function startsABlock(content: string, from: number): boolean {
+	if (from === -1) return false;
+	BLOCK_START.lastIndex = from;
+	if (BLOCK_START.test(content)) return true;
+	const lineEnd = content.indexOf('\n', from);
+	return LONE_TAG.test(content.slice(from, lineEnd === -1 ? content.length : lineEnd));
 }
 
 /** An alert's marker, as the first line of its paragraph's text, which
