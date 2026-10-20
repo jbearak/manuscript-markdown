@@ -1210,6 +1210,25 @@ describe('a bare environment in a quote, an alert or a list item', () => {
 		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
 	});
 
+	// An environment that holds another \begin{, as a nested one: the
+	// search for its \end{...} took a nested one's of the same name for its
+	// own, so the closing fence went in it, the preview got a matrix with no
+	// end, and Word the rest of it as text. Main's decision holds for each
+	const nested: Array<[string, string[]]> = [
+		['a pmatrix in a pmatrix', ['\\begin{pmatrix}', 'a & \\begin{pmatrix}', 'b \\\\ c', '\\end{pmatrix}', '\\end{pmatrix}']],
+		['an aligned in an equation', ['\\begin{equation}', '\\begin{aligned}', 'a &= b', '\\end{aligned}', '\\end{equation}']],
+		['cases in cases', ['\\begin{cases}', 'a & \\begin{cases} b & c \\end{cases}', '\\end{cases}']],
+		['three pmatrix, one in another', ['\\begin{pmatrix}', '\\begin{pmatrix}', '\\begin{pmatrix} a \\end{pmatrix}', '\\end{pmatrix}', '\\end{pmatrix}']],
+	];
+	test.each(nested.flatMap(([nest, lines]) => inContainers.map(([where, make]) => [nest, where, make(lines)])))('leaves %s in %s as main leaves it, which two round trips keep', async (_nest, _where, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(wrapBareLatexEnvironmentsWithMap(md).output).toBe(md);
+		expect((await word(md)).equations).toHaveLength(0);
+		expect(preview(md).maths).toHaveLength(0);
+		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+	});
+
 	test('wraps a bare environment of a phantom and text in a quote, whose equation shows the text', () => {
 		const md = '> \\begin{equation}\n> \\phantom{x} y\n> \\end{equation}\n';
 		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{equation}\n> \\phantom{x} y\n> \\end{equation}' + D + '\n');
@@ -1272,6 +1291,7 @@ describe('bare environments in quotes, alerts and list items in time linear in t
 		['emphasis over an environment', '*a\n' + env + '\nb*'],
 		['an environment whose equation shows nothing', '\\begin{equation}\n\\label{x}\\notag % c\n\\end{equation}'],
 		['a dollar sign of text and an environment', 'Cost \\$5 and &#36;6.\n' + env],
+		['an environment in an environment', '\\begin{pmatrix}\na & \\begin{pmatrix} b \\end{pmatrix}\n\\end{pmatrix}'],
 	];
 	const works: Array<(text: string) => unknown> = [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives, text => wrapBareLatexEnvironmentsWithMap(text)];
 	const linear = (make: (n: number) => string, through: Array<(text: string) => unknown>) => {

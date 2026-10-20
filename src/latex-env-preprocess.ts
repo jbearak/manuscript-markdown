@@ -1129,7 +1129,9 @@ const CONTAINED_BEGIN = /( {0,3})\\begin\{([a-zA-Z*]+)\}/y;
  *  where one holds nothing but white space, whose empty equation import
  *  writes as a line of the container's indent alone, which the next trip
  *  drops (and see readContainedParagraph for one whose equation shows
- *  nothing), nor where text follows one's \end{...} on its line, which VS
+ *  nothing), nor where one holds another \begin{, as of a nested
+ *  environment, whose end the search may take for its own, nor where text
+ *  follows one's \end{...} on its line, which VS
  *  Code's preview drops, or the line after it starts a block there (see
  *  startsABlock) */
 function containedEnvironments(text: string, paragraph: ContainedParagraph, endOf: (marker: string, from: number) => number, steps: Zone[]): BareEnvironment[] {
@@ -1153,6 +1155,14 @@ function containedEnvironments(text: string, paragraph: ContainedParagraph, endO
 		const contentStart = begin + match[0].length - match[1].length;
 		const at = endOf(marker, contentStart);
 		if (at === -1 || at + marker.length > textEnd) return [];
+		// Another \begin{ before the \end{...} this search finds, as of a
+		// nested environment, whose \end{...} the search takes for this one's
+		// where it is of the same name: then the closing fence went in the
+		// environment, and its rest went to Word as text. So with any, its
+		// extent here, which each rule after this reads, may be wrong, and
+		// main's decision holds. Main's search at the top level is the same
+		const inner = endOf('\\begin{', contentStart);
+		if (inner !== -1 && inner < at) return [];
 		const end = at + marker.length;
 		// The rest of its \end{...}'s line. VS Code's preview reads display
 		// math from a fence at a line's start to the next line with a fence,
