@@ -1182,11 +1182,7 @@ function hostsIn(markdown: string, text: string, own: RunFormatting, limit: numb
  *  text back; undefined where they don't, as for [@a,p. 2]. Export runs a
  *  prefix's spaces together, and keeps one locator and one - for each key,
  *  the last, so [see  also @a] and [@a, p. 1; @a, p. 2] don't, nor does
- *  one with a line break in it. Nor does one whose keys and locators,
- *  written as they are, export would read with other bounds, now that a
- *  backslash escapes a ] or a ; there (see citationClose and
- *  citationItemEnd in citation-syntax.ts), as Word's [@a, x\] *y*], which
- *  would read to its last ], so its stars, escaped, would be its text. */
+ *  one with a line break in it. */
 function citationKeyRanges(text: string, open: number, close: number): Array<[number, number]> | undefined {
   const inner = text.slice(open + 1, close);
   // A line break, which export would read as a backslash and a line's end,
@@ -1194,9 +1190,6 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
   // as one, or raw HTML's line end (see RAW_LINE_END), in a tag export
   // would read as a prefix's text
   if (/[\n\r]/.test(inner)) return undefined;
-  // A ] a backslash escapes, as in x\], which a later ] would end the
-  // citation after
-  if (escapedClose(text, close)) return undefined;
   const raw: Array<[number, number]> = [];
   const locators = new Map<string, string>();
   const suppressed = new Set<string>();
@@ -1204,22 +1197,34 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
   // isn't the one written from the items
   // As Word's text, whose backslashes import escapes, so they escape none
   // (see readCitationItems)
-  let rereads = true;
   const items = readCitationItems(inner, false).map(item => {
     if (item.markStart !== -1) raw.push([open + 1 + item.itemStart + item.markStart, open + 1 + item.itemEnd]);
-    // A locator whose backslash at its end, which no other escapes, would
-    // escape the ; after it, as in x\; @b, so export would read the next
-    // item as more of this one's locator
-    if (item.locator !== undefined) {
-      const comma = inner.indexOf(',', item.itemStart + item.keyStart);
-      if (item.itemEnd < inner.length && ESCAPE_AT_END_RE.test(inner.slice(comma + 1, item.itemEnd))) rereads = false;
-      locators.set(item.key, item.locator);
-    }
+    if (item.locator !== undefined) locators.set(item.key, item.locator);
     if (item.suppressed) suppressed.add(item.key);
     return { prefix: item.prefix.replace(/\s+/g, ' '), key: item.key };
   });
-  return rereads && '[' + items.map(({ prefix, key }) => (prefix ? prefix + ' ' : '') + (suppressed.has(key) ? '-@' : '@') + key
+  return '[' + items.map(({ prefix, key }) => (prefix ? prefix + ' ' : '') + (suppressed.has(key) ? '-@' : '@') + key
     + (locators.get(key) ? ', ' + locators.get(key) : '')).join('; ') + ']' === text.slice(open, close + 1) ? raw : undefined;
+}
+
+/** Whether export would read the citation from the [ at `open` to the ]
+ *  at `close` in Word's `text`, its keys and locators written as they are
+ *  (see citationKeyRanges), with other bounds, now that a backslash escapes
+ *  a ] or a ; there (see citationClose and citationItemEnd in
+ *  citation-syntax.ts): at a ] a backslash escapes, as in [@a, x\] *y*],
+ *  which a later ] would end it after, so its stars, escaped, would be its
+ *  text, or where a locator's backslash at its end would escape the ; after
+ *  it, as in [@a, x\; @b], so @b would be more of the locator. Such a
+ *  citation is text, as one of keys export doesn't know is (see
+ *  citationKnown), each [ in it escaped. */
+function citationBoundsMove(text: string, open: number, close: number): boolean {
+  if (escapedClose(text, close)) return true;
+  const inner = text.slice(open + 1, close);
+  return readCitationItems(inner, false).some(item => {
+    if (item.locator === undefined || item.itemEnd >= inner.length) return false;
+    const comma = inner.indexOf(',', item.itemStart + item.keyStart);
+    return ESCAPE_AT_END_RE.test(inner.slice(comma + 1, item.itemEnd));
+  });
 }
 
 // An odd run of backslashes at the end, the last of which escapes what
@@ -1394,7 +1399,8 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     // With no [ before its ], so each citation's text is read once, nor a
     // ! before it, which makes it an image's
     else if (close !== undefined && (inner === -1 || inner > close) && text[i - 1] !== '!' && /^-?@/.test(text.slice(i + 1, i + 3))
-      && citationEndInText(text, i, false) === close && citationKeyRanges(text, i, close) && citationKnown(text, i, close)) opens = false;
+      && citationEndInText(text, i, false) === close && citationKeyRanges(text, i, close) && citationKnown(text, i, close)
+      && !citationBoundsMove(text, i, close)) opens = false;
     else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
     else if (!after) opens = true;
     else {
@@ -1441,8 +1447,9 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
       continue;
     }
     // Text, as is each [ in it, which export would read as a citation's once
-    // the first is escaped, as in [@a[@b]
-    if (!citationKnown(text, i, close)) {
+    // the first is escaped, as in [@a[@b], or in [@a, [*see* @b, p. 2\],
+    // whose inner one's stars are escaped
+    if (!citationKnown(text, i, close) || citationBoundsMove(text, i, close)) {
       for (let k = i; k !== -1 && k < close; k = text.indexOf('[', k + 1)) escaped.add(k);
       i = close;
       continue;

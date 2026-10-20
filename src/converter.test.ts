@@ -10739,6 +10739,35 @@ describe('Word text that reads as Markdown', () => {
     for (const run of parseMd(line).flatMap(token => token.runs ?? []).filter(run => run.type === 'citation')) expect(run.keys).toEqual(keys);
   });
 
+  // Which escaped only the outer [, so the inner one, whose prefix's stars
+  // were escaped, read as a citation of @b: of text, or, with @b in the
+  // .bib, as Zotero's. Each [ is escaped, as in a citation of keys export
+  // doesn't know. An inner [ in a locator, a later item's prefix and a
+  // suffix, two inner ones, and one after a ; a backslash would escape,
+  // each in a document whose next paragraph cites @a, missing, and with @b
+  // in its .bib or not
+  const BIB_B = '@article{b,\n  author = {Roe, Rick},\n  title = {T},\n  journal = {J},\n  year = {2019}\n}\n';
+  test.each([
+    '[@a, [*see* @b, p. 2\\]', '[@a; [*see* @b, p. 2\\]', '[@a, p. 2, [*see* @b, x\\]', '[@a, [*see* [*x* @b, p. 2\\]', '[@a, x\\; [*see* @b, p. 2]',
+  ].flatMap(text => [[text, false], [text, true]]))('keeps %s, Word\'s text whose bounds export would read otherwise, as text over two trips, with each [ escaped (@b in the .bib: %p)', async (text, withB) => {
+    const options = withB ? { bibtex: BIB_B } : {};
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nP XX Q.\n\nB [@a].', options)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    zip.file('word/document.xml', xml.replace(/<w:t(?: [^>]*)?>([^<]*)XX([^<]*)<\/w:t>/, (_m, before: string, after: string) => '<w:t xml:space="preserve">' + before + escaped + after + '</w:t>'));
+    let docx = await zip.generateAsync({ type: 'uint8array' });
+    for (let trip = 0; trip < 2; trip++) {
+      const markdown = strip((await convertDocx(docx)).markdown);
+      // No citation of @b, which Word's text has none of
+      expect(parseMd(markdown.split('\n\n')[1]).flatMap(token => token.runs ?? []).filter(run => run.type === 'citation').flatMap(run => run.keys ?? [])).not.toContain('b');
+      docx = (await convertMdToDocx(markdown, options)).docx;
+      const body = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      const paragraph = [...body.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)][1][0];
+      expect(paragraph).not.toMatch(/ZOTERO_ITEM|CSL_CITATION/);
+      expect(paragraph.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')).toBe('P ' + text + ' Q.');
+    }
+  });
+
   test('escapes a citation in Word\'s text of one export doesn\'t know, though it knows the inner one\'s key', async () => {
     // Its [ was escaped, so export read the inner one as a citation
     const { line, markdown } = await importCited('[@a[@b]', '[@b]');
