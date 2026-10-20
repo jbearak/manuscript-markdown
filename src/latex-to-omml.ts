@@ -1993,6 +1993,27 @@ export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownC
   return literalBackslashes(keepWhitespaceChanges(parser.numberedEquation(parser.parseExpression(false))), inline);
 }
 
+/**
+ * Whether the display equation export writes of `latex` (see
+ * generateMathXml in md-to-docx-citations.ts) shows any text: a character
+ * but white space or a zero-width space in a run Word shows, past the hidden
+ * runs of comments and the runs in a phantom, each of which hides its
+ * content (see \phantom in Parser). One of a \label, a \notag, a \tag on an
+ * empty row, an empty \text{}, a phantom or a comment alone shows none,
+ * though its LaTeX holds more than white space, and import writes one of
+ * most of these back as nothing.
+ */
+export function equationShowsText(latex: string): boolean {
+  const shown = latexToOmml(latex, undefined, true).split(HIDDEN_RUN_RE).filter((_part, i) => i % 2 === 0).join('');
+  let phantoms = 0;
+  for (const m of shown.matchAll(/<m:phant>|<\/m:phant>|<m:t(?:\s[^>]*)?>([^<]*)<\/m:t>/g)) {
+    if (m[0] === '<m:phant>') phantoms++;
+    else if (m[0] === '</m:phant>') phantoms--;
+    else if (phantoms === 0 && /[^\s\u200B]/.test(unescapeXmlChars(m[1]))) return true;
+  }
+  return false;
+}
+
 /** The mark on the w:ins or w:del of a tracked change whose source is only
  *  whitespace, as {++ ++} is (see keepWhitespaceChanges) */
 const WHITESPACE_CHANGE_MARK = ' mm:whitespace=""';

@@ -1165,6 +1165,56 @@ describe('a bare environment in a quote, an alert or a list item', () => {
 		expect(preview(md).maths).toEqual(['\\begin{align*}\na_1 &= b^*\n\\end{align*}']);
 	});
 
+	// An environment whose equation shows nothing, though its LaTeX holds
+	// more than white space: export wrote an empty equation, which import
+	// wrote back after a wide marker as a line of the item's indent alone,
+	// which the next trip dropped. Export's own conversion says which (see
+	// equationShowsText in latex-to-omml.ts)
+	const showsNothing: Array<[string, string]> = [
+		['a \\label', '\\label{x}'],
+		['a \\notag', '\\notag'],
+		['a \\nonumber', '\\nonumber'],
+		['an empty \\text{}', '\\text{}'],
+		['a \\label and a \\notag', '\\label{x}\\notag'],
+		['comments', '% a comment\n% another'],
+		['a phantom', '\\phantom{x}'],
+	];
+	const inContainers: Array<[string, (lines: string[]) => string]> = [
+		['a quote', lines => lines.map(line => '> ' + line).join('\n') + '\n'],
+		['an alert', lines => '> [!NOTE]\n' + lines.map(line => '> ' + line).join('\n') + '\n'],
+		['a nested item', lines => '- a\n  - b\n' + lines.map(line => '    ' + line).join('\n') + '\n'],
+		['an item after a wide marker', lines => '10. a\n\n' + lines.map(line => '    ' + line).join('\n') + '\n'],
+	];
+	test.each(showsNothing.flatMap(([body, latex]) => inContainers.map(([where, make]) => [body, where, make(['\\begin{equation}', ...latex.split('\n'), '\\end{equation}'])])))('leaves a bare environment of %s alone in %s as main leaves it, which two round trips keep', async (_body, _where, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(wrapBareLatexEnvironmentsWithMap(md).output).toBe(md);
+		expect((await word(md)).equations).toHaveLength(0);
+		expect(preview(md).maths).toHaveLength(0);
+		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+		expect(once).toContain('begin{equation}');
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+	});
+
+	// A dollar sign Word shows as text, which import wrote back unescaped,
+	// and which the next trip paired, past the wrap's display math, with
+	// one after it, as for display math written so in a quote on main
+	test.each([
+		['an escaped one before it and inline math after it in a quote', '> Text cost \\$\n> \\begin{equation}\n> x\n> \\end{equation}\n> $\\alpha$ here.\n'],
+		['an entity before it and inline math after it in an alert', '> [!NOTE]\n> Text cost &#36;\n> \\begin{equation}\n> x\n> \\end{equation}\n> $\\alpha$ here.\n'],
+		['escaped ones before and after it in a nested item', '- a\n  - b\n    Text cost \\$\n    \\begin{equation}\n    x\n    \\end{equation}\n    more \\$ here.\n'],
+		['escaped ones before and after it in an item after a wide marker', '10. a\n\n    Text cost \\$\n    \\begin{equation}\n    x\n    \\end{equation}\n    more \\$ here.\n'],
+	])('leaves a bare environment with a dollar sign of text, %s, as main leaves it, which two round trips keep', async (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(preview(md).maths.filter(m => m.includes('begin{equation}'))).toHaveLength(0);
+		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+	});
+
+	test('wraps a bare environment of a phantom and text in a quote, whose equation shows the text', () => {
+		const md = '> \\begin{equation}\n> \\phantom{x} y\n> \\end{equation}\n';
+		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{equation}\n> \\phantom{x} y\n> \\end{equation}' + D + '\n');
+	});
+
 	test('leaves a bare environment on its one line in a quote, with white space after it, as main leaves it', () => {
 		// Whose closing fence, before the white space, the preview read as
 		// none, and so the fence in its equation
@@ -1220,6 +1270,8 @@ describe('bare environments in quotes, alerts and list items in time linear in t
 		['an environment with prose after its end', env + ' and prose'],
 		['an environment with a [ on the line after it', env + '\n[a b'],
 		['emphasis over an environment', '*a\n' + env + '\nb*'],
+		['an environment whose equation shows nothing', '\\begin{equation}\n\\label{x}\\notag % c\n\\end{equation}'],
+		['a dollar sign of text and an environment', 'Cost \\$5 and &#36;6.\n' + env],
 	];
 	const works: Array<(text: string) => unknown> = [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives, text => wrapBareLatexEnvironmentsWithMap(text)];
 	const linear = (make: (n: number) => string, through: Array<(text: string) => unknown>) => {

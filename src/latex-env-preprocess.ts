@@ -22,6 +22,7 @@ import { criticCloserSearch, preprocessCriticMarkupWithLines } from './critic-ma
 import { linearInlineComments } from './inline-html-comments';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-delimiters';
 import { previewEquations, type PreviewEquation } from './preview-math-read';
+import { equationShowsText } from './latex-to-omml';
 
 // All environments recognized by the latexToOmml parser as display math.
 export const DISPLAY_MATH_ENVIRONMENTS = new Set([
@@ -806,6 +807,11 @@ interface ParagraphRead {
 	limit: number;
 	runAt: number;
 	runEnd: number;
+	/** Whether it read a dollar sign as text before `limit`: escaped, of an
+	 *  entity, or one that opens no equation, but in a code span or a
+	 *  comment. Past it, the read takes a tag's, a URL's or a link's for
+	 *  text, as it takes all past it for text but equations */
+	textDollar: boolean;
 }
 
 /** markdown-it with the inline rules of export's (see createMarkdownIt in
@@ -825,12 +831,13 @@ const reader = new MarkdownIt('zero', { html: true });
 reader.inline.ruler.enable(['escape', 'backticks', 'html_inline']);
 reader.use(linearInlineComments);
 reader.inline.ruler.before('text', 'unsimple', unsimpleRule);
+reader.inline.ruler.before('escape', 'textDollar', textDollarRule);
 reader.inline.ruler.push('math', readMath);
 
 /** The read of `src`, a paragraph's text, as export's inline parse reads it
  *  where it is simple, which stops where it is not before `limit` */
 function readParagraph(src: string, limit: number): ParagraphRead {
-	const read: ParagraphRead = { equations: [], unsimple: -1, limit, runAt: -1, runEnd: -1 };
+	const read: ParagraphRead = { equations: [], unsimple: -1, limit, runAt: -1, runEnd: -1, textDollar: false };
 	reader.inline.tokenize(new reader.inline.State(src, reader, read, []));
 	return read;
 }
@@ -870,8 +877,26 @@ function unsimpleRule(state: StateInline, silent: boolean): boolean {
 	return false;
 }
 
+/** An entity, which export's entity rule reads as its character */
+const ENTITY_RE = /&(?:#[xX][0-9a-fA-F]{1,6}|#[0-9]{1,7}|[a-zA-Z][a-zA-Z0-9]{1,31});/y;
+
+/** Records an escaped dollar sign, or one of an entity, which export reads
+ *  as text, before the read's limit, and reads nothing */
+function textDollarRule(state: StateInline): boolean {
+	const { src, pos } = state;
+	if (pos >= (state.env as ParagraphRead).limit) return false;
+	const code = src.charCodeAt(pos);
+	if (code === 0x5C && src.charCodeAt(pos + 1) === 0x24) (state.env as ParagraphRead).textDollar = true;
+	else if (code === 0x26) {
+		ENTITY_RE.lastIndex = pos;
+		const entity = ENTITY_RE.exec(src);
+		if (entity && reader.utils.unescapeAll(entity[0]) === '$') (state.env as ParagraphRead).textDollar = true;
+	}
+	return false;
+}
+
 /** export's math rule (see mathRule in md-to-docx.ts), which records each
- *  equation it reads */
+ *  equation it reads, and a dollar sign that opens none as text */
 function readMath(state: StateInline, silent: boolean): boolean {
 	const src = state.src;
 	const at = state.pos;
@@ -894,7 +919,10 @@ function readMath(state: StateInline, silent: boolean): boolean {
 		return true;
 	}
 	const match = findDollarMathAt(src, at, DOCX_DOLLAR_MATH_OPTIONS);
-	if (match?.kind !== 'math') return false;
+	if (match?.kind !== 'math') {
+		if (at < read.limit) read.textDollar = true;
+		return false;
+	}
 	if (!silent) read.equations.push({ start: match.start, end: match.end, display: match.delimiterLength === 2 });
 	state.pos = match.end;
 	return true;
@@ -1027,7 +1055,8 @@ function endFinder(text: string): (marker: string, from: number) => number {
  * or deeper, or which CriticMarkup joins to another (see exportUnits), and
  * for an environment whose \end{...} is past the paragraph's end, or has
  * text after it on its line, or a line after it that VS Code's preview
- * reads as a block of its own (see containedEnvironments). And each
+ * reads as a block of its own (see containedEnvironments), or whose
+ * equation shows nothing (see readContainedParagraph). And each
  * is to be read as display math after its wrap, by export and the preview,
  * as the paragraphs of the top level are (see readParagraphOnItsOwn and
  * confirmInPreview).
@@ -1099,7 +1128,8 @@ const CONTAINED_BEGIN = /( {0,3})\\begin\{([a-zA-Z*]+)\}/y;
  *  dollar sign in one that stays text may pair with one in another. Nor
  *  where one holds nothing but white space, whose empty equation import
  *  writes as a line of the container's indent alone, which the next trip
- *  drops, nor where text follows one's \end{...} on its line, which VS
+ *  drops (and see readContainedParagraph for one whose equation shows
+ *  nothing), nor where text follows one's \end{...} on its line, which VS
  *  Code's preview drops, or the line after it starts a block there (see
  *  startsABlock) */
 function containedEnvironments(text: string, paragraph: ContainedParagraph, endOf: (marker: string, from: number) => number, steps: Zone[]): BareEnvironment[] {
@@ -1231,6 +1261,13 @@ function readContainedParagraph(text: string, paragraph: ContainedParagraph, env
 	const last = ends[ends.length - 1];
 	const before = readParagraph(masked.join(''), last);
 	if (before.unsimple !== -1) return undefined;
+	// A dollar sign Word shows as text before an environment's end, escaped,
+	// of an entity, or one that opens no equation. Import writes one of
+	// Word's text before display math back unescaped where it pairs with
+	// none in that text, and the next trip read it with the display math's
+	// fences after it, so the round trip changed the Markdown, as for
+	// display math written so in a quote on main
+	if (before.textDollar) return undefined;
 	const displays = before.equations.filter(e => e.display);
 	const wrapped = environments.map((_e, i) => i).filter(i => !holdsEither({ start: begins[i], end: toContent(environments[i].contentStart) }, { start: toContent(environments[i].contentEnd), end: ends[i] }, displays));
 	if (wrapped.length === 0) return undefined;
@@ -1240,6 +1277,12 @@ function readContainedParagraph(text: string, paragraph: ContainedParagraph, env
 	const sure = (offset: number) => overlapsAnyZone(offset, offset + 2, zonesOf.steps)
 		|| paragraph.start <= offset && offset < paragraph.end && inEquation(inlineMath, toContent(offset));
 	if (wrapped.some(i => !mainZoneIsWrong(environments[i], zonesOf.fences, sure))) return undefined;
+	// And none whose equation shows nothing, as one of a \label, a \notag
+	// or a comment alone. Export writes an empty equation of it, which
+	// import writes back as a line of the container's indent alone, which
+	// the next trip drops, as for one of white space alone (see
+	// containedEnvironments). Export's own conversion says which
+	if (environments.some((_e, i) => !equationShowsText(content.slice(begins[i], ends[i])))) return undefined;
 
 	// The paragraph's text with those wrapped, the offsets before which a
 	// fence goes, and each wrap's display math
