@@ -380,7 +380,7 @@ import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessC
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt } from './math-delimiters';
 import { citationEnd, citationPrefixText, readCitationItems } from './citation-syntax';
-import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments } from './latex-env-preprocess';
+import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments, type ContainerOptions } from './latex-env-preprocess';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines, withEnd } from './line-map';
 import { normalizeNewlines } from './newlines';
 export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
@@ -2897,11 +2897,11 @@ function startsAdjacentList(item: MdToken, prevTopOrdered: boolean | undefined):
  *  block's text can't tell from dollar signs the Markdown has: by the lines
  *  of `text` wrapped with a mark at the start of each, which are the parsed
  *  text's (`lineCount` of them), or else by any line that starts as one */
-function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number): void {
+function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number, containers: ContainerOptions): void {
   let code = 0xF8FF;
   while (text.includes(String.fromCharCode(code))) code--;
   const mark = String.fromCharCode(code);
-  const lines = preprocessCriticMarkup(wrapBareLatexEnvironments(text, mark)).split('\n');
+  const lines = preprocessCriticMarkup(wrapBareLatexEnvironments(text, mark, containers)).split('\n');
   for (const token of tokens) {
     if (token.type !== 'html_block' || !token.map) continue;
     const wraps = lines.length === lineCount ? lines.slice(token.map[0], token.map[1]).some(line => line.includes(mark))
@@ -2934,21 +2934,21 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
   const md = createMarkdownIt();
   // Grid tables, quotes without lazy continuation, and bare LaTeX
   // environments, as the orientation scan reads them too
-  const blocks = preprocessBlocks(markdown);
+  const blocks = preprocessBlocks(markdown, inNote);
   const { deLazified, output: wrapped } = blocks;
   const critic = preprocessCriticMarkupWithLines(wrapped);
   const processed = critic.output;
   const env: { references?: Record<string, unknown>; documentLinkDefinitions?: Record<string, unknown> } =
     linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {};
   const tokens = md.parse(processed, env);
-  if (wrapped !== deLazified) markWrappedLatexBlocks(tokens, deLazified, processed.split('\n').length);
+  if (wrapped !== deLazified) markWrappedLatexBlocks(tokens, deLazified, processed.split('\n').length, blocks.containers);
 
   const processedLines = processed.split('\n');
   // Number formatting can widen a table's cells past their padding, so
   // whether a table's columns line up reads its lines from before it,
   // `unformatted`, which differ from these in cell text alone
   const unformattedLines = unformatted === undefined ? undefined
-    : preprocessCriticMarkup(preprocessBlocks(unformatted).output).split('\n');
+    : preprocessCriticMarkup(preprocessBlocks(unformatted, inNote).output).split('\n');
   const sourceLines = unformattedLines?.length === processedLines.length ? unformattedLines : processedLines;
   const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, sourceLines)));
   annotateBlockquoteBoundaries(result);

@@ -226,8 +226,27 @@ function holdsEither(begin: Zone, end: Zone, zones: Zone[]): boolean {
  * Blank lines inside the wrapped block are collapsed to single newlines so
  * markdown-it doesn't split them into separate paragraphs.
  */
-export function wrapBareLatexEnvironments(text: string, mark = ''): string {
-	return withReplacements(text, latexReplacements(text), mark);
+export function wrapBareLatexEnvironments(text: string, mark = '', options: ContainerOptions = {}): string {
+	return withReplacements(text, latexReplacements(text, options), mark);
+}
+
+/** The lines, from `first` to `last`, of a paragraph in a quote or a list
+ *  item that export's ending of quotes before a line without a > splits,
+ *  or that has a lazy line (see endedParagraphs in block-preprocess.ts) */
+export interface LineSpan {
+	first: number;
+	last: number;
+}
+
+/** How export reads the text's quotes and list items: `lazy`, the lines of
+ *  its paragraphs export's ending of quotes splits, whose environments
+ *  export and VS Code's preview leave as written, and `inNote`, where the
+ *  text is a note's body, which export reads on its own, and the preview in
+ *  the document, on the note's indented lines, where it leaves an
+ *  environment in a quote or an item as written. Export does too */
+export interface ContainerOptions {
+	lazy?: LineSpan[];
+	inNote?: boolean;
 }
 
 /** `text` with each of `replacements`, in order, and `mark` before each,
@@ -249,10 +268,10 @@ function withReplacements(text: string, replacements: Replacement[], mark = ''):
  * `wrapBareLatexEnvironments(text)`, with the line of `text` each of its
  * lines comes from: all but the blank lines it collapses in a block.
  */
-export function wrapBareLatexEnvironmentsWithLines(text: string): { output: string; lines: number[] } {
+export function wrapBareLatexEnvironmentsWithLines(text: string, options: ContainerOptions = {}): { output: string; lines: number[] } {
 	const lineStarts = [0];
 	for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) lineStarts.push(i + 1);
-	const replacements = latexReplacements(text);
+	const replacements = latexReplacements(text, options);
 	const lines: number[] = [];
 	let k = 0;
 	for (let line = 0; line < lineStarts.length; line++) {
@@ -271,17 +290,20 @@ interface Replacement {
 	replacement: string;
 }
 
-/** The bare environments of `text`, each with its block wrapped, in order */
-function latexReplacements(text: string): Replacement[] {
+/** The bare environments of `text`, each with its block wrapped, in order,
+ *  as export reads its quotes and items (see ContainerOptions) */
+function latexReplacements(text: string, options: ContainerOptions): Replacement[] {
 	// Fast path: no \begin{ means nothing to do
 	if (!text.includes('\\begin{')) return [];
-	const { zones, literalHtml, steps, fences, inlineBlocks, contained } = inertZonesAndLiteralHtml(text);
+	const { zones, literalHtml, steps, fences, inlineBlocks, contained: read } = inertZonesAndLiteralHtml(text);
 	const byMain = bareEnvironments(text, (begin, end) => holdsEither(begin, end, zones), literalHtml);
 	const environments = bareEnvironments(text, (begin, end) => holdsEither(begin, end, steps), literalHtml);
+	// A note's body's quotes and items as main reads them (see ContainerOptions)
+	const contained = options.inNote ? [] : read;
 	const units = environments.length > 0 || contained.length > 0 ? exportUnits(text, inlineBlocks) : [];
 	const sure = fenceIsSure(text, steps, units, environments);
 	const decided = confirmInPreview(text, decideParagraphs(text, byMain, environments, units, { fences, steps, sure }));
-	const inContainers = decideContainers(text, contained, units, [environments, byMain], { fences, steps });
+	const inContainers = decideContainers(text, contained, units, [environments, byMain], { fences, steps }, options.lazy ?? []);
 	if (inContainers.length === 0) return toReplacements(text, decided);
 	// The top level's, as decided, which hold, and each container
 	// paragraph's, which takes main's decision, to wrap none, where the
@@ -1000,7 +1022,8 @@ function endFinder(text: string): (marker: string, from: number) => number {
  * Main wraps none of these, so its decision, to leave each as it is, holds
  * where any of this is uncertain: in a paragraph with a line that goes on
  * it lazily, which export ends the quote before and VS Code's preview
- * doesn't, with a tab in a line's prefix, in a quote in an item in a quote
+ * doesn't, or which export's ending of quotes splits, of `lazy`, in a
+ * note's body, with a tab in a line's prefix, in a quote in an item in a quote
  * or deeper, or which CriticMarkup joins to another (see exportUnits), and
  * for an environment whose \end{...} is past the paragraph's end, or has
  * text after it on its line, or a line after it that VS Code's preview
@@ -1009,13 +1032,15 @@ function endFinder(text: string): (marker: string, from: number) => number {
  * as the paragraphs of the top level are (see readParagraphOnItsOwn and
  * confirmInPreview).
  */
-function decideContainers(text: string, contained: ContainedParagraph[], units: Zone[], ofTopLevel: BareEnvironment[][], zonesOf: { fences: FenceZone[]; steps: Zone[] }): Decision[] {
+function decideContainers(text: string, contained: ContainedParagraph[], units: Zone[], ofTopLevel: BareEnvironment[][], zonesOf: { fences: FenceZone[]; steps: Zone[] }, lazy: LineSpan[]): Decision[] {
 	if (contained.length === 0 || text.includes('\r')) return [];
 	const decisions: Decision[] = [];
 	const endOf = endFinder(text);
 	const readsAlerts = !ALERT_REFERENCE.test(text);
+	const lineAt = lazy.length > 0 ? lineFinder(text) : undefined;
 	for (const paragraph of contained) {
 		if (paragraph.lazy || !paragraph.lines || !readsContainers(paragraph.containers)) continue;
+		if (lineAt && overlapsSpan(lazy, lineAt(paragraph.start), lineAt(paragraph.end - 1))) continue;
 		if (ofTopLevel.some(environments => overlapsAnyZone(paragraph.start, paragraph.end, environments))) continue;
 		const unit = units[firstEndingAfter(units, paragraph.start)];
 		if (!unit || unit.start !== paragraph.start || unit.end !== paragraph.end) continue;
@@ -1025,6 +1050,19 @@ function decideContainers(text: string, contained: ContainedParagraph[], units: 
 		if (decision) decisions.push(decision);
 	}
 	return decisions;
+}
+
+/** Whether any of `spans`, sorted and apart, has a line from `first` to
+ *  `last` */
+function overlapsSpan(spans: LineSpan[], first: number, last: number): boolean {
+	let lo = 0;
+	let hi = spans.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (spans[mid].last < first) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo < spans.length && spans[lo].first <= last;
 }
 
 /** Whether decideContainers reads a paragraph in `containers`, outermost
@@ -1178,6 +1216,7 @@ function readContainedParagraph(text: string, paragraph: ContainedParagraph, env
 	};
 	const begins = environments.map(e => toContent(e.start + e.indent));
 	const ends = environments.map(e => toContent(e.end));
+	if (splitsInPreview(content, begins, ends)) return undefined;
 	// Each environment's text as x, but its line ends, so a dollar sign or a
 	// backtick in it opens and closes nothing out of it, as once wrapped
 	const masked: string[] = [];
@@ -1252,6 +1291,37 @@ function readContainedParagraph(text: string, paragraph: ContainedParagraph, env
 	};
 	const shown = after.equations.filter(e => e.display).map(e => ({ start: lineStartIn(lineOf(e.start)), end: lineStartIn(lineOf(e.end - 1)) + 1, display: true }));
 	return { environments: wrapped.map(i => environments[i]), override: { unit: { start: paragraph.start, end: paragraph.end }, byMain: [], displays: shown } };
+}
+
+/**
+ * Whether VS Code's preview, whose display math from a wrap's opening fence
+ * ends the paragraph before it and starts one after its closing fence's
+ * line, would read the paragraph's text out of its environments, from
+ * `begins` to `ends` in `content`, otherwise than export and main's preview
+ * read it whole. Emphasis, strong emphasis or strikethrough from before an
+ * environment to after it, which Word keeps, showed as its delimiters, and
+ * a line break before one, a backslash at a line's end, as the backslash.
+ * So the paragraph stays as written where its text out of its environments
+ * holds any *, _ or ~, which may pair across one, or a line before one ends
+ * in a backslash. Without them, of the rules a simple paragraph reads,
+ * none reads a span over an environment but a code span or a comment,
+ * which zone it (see containedEnvironments), and inline math, which the
+ * reads with and without the wraps compare. So each piece of the paragraph
+ * reads alone as in the whole, but a line break of two spaces before an
+ * environment, which goes with the piece's end, where display math starts
+ * a line anyway.
+ */
+function splitsInPreview(content: string, begins: number[], ends: number[]): boolean {
+	for (let i = 0; i <= begins.length; i++) {
+		const from = i === 0 ? 0 : ends[i - 1];
+		const to = i === begins.length ? content.length : begins[i];
+		if (/[*_~]/.test(content.slice(from, to))) return true;
+		if (i < begins.length) {
+			const lineStart = content.lastIndexOf('\n', begins[i] - 1);
+			if (lineStart > 0 && content.charCodeAt(lineStart - 1) === 0x5C) return true;
+		}
+	}
+	return false;
 }
 
 /** How many of `offsets`, sorted, are before `offset`, or at it too where

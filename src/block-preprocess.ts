@@ -8,22 +8,87 @@
 
 import { computeMarkdownRegions, isInsideCodeRegion, isQuoteLine, keepsLazyLine, QUOTE_START, type MarkdownRegions } from './code-regions';
 import { preprocessGridTablesWithSourceMap } from './grid-table-preprocess';
-import { wrapBareLatexEnvironmentsWithLines } from './latex-env-preprocess';
+import { wrapBareLatexEnvironmentsWithLines, type ContainerOptions, type LineSpan } from './latex-env-preprocess';
 
 export interface PreprocessedBlocks {
   /** After grid tables and quotes, before LaTeX environments are wrapped */
   deLazified: string;
+  /** How the wrap read the quotes and list items of `deLazified`: the lines
+   *  of each paragraph that had a lazy line before, whose environments stay
+   *  as written, and whether it is a note's body (see ContainerOptions) */
+  containers: ContainerOptions;
   output: string;
   /** For each line of `output`, the line of the Markdown it comes from */
   lines: number[];
 }
 
-/** The Markdown as markdown-it reads it, before CriticMarkup is preprocessed */
-export function preprocessBlocks(markdown: string): PreprocessedBlocks {
+/** The Markdown as markdown-it reads it, before CriticMarkup is
+ *  preprocessed, where it is a note's body `inNote` */
+export function preprocessBlocks(markdown: string, inNote = false): PreprocessedBlocks {
   const grid = preprocessGridTablesWithSourceMap(markdown);
   const quotes = deLazifyBlockquotesWithLines(grid.output);
-  const latex = wrapBareLatexEnvironmentsWithLines(quotes.output);
-  return { deLazified: quotes.output, output: latex.output, lines: latex.lines.map(line => grid.lines[quotes.lines[line]]) };
+  const containers: ContainerOptions = { lazy: inNote ? [] : endedParagraphs(grid.output, quotes).after, inNote };
+  const latex = wrapBareLatexEnvironmentsWithLines(quotes.output, containers);
+  return { deLazified: quotes.output, containers, output: latex.output, lines: latex.lines.map(line => grid.lines[quotes.lines[line]]) };
+}
+
+/** The lines of `markdown` in each paragraph of a quote or a list item, with
+ *  a bare environment, whose quote export ends inside it (see
+ *  endedParagraphs), where VS Code's preview wraps the text as written: the
+ *  environments it leaves as written, as export does */
+export function paragraphsExportEnds(markdown: string): LineSpan[] {
+  if (!markdown.includes('\\begin{')) return [];
+  return endedParagraphs(markdown, deLazifyBlockquotesWithLines(markdown)).before;
+}
+
+/**
+ * Each paragraph in a quote or a list item, with a bare environment, whose
+ * quote export ends inside it, putting a blank line before a line of it
+ * (see deLazifyBlockquotesWithLines), or that has a lazy line: by its lines
+ * in `markdown`, `before`, and after, of `quotes`, the Markdown with the
+ * quotes ended, and for each of its lines, the line it comes from.
+ *
+ * VS Code's preview reads such a paragraph as written, as one, and export
+ * reads its pieces in quotes of their own, or ends a quote before a line
+ * the preview reads in it, as one four spaces into a list item after the
+ * item's quote, which isQuoteLine takes for no quote's. Their environments
+ * stay as written in both (see decideContainers in latex-env-preprocess.ts).
+ */
+function endedParagraphs(markdown: string, quotes: { output: string; lines: number[] }): { before: LineSpan[]; after: LineSpan[] } {
+  if (quotes.output === markdown || !markdown.includes('\\begin{')) return { before: [], after: [] };
+  const { containedParagraphs } = computeMarkdownRegions(markdown, { inlineCode: false, html: 'all', containedParagraphs: true });
+  if (containedParagraphs.length === 0) return { before: [], after: [] };
+  // The lines of the Markdown a blank line went in before, in order
+  const ended: number[] = [];
+  for (let i = 0; i + 1 < quotes.lines.length; i++) if (quotes.lines[i] === quotes.lines[i + 1]) ended.push(quotes.lines[i]);
+  const lineStarts = [0];
+  for (let i = markdown.indexOf('\n'); i !== -1; i = markdown.indexOf('\n', i + 1)) lineStarts.push(i + 1);
+  // The first of a sorted list at or past a value
+  const firstFrom = (list: number[], value: number) => {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (list[mid] < value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const before: LineSpan[] = [];
+  const after: LineSpan[] = [];
+  for (const paragraph of containedParagraphs) {
+    const first = firstFrom(lineStarts, paragraph.start + 1) - 1;
+    const last = firstFrom(lineStarts, paragraph.end) - 1;
+    // A blank line before a line of it but its first
+    const at = firstFrom(ended, first + 1);
+    if (!paragraph.lazy && !(at < ended.length && ended[at] <= last)) continue;
+    before.push({ first, last });
+    // Its lines after, which come from those
+    const from = firstFrom(quotes.lines, first);
+    const to = firstFrom(quotes.lines, last + 1) - 1;
+    if (from <= to) after.push({ first: from, last: to });
+  }
+  return { before, after };
 }
 
 /** A line that may be a quote's (see isQuoteLine), before a line with text

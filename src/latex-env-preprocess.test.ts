@@ -10,6 +10,7 @@ import MarkdownIt from 'markdown-it';
 import { manuscriptMarkdownPlugin } from './preview/manuscript-markdown-plugin';
 import { vscodeMath } from './preview-math-read';
 import { wrapBareLatexEnvironmentsWithMap } from './preview/preprocess-with-map';
+import { preprocessBlocks } from './block-preprocess';
 
 describe('wrapBareLatexEnvironments', () => {
 	test('wraps a bare equation environment', () => {
@@ -1061,6 +1062,109 @@ describe('a bare environment in a quote, an alert or a list item', () => {
 		expect(shown.texts).toContain('important');
 	});
 
+	// Export ends a quote before a line without its > (see
+	// deLazifyBlockquotesWithLines in block-preprocess.ts) before the wrap,
+	// and the preview reads the line on in the quote's paragraph, which
+	// leaves it as written. So export wrapped the environment and the
+	// preview didn't. Both read the paragraph as written, with its lazy line
+	const lazy: Array<[string, string]> = [
+		['a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\nlazy text\n'],
+		['an alert', '> [!NOTE]\n> \\begin{equation}\n> x = 1\n> \\end{equation}\nlazy text\n'],
+		['a nested item', '- a\n  - b\n    \\begin{equation}\n    x = 1\n    \\end{equation}\nlazy text\n'],
+		['a quote on a list item\'s marker line', '- > \\begin{equation}\n  > x = 1\n  > \\end{equation}\nlazy text\n'],
+	];
+	test.each(lazy)('leaves a bare environment in %s with a lazy line after its \\end{...} as main leaves it, in export and the preview', async (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const blocks = preprocessBlocks(md);
+		expect(blocks.output).toBe(blocks.deLazified);
+		const out = await word(md);
+		expect(out.equations).toHaveLength(0);
+		expect(out.text).toContain('begin{equation}');
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('leaves a bare environment in a quote of a list item, four spaces in, which export ends the quote before, as main leaves it, in export and the preview', async () => {
+		// The preview reads the line four spaces in on the item's quote, and
+		// export puts a blank line before it, which ends the paragraph inside
+		// the environment
+		const md = '- > P\n  >\n  > \\begin{align*}\n    > a = b\n  > \\end{align*}\n';
+		expect(wrapBareLatexEnvironmentsWithMap(md).output).toBe(md);
+		const blocks = preprocessBlocks(md);
+		expect(blocks.output).toBe(blocks.deLazified);
+		expect((await word(md)).equations).toHaveLength(0);
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('leaves a bare environment in a quote in a note as main leaves it, in export and the preview', async () => {
+		// Export reads the note on its own, and the preview on the note's
+		// indented lines in the document
+		const md = 'Text[^n].\n\n[^n]: A note.\n\n    > \\begin{equation}\n    > x = 1\n    > \\end{equation}\n';
+		const { docx } = await convertMdToDocx(md);
+		const notes = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+		expect(notes).not.toContain('<m:oMath>');
+		expect(notes).toContain('begin{equation}');
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('leaves a bare environment in a quote after a lazy line as main leaves it, in export and the preview', async () => {
+		const md = '> P\nlazy\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n';
+		const blocks = preprocessBlocks(md);
+		expect(blocks.output).toBe(blocks.deLazified);
+		expect((await word(md)).equations).toHaveLength(0);
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	// The preview's display math splits the paragraph, so emphasis, strong
+	// emphasis or strikethrough from before an environment to after it, which
+	// Word keeps, showed as its delimiters, and a line break before it as a
+	// backslash. Main's preview showed the formatting, with the environment
+	// as text in it. A paragraph with any *, _ or ~ out of its environments
+	// stays as written
+	const formats = (md: string) => {
+		const it = new MarkdownIt({ html: true });
+		vscodeMath(it);
+		it.use(manuscriptMarkdownPlugin);
+		const opens: string[] = [];
+		const visit = (tokens: ReturnType<MarkdownIt['parse']>) => {
+			for (const token of tokens) {
+				if (['em_open', 'strong_open', 's_open'].includes(token.type)) opens.push(token.type);
+				if (token.children) visit(token.children);
+			}
+		};
+		visit(it.parse(md, {}));
+		return opens;
+	};
+	const spanning: Array<[string, string, string]> = [
+		['emphasis in a quote', '> *before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after*\n', 'em_open'],
+		['emphasis of underscores in a quote', '> _before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after_\n', 'em_open'],
+		['strong emphasis in an alert', '> [!NOTE]\n> **before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after**\n', 'strong_open'],
+		['strikethrough in a nested item', '- a\n  - b\n    ~~before\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n    after~~\n', 's_open'],
+		['emphasis in a nested item', '- a\n  - b\n    *before\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n    after*\n', 'em_open'],
+		['strikethrough in an alert', '> [!NOTE]\n> ~~before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after~~\n', 's_open'],
+	];
+	test.each(spanning)('leaves a bare environment in %s over it as main leaves it, which the preview shows in it', (_name, md, open) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(preview(md).maths).toHaveLength(0);
+		expect(formats(md)).toEqual([open]);
+	});
+
+	test.each([
+		['highlight in a quote', '> ==before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after==\n'],
+		['a code span in a quote', '> `before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after`\n'],
+		['emphasis before it in a quote', '> *a* before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['a line break before it in a quote', '> before\\\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['a line break before it in a nested item', '- a\n  - b\n    before\\\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n'],
+	])('leaves a bare environment with %s as main leaves it', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('wraps a bare environment of a starred name with an underscore in it in a quote, whose * and _ are its own', () => {
+		const md = '> \\begin{align*}\n> a_1 &= b^*\n> \\end{align*}\n';
+		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{align*}\n> a_1 &= b^*\n> \\end{align*}' + D + '\n');
+		expect(preview(md).maths).toEqual(['\\begin{align*}\na_1 &= b^*\n\\end{align*}']);
+	});
+
 	test('leaves a bare environment on its one line in a quote, with white space after it, as main leaves it', () => {
 		// Whose closing fence, before the white space, the preview read as
 		// none, and so the fence in its equation
@@ -1115,6 +1219,7 @@ describe('bare environments in quotes, alerts and list items in time linear in t
 		['a link and an environment', 'See [a](u)\n' + env],
 		['an environment with prose after its end', env + ' and prose'],
 		['an environment with a [ on the line after it', env + '\n[a b'],
+		['emphasis over an environment', '*a\n' + env + '\nb*'],
 	];
 	const works: Array<(text: string) => unknown> = [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives, text => wrapBareLatexEnvironmentsWithMap(text)];
 	const linear = (make: (n: number) => string, through: Array<(text: string) => unknown>) => {
@@ -1139,5 +1244,15 @@ describe('bare environments in quotes, alerts and list items in time linear in t
 		const one = contain(shape) + '\n\n';
 		linear(n => one.repeat(n), works);
 		linear(n => contain((shape + '\n').repeat(n)) + '\n', works.slice(0, 1));
+	}, 120000);
+
+	test.each([
+		['at a lazy line after it', '> ' + env.replace(/\n/g, '\n> ') + '\nlazy\n\n'],
+		['at a lazy line before it', '> P\nlazy\n> ' + env.replace(/\n/g, '\n> ') + '\n\n'],
+		['in it, at a line four spaces into its item', '- > P\n  >\n  > \\begin{equation}\n    > x\n  > \\end{equation}\n\n'],
+	])('reads many quotes of an environment that export ends %s in linear time', (_where, one) => {
+		// Whose paragraphs export reads before it ends the quotes, as the
+		// orientation scan does (see preprocessBlocks)
+		linear(n => one.repeat(n), works.concat([text => preprocessBlocks(text)]));
 	}, 120000);
 });
