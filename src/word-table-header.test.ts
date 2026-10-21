@@ -17,6 +17,12 @@ const LOOK_OFF = '<w:tblLook w:val="0000" w:firstRow="0" w:lastRow="0" w:firstCo
 
 const BORDER = 'w:val="single" w:sz="4" w:space="0"';
 
+/** A table style `id` based on `basedOn`, whose first row's part has the
+ *  borders `sides` in its `kind` properties' element `tag` */
+const borderStyle = (id: string, basedOn: string, kind: string, tag: string, sides: string) => '<w:style w:type="table" w:styleId="' + id + '">'
+  + '<w:name w:val="' + id + '"/><w:basedOn w:val="' + basedOn + '"/><w:tblStylePr w:type="firstRow"><w:' + kind + '><w:' + tag + '>' + sides
+  + '</w:' + tag + '></w:' + kind + '></w:tblStylePr></w:style>';
+
 /** Word's own styles.xml, in part: Normal, Strong, a bold paragraph
  *  style, Table Normal, Table Grid, and Grid Table 4 Accent 1, whose first
  *  row's part is bold and white on blue, with a style based on it */
@@ -45,6 +51,13 @@ const STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles
   // A first row's part that shows nothing: rows kept together, and bold off
   + '<w:style w:type="table" w:styleId="Unshown"><w:name w:val="Unshown"/><w:basedOn w:val="TableGrid"/>'
   + '<w:tblStylePr w:type="firstRow"><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="auto"/></w:tcPr></w:tblStylePr></w:style>'
+  // A first row's part of borders above and below its cells, or its
+  // paragraphs, and styles based on those that turn some of them off
+  + borderStyle('Ruled', 'TableNormal', 'tcPr', 'tcBorders', '<w:top ' + BORDER + ' w:color="auto"/><w:bottom w:val="single" w:sz="12" w:space="0" w:color="auto"/>')
+  + borderStyle('RuledAbove', 'Ruled', 'tcPr', 'tcBorders', '<w:bottom w:val="nil"/>')
+  + borderStyle('Unruled', 'Ruled', 'tcPr', 'tcBorders', '<w:top w:val="nil"/><w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>')
+  + borderStyle('Lined', 'TableNormal', 'pPr', 'pBdr', '<w:top ' + BORDER + ' w:color="auto"/><w:bottom ' + BORDER + ' w:color="auto"/>')
+  + borderStyle('LinedBelow', 'Lined', 'pPr', 'pBdr', '<w:top w:val="nil"/>')
   + '</w:styles>';
 
 /** A run of `text`, with `rPr`'s properties */
@@ -145,6 +158,38 @@ describe('the header row of a Word table', () => {
     // But not with the first row's part turned off, though its first
     // column's is bold
     expect(await imported(table([plain, BODY], 'GridTable4-Accent1', LOOK_OFF))).toBe(HEADERLESS);
+  });
+
+  test('a style whose first row\'s part draws a border makes its first row a header, by each side it takes from its base', async () => {
+    const plain = row([cell(run('Name')), cell(run('Age'))]);
+    expect(await imported(table([plain, BODY], 'Ruled'))).toBe(PIPE);
+    // Based on it, with its bottom border off, which leaves the top one
+    expect(await imported(table([plain, BODY], 'RuledAbove'))).toBe(PIPE);
+    expect(await imported(table([plain, BODY], 'Unruled'))).toBe(HEADERLESS);
+    // A paragraph's borders, its top one off, which leaves the bottom one
+    expect(await imported(table([plain, BODY], 'Lined'))).toBe(PIPE);
+    expect(await imported(table([plain, BODY], 'LinedBelow'))).toBe(PIPE);
+    // With the first row's part turned off
+    expect(await imported(table([plain, BODY], 'RuledAbove', LOOK_OFF))).toBe(HEADERLESS);
+  });
+
+  test('a symbol and a non-breaking hyphen count for a first row in bold', async () => {
+    // A symbol's run, or a hyphen's, not in bold, beside bold text, is a
+    // body row, which the next export doesn't make bold
+    const symbol = (char: string, rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:sym w:font="Symbol" w:char="' + char + '"/></w:r>';
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell(symbol('F061'))]), BODY], 'TableGrid', LOOK_OFF)))
+      .toBe('+----------+-----+\n| **Name** | α   |\n+----------+-----+\n| Ann      | 30  |\n+----------+-----+');
+    const hyphenated = (rPr: string) => cell(run('A', '<w:b/>') + '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:noBreakHyphen/></w:r>' + run('B', '<w:b/>'));
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), hyphenated('')]), BODY], 'TableGrid', LOOK_OFF)))
+      .toBe('+----------+-------------+\n| **Name** | **A**\u2011**B** |\n+----------+-------------+\n| Ann      | 30          |\n+----------+-------------+');
+    // A symbol of a font import can't read, which Word shows still
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell('<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r>')]), BODY], 'TableGrid', LOOK_OFF)))
+      .not.toContain('| --- |');
+    // In bold, they're a header row's, as symbols alone are
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), hyphenated('<w:b/>')]), BODY], 'TableGrid', LOOK_OFF)))
+      .toBe('| Name | A\u2011B |\n| --- | --- |\n| Ann | 30 |');
+    expect(await imported(table([row([cell(symbol('F061', '<w:b/>')), cell(symbol('F062', '<w:b/>'))]), BODY], 'TableGrid', LOOK_OFF)))
+      .toBe('| α | β |\n| --- | --- |\n| Ann | 30 |');
   });
 
   test('a style whose first row\'s part shows nothing leaves a plain first row a body row', async () => {

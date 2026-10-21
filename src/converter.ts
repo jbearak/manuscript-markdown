@@ -6896,12 +6896,6 @@ function firstRowHeader(tblChildren: XmlNode[], layouts: StyleLayouts | undefine
   return look.firstRow || 'bold';
 }
 
-/** Whether a border's element, as a w:tcBorders or a w:pBdr, draws any
- *  border: one of a style, not none or nil */
-function drawsBorder(node: XmlNode, tag: string): boolean {
-  return asXmlNodes(node[tag]).some(side => !['', 'none', 'nil'].includes(getAttr(side, 'val')));
-}
-
 /** Whether a w:shd shades anything: with a pattern, or a fill but none or
  *  automatic */
 function shades(node: XmlNode): boolean {
@@ -6914,7 +6908,8 @@ function shades(node: XmlNode): boolean {
  *  the cells, with, by the properties it's in and its element, and whether
  *  the element's value shows it: a toggle on, as bold, an underline, a
  *  colour, a highlight, a size or a font, an alignment but left, as Word
- *  shows a paragraph of none, shading or a border */
+ *  shows a paragraph of none, or shading; and borders, by their elements
+ *  (see TABLE_PART_BORDERS) */
 const TABLE_PART_SHOWS: (readonly [kind: 'pPr' | 'rPr' | 'tcPr', tag: string, shows: (node: XmlNode, tag: string) => boolean])[] = [
   ...['w:b', 'w:i', 'w:caps', 'w:smallCaps', 'w:strike', 'w:dstrike', 'w:outline', 'w:shadow', 'w:emboss', 'w:imprint']
     .map(tag => ['rPr', tag, (node: XmlNode) => isToggleOn([node], tag)] as const),
@@ -6926,30 +6921,45 @@ const TABLE_PART_SHOWS: (readonly [kind: 'pPr' | 'rPr' | 'tcPr', tag: string, sh
   ['rPr', 'w:rFonts', () => true],
   ['pPr', 'w:jc', node => ['center', 'right', 'end'].includes(getAttr(node, 'val'))],
   ['pPr', 'w:shd', shades],
-  ['pPr', 'w:pBdr', drawsBorder],
   ['tcPr', 'w:shd', shades],
-  ['tcPr', 'w:tcBorders', drawsBorder],
 ];
+
+/** The borders of a part of a table style, by the properties they're in
+ *  and their element, which holds an element for each side */
+const TABLE_PART_BORDERS: (readonly [kind: 'pPr' | 'tcPr', tag: string])[] = [['pPr', 'w:pBdr'], ['tcPr', 'w:tcBorders']];
 
 /** Whether a table's style shows its first row apart: where tblLook turns
  *  on the style's part for it, and the part, its own or else its base's,
  *  for each property, as styledProperty reads a part, sets something Word
- *  shows (see TABLE_PART_SHOWS). Table Grid, the style of a table Word
- *  inserts, has no such part. */
+ *  shows (see TABLE_PART_SHOWS), or a border, of a style, not none or nil,
+ *  on any side, each side its own or else its base's, as a style that
+ *  turns one side off keeps its base's others (see TABLE_PART_BORDERS).
+ *  Table Grid, the style of a table Word inserts, has no such part. */
 function styleShowsFirstRow(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
   if (!look.firstRow || !layouts) return false;
   const table = styleChain(layouts.table, styleById(layouts.table, tableStyleId(tblChildren, layouts)) ?? styleById(layouts.table, layouts.defaultTableStyle));
   const parts = table.map(style => style.parts.get('firstRow'));
+  // The element `tag` that `kind` properties of the part have first, nearest
+  // the table's style, of the element `inner` holds within it, where given
+  const value = (kind: 'pPr' | 'rPr' | 'tcPr', tag: string, inner?: string) => firstValue(parts.map(part => part?.[kind]), properties => {
+    const node = properties.find(c => c[tag] !== undefined);
+    return node && inner !== undefined ? asXmlNodes(node[tag]).find(c => c[inner] !== undefined) : node;
+  });
   return TABLE_PART_SHOWS.some(([kind, tag, shows]) => {
-    const node = firstValue(parts.map(part => part?.[kind]), properties => properties.find(c => c[tag] !== undefined));
+    const node = value(kind, tag);
     return node !== undefined && shows(node, tag);
+  }) || TABLE_PART_BORDERS.some(([kind, tag]) => {
+    const sides = new Set(parts.flatMap(part => (part?.[kind] ?? []).filter(c => c[tag] !== undefined)
+      .flatMap(c => asXmlNodes(c[tag]).flatMap(side => Object.keys(side).filter(key => key !== ':@' && key !== '#text')))));
+    return [...sides].some(side => !['', 'none', 'nil'].includes(getAttr(value(kind, tag, side), 'val')));
   });
 }
 
 /**
  * Whether Word shows all the text of a table's first row in bold, as a row
  * of headings: each run of text but whitespace alone, which shows no bold,
- * and not a hidden run's, in the elements the walk of a table's runs reads
+ * with its symbols and the characters export writes back as them (see
+ * withCharactersAsText), and not a hidden run's, in the elements the walk of a table's runs reads
  * (see TABLE_CONTENT), its bold its own or else its styles', for where its
  * cell is in the table (see styledProperty), and some text. Not where a
  * run's bold is unknown, as from a character style styles.xml doesn't have.
@@ -6975,9 +6985,12 @@ function firstRowBold(tblChildren: XmlNode[], layouts: StyleLayouts | undefined,
     const rPr = children.find(c => c['w:rPr'] !== undefined);
     const rPrChildren = rPr ? asXmlNodes(rPr['w:rPr']) : [];
     if (isToggleOn(rPrChildren, 'w:vanish')) return true;
-    const shown = children.map(child => child['w:t'] !== undefined ? nodeText(asXmlNodes(child['w:t']))
+    // A symbol's character and a non-breaking hyphen's too, which Word
+    // shows in the run's bold, and a symbol of a font import can't read
+    const runChildren = withCharactersAsText(children);
+    const shown = runChildren.map(child => child['w:t'] !== undefined ? nodeText(asXmlNodes(child['w:t']))
       : child['w:delText'] !== undefined ? nodeText(asXmlNodes(child['w:delText'])) : '').join('');
-    if (!/\S/.test(shown)) return true;
+    if (!/\S/.test(shown) && !runChildren.some(child => child['w:sym'] !== undefined)) return true;
     text = true;
     return styledProperty(layouts, 'rPr', rPrChildren, { style: paragraphStyle, tableStyle, place }, rPr => toggleIn(rPr, 'w:b'))?.value === true;
   }));
