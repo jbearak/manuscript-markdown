@@ -76,6 +76,9 @@ export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
   'bibliography-hanging-indent',
 ]);
 
+/** The keys parseFrontmatter reads, each of which import writes from what the Word document has */
+const READ_KEYS: ReadonlySet<string> = new Set([...SINGLE_VALUE_KEYS, ...ARRAY_KEYS, 'title', 'styles']);
+
 /** An item of a block list in frontmatter, as `  - One` after `title:` */
 export interface BlockListItem {
   /** The index of its line among the frontmatter's */
@@ -107,6 +110,11 @@ function indentOf(line: string): number {
   let k = 0;
   while (line[k] === ' ' || line[k] === '\t') k++;
   return k;
+}
+
+/** Whether a line is blank, as the line after frontmatter's opening one can't be */
+function isBlankLine(line: string): boolean {
+  return /^[ \t]*\r?$/.test(line);
 }
 
 /** Whether text after a line's indentation is an item of a block list: a `-`, then a space, a tab or the line's end */
@@ -457,23 +465,41 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
   if (bodyStart === undefined) {
     return { metadata: {}, body: markdown, fieldOrder: [] };
   }
-  const trimmed = markdown.trimStart();
+  const body = markdown.slice(bodyStart);
+  const warnings: string[] = [];
+  const { metadata, fieldOrder } = readFrontmatterLines(frontmatterYamlLines(markdown), warnings);
 
+  // Title inline array: if exactly one title entry looks like [v1, v2, ...], expand it
+  if (metadata.title && metadata.title.length === 1) {
+    const t = metadata.title[0];
+    if (t.startsWith('[') && t.endsWith(']')) {
+      metadata.title = parseInlineArray(t);
+    }
+  }
+
+  return warnings.length > 0 ? { metadata, body, fieldOrder, warnings } : { metadata, body, fieldOrder };
+}
+
+/**
+ * The lines of frontmatter's YAML, of frontmatter the Markdown has, from
+ * the line after the opening one, with its indentation, which says whether
+ * a key there opens a block list, as the language server reads it
+ */
+function frontmatterYamlLines(markdown: string): string[] {
+  const trimmed = markdown.trimStart();
   const endMatch = trimmed.substring(3).match(FRONTMATTER_CLOSING_RE)!;
   const endIdx = endMatch.index! + 3;
+  return trimmed.slice(3, endIdx).replace(/^[ \t]*\r?\n/, '').trimEnd().split('\n');
+}
 
-  // From the line after the opening one, with its indentation, which says
-  // whether a key there opens a block list, as the language server reads it
-  const yamlBlock = trimmed.slice(3, endIdx).replace(/^[ \t]*\r?\n/, '').trimEnd();
-  const body = markdown.slice(bodyStart);
-
+/** The settings frontmatter's lines give, and the keys they have, in order, as parseFrontmatter reads them */
+function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: Frontmatter; fieldOrder: string[] } {
   const metadata: Frontmatter = {};
   const fieldOrder: string[] = [];
   const seenFields = new Set<string>();
-  const warnings: string[] = [];
   // Each block list as the lines it stands for, as `title:` then `  - One`
   // and `  - Two` as `title: One` and `title: Two`
-  const yamlLines = readBlockLists(yamlBlock.split('\n'), warnings);
+  const yamlLines = readBlockLists(lines, warnings);
   for (let lineIdx = 0; lineIdx < yamlLines.length; lineIdx++) {
     const line = yamlLines[lineIdx];
     const colonIdx = line.indexOf(':');
@@ -745,23 +771,95 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         break;
     }
   }
+  return { metadata, fieldOrder };
+}
 
-  // Title inline array: if exactly one title entry looks like [v1, v2, ...], expand it
-  if (metadata.title && metadata.title.length === 1) {
-    const t = metadata.title[0];
-    if (t.startsWith('[') && t.endsWith(']')) {
-      metadata.title = parseInlineArray(t);
+/**
+ * Frontmatter's top-level keys in their order, for a Word document to keep
+ * for import: the name of each key parseFrontmatter reads, whose value
+ * import takes from the document, so that an edit in Word wins, and as
+ * written each key it reads nothing from, as `date`, `abstract` or
+ * Quarto's `format`, which import puts back where it was among them.
+ */
+export type FrontmatterLayout = Array<string | { text: string }>;
+
+/**
+ * Frontmatter's top-level entries, by the indices of their lines: each a
+ * key's line, a line at its start with a colon, with the comments and
+ * blank lines right before it and the lines after it up to the next one's:
+ * those indented, as a mapping's or a literal value's, the items of a
+ * list, and lines of no key. The comments and blank lines at the end go
+ * with the last entry. The lines before the first entry but its comments
+ * and blank lines are in none.
+ */
+function topLevelEntries(lines: readonly string[]): { key: string; start: number; end: number }[] {
+  const entries: { key: string; start: number; end: number }[] = [];
+  // The last line not a comment or blank, after which the next entry starts
+  let content = -1;
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k].replace(/\r$/, '');
+    if (isBlankLine(line) || line[0] === '#') continue;
+    const colon = line.indexOf(':');
+    if (colon > 0 && line[0] !== ' ' && line[0] !== '\t' && !isListItem(line)) {
+      if (entries.length > 0) entries[entries.length - 1].end = content + 1;
+      entries.push({ key: line.slice(0, colon).trim(), start: content + 1, end: lines.length });
+    }
+    content = k;
+  }
+  return entries;
+}
+
+/**
+ * The layout of the Markdown's frontmatter (see FrontmatterLayout), where
+ * it has a key export reads nothing from: one whose name parseFrontmatter
+ * doesn't read, none of whose lines gives a setting. A line of a key it
+ * reads, in a mapping or a literal value under the key, gives one, which
+ * export writes to Word, and the key goes as before, as import writes the
+ * setting. Each key held is its lines as written, quotes, comments and
+ * all, with the comments and blank lines before it.
+ */
+export function frontmatterLayout(markdown: string): FrontmatterLayout | undefined {
+  if (frontmatterBodyStartOffset(markdown) === undefined) return undefined;
+  const lines = frontmatterYamlLines(markdown);
+  const layout: FrontmatterLayout = [];
+  const named = new Set<string>();
+  let unused = false;
+  for (const entry of topLevelEntries(lines)) {
+    const entryLines = lines.slice(entry.start, entry.end);
+    // As parseFrontmatter reads its lines among the others', as no block
+    // list or mapping it reads goes past an entry's
+    const { metadata, fieldOrder } = readFrontmatterLines(entryLines, []);
+    const last = layout[layout.length - 1];
+    if (!READ_KEYS.has(entry.key) && Object.keys(metadata).length === 0) {
+      // With those right before it, as nothing goes between them
+      if (typeof last === 'object') last.text += '\n' + entryLines.join('\n');
+      else layout.push({ text: entryLines.join('\n') });
+      unused = true;
+      continue;
+    }
+    // The blank lines it starts with, after a key held, go with that key,
+    // as a literal value's that keeps its line ends, as `|+`, do
+    let blank = 0;
+    while (blank < entryLines.length && isBlankLine(entryLines[blank])) blank++;
+    if (typeof last === 'object' && blank > 0) last.text += '\n' + entryLines.slice(0, blank).join('\n');
+    for (const key of fieldOrder) {
+      if (!READ_KEYS.has(key) || named.has(key)) continue;
+      named.add(key);
+      layout.push(key);
     }
   }
-
-  return warnings.length > 0 ? { metadata, body, fieldOrder, warnings } : { metadata, body, fieldOrder };
+  return unused ? layout : undefined;
 }
 
 /**
  * Serialize a Frontmatter object to a YAML frontmatter string.
- * Returns empty string if metadata has no fields.
+ * Returns empty string if metadata has no fields. With a layout (see
+ * frontmatterLayout), its keys export reads nothing from go back where they
+ * were among the keys written from `metadata`, whose order is the
+ * layout's, then `fieldOrder`'s for the rest, and a key in neither, as one
+ * added in Word, goes after them all.
  */
-export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[]): string {
+export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[], layout?: FrontmatterLayout): string {
   const lines: string[] = [];
   const emitArr = (key: string, arr: (string | number)[] | undefined) => {
     if (!arr || arr.length === 0) return;
@@ -859,8 +957,8 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
   const order = fieldOrder && fieldOrder.length > 0 ? fieldOrder : defaultOrder;
   const emitted = new Set<string>();
 
-  for (const key of order) {
-    if (emitted.has(key)) continue;
+  const emit = (key: string) => {
+    if (emitted.has(key)) return;
     emitted.add(key);
     const canonical = aliasToCanonical[key];
     if (canonical) {
@@ -872,7 +970,22 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     if (aliases) for (const a of aliases) emitted.add(a);
     const emitter = emitters[key];
     if (emitter) emitter();
+  };
+  // The keys export read nothing from, as written, each after the keys
+  // before it in the Markdown that are written here and before those after
+  // it. One that's first goes without the blank lines it starts with,
+  // which would make the opening --- a rule.
+  for (const item of layout ?? []) {
+    if (typeof item === 'string') {
+      emit(item);
+      continue;
+    }
+    const held = item.text.split('\n');
+    let start = 0;
+    if (lines.length === 0) while (start < held.length && isBlankLine(held[start])) start++;
+    pushAll(lines, held.slice(start));
   }
+  for (const key of order) emit(key);
 
   // Emit any remaining fields not in the provided order
   for (const key of defaultOrder) {
@@ -881,6 +994,9 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     const emitter = emitters[key];
     if (emitter) emitter();
   }
+  // Without the blank lines a key held ends with where it's last, as export
+  // reads the frontmatter without those it ends with
+  while (lines.length > 0 && isBlankLine(lines[lines.length - 1])) lines.pop();
 
   if (lines.length === 0) return '';
   return '---\n' + lines.join('\n') + '\n---\n';

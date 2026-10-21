@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 import { apartFromCurrency, asXmlNodes, endsInLatexComment, ommlToLatex, symbolFontCharacter, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
-import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
+import { FRONTMATTER_OPENING_RE, Frontmatter, type FrontmatterLayout, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
@@ -4788,6 +4788,26 @@ export async function extractFrontmatterFieldOrder(data: Uint8Array | JSZip): Pr
     const arr = JSON.parse(json);
     if (!Array.isArray(arr)) return null;
     return arr.filter((s: unknown): s is string => typeof s === 'string');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The frontmatter's keys export read nothing from, as written, among the
+ * names of those it reads (see frontmatterLayout and frontmatterLayoutProps
+ * in md-to-docx.ts). An entry with a line that would close the frontmatter
+ * isn't one export wrote, and goes.
+ */
+export async function extractFrontmatterLayout(data: Uint8Array | JSZip): Promise<FrontmatterLayout | null> {
+  const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_FRONTMATTER_UNUSED_KEYS_');
+  if (!json) return null;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((item: unknown): item is string | { text: string } => typeof item === 'string'
+      || (typeof item === 'object' && item !== null && typeof (item as { text?: unknown }).text === 'string'
+        && !/^---[ \t]*\r?$/m.test((item as { text: string }).text)));
   } catch {
     return null;
   }
@@ -19096,6 +19116,7 @@ export async function convertDocx(
     portraitTableMapping,
     explicitTableFontSize,
     storedFieldOrder,
+    storedFrontmatterLayout,
     htmlCommentAfterGapMapping,
     sentinelGapMapping,
     styleBlockEdges,
@@ -19156,6 +19177,7 @@ export async function convertDocx(
     portraitTableMapping: extractPortraitTableMapping(zip),
     explicitTableFontSize: extractExplicitTableFontSize(zip),
     storedFieldOrder: extractFrontmatterFieldOrder(zip),
+    storedFrontmatterLayout: extractFrontmatterLayout(zip),
     htmlCommentAfterGapMapping: extractHtmlCommentAfterGapMapping(zip),
     sentinelGapMapping: extractSentinelGapMapping(zip),
     styleBlockEdges: extractStyleBlockEdges(zip),
@@ -19889,7 +19911,8 @@ export async function convertDocx(
   // Without a stored setting, as in a document from Word, the style its
   // quotes are in, which export would otherwise write as GitHub's
   fm.blockquoteStyle ??= inferredBlockquoteStyle(docContent);
-  const frontmatterStr = serializeFrontmatter(fm, storedFieldOrder ?? undefined);
+  // With the keys export read nothing from, as written, where they were
+  const frontmatterStr = serializeFrontmatter(fm, storedFieldOrder ?? undefined, storedFrontmatterLayout ?? undefined);
   if (frontmatterStr) {
     // Restore the original number of blank lines after frontmatter.
     // Default to 1 blank line (conventional) when no stored value exists.
