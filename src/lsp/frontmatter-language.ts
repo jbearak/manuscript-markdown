@@ -6,7 +6,7 @@
  * and typo detection. No LSP types — returns offsets; server converts.
  */
 
-import { SINGLE_VALUE_KEYS, blockListAfter, normalizeFontStyle, parseColWidths } from '../frontmatter';
+import { SINGLE_VALUE_KEYS, blockListAfter, normalizeFontStyle, parseColWidths, parseFrontmatter } from '../frontmatter';
 import { MAX_TABLE_DIGITS } from '../table-number-format';
 import { getCslFieldInfo } from './csl-language';
 import { BUNDLED_STYLE_LABELS } from '../csl-loader';
@@ -1319,6 +1319,48 @@ export function getFrontmatterHover(location: FrontmatterLocation): FrontmatterH
 		hoverStart: location.keyStart,
 		hoverEnd: location.kind === 'value' ? location.valueEnd : location.keyEnd,
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Bibliography value
+// ---------------------------------------------------------------------------
+
+export interface FrontmatterBibliographyValue {
+	/** The value as export reads it, as parseFrontmatter's `bibliography` */
+	value: string;
+	/** Where it's written: the offsets of its first character and past its last, without quotes around it */
+	start: number;
+	end: number;
+}
+
+/**
+ * The bibliography export reads from the frontmatter at the start of `text`,
+ * and where it's written, for the language server's link to its file: the
+ * value of the first `bibliography`, `bib` or `bibtex` that has one, or of
+ * the first item of text of its block list, as parseFrontmatter reads them,
+ * with a quote at either end left out, as it leaves them out. Undefined
+ * where no closed block starts the text, as for the language server's
+ * diagnostics, where the block gives export no bibliography, or where the
+ * value found here, by its line, isn't the one parseFrontmatter reads.
+ *
+ * It reads the block alone, past which it reads nothing, in time linear in
+ * its length.
+ */
+export function findBibliographyValue(text: string): FrontmatterBibliographyValue | undefined {
+	const parsed = parseFrontmatterLines(text);
+	if (!parsed) return undefined;
+	const line = parsed.lines.find(l => !l.inStylesBlock && l.rawValue && resolveCanonical(l.key) === 'bibliography');
+	if (!line) return undefined;
+	// The value as written, to its line's end, without the spaces there, and
+	// then a quote at each end, as parseFrontmatter reads it
+	let start = line.valueQuote ? line.valueStart - 1 : line.valueStart;
+	let end = line.valueQuote ? line.valueEnd + 1 : line.valueEnd;
+	while (end > start && /\s/.test(text[end - 1])) end--;
+	if (end > start && (text[start] === '"' || text[start] === "'")) start++;
+	if (end > start && (text[end - 1] === '"' || text[end - 1] === "'")) end--;
+	const value = parseFrontmatter(text.slice(0, parsed.fmEnd)).metadata.bibliography;
+	if (value === undefined || text.slice(start, end) !== value) return undefined;
+	return { value, start, end };
 }
 
 // ---------------------------------------------------------------------------

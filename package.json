@@ -1185,7 +1185,7 @@
         "manuscriptMarkdown.enableCitekeyLanguageServer": {
           "type": "boolean",
           "default": true,
-          "description": "Enable language server features: YAML frontmatter completions, hover, and diagnostics; @ completions; citation go-to-definition and references; and comment hover."
+          "description": "Enable language server features: YAML frontmatter completions, hover, and diagnostics, and the link from the frontmatter bibliography to its file; @ completions; citation go-to-definition and references; and comment hover."
         },
         "manuscriptMarkdown.defaultHighlightColor": {
           "type": "string",

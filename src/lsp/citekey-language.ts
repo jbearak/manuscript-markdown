@@ -340,6 +340,62 @@ export function getCompletionContextAtOffset(text: string, offset: number): Comp
 	};
 }
 
+/**
+ * The files the server tries, in order, for the bibliography written in
+ * frontmatter, as `bibliography: refs/library`, with `.bib` added where it
+ * has none (see normalizeBibPath): a relative path in `markdownDir`, then in
+ * each workspace root; a path that starts with `/` in each workspace root,
+ * then as written; any other absolute path as written.
+ */
+export function writtenBibliographyCandidates(
+	bibliography: string,
+	markdownDir: string,
+	workspaceRootPaths: readonly string[],
+): string[] {
+	const bibFile = normalizeBibPath(bibliography);
+	const candidates: string[] = [];
+	if (bibFile.startsWith('/')) {
+		const rel = bibFile.slice(1);
+		for (const workspaceRoot of workspaceRootPaths) {
+			candidates.push(path.join(workspaceRoot, rel));
+		}
+		candidates.push(bibFile);
+	} else if (path.isAbsolute(bibFile)) {
+		candidates.push(bibFile);
+	} else {
+		candidates.push(path.join(markdownDir, bibFile));
+		for (const workspaceRoot of workspaceRootPaths) {
+			candidates.push(path.join(workspaceRoot, bibFile));
+		}
+	}
+	return candidates;
+}
+
+/**
+ * The files the server tries, in order and each once, for the bibliography
+ * of the Markdown file at `markdownPath`: those of the bibliography written
+ * in its frontmatter, if any (see writtenBibliographyCandidates), then, with
+ * `fallback`, the file of its name with `.bib` for `.md`.
+ */
+function bibliographyCandidates(
+	markdownPath: string,
+	bibliography: string | undefined,
+	workspaceRootPaths: readonly string[],
+	fallback: boolean,
+): string[] {
+	const basePath = markdownPath.replace(/\.md$/i, '');
+	const candidates = bibliography ? writtenBibliographyCandidates(bibliography, path.dirname(basePath), workspaceRootPaths) : [];
+	if (fallback) candidates.push(basePath + '.bib');
+	return [...new Set(candidates)];
+}
+
+async function firstExistingFileAsync(candidates: readonly string[]): Promise<string | undefined> {
+	for (const c of candidates) {
+		if (await isExistingFileAsync(c)) return c;
+	}
+	return undefined;
+}
+
 export function resolveBibliographyPath(
 	markdownUri: string,
 	markdownText: string,
@@ -349,35 +405,8 @@ export function resolveBibliographyPath(
 	if (!markdownPath) {
 		return undefined;
 	}
-
-	const basePath = markdownPath.replace(/\.md$/i, '');
-	const markdownDir = path.dirname(basePath);
 	const { metadata } = parseFrontmatter(markdownText);
-
-	const candidates: string[] = [];
-	if (metadata.bibliography) {
-		const bibFile = normalizeBibPath(metadata.bibliography);
-		const isRootRelative = bibFile.startsWith('/');
-		if (isRootRelative) {
-			const rel = bibFile.slice(1);
-			for (const workspaceRoot of workspaceRootPaths) {
-				candidates.push(path.join(workspaceRoot, rel));
-			}
-			candidates.push(bibFile);
-		} else if (path.isAbsolute(bibFile)) {
-			candidates.push(bibFile);
-		} else {
-			candidates.push(path.join(markdownDir, bibFile));
-			for (const workspaceRoot of workspaceRootPaths) {
-				candidates.push(path.join(workspaceRoot, bibFile));
-			}
-		}
-	}
-
-	candidates.push(basePath + '.bib');
-
-	const uniqueCandidates = [...new Set(candidates)];
-	return uniqueCandidates.find(isExistingFile);
+	return bibliographyCandidates(markdownPath, metadata.bibliography, workspaceRootPaths, true).find(isExistingFile);
 }
 
 export async function resolveBibliographyPathAsync(
@@ -390,38 +419,27 @@ export async function resolveBibliographyPathAsync(
 	if (!markdownPath) {
 		return undefined;
 	}
-
-	const basePath = markdownPath.replace(/\.md$/i, '');
-	const markdownDir = path.dirname(basePath);
 	const fm = metadata ?? parseFrontmatter(markdownText).metadata;
+	return firstExistingFileAsync(bibliographyCandidates(markdownPath, fm.bibliography, workspaceRootPaths, true));
+}
 
-	const candidates: string[] = [];
-	if (fm.bibliography) {
-		const bibFile = normalizeBibPath(fm.bibliography);
-		const isRootRelative = bibFile.startsWith('/');
-		if (isRootRelative) {
-			const rel = bibFile.slice(1);
-			for (const workspaceRoot of workspaceRootPaths) {
-				candidates.push(path.join(workspaceRoot, rel));
-			}
-			candidates.push(bibFile);
-		} else if (path.isAbsolute(bibFile)) {
-			candidates.push(bibFile);
-		} else {
-			candidates.push(path.join(markdownDir, bibFile));
-			for (const workspaceRoot of workspaceRootPaths) {
-				candidates.push(path.join(workspaceRoot, bibFile));
-			}
-		}
+/**
+ * The file the server resolves for `bibliography` as written in the
+ * frontmatter of the Markdown file at `markdownUri`, as
+ * resolveBibliographyPathAsync does but without its fallback to the file of
+ * the document's name: the first of its candidates that exists, or
+ * undefined where none does.
+ */
+export async function resolveWrittenBibliographyPathAsync(
+	markdownUri: string,
+	bibliography: string,
+	workspaceRootPaths: readonly string[],
+): Promise<string | undefined> {
+	const markdownPath = uriToFsPath(markdownUri);
+	if (!markdownPath) {
+		return undefined;
 	}
-
-	candidates.push(basePath + '.bib');
-
-	const uniqueCandidates = [...new Set(candidates)];
-	for (const c of uniqueCandidates) {
-		if (await isExistingFileAsync(c)) return c;
-	}
-	return undefined;
+	return firstExistingFileAsync(bibliographyCandidates(markdownPath, bibliography, workspaceRootPaths, false));
 }
 
 

@@ -696,7 +696,7 @@ bibliography: shared/references.bib
 ---
 ```
 
-The `.bib` extension is optional (`bibliography: shared/references` also works). Relative paths resolve from the `.md` file directory first, then the workspace root. Paths starting with `/` resolve from the workspace root first, then as absolute OS paths.
+The `.bib` extension is optional (`bibliography: shared/references` also works). Relative paths resolve from the `.md` file directory first, then the workspace root. Paths starting with `/` resolve from the workspace root first, then as absolute OS paths. In VS Code, Cmd-click the path (Ctrl-click on Windows and Linux) to open the file, where it exists.
 
 An entry's type is what BibTeX reads as one: after the `@` and any white space, a run of characters that doesn't start with a digit and has no white space and none of `"#%'(),={}`, so `@my-type{k,` and `@ article{k,` are entries `k`. An entry's key is what BibTeX and biber both read as one: after the entry's `{` or `(`, the text to a space, a comma or the entry's closing delimiter, with no `@` in it. BibTeX reads an `@` in a key, but biber reads none, so `@article{` with no key, followed by `@book{b,` on the next line, is an entry `b`, not one keyed `@book{b`. An entry with no fields, as `@article{k}`, is an entry `k`.
 

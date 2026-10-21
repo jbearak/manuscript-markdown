@@ -74,6 +74,10 @@ An item of a YAML block list, as `  - Georgia` after `header-font:`, gets the sa
 
 Hovering on a recognized key shows its description, accepted values, and aliases.
 
+### Bibliography Link
+
+The path after `bibliography:` (or `bib:` or `bibtex:`) is a link to the file: Cmd-click it (Ctrl-click on Windows and Linux) to open it. The link goes to the file the server pairs with the document, found as in [Bib file pairing](#bib-file-pairing), and only where that file exists. Under a block list, the link is on the item export reads. The same-basename fallback gets no link, as nothing in the frontmatter names it.
+
 ### Diagnostics
 
 | Severity | Condition |

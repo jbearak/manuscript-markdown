@@ -27,7 +27,10 @@ import {
 	pathsEqual,
 	resolveFileEntryPath,
 	resolveBibliographyPath,
+	resolveBibliographyPathAsync,
+	resolveWrittenBibliographyPathAsync,
 	scanCitationUsages,
+	writtenBibliographyCandidates,
 } from './citekey-language';
 import type { BibtexEntry } from '../bibtex-parser';
 
@@ -355,6 +358,55 @@ describe('resolveBibliographyPath', () => {
 			const markdownText = fs.readFileSync(markdownPath, 'utf8');
 			const resolved = resolveBibliographyPath(fsPathToUri(markdownPath), markdownText, [tmpDir]);
 			expect(resolved).toBe(bibPath);
+		} finally {
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('the bibliography files the server tries', () => {
+	test('tries a relative path beside the document, then in each workspace root', () => {
+		const dir = path.join(os.tmpdir(), 'docs');
+		const roots = [path.join(os.tmpdir(), 'a'), path.join(os.tmpdir(), 'b')];
+		expect(writtenBibliographyCandidates('refs/library', dir, roots)).toEqual([
+			path.join(dir, 'refs', 'library.bib'), path.join(roots[0], 'refs', 'library.bib'), path.join(roots[1], 'refs', 'library.bib'),
+		]);
+		expect(writtenBibliographyCandidates('refs.bib', dir, [])).toEqual([path.join(dir, 'refs.bib')]);
+	});
+
+	test('tries a path that starts with / in each workspace root, then as written', () => {
+		const roots = [path.join(os.tmpdir(), 'a'), path.join(os.tmpdir(), 'b')];
+		expect(writtenBibliographyCandidates('/shared', 'docs', roots)).toEqual([
+			path.join(roots[0], 'shared.bib'), path.join(roots[1], 'shared.bib'), '/shared.bib',
+		]);
+	});
+
+	test('resolves each frontmatter the same way, sync and async, and as written without the fallback', async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-lsp-candidates-'));
+		try {
+			const root = path.join(tmpDir, 'root');
+			const docDir = path.join(root, 'doc');
+			for (const file of [path.join(docDir, 'paper.bib'), path.join(docDir, 'local.bib'), path.join(root, 'local.bib'), path.join(root, 'shared.bib')]) {
+				fs.mkdirSync(path.dirname(file), { recursive: true });
+				fs.writeFileSync(file, '@article{a,\n  title={A}\n}\n');
+			}
+			const uri = fsPathToUri(path.join(docDir, 'paper.md'));
+			const fallback = path.join(docDir, 'paper.bib');
+			for (const [bibliography, written] of [
+				[undefined, undefined],
+				['local', path.join(docDir, 'local.bib')],
+				['shared.bib', path.join(root, 'shared.bib')],
+				['/local', path.join(root, 'local.bib')],
+				['missing', undefined],
+				['/missing', undefined],
+			] as const) {
+				const text = bibliography === undefined ? 'Text.\n' : '---\nbibliography: ' + bibliography + '\n---\n';
+				expect(resolveBibliographyPath(uri, text, [root])).toBe(written ?? fallback);
+				expect(await resolveBibliographyPathAsync(uri, text, [root])).toBe(written ?? fallback);
+				if (bibliography !== undefined) {
+					expect(await resolveWrittenBibliographyPathAsync(uri, bibliography, [root])).toBe(written);
+				}
+			}
 		} finally {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
