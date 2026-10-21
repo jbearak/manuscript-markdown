@@ -74,7 +74,7 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 
 ### Keys for Other Tools
 
-Frontmatter can hold keys that Manuscript Markdown doesn't read, such as Pandoc's `date`, `subtitle`, `abstract`, `keywords` and `lang`, or Quarto's `format`, `execute` and `crossref`. Export doesn't show them in the Word document. It keeps them in the document's custom properties, and import writes them back as you wrote them, with their quotes, literal and folded values, mappings, lists and comments:
+Frontmatter can hold keys that Manuscript Markdown doesn't read, such as Pandoc's `date`, `subtitle`, `abstract`, `keywords` and `lang`, or Quarto's `format`, `execute` and `crossref`. Export doesn't show them in the Word document. It keeps them in the document's custom properties (`MANUSCRIPT_FRONTMATTER_UNUSED_KEYS_*`, see [converter](converter.md#yaml-frontmatter)), and import writes them back as you wrote them, with their quotes, literal and folded values, mappings, lists and comments:
 
 ```yaml
 ---
@@ -94,9 +94,9 @@ author: Jane Smith
 
 After a trip through Word, `title` and `author` come from the document, so an edit made in Word wins, and the other keys come back as written, in their places among them. If a co-author deletes the title in Word, `date` becomes the first key and the others keep their order. A key the Word document adds, such as a title typed in Word where the Markdown had none, goes after the others, as it does without them. A comment goes with the key after it, and a blank line with the kept key next to it. Comments before the keys import writes, and blank lines between two of them, are dropped, as before.
 
-A Word document without the record, such as one created in Word or exported by an earlier version, imports as before, without those keys.
+A Word document without those properties, such as one created in Word or exported by an earlier version, imports as before, without those keys.
 
-Export still reads a line under another key that names one of its own settings, such as `font: Arial` in a mapping under `format`, as that setting, and writes it to Word. A key with such a line isn't kept: import writes the setting it read in its place, as before.
+Export reads a line under another key that names one of its own settings, such as `font: Arial` in a mapping under `format`, as that setting, and writes it to Word. A key with such a line isn't kept: import writes the setting it read in its place, as before.
 
 ### Heading and Title Font Configuration
 
