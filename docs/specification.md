@@ -185,6 +185,8 @@ The three numeric settings inherit independently. An omitted per-table property 
 <!-- table-digit-grouping: thin-space -->
 ```
 
+Known limit: number formatting reads a `<!--` with no `-->` after it in its paragraph, as in `a <!-- b`, as a comment that runs to the next `-->` in the document, even in a later paragraph. A number directive it covers doesn't apply, and a table it covers keeps its source format. The same holds for `a \<!-- b`, which is how import writes Word's own `<!--`. Write the text as `a &lt;!-- b` or put it in a code span, and the directive applies again.
+
 Excel cells use Excel's displayed value and number format by default; Stata cells use their display format. Percent, currency, and scientific semantics are retained. Value labels, missing values, dates, Booleans, and identifiers are not treated as ordinary numbers. Markdown and CSV/TSV cells are formatted only when the whole cell matches a strict numeric or statistical grammar; ambiguous punctuation is left unchanged. Decimal and grouping settings that use the same character are invalid.
 
 #### Table Font Configuration
