@@ -122,7 +122,7 @@ Export and document-setting commands. See [Converter](converter.md) for details 
 |-------|------|
 | Export | **Export to Word** |
 | | **Export to Word with Template** |
-| Settings | **Document** — title, author, timezone, and hard line breaks |
+| Settings | **Document** — title, author, timezone, hard line breaks, and caption titles and location |
 | | **Typography** — body, heading, and title typography; paragraph layout; blockquotes; callout labels; colors; and custom styles |
 | | **Tables** — fonts, widths, borders, number formatting, and source line-width limits |
 | | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, bibliography indentation, and Zotero sync |

@@ -30,6 +30,7 @@ describe('schema completeness', () => {
 		'pipe-table-max-line-width', 'grid-table-max-line-width',
 		'blockquote-style', 'callout-labels', 'colors', 'styles', 'breaks',
 		'line-spacing', 'paragraph-indent', 'bibliography-hanging-indent',
+		'crossref', 'fig-cap-location',
 	];
 
 	test('schema covers all expected frontmatter keys', () => {
@@ -1132,7 +1133,7 @@ describe('block lists', () => {
 
 	test('the keys export reads lists of are the schema\'s', () => {
 		const schemaKeys = FRONTMATTER_SCHEMA.flatMap(def => [def.key, ...def.aliases ?? []]).sort();
-		expect([...ARRAY_KEYS, ...SINGLE_VALUE_KEYS, 'title', 'styles'].sort()).toEqual(schemaKeys);
+		expect([...ARRAY_KEYS, ...SINGLE_VALUE_KEYS, 'title', 'styles', 'crossref'].sort()).toEqual(schemaKeys);
 		for (const def of FRONTMATTER_SCHEMA) {
 			if (def.arrayField) expect(ARRAY_KEYS.has(def.key)).toBe(true);
 			if (def.allowsMultiple) expect(def.key).toBe('title');
@@ -1299,5 +1300,44 @@ describe('block lists', () => {
 		// Nor counts as the key declared again
 		const key = getFrontmatterLocation(text, text.indexOf('header-font'));
 		expect(key.currentKeyHasOtherDeclaration).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// crossref and fig-cap-location
+// ---------------------------------------------------------------------------
+
+describe('crossref', () => {
+	const text = '---\ntitle: T\ncrossref:\n  fig-title: Fig.\n  title-delim: "."\n  fig-prefx: x\n  Tbl-title: y\n  labels:\n    fig-title: z\n  fig-title: again\n\nfig-cap-location: middle\n---\nBody\n';
+	const messages = async (source: string) =>
+		(await validateFrontmatter(source, stubCallbacks)).map(d => d.severity + ': ' + d.message + ' @ ' + source.slice(d.start, d.end));
+
+	test('checks the keys under crossref: and the value of fig-cap-location', async () => {
+		expect(await messages(text)).toEqual([
+			'information: Export reads only `fig-title`, `tbl-title` and `title-delim` of `crossref`, so Word gets nothing from `fig-prefx`. @ fig-prefx',
+			'information: Frontmatter keys are case-sensitive. Did you mean `tbl-title`? @ Tbl-title',
+			'information: Export reads only `fig-title`, `tbl-title` and `title-delim` of `crossref`, so Word gets nothing from `labels`. @ labels',
+			'warning: Duplicate key `fig-title`. @ fig-title',
+			'error: Invalid value. Expected one of: `bottom`, `top`. @ middle',
+		]);
+		expect(await messages('---\ncrossref:\n  fig-title: Fig.\n  title-delim: ". "\nfig-cap-location: top\n---\n')).toEqual([]);
+	});
+
+	test('warns of crossref\'s keys written on its line', async () => {
+		expect(await messages('---\ncrossref: {fig-title: Fig.}\n---\n')).toEqual([
+			'warning: Export reads `crossref`’s keys on the lines after it, each indented, as `  fig-title: Fig.`, not on its line. @ {fig-title: Fig.}',
+		]);
+	});
+
+	test('completes and describes the keys under crossref:', () => {
+		const at = (source: string, offset: number) => getFrontmatterLocation(source, offset);
+		expect(at(text, text.indexOf('fig-title') + 2).kind).toBe('crossref-key');
+		const blank = '---\ncrossref:\n  \n---\n';
+		expect(getFrontmatterCompletionItems(at(blank, blank.indexOf('  \n') + 2), 'darwin').map(item => item.label))
+			.toEqual(['fig-title', 'tbl-title', 'title-delim']);
+		expect(getFrontmatterHover(at(text, text.indexOf('title-delim') + 2))?.markdown).toContain('**title-delim**');
+		const location = '---\nfig-cap-location: \n---\n';
+		expect(getFrontmatterCompletionItems(at(location, location.indexOf(': ') + 2), 'darwin').map(item => item.label))
+			.toEqual(['bottom', 'top']);
 	});
 });

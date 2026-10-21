@@ -443,6 +443,10 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
     ['a critic highlight and its comment after an == in text', 'a == b {==x==}{>>c<<} d', ['highlight', 'comment']],
     ['a critic highlight after an opener', 'a ==b {==x==} c', ['highlight']],
     ['a comment\'s range and body', 'a {#1}x{/1}{#1>>c<<} b', ['comment_range_start', 'comment_range_end', 'comment_with_id']],
+    // A caption's label is no range's start (see captions.ts), but an ID
+    // that's fig- alone is one
+    ['a figure\'s label', '![Map](map.png){#fig-map} {#tbl-est} {#fig-}x{/fig-}', ['comment_range_start', 'comment_range_end']],
+    ['a comment with a figure label\'s ID', 'a {#fig-1>>c<<} b', ['comment_with_id']],
   ])('reads %s as export does', (_name, line, expected) => {
     expect(opened(line)).toEqual(expected);
   });

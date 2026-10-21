@@ -229,6 +229,14 @@
         "title": "Hard Line Breaks"
       },
       {
+        "command": "manuscript-markdown.setFrontmatter.crossref",
+        "title": "Caption Titles"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.fig-cap-location",
+        "title": "Figure Caption Location"
+      },
+      {
         "command": "manuscript-markdown.setFrontmatter.font",
         "title": "Body Font"
       },
@@ -859,6 +867,16 @@
           "command": "manuscript-markdown.setFrontmatter.breaks",
           "when": "editorLangId == markdown",
           "group": "1_settings@4"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.crossref",
+          "when": "editorLangId == markdown",
+          "group": "2_captions@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.fig-cap-location",
+          "when": "editorLangId == markdown",
+          "group": "2_captions@2"
         }
       ],
       "markdown.frontmatter.typography": [

@@ -1,5 +1,27 @@
 import type MarkdownIt from 'markdown-it';
+import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import image from 'markdown-it/lib/rules_inline/image.mjs';
+import { figureAttributesAt, nextIndexFinder } from './captions';
+
+// For each inline parse, its finder of the next of a character (see
+// nextIndexFinder), as the parse goes over its text from the start
+const finders = new WeakMap<StateInline, (ch: string, from: number) => number>();
+
+/**
+ * Take the figure's attribute block right after an image, as `{#fig-map}`
+ * (see figureAttributesAt), which then is the image's, in its token's
+ * `meta.figure`, and no comment's range start. It goes with the image in
+ * a silent parse too, as in a link's text, as one that isn't silent has it.
+ */
+function takeFigureAttributes(state: StateInline, silent: boolean): void {
+  let next = finders.get(state);
+  if (!next) finders.set(state, next = nextIndexFinder(state.src));
+  const figure = figureAttributesAt(state.src, state.pos, state.posMax, next);
+  if (!figure) return;
+  const token = state.tokens[state.tokens.length - 1];
+  if (!silent && token?.type === 'image') token.meta = { ...token.meta, figure };
+  state.pos = figure.end;
+}
 
 /** Accept bare image paths with spaces after the standard image parser has
  * declined them. Keep this inline so code, HTML, and ordinary links are untouched.
@@ -16,6 +38,7 @@ export function imagePathsWithSpaces(md: MarkdownIt): void {
       if (!silent && token?.type === 'image' && state.src[labelEnd + 1] === '(') {
         token.meta = { ...token.meta, source: state.src.slice(start, state.pos) };
       }
+      takeFigureAttributes(state, silent);
       return true;
     }
     if (state.src.slice(start, start + 2) !== '![') return false;
@@ -74,6 +97,7 @@ export function imagePathsWithSpaces(md: MarkdownIt): void {
       md.inline.parse(content, md, state.env, token.children);
     }
     state.pos = pos + 1;
+    takeFigureAttributes(state, silent);
     return true;
   });
 }

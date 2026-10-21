@@ -30,6 +30,7 @@ import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
+import { attributeValue, captionBookmarkName, captionOptions, captionSeparator, isCaptionLabelId, labelOfBookmark, seqIdentifier, type CaptionOptions, type FigureAttributes } from './captions';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
 import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters } from './xml-parser';
 import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
@@ -245,6 +246,10 @@ export interface MdRun {
   imageSyntax?: 'md' | 'html';
   imageSource?: string;     // the image as written, which export hides in the text when it can't embed the image
   linkRId?: string;         // for an image in a link: the relationship of the link, which its drawing clicks to too, as Word writes a linked picture
+  figure?: {                // for an image with a figure's label after it, as ![Caption](map.png){#fig-map} (see captions.ts)
+    attributes: FigureAttributes;
+    captionRuns: MdRun[];   // its text, which is the caption of a figure the image is alone in its paragraph
+  };
 }
 
 /** An image's Markdown: as written, or for a reference, inline, with its
@@ -520,11 +525,14 @@ function commentRangeRule(state: StateInline, silent: boolean): boolean {
       return true;
     }
 
-    // Check for {#id} range start
+    // Check for {#id} range start. A caption's label, as {#fig-map}, is
+    // none (see captions.ts): one an image doesn't take is a marker of no
+    // range, its ID one no comment's body has, which writes nothing, as a
+    // range start of an ID with no body does, and gets a warning
     if (idEnd < max && src.charAt(idEnd) === '}') {
       if (!silent) {
         const token = pushManuscriptToken(state, 'comment_range_start', '', 0);
-        token.commentId = id;
+        token.commentId = isCaptionLabelId(id) ? '#' + id : id;
       }
       state.pos = idEnd + 1;
       return true;
@@ -4267,6 +4275,13 @@ const HTML_FORMAT_TAG_RE = /^<(\/?)(b|strong|i|em|s|del|strike|u|sup|sub)\s*>$/i
 /** An opening tag of a name in HTML_FORMAT_TAGS, with attributes or without */
 const HTML_FORMAT_OPENER_RE = /^<(b|strong|i|em|s|del|strike|u|sup|sub)(?=[\s/>])/i;
 
+/** An image's text's tokens with an escape's or a reference's text as
+ *  text, as text_join gives the tokens of a paragraph, which the image's
+ *  own parse doesn't run */
+function textJoined(tokens: ManuscriptToken[]): ManuscriptToken[] {
+  return tokens.map(token => token.type === 'text_special' ? Object.assign(Object.create(Object.getPrototypeOf(token)), token, { type: 'text' }) : token);
+}
+
 /** Convert inline tokens to Word runs, carrying formatting and protected paragraph metadata. */
 function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
@@ -4599,10 +4614,22 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         let height: number | undefined;
         let attrs: string | undefined;
         let writtenAttrs: string | undefined;
+        // A figure's attribute block, which the image took (see
+        // imagePathsWithSpaces), as written, its width and height its
+        // attributes', and its caption the image's text, as runs
+        const figure: FigureAttributes | undefined = token.meta?.figure;
+        const nextToken = tokens[ti + 1];
+        if (figure) {
+          writtenAttrs = figure.written;
+          const dimension = (name: 'width' | 'height') => {
+            const value = attributeValue(figure.block, name);
+            return value === undefined ? undefined : parseMarkdownImageDimension(name + '=' + value, name);
+          };
+          width = dimension('width');
+          height = dimension('height');
         // Look ahead for {width=N height=N} attribute syntax, but not an
         // escaped {, or one written as a reference, which is text
-        const nextToken = tokens[ti + 1];
-        if (nextToken?.type === 'text' && nextToken.content && !nextToken.meta?.escapedBrace) {
+        } else if (nextToken?.type === 'text' && nextToken.content && !nextToken.meta?.escapedBrace) {
           const attrMatch = nextToken.content.match(/^\{([^}]+)\}/);
           if (attrMatch) {
             attrs = attrMatch[1];
@@ -4623,12 +4650,14 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           type: 'image',
           text: '',
           imageSrc: src,
-          imageAlt: alt,
+          // A figure's fig-alt, as Quarto's, where it has one
+          imageAlt: (figure ? attributeValue(figure.block, 'fig-alt') : undefined) ?? alt,
           imageWidth: width,
           imageHeight: height,
           imageSyntax: 'md',
           imageSource: imageMarkdownSource(token, alt, writtenAttrs),
           href: currentHref,
+          ...(figure ? { figure: { attributes: figure, captionRuns: processInlineChildren(textJoined(token.children ?? [])) } } : {}),
         });
         break;
       }
@@ -5593,6 +5622,12 @@ export interface DocxGenState {
   ownedNoteLabels?: Set<string>;     // note labels whose Word note reference has been written
   noteRevision?: 'addition';         // set while generating inserted content
   nextBookmarkId: number; // counter for unique bookmark IDs within footnotes/endnotes XML
+  captions: CaptionOptions; // the words a caption shows and where it goes, from the frontmatter (see captions.ts)
+  figureNumber: number; // the figures numbered so far
+  captionBookmarks: Set<string>; // the names of the bookmarks of the captions so far, in lower case, as Word compares them
+  captionLabels: Map<string, string>; // each caption's bookmark's name, by which import reads its label, to the label, where the name alone doesn't give it (see labelOfBookmark)
+  captionedImages: Set<MdRun>; // the images of figures, which take a caption, and of no others (see figureImageOf)
+  uncaptionedLabels: Set<string>; // the labels of images that aren't figures, each of which has had its warning
   firstLineIndentTwips?: number;   // undefined = no indent mode
   indentMode: boolean;       // true when first-line indent is active (controls inter-paragraph spacing removal)
   afterHeading: boolean;           // suppress indent on first para after heading
@@ -6105,6 +6140,7 @@ const BUILT_IN_STYLES = new Map<string, { name: string; type: string }>([
     ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map(level => ['Heading' + level, 'heading ' + level]),
     ['Title', 'title'], ['Quote', 'quote'], ['IntenseQuote', 'intense quote'],
     ['FootnoteText', 'footnote text'], ['EndnoteText', 'endnote text'], ['Bibliography', 'bibliography'],
+    ['Caption', 'caption'],
   ].map(([id, name]) => [id, { name, type: 'paragraph' }] as [string, { name: string; type: string }]),
   ...[
     ['FootnoteReference', 'footnote reference'], ['EndnoteReference', 'endnote reference'],
@@ -6834,6 +6870,26 @@ const holdsRawHtmlLineEnd = (run: MdRun): boolean => !!run.rawHtml && run.text.i
  *  Word's line break */
 function rawHtmlTextElements(run: MdRun, tag: 'w:t' | 'w:delText'): string {
   return run.text.split('\n').map(line => line ? textElements(line, tag) : '').join('<w:br/>');
+}
+
+/** The Caption style, as Word's own: small, italic and in the theme's
+ *  second text color, with space after it, its lines single spaced */
+const CAPTION_STYLE_XML = '<w:style w:type="paragraph" w:styleId="Caption">\n'
+  + '<w:name w:val="caption"/>\n'
+  + '<w:basedOn w:val="Normal"/>\n'
+  + '<w:next w:val="Normal"/>\n'
+  + '<w:uiPriority w:val="35"/>\n'
+  + '<w:unhideWhenUsed/>\n'
+  + '<w:qFormat/>\n'
+  + '<w:pPr><w:spacing w:after="200" w:line="' + SINGLE_LINE_SPACING + '" w:lineRule="auto"/></w:pPr>\n'
+  + '<w:rPr><w:i/><w:iCs/><w:color w:val="44546A" w:themeColor="text2"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>\n'
+  + '</w:style>\n';
+
+/** Styles XML with the Caption style, for a document with captions, where
+ *  the styles lack it: a template's Caption, of any type, as it's found, by
+ *  its ID or, in a template from Word in another language, by its name */
+function withCaptionStyle(xml: string, ids: Map<string, string>): string {
+  return findStyleElement(xml, 'Caption', ids, true) ? xml : withStyleAdded(xml, CAPTION_STYLE_XML);
 }
 
 /** A template's styles with export's own, where it lacks them */
@@ -7866,9 +7922,10 @@ function commentIdMappingProps(commentIdMap: Map<string, number>): CustomPropEnt
   if (commentIdMap.size === 0) return [];
   const mapping: Record<string, string> = {};
   for (const [mdId, numericId] of commentIdMap) {
-    mapping[String(numericId)] = mdId;
+    // Not a caption's label, which is no comment's (see commentRangeRule)
+    if (!mdId.startsWith('#')) mapping[String(numericId)] = mdId;
   }
-  return chunkCustomProps('MANUSCRIPT_COMMENT_IDS_', JSON.stringify(mapping));
+  return Object.keys(mapping).length > 0 ? chunkCustomProps('MANUSCRIPT_COMMENT_IDS_', JSON.stringify(mapping)) : [];
 }
 
 function footnoteIdMappingProps(footnoteLabelToId: Map<string, number>, trackedReference: boolean): CustomPropEntry[] {
@@ -8044,6 +8101,7 @@ function frontmatterSettingsProps(fm: Frontmatter): CustomPropEntry[] {
   const settings: Frontmatter = {
     locale: fm.locale, zoteroNotes: fm.zoteroNotes, notes: fm.notes, timezone: fm.timezone,
     blockquoteStyle: fm.blockquoteStyle, colors: fm.colors, breaks: fm.breaks,
+    crossref: fm.crossref, figCapLocation: fm.figCapLocation,
   };
   const yaml = serializeFrontmatter(settings);
   return yaml ? chunkCustomProps('MANUSCRIPT_FRONTMATTER_SETTINGS_', yaml) : [];
@@ -9131,6 +9189,11 @@ function withoutCommentMarkers(xml: string, ids: ReadonlySet<number>): string {
 /** An image's run: its drawing, or if export can't embed the image, its
  *  Markdown hidden in the text, deleted text in a deletion */
 function imageRunXml(run: MdRun, state: DocxGenState, options: MdToDocxOptions | undefined, deleted = false): string {
+  const label = run.figure?.attributes.label;
+  if (label && !state.captionedImages.has(run) && !state.uncaptionedLabels.has(label)) {
+    state.uncaptionedLabels.add(label);
+    state.warnings.push('The image labeled {#' + label + '} is no figure, so Word gets no caption for it: a figure is an image alone in its paragraph, not in a list, a quote, a table, a note, a link, a style block or a tracked change.');
+  }
   const src = run.imageSrc || '';
   const alt = run.imageAlt || '';
   const syntax = run.imageSyntax || 'md';
@@ -9785,6 +9848,84 @@ function withQuoteCommentBodiesMerged(tokens: MdToken[]): MdToken[] {
   }
   if (carried) merged.push(carried);
   return merged;
+}
+
+/**
+ * The image of the figure the block `token` is, as Quarto reads one: a
+ * paragraph whose one run is an image with a figure's label after it, as
+ * `![Caption](map.png){#fig-map}`, in no link, at the top level of the
+ * body, in no list item, style block or note, and with no tracked change
+ * to its mark. Its paragraph is the image's, as before, and a caption
+ * goes with it (see figureCaptionXml).
+ */
+function figureImageOf(token: MdToken, state: DocxGenState): MdRun | undefined {
+  if (token.type !== 'paragraph' || token.listContinuation || state.activeCustomStyle || state.inNoteBody || token.criticParaMark || token.runs.length !== 1) return undefined;
+  const run = token.runs[0];
+  return run.type === 'image' && run.figure && !run.href ? run : undefined;
+}
+
+/** A paragraph's XML with keepNext in its properties, in their order, so
+ *  Word keeps it on the page with the paragraph after it */
+function withKeepNext(paragraphXml: string): string {
+  const start = /^<w:p(?:\s[^>]*)?>/.exec(paragraphXml)![0];
+  const rest = paragraphXml.slice(start.length);
+  if (!rest.startsWith('<w:pPr>')) return start + '<w:pPr><w:keepNext/></w:pPr>' + rest;
+  const end = rest.indexOf('</w:pPr>');
+  return start + '<w:pPr>' + orderPPr(rest.slice('<w:pPr>'.length, end) + '<w:keepNext/>') + rest.slice(end);
+}
+
+/** The run types a figure's caption keeps, of what the image's text has,
+ *  which import reads back as a caption's: text, in any formatting and
+ *  link, and an inline equation */
+function captionKeeps(run: MdRun): boolean {
+  return run.type === 'text' || run.type === 'softbreak' || run.type === 'math' && !run.display;
+}
+
+/**
+ * The caption of the figure whose image is `image`, as Word's Insert
+ * Caption writes one: a paragraph in the Caption style, which a template
+ * gives or export adds (see captionStyleAdded), with the caption's title,
+ * as Figure, and its number, in a SEQ field, numbered here in document
+ * order, its result as Word would update it, in a bookmark a
+ * cross-reference goes to, then the delimiter and the caption's text, the
+ * image's. A caption above its figure is kept on the page with it.
+ *
+ * The bookmark's name is the label as Word can name one (see
+ * captionBookmarkName), which import reads the label back by, or else by
+ * the custom property MANUSCRIPT_CAPTION_LABELS_. Its ID is the next of
+ * those of the notes' bookmarks, which no other bookmark has.
+ *
+ * Text Word's caption would show other than as import reads it back, as a
+ * citation, a note, a comment, a tracked change or a line break, goes as
+ * the image's alt text does, as text.
+ */
+function figureCaptionXml(image: MdRun, state: DocxGenState, options: MdToDocxOptions | undefined, bibEntries: Map<string, BibtexEntry> | undefined, citeprocEngine: CiteprocEngine | undefined): string {
+  const { attributes: { label }, captionRuns } = image.figure!;
+  const { figTitle, titleDelim, figCapLocation } = state.captions;
+  const number = ++state.figureNumber;
+  const name = captionBookmarkName(label, state.captionBookmarks);
+  if (labelOfBookmark(name) !== label) state.captionLabels.set(name, label);
+  let runs = captionRuns;
+  if (!runs.every(captionKeeps)) {
+    const text = runs.map(run => run.type === 'hardbreak' || run.type === 'softbreak' ? ' ' : run.type === 'image' ? run.imageAlt ?? '' : run.text).join('');
+    runs = text ? [{ type: 'text', text }] : [];
+    state.warnings.push('The caption of figure {#' + label + '} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as text in its caption.');
+  }
+  const hasText = runs.some(run => run.type !== 'softbreak' && (run.type === 'math' || run.text.length > 0));
+  const separator = captionSeparator(titleDelim, hasText);
+  const id = state.nextBookmarkId++;
+  return '<w:p><w:pPr><w:pStyle w:val="Caption"/>' + (figCapLocation === 'top' ? '<w:keepNext/>' : '') + '</w:pPr>'
+    + '<w:bookmarkStart w:id="' + id + '" w:name="' + name + '"/>'
+    + '<w:r>' + wt(figTitle + ' ') + '</w:r>'
+    + '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+    + '<w:r><w:instrText xml:space="preserve"> SEQ ' + escapeXmlText(seqIdentifier(figTitle)) + ' \\* ARABIC </w:instrText></w:r>'
+    + '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+    + '<w:r><w:rPr><w:noProof/></w:rPr><w:t>' + number + '</w:t></w:r>'
+    + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    + '<w:bookmarkEnd w:id="' + id + '"/>'
+    + (separator ? '<w:r>' + wt(separator) + '</w:r>' : '')
+    + (hasText ? generateRuns(runs, state, options, bibEntries, citeprocEngine) : '')
+    + '</w:p>';
 }
 
 export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
@@ -11591,7 +11732,15 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.tableIndex++;
     } else {
       state.afterHeading = prevToken?.type === 'heading' || (!prevToken && state.afterHeading);
+      const figureImage = figureImageOf(token, state);
+      if (figureImage) state.captionedImages.add(figureImage);
       let paragraphXml = generateParagraph(token, state, options, bibEntries, citeprocEngine);
+      // A figure's caption, where Word got its image, with the image's
+      // paragraph kept on the page with the caption below it. Neither side
+      // counts it among the body's paragraphs, as import reads it with the
+      // image (see readFigureCaptions in converter.ts).
+      const caption = figureImage && paragraphXml.includes('<w:drawing>') ? figureCaptionXml(figureImage, state, options, bibEntries, citeprocEngine) : '';
+      if (caption && state.captions.figCapLocation === 'bottom') paragraphXml = withKeepNext(paragraphXml);
       if (readParaId) paragraphXml = withParaId(paragraphXml, readParaId, state);
       // Track body paragraph index for indent override round-trip. Import
       // counts the paragraphs that show something, by countsForIndent as
@@ -11620,7 +11769,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         // have none
         if (paragraphXml.includes('<w:pStyle ')) identity.paragraphs++;
       }
-      body += paragraphXml;
+      body += !caption ? paragraphXml : state.captions.figCapLocation === 'top' ? caption + paragraphXml : paragraphXml + caption;
       // A hidden paragraph after a section ends, with nothing else since,
       // leaves the next section to start before it. Not one in a list, nor
       // one in a style block, which import reads by its style.
@@ -12267,6 +12416,12 @@ export async function convertMdToDocx(
     noteNextRId: 1,
     footnoteCrossRefLabels: new Set(),
     nextBookmarkId: 0,
+    captions: captionOptions(frontmatter),
+    figureNumber: 0,
+    captionBookmarks: new Set(),
+    captionLabels: new Map(),
+    captionedImages: new Set(),
+    uncaptionedLabels: new Set(),
     indentMode: false,
     afterHeading: false,
     indentOverrides: new Map(),
@@ -12685,13 +12840,17 @@ export async function convertMdToDocx(
     // a custom style the frontmatter defines or the Bibliography, which a
     // heading may be based on (dirty-flag invariant #5)
     mutated = withoutInheritedSizes(ensureManuscriptStyles(mutated), withFonts.sizedStyleIds, withFonts.ids);
+    if (state.figureNumber > 0) mutated = withCaptionStyle(mutated, templateIds);
     zip.file('word/styles.xml', withTemplateStyleIds(mutated, templateIds));
   } else if (templateParts?.has('word/styles.xml')) {
     let decoded = asUtf8(decodeXml(templateParts.get('word/styles.xml')!));
     decoded = applyLineSpacingToTemplate(decoded, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
-    zip.file('word/styles.xml', withTemplateStyleIds(ensureManuscriptStyles(applyAlertColorsToTemplate(decoded, effectiveColors)), templateIds));
+    decoded = ensureManuscriptStyles(applyAlertColorsToTemplate(decoded, effectiveColors));
+    if (state.figureNumber > 0) decoded = withCaptionStyle(decoded, templateIds);
+    zip.file('word/styles.xml', withTemplateStyleIds(decoded, templateIds));
   } else {
-    zip.file('word/styles.xml', stylesXml(fontOverrides, codeBlockConfig, effectiveColors, frontmatter.styles, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent));
+    const styles = stylesXml(fontOverrides, codeBlockConfig, effectiveColors, frontmatter.styles, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
+    zip.file('word/styles.xml', state.figureNumber > 0 ? withCaptionStyle(styles, new Map()) : styles);
   }
 
   // Always use generated settings.xml to guarantee compatibilityMode >= 15
@@ -12776,6 +12935,8 @@ export async function convertMdToDocx(
     }
     pushAll(customProps, defaultCslProps(defaultCsl));
     pushAll(customProps, commentIdMappingProps(state.commentIdMap));
+    // The labels of captions their bookmarks' names don't give (see figureCaptionXml)
+    if (state.captionLabels.size > 0) pushAll(customProps, chunkCustomProps('MANUSCRIPT_CAPTION_LABELS_', JSON.stringify(Object.fromEntries(state.captionLabels))));
     pushAll(customProps, footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
     pushAll(customProps, footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));
     pushAll(customProps, codeBlockLanguageProps(state.codeBlockLanguages));
@@ -12933,7 +13094,10 @@ export async function convertMdToDocx(
 
   // Check for comment range markers without corresponding bodies
   for (const [mdId, numericId] of state.commentIdMap) {
-    if (!hasCommentWithId(state.comments, numericId)) {
+    if (mdId.startsWith('#')) {
+      // A caption's label no image took (see commentRangeRule)
+      state.warnings.push('The label {' + mdId + '} labels no ' + (mdId.startsWith('#fig-') ? 'figure: a label goes right after an image alone in its paragraph, as ![Caption](map.png){' + mdId + '}' : 'table: export doesn\'t write a table\'s caption yet') + '. Word gets no label there.');
+    } else if (!hasCommentWithId(state.comments, numericId)) {
       state.warnings.push(`Comment range markers {#${mdId}}...{/${mdId}} exist without corresponding body {#${mdId}>>...<<}`);
     }
   }
