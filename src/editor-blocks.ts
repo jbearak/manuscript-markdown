@@ -4,7 +4,7 @@
  * highlight as they did before.
  */
 
-import { type CodeRegion, codeOverlapTest, computeLineStarts, computeMarkdownRegions, formatHighlightLimit, mergeRegions } from './code-regions';
+import { type CodeRegion, codeOverlapTest, computeLineStarts, computeMarkdownRegions, formatHighlightLimit, type MarkdownRegions, mergeRegions } from './code-regions';
 import { preprocessBlocks } from './block-preprocess';
 import { preprocessCriticMarkupWithLines } from './critic-markup';
 import { linkifiedUrls } from './md-to-docx';
@@ -20,10 +20,13 @@ export interface EditorBlocks {
 	 *  ends (see editorBlocks) */
 	limitAt(offset: number): number;
 	/** Whether [start, end) holds what export may read in other blocks than
-	 *  the text's parse does: an HTML block, which export reads as HTML, a
-	 *  line that may be a link's definition, to the next blank line, or a
-	 *  line export's block preprocessing rewrites, as a quote's lazy line,
-	 *  which it ends the quote before (see editorBlocks) */
+	 *  the text's parse does: an HTML block, which export reads as HTML, the
+	 *  blocks around a line where the text's parse with HTML off, whose code
+	 *  the editor reads, and with it on, as export's and the preview's, end
+	 *  blocks otherwise (see htmlDisagreements), a line that may be a link's
+	 *  definition, to the next blank line, or a line export's block
+	 *  preprocessing rewrites, as a quote's lazy line, which it ends the
+	 *  quote before (see editorBlocks) */
 	unsure(start: number, end: number): boolean;
 	/** Whether the paragraph's text that holds `offset`, which ends where
 	 *  its line's limitAt does, holds an == that export may read as text:
@@ -47,10 +50,15 @@ export interface EditorBlocks {
  * preview read each highlight in its paragraph's text alone, and in a
  * table's cell's.
  *
- * A highlight's text ends where a block does in both the text's parse and
- * export's, which reads the blocks after preprocessCriticMarkup joins each
- * span's lines: a span over a line end can take the lines after it into its
- * paragraph, as {++a, then # b++} ==c and d==, which export reads as one
+ * A highlight's text ends where a block does in both the text's parse, with
+ * HTML on, as the preview's, and export's, which reads the blocks after
+ * preprocessCriticMarkup joins each span's lines, with HTML on too. So a
+ * line of == after an HTML comment's block is a paragraph's first line, as
+ * to them, not a setext heading's underline, as to a parse with HTML off,
+ * whose code the editor reads, as computeCodeRegions does. Where that parse
+ * ends blocks otherwise, the editor reads a highlight there as before (see
+ * unsure). And to export, a span over a line end can take the lines after
+ * it into its paragraph, as {++a, then # b++} ==c and d==, which export reads as one
  * paragraph, with c and d highlighted, where the text's parse reads a
  * heading and a paragraph. Where the two differ, a highlight reads on to
  * the next end both share, as the editor read one before. A span across a
@@ -74,11 +82,21 @@ export interface EditorBlocks {
  * (see extractAllDecorationRanges and navigationMatches).
  */
 export function editorBlocks(text: string): EditorBlocks {
-	const { codeRegions, blockCodeRegions, inlineBlocks, tableRegions } = computeMarkdownRegions(text, { inlineBlocks: true, includeTables: true });
+	// The text's parse with HTML off, whose code computeCodeRegions reads,
+	// as the editor reads code
+	const textParse = computeMarkdownRegions(text, { inlineBlocks: true, includeTables: true });
+	const { codeRegions, blockCodeRegions, inlineBlocks } = textParse;
 	const lineStarts = computeLineStarts(text);
-	const htmlRegions = text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions : [];
-	const unsure = mergeRegions([...htmlRegions, ...definitionRegions(text, lineStarts), ...blockRewrites(text, lineStarts)]);
-	const { limitAt, paragraphAt } = sharedLimit(text, lineStarts, inlineBlocks, tableRegions);
+	// And with HTML on, as export and the preview parse it, whose blocks a
+	// highlight's text ends with, which is the same where no < is
+	const htmlParse = text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all', inlineBlocks: true, includeTables: true }) : textParse;
+	const unsure = mergeRegions([
+		...htmlParse.htmlRegions,
+		...htmlParse === textParse ? [] : htmlDisagreements(text, lineStarts, textParse, htmlParse),
+		...definitionRegions(text, lineStarts),
+		...blockRewrites(text, lineStarts),
+	]);
+	const { limitAt, paragraphAt } = sharedLimit(text, lineStarts, htmlParse.inlineBlocks, htmlParse.tableRegions);
 	const { paragraphs: inert, openers } = inertMarks(text, lineStarts, codeRegions, paragraphAt);
 	// The paragraphs a code span whose backticks pair across blocks starts
 	// and ends in
@@ -135,8 +153,9 @@ export function editorBlocks(text: string): EditorBlocks {
  *   core, after inline: linkify's search of text, as for an email address,
  *     replacements, smartquotes, text_join and the plugins' | no: every == is read by then
  *   core, before inline, and block: normalize, preprocessing, table, code,
- *     fence, html_block, reference, lheading | see editorBlocks: cells,
- *     code and unsure, and here an == on a line that may underline a heading
+ *     fence, html_block, reference, lheading | see editorBlocks: the blocks
+ *     of a parse with HTML on, cells, code, and unsure where one with HTML
+ *     off reads others, and here an == on a line that may underline a heading
  */
 function inertMarks(text: string, lineStarts: readonly number[], codeRegions: readonly CodeRegion[], paragraphAt: (offset: number) => number): { paragraphs: Uint8Array; openers: Uint8Array } {
 	const paragraphs = new Uint8Array(lineStarts.length + 1);
@@ -316,6 +335,48 @@ function blockRewrites(text: string, lineStarts: readonly number[]): CodeRegion[
 	return regions;
 }
 
+/** The lines of `text`, whose lines start at `lineStarts`, around each
+ *  line before which its parse with HTML off, `off`, whose code the editor
+ *  reads, and with HTML on, `on`, as export and the preview parse it,
+ *  differ on whether a block ends, or that one reads as a table's row and
+ *  the other doesn't: from the last line before it that both end a block
+ *  before, or the text's start, to the next, or the text's end. So a line
+ *  of == after an HTML comment, which the one reads as a setext heading's
+ *  underline and the other as a paragraph's text, and an HTML block, which
+ *  the one reads as a paragraph and the other as HTML, read as before.
+ *  Each line is read once. */
+function htmlDisagreements(text: string, lineStarts: readonly number[], off: MarkdownRegions, on: MarkdownRegions): CodeRegion[] {
+	const lineCount = lineStarts.length;
+	const offEnds = blockEnds(text, lineStarts, formatHighlightLimit(text, off.inlineBlocks));
+	const onEnds = blockEnds(text, lineStarts, formatHighlightLimit(text, on.inlineBlocks));
+	const offRows = tableLines(lineStarts, off.tableRegions);
+	const onRows = tableLines(lineStarts, on.tableRegions);
+	const shared = (line: number) => line === 0 || line === lineCount || (offEnds[line] === 1 && onEnds[line] === 1);
+	// For each line, the last line at or before it, and the first at or
+	// after it, before which both end a block
+	const last = new Int32Array(lineCount + 1);
+	for (let line = 0; line <= lineCount; line++) last[line] = shared(line) ? line : last[line - 1];
+	const next = new Int32Array(lineCount + 1);
+	for (let line = lineCount; line >= 0; line--) next[line] = shared(line) ? line : next[line + 1];
+	const startOf = (line: number) => lineStarts[line] ?? text.length;
+	const regions: CodeRegion[] = [];
+	for (let line = 0; line <= lineCount; line++) {
+		let from: number;
+		let to: number;
+		if (offEnds[line] !== onEnds[line]) {
+			from = last[line];
+			to = next[line];
+		} else if (line < lineCount && offRows[line] !== onRows[line]) {
+			from = last[line];
+			to = next[line + 1];
+		} else continue;
+		const region = { start: startOf(from), end: startOf(to) };
+		const previous = regions[regions.length - 1];
+		if (region.start !== previous?.start || region.end !== previous.end) regions.push(region);
+	}
+	return regions;
+}
+
 /** The index of the last of `sorted` whose `start` is at or before
  *  `offset`, or -1, by binary search */
 function before<T>(sorted: readonly T[], offset: number, start: (item: T) => number): number {
@@ -343,10 +404,10 @@ const BLANK_LINE_RE = /\n[ \t>]*(?:\r?\n|$)/;
 /**
  * For an offset of `text`, whose lines start at `lineStarts`, the start of
  * the first line after its line before which a block ends both in the
- * text's parse, of `inlineBlocks`, and in the parse of what
- * preprocessCriticMarkup writes for it, as export reads it, at the line it
- * comes from (see preprocessCriticMarkupWithLines), or the text's end: its
- * limitAt. On a table's row, of `tableRegions`, that both parses read, and
+ * text's parse with HTML on, of `inlineBlocks`, and in the parse with HTML
+ * on of what preprocessCriticMarkup writes for it, as export reads it, at
+ * the line it comes from (see preprocessCriticMarkupWithLines), or the
+ * text's end: its limitAt. On a table's row, of `tableRegions`, that both parses read, and
  * preprocessing writes as it is, the end of its cell, at the next | that no
  * backslash comes just before, as markdown-it splits a row, as export reads
  * each cell's text alone. And its paragraphAt, which is the line its line's
@@ -363,7 +424,7 @@ function sharedLimit(text: string, lineStarts: readonly number[], inlineBlocks: 
 	const joined = preprocessCriticMarkupWithLines(normalized);
 	if (joined.output !== normalized) {
 		const joinedStarts = computeLineStarts(joined.output);
-		const joinedRegions = computeMarkdownRegions(joined.output, { includeCode: false, inlineBlocks: true, includeTables: true });
+		const joinedRegions = computeMarkdownRegions(joined.output, { includeCode: false, html: 'all', inlineBlocks: true, includeTables: true });
 		const joinedEnds = blockEnds(joined.output, joinedStarts, formatHighlightLimit(joined.output, joinedRegions.inlineBlocks));
 		// The lines of `text` before which a block ends in what it writes
 		const shared = new Uint8Array(lineCount + 1);

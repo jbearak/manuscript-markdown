@@ -758,6 +758,25 @@ describe('Editor decorations read as before where export may read the blocks oth
     expect(painted(text)).toEqual(expected);
   });
 
+  // A line of == or -- after an HTML comment, which a parse with HTML off
+  // reads as a setext heading's underline, and export and the preview as a
+  // paragraph's first line, after the comment's block. A highlight's text
+  // ends where their parse ends a block, and where the two parses differ,
+  // the editor reads a highlight as before
+  it.each<[string, string, string[]]>([
+    ['a highlight from a line of == after an HTML comment', '<!-- note -->\n==\ntext==', ['yellow: ==\ntext==']],
+    ['a highlight from a line of == after an HTML comment, before an == on the next line', '<!-- c -->\n==\n==a\nb==', ['yellow: ==\n==']],
+    ['a highlight in an HTML comment\'s block whose last line ends it, before a line of ==', '<!--\n==a\n-->\n==\nb==', ['yellow: ==a\n-->\n==']],
+    ['a highlight over a line end after an HTML comment and a line of --', '<!-- note -->\n--\ntext ==a\nb==', ['yellow: ==a\nb==']],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(painted(text)).toEqual(expected);
+  });
+
+  it('reads a setext heading after an HTML comment, and the highlight after it, as export does', () => {
+    // Before, the parse with HTML off read the comment as the heading's text
+    expect(painted('<!-- c -->\n==a==\n==\n==b==')).toEqual(['yellow: ==a==', 'yellow: ==b==']);
+  });
+
   // What the editor read before is read once at most, and each unsure
   // region's overlap found by binary search
   it.each<[string, number, (n: number) => string]>([
@@ -769,6 +788,8 @@ describe('Editor decorations read as before where export may read the blocks oth
     ['many quotes with a lazy line', 50_000, n => '> a ==h\nb==\n\n'.repeat(n)],
     ['many code spans whose backticks pair across blocks', 100_000, n => '`{>>` x ` b\n\n'.repeat(n) + '<<}'],
     ['many comments that hold code spans over blank lines', 50_000, n => '{>>a `x == \n\ny` ==d== b<<}\n\n'.repeat(n)],
+    ['many HTML comments each before a line of == and a highlight', 50_000, n => '<!-- c -->\n==\ntext==\n\n'.repeat(n)],
+    ['many tags each before a line of ==, with no blank line between', 100_000, n => '<b>\n==\n'.repeat(n) + 'x=='],
   ])('decorates %s in linear time', (_name, n, input) => {
     const text = input(n);
     expect(fastestRun(() => editorDecorationRanges(text, 'yellow'))).toBeLessThan(1000);
@@ -783,5 +804,7 @@ describe('Editor decorations read as before where export may read the blocks oth
     expect(painted('{>>a `x == \n\ny` ==d== b<<}\n\n'.repeat(2))).toEqual([]);
     expect(painted('x == y\n\n<!-- c -->\n\n==a==\n\n'.repeat(2))).toEqual(['yellow: ==a==', 'yellow: ==a==']);
     expect(painted('x == y\n\n==a==\n\n<div>\n==\n</div>\n\n'.repeat(2))).toEqual(['yellow: ==a==', 'yellow: ==a==']);
+    expect(painted('<!-- c -->\n==\ntext==\n\n'.repeat(2))).toEqual(['yellow: ==\ntext==', 'yellow: ==\ntext==']);
+    expect(painted('<b>\n==\n'.repeat(2) + 'x==')).toEqual(['yellow: ==\n<b>\n==']);
   });
 });

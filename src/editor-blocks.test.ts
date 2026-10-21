@@ -84,6 +84,18 @@ describe('editorBlocks', () => {
 			.toBe('a `x == y` b\n.........e <f> ==\n.[g ==] h\n.[i](j==) k\n.$l$ m ==\n...........A `\n.b `c\n..........');
 	});
 
+	// A line of == or -- after an HTML comment, which a parse with HTML off
+	// reads as a setext heading's underline, and export and the preview as
+	// a paragraph's first line, and a line after a comment's block
+	test('reads the blocks a parse with HTML on reads, and where one with HTML off reads others as unsure', () => {
+		const text = '<!-- note -->\n==\ntext==\n\na ==b\n\n<!--\nc\n-->\n--\nd\n\n- e\n==\n';
+		const blocks = editorBlocks(text);
+		expect(reach(text)(text.indexOf('==\ntext'))).toBe('==\ntext==\n');
+		expect(reach(text)(text.indexOf('--\nd'))).toBe('--\nd\n');
+		expect(marked(text, offset => blocks.unsure(offset, offset + 1)))
+			.toBe('<!-- note -->\n==\ntext==\n........<!--\nc\n-->\n--\nd\n........');
+	});
+
 	// One for each inline rule that may read an == as text but code and
 	// inline HTML (see inertMarks): a URL that linkify links, a link's text
 	// in brackets in brackets, its destination past a ( ) in it, its title
@@ -139,6 +151,8 @@ describe('editorBlocks', () => {
 		['URLs, links, comments\' closers and autolinks that hold == and openers, and setext headings', n => 'a https://e.com/?q==b{++c} {>>d<<} [e [f]](g(h) "i)") == <j@k.l> ==\nV ==w\n==\n\n'.repeat(n)],
 		['< before addresses with no > after them', n => '<}' + 'a@b<}'.repeat(n) + ' ==x=='],
 		['unclosed brackets, parens and quotes in a link\'s destination', n => '[a](b "c' + ' [(d'.repeat(n) + ' ==x=='],
+		['HTML comments each before a line of ==, which a parse with HTML off reads as headings', n => '<!-- c -->\n==\ntext==\n\n'.repeat(n)],
+		['tags each before a line of ==, with no blank line between', n => '<b>\n==\n'.repeat(n) + 'x=='],
 	])('reads %s in linear time', (_name, input) => {
 		const text = input(50_000);
 		expect(fastestRun(() => {

@@ -872,6 +872,24 @@ describe('Navigation reads as before where export may read the blocks otherwise'
     expect(stops(text)).toEqual(expected);
   });
 
+  // A line of == or -- after an HTML comment, which a parse with HTML off
+  // reads as a setext heading's underline, and export and the preview as a
+  // paragraph's first line, after the comment's block (see the decorations'
+  // describe in highlight-colors.test.ts)
+  it.each<[string, string, string[]]>([
+    ['a highlight from a line of == after an HTML comment', '<!-- note -->\n==\ntext==', ['<!-- note -->', '==\ntext==']],
+    ['a highlight from a line of == after an HTML comment, before an == on the next line', '<!-- c -->\n==\n==a\nb==', ['<!-- c -->', '==\n==']],
+    ['a highlight after an HTML comment\'s block whose last line ends it, from a line of ==', '<!--\n==a\n-->\n==\nb==', ['<!--\n==a\n-->', '==\nb==']],
+    ['a highlight over a line end after an HTML comment and a line of --', '<!-- note -->\n--\ntext ==a\nb==', ['<!-- note -->', '==a\nb==']],
+  ])('reads %s as before', (_name, text, expected) => {
+    expect(stops(text)).toEqual(expected);
+  });
+
+  it('reads a setext heading after an HTML comment, and the highlight after it, as export does', () => {
+    // Before, the parse with HTML off read the comment as the heading's text
+    expect(stops('<!-- c -->\n==a==\n==\n==b==')).toEqual(['<!-- c -->', '==a==', '==b==']);
+  });
+
   it('reads the highlight after one before a span across a table\'s rows, as before', () => {
     // Its opener's scan read past the row's end
     expect(stops('| x == y |\n|---|\n| ==b {++c |\n| d++} ==e== |')).toContain('==e==');
@@ -903,6 +921,8 @@ describe('Navigation reads as before where export may read the blocks otherwise'
     ['many quotes with a lazy line', 50_000, n => '> a ==h\nb==\n\n'.repeat(n)],
     ['many code spans whose backticks pair across blocks', 100_000, n => '`{>>` x ` b\n\n'.repeat(n) + '<<}'],
     ['many HTML comments\' openers in code before HTML blocks', 50_000, n => '`<!--`\n\n<div>\n-->\n</div>\n\n'.repeat(n)],
+    ['many HTML comments each before a line of == and a highlight', 50_000, n => '<!-- c -->\n==\ntext==\n\n'.repeat(n)],
+    ['many tags each before a line of ==, with no blank line between', 100_000, n => '<b>\n==\n'.repeat(n) + 'x=='],
   ])('finds the stops in %s in linear time', (_name, n, input) => {
     const text = input(n);
     expect(fastestRun(() => navigationRanges(combinedPattern, text))).toBeLessThan(1000);
@@ -916,5 +936,7 @@ describe('Navigation reads as before where export may read the blocks otherwise'
     expect(stops('`<!--`\n\n<div>\n-->\n</div>\n\n'.repeat(2))).toEqual([]);
     expect(stops('x == y\n\n<!-- c -->\n\n==a==\n\n'.repeat(2))).toEqual(['<!-- c -->', '==a==', '<!-- c -->', '==a==']);
     expect(stops('x == y\n\n==a==\n\n<div>\n==\n</div>\n\n'.repeat(2))).toEqual(['==a==', '==a==']);
+    expect(stops('<!-- c -->\n==\ntext==\n\n'.repeat(2))).toEqual(['<!-- c -->', '==\ntext==', '<!-- c -->', '==\ntext==']);
+    expect(stops('<b>\n==\n'.repeat(2) + 'x==')).toEqual(['==\n<b>\n==']);
   });
 });
