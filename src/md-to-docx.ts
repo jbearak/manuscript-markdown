@@ -12200,7 +12200,10 @@ export async function convertMdToDocx(
       scannedNotes.add(label);
       const bodyText = footnoteDefs.get(label);
       if (!bodyText) return;
-      for (const item of reachedIn(parseMd(bodyText, undefined, false, undefined, linkDefinitionsOf.get(tokens)))) {
+      // Parse the note as a note (inNote), as the real note parse below does:
+      // a note leaves a quote's or a list item's bare environment as written,
+      // so a citation in it is a field, and the scan must register it too.
+      for (const item of reachedIn(parseMd(bodyText, undefined, false, undefined, linkDefinitionsOf.get(tokens), undefined, true))) {
         if ('keys' in item) registerKeys(item.keys);
         else scanNote(item.label);
       }

@@ -1229,6 +1229,48 @@ describe('a bare environment in a quote, an alert or a list item', () => {
 		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
 	});
 
+	// A citation in an environment that a note leaves as written in its
+	// quote or list item, as a note holds no container's environment. The
+	// citation pre-scan, which registers a note's citations where its
+	// reference is, read the note as the body, wrapped the environment and
+	// missed the citation, which the note's own parse writes as a field: a
+	// numeric style then showed author-year text for it, and the
+	// bibliography left its reference out. A CriticMarkup comment beside it
+	// keeps main's decision, and a comment's own text holds no field.
+	const bib = '@article{smith2020, author={Smith, John}, title={Alpha}, journal={J}, year={2020}}\n'
+		+ '@article{jones2021, author={Jones, Ann}, title={Beta}, journal={J}, year={2021}}';
+	const cited = async (md: string, part: string) => {
+		const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex: bib })).docx);
+		const doc = await zip.file('word/document.xml')!.async('string');
+		const note = await zip.file('word/' + part + '.xml')!.async('string');
+		const text = (xml: string) => [...xml.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join('');
+		return { note: text(note), fields: (note.match(/ZOTERO_ITEM/g) ?? []).length, bibliography: text(doc.slice(doc.indexOf('ZOTERO_BIBL'))) };
+	};
+	const inNotes: Array<[string, string]> = [
+		['a quote in a note', '[^n]: A note.\n\n    > \\begin{equation}\n    > x [@jones2021]\n    > \\end{equation}\n'],
+		['a quote on a note\'s line', '[^n]: > \\begin{equation}\n    > x [@jones2021]\n    > \\end{equation}\n'],
+		['an alert in a note', '[^n]: A note.\n\n    > [!NOTE]\n    > \\begin{equation}\n    > x [@jones2021]\n    > \\end{equation}\n'],
+		['a list item in a note', '[^n]: A note.\n\n    - \\begin{equation}\n      x [@jones2021]\n      \\end{equation}\n'],
+		['a quote in a note, with a comment', '[^n]: A note.\n\n    > \\begin{equation}\n    > x [@jones2021] {>>a remark<<}\n    > \\end{equation}\n'],
+	];
+	const styles: Array<[string, string]> = [['vancouver', '(2)'], ['ieee', '[2]'], ['apa', '(Jones, 2021)'], ['chicago-author-date', '(Jones 2021)']];
+	test.each(inNotes.flatMap(([where, note]) => styles.flatMap(([style, shown]) => ['footnotes', 'endnotes'].map(notes => [where, style, notes, note, shown]))))('numbers and lists a citation in an environment in %s, which the note leaves as written, with %s in %s', async (_where, style, notes, note, shown) => {
+		const md = '---\ncsl: ' + style + '\nnotes: ' + notes + '\n---\n\nBody [@smith2020].[^n]\n\n' + note;
+		const out = await cited(md, notes);
+		expect(out.fields).toBe(1);
+		expect(out.note).toContain('x ' + shown);
+		expect(out.bibliography).toContain('Alpha');
+		expect(out.bibliography).toContain('Beta');
+	});
+
+	test('numbers and lists a citation in an environment in a quote with a comment, which keeps main\'s decision', async () => {
+		const md = '---\ncsl: vancouver\n---\n\nBody [@smith2020].\n\n> \\begin{equation}\n> x [@jones2021] {>>a remark<<}\n> \\end{equation}\n';
+		const out = await cited(md, 'document');
+		expect(out.fields).toBe(2);
+		expect(out.note).toContain('x (2)');
+		expect(out.bibliography).toContain('Beta');
+	});
+
 	test('wraps a bare environment of a phantom and text in a quote, whose equation shows the text', () => {
 		const md = '> \\begin{equation}\n> \\phantom{x} y\n> \\end{equation}\n';
 		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{equation}\n> \\phantom{x} y\n> \\end{equation}' + D + '\n');
