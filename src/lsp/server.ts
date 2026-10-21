@@ -13,6 +13,8 @@ import {
 	Diagnostic,
 	DiagnosticSeverity,
 	DidChangeWatchedFilesParams,
+	DocumentLink,
+	DocumentLinkParams,
 	DocumentSymbol,
 	DocumentSymbolParams,
 	Hover,
@@ -84,6 +86,7 @@ import {
 	validateFrontmatter as validateFrontmatterFields,
 } from './frontmatter-language';
 import { toLspFrontmatterCompletionItem } from './frontmatter-completion-adapter';
+import { findBibliographyLink } from './bibliography-link';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -237,6 +240,7 @@ connection.onInitialize((params: InitializeParams) => {
 				triggerCharacters: ['@'],
 			},
 			definitionProvider: true,
+			documentLinkProvider: { resolveProvider: false },
 			documentSymbolProvider: true,
 			hoverProvider: true,
 			referencesProvider: true,
@@ -431,6 +435,25 @@ connection.onDefinition(async (params: DefinitionParams): Promise<Location | nul
 		return null;
 	}
 	return (await getDefinitionLocationForKey(symbol.key, symbol.bibPath)) ?? null;
+});
+
+// The bibliography written in a Markdown document's frontmatter, linked to
+// its file (see findBibliographyLink). VS Code asks after each edit, so it
+// reads only the frontmatter block at the document's start.
+connection.onDocumentLinks(async (params: DocumentLinkParams): Promise<DocumentLink[]> => {
+	const doc = documents.get(params.textDocument.uri);
+	if (!doc || !isMarkdownUri(doc.uri, doc.languageId)) {
+		return [];
+	}
+	const link = await findBibliographyLink(doc.uri, doc.getText(), workspaceRootPaths);
+	if (!link) {
+		return [];
+	}
+	return [{
+		range: Range.create(doc.positionAt(link.start), doc.positionAt(link.end)),
+		target: fsPathToUri(link.path),
+		tooltip: link.path,
+	}];
 });
 
 connection.onReferences(async (params: ReferenceParams): Promise<Location[]> => {
