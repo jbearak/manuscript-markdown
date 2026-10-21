@@ -18,7 +18,7 @@ import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type Tabl
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { readCitationItems } from './citation-syntax';
 import { citationLocatorText } from './citation-locator';
-import { bibtexNameParts, citeprocFieldText } from './md-to-docx-citations';
+import { bibtexNameParts, buildItemData, citeprocFieldText } from './md-to-docx-citations';
 import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -18024,6 +18024,17 @@ function escapeBibtexField(s: string, field: string, wrap = false): string {
   return [groups, '{' + groups + '}'].find(value => asRead !== undefined && read(value) === asRead) ?? asWritten;
 }
 
+/** A citation's status, escaped, as a pubstate export reads back as that
+ *  status: as it is, or, where export would read a word of it as one of
+ *  biblatex's keys, as inpress, which it reads as in press, in a group
+ *  around the whole value, which the parser reads as the field's braces
+ *  and export as a group, so pubstate = {{inpress}} is inpress. */
+function pubstateAsWritten(written: string): string {
+  const entry = parseBibtex('@misc{k,\n  pubstate = {' + written + '}\n}').get('k');
+  const text = entry && citeprocFieldText(entry, 'pubstate');
+  return !entry || !text || buildItemData(entry).status === text ? written : '{' + written + '}';
+}
+
 /** Map CSL type back to the most appropriate BibTeX entry type. */
 export function mapCSLTypeToBibtex(cslType: string, genre?: string): string {
   switch (cslType) {
@@ -18112,6 +18123,8 @@ const CSL_TO_BIBTEX: Record<string, string> = {
   'abstract': 'abstract',
   'note': 'note',
   'collection-title': 'series',
+  // As BibLaTeX's publication state, which export gives citeproc as status
+  'status': 'pubstate',
 };
 
 export function generateBibTeX(
@@ -18185,7 +18198,8 @@ export function generateBibTeX(
       const val = meta.fullItemData?.[cslField];
       if (val != null && (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean')) {
         const strVal = String(val);
-        fields.push(`  ${bibtexField} = {${VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtexField(strVal, bibtexField)}}`);
+        const written = VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtexField(strVal, bibtexField);
+        fields.push(`  ${bibtexField} = {${cslField === 'status' ? pubstateAsWritten(written) : written}}`);
         alreadyEmitted.add(cslField);
       }
     }

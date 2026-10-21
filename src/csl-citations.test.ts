@@ -1222,3 +1222,53 @@ describe('Character references in a source\'s fields', () => {
     expect(plain).toEqual(['(Müller & Øster, 2019)']);
   });
 });
+
+describe('A source\'s publication state', () => {
+  // BibLaTeX's pubstate, which citeproc didn't get, so chicago-author-date
+  // showed a forthcoming article as "ahead of print"
+  const bibtex = `@article{k,
+  author = {Kleven, Henrik},
+  title = {The Geography of Child Penalties and Gender Norms: A Pseudo-Event Study Approach},
+  journal = {American Economic Journal: Applied Economics},
+  year = {2026},
+  pubstate = {forthcoming},
+  doi = {10.1257/app.20240026}
+}`;
+  const md = '---\ncsl: chicago-author-date\nbibliography: t.bib\n---\n\n[@k]\n\n## References\n';
+
+  test('shows in chicago-author-date\'s bibliography as pandoc shows it', async () => {
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx)).file('word/document.xml')!.async('string');
+    const paragraphs = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)]
+      .map(paragraph => [...paragraph[0].matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(text => decodeXmlEntities(text[1])).join(''))
+      .filter(text => text.trim() !== '');
+    expect(paragraphs).toEqual([
+      '(Kleven 2026)',
+      'References',
+      'Kleven, Henrik. 2026. “The Geography of Child Penalties and Gender Norms: A Pseudo-Event Study Approach.” American Economic Journal: Applied Economics, Forthcoming. https://doi.org/10.1257/app.20240026.',
+    ]);
+    // And the citation's data for Zotero has it
+    const field = /CSL_CITATION\s+(.*?)\s*<\/w:instrText>/.exec(xml);
+    expect(JSON.parse(decodeXmlEntities(field![1])).citationItems[0].itemData.status).toBe('forthcoming');
+  });
+
+  // A status that holds a key as written, as inpress, in a group around
+  // the whole value, as export would read the key as in press
+  test.each([
+    ['{forthcoming}', 'forthcoming', '{forthcoming}'],
+    ['{inpress}', 'in press', '{in press}'],
+    ['{{inpress}}', 'inpress', '{{inpress}}'],
+    ['{{to appear inpress}}', 'to appear inpress', '{{to appear inpress}}'],
+  ])('comes back as the status it was from a document with no .bib file in it: pubstate = %s', async (pubstate, status, written) => {
+    // Where import writes the .bib file from the citations' data, as for a
+    // document from Word
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex: bibtex.replace('{forthcoming}', pubstate) })).docx);
+    const customXml = await zip.file('docProps/custom.xml')!.async('string');
+    zip.file('docProps/custom.xml', customXml.replace(/<property[^>]*name="MANUSCRIPT_BIB_DATA_[^"]*"[^>]*>[\s\S]*?<\/property>/g, ''));
+    const result = await convertDocx(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })));
+    expect(result.bibtex).toContain('pubstate = ' + written + ',');
+    const [entry] = parseBibtex(result.bibtex).values();
+    expect(buildItemData(entry).status).toBe(status);
+  });
+});
