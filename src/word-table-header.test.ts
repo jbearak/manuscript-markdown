@@ -4,9 +4,10 @@ import { convertDocx } from './converter';
 import { convertMdToDocx } from './md-to-docx';
 import { fastestRunAsync } from './test-timing';
 
-// Which row of a Word table import reads as its header: one Word shows as
-// one, not one tblLook's firstRow alone turns on, as Word does for each
-// table it inserts, whose Table Grid style shows the row as the rest
+// Which row of a Word table import reads as its header: with Header Row
+// on (tblLook's firstRow), the first row, but not where the table's style
+// sets nothing for it and the row isn't all bold, as in a table Word
+// inserts, whose Table Grid shows the row as the rest
 
 const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 
@@ -17,11 +18,11 @@ const LOOK_OFF = '<w:tblLook w:val="0000" w:firstRow="0" w:lastRow="0" w:firstCo
 
 const BORDER = 'w:val="single" w:sz="4" w:space="0"';
 
-/** A table style `id` based on `basedOn`, whose first row's part has the
- *  borders `sides` in its `kind` properties' element `tag` */
-const borderStyle = (id: string, basedOn: string, kind: string, tag: string, sides: string) => '<w:style w:type="table" w:styleId="' + id + '">'
-  + '<w:name w:val="' + id + '"/><w:basedOn w:val="' + basedOn + '"/><w:tblStylePr w:type="firstRow"><w:' + kind + '><w:' + tag + '>' + sides
-  + '</w:' + tag + '></w:' + kind + '></w:tblStylePr></w:style>';
+/** A table style `id` based on `basedOn`, with `own` properties, and
+ *  `part` in its part for the first row, where given */
+const tableStyle = (id: string, basedOn: string, part?: string, own = '') => '<w:style w:type="table" w:styleId="' + id + '">'
+  + '<w:name w:val="' + id + '"/><w:basedOn w:val="' + basedOn + '"/>' + own
+  + (part === undefined ? '' : '<w:tblStylePr w:type="firstRow">' + part + '</w:tblStylePr>') + '</w:style>';
 
 /** Word's own styles.xml, in part: Normal, Strong, a bold paragraph
  *  style, Table Normal, Table Grid, and Grid Table 4 Accent 1, whose first
@@ -48,16 +49,18 @@ const STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles
   + '<w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>'
   + '</w:style>'
   + '<w:style w:type="table" w:styleId="MyGallery"><w:name w:val="My Gallery"/><w:basedOn w:val="GridTable4-Accent1"/></w:style>'
-  // A first row's part that shows nothing: rows kept together, and bold off
-  + '<w:style w:type="table" w:styleId="Unshown"><w:name w:val="Unshown"/><w:basedOn w:val="TableGrid"/>'
-  + '<w:tblStylePr w:type="firstRow"><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="auto"/></w:tcPr></w:tblStylePr></w:style>'
-  // A first row's part of borders above and below its cells, or its
-  // paragraphs, and styles based on those that turn some of them off
-  + borderStyle('Ruled', 'TableNormal', 'tcPr', 'tcBorders', '<w:top ' + BORDER + ' w:color="auto"/><w:bottom w:val="single" w:sz="12" w:space="0" w:color="auto"/>')
-  + borderStyle('RuledAbove', 'Ruled', 'tcPr', 'tcBorders', '<w:bottom w:val="nil"/>')
-  + borderStyle('Unruled', 'Ruled', 'tcPr', 'tcBorders', '<w:top w:val="nil"/><w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>')
-  + borderStyle('Lined', 'TableNormal', 'pPr', 'pBdr', '<w:top ' + BORDER + ' w:color="auto"/><w:bottom ' + BORDER + ' w:color="auto"/>')
-  + borderStyle('LinedBelow', 'Lined', 'pPr', 'pBdr', '<w:top w:val="nil"/>')
+  // Parts for the first row that set something, whether it shows or not:
+  // keeping the row with the next, left alignment in a table centered,
+  // shading of the table, a border, and a border based on that turned off
+  + tableStyle('KeepNext', 'TableGrid', '<w:pPr><w:keepNext/></w:pPr>')
+  + tableStyle('LeftFirstRow', 'TableGrid', '<w:pPr><w:jc w:val="left"/></w:pPr>', '<w:pPr><w:jc w:val="center"/></w:pPr>')
+  + tableStyle('TableShaded', 'TableGrid', '<w:tblPr><w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/></w:tblPr>')
+  + tableStyle('Ruled', 'TableNormal', '<w:tcPr><w:tcBorders><w:bottom w:val="single" w:sz="12" w:space="0" w:color="auto"/></w:tcBorders></w:tcPr>')
+  + tableStyle('Unruled', 'Ruled', '<w:tcPr><w:tcBorders><w:bottom w:val="nil"/></w:tcBorders></w:tcPr>')
+  // Styles that set nothing for the first row: a part with empty
+  // properties, and banded rows alone
+  + tableStyle('EmptyPart', 'TableGrid', '<w:rPr/><w:tcPr></w:tcPr>')
+  + tableStyle('Banded', 'TableGrid', undefined, '<w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>')
   + '</w:styles>';
 
 /** A run of `text`, with `rPr`'s properties */
@@ -75,13 +78,14 @@ const table = (rows: string[], style = 'TableGrid', look = WORD_LOOK) => '<w:tbl
 /** The body rows of each table here: Ann, 30 */
 const BODY = row([cell(run('Ann')), cell(run('30'))]);
 
-/** A Word document of `body`, with Word's styles, and `footnotes` */
-async function wordDocx(body: string, footnotes?: string): Promise<Uint8Array> {
+/** A Word document of `body`, with `styles`, Word's by default, and
+ *  `footnotes` */
+async function wordDocx(body: string, footnotes?: string, styles = STYLES): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
   zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>');
   zip.file('word/document.xml', '<?xml version="1.0"?><w:document ' + W_NS + '><w:body>' + body + '</w:body></w:document>');
-  zip.file('word/styles.xml', STYLES);
+  zip.file('word/styles.xml', styles);
   if (footnotes) {
     zip.file('word/footnotes.xml', '<?xml version="1.0"?><w:footnotes ' + W_NS + '>'
       + '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
@@ -96,8 +100,8 @@ const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
 
 /** The Markdown of a Word document's `body`, and of its round trip:
  *  Markdown to Word and back, which must be the same */
-async function imported(body: string, footnotes?: string): Promise<string> {
-  const md = (await convertDocx(await wordDocx(body, footnotes))).markdown;
+async function imported(body: string, footnotes?: string, styles = STYLES): Promise<string> {
+  const md = (await convertDocx(await wordDocx(body, footnotes, styles))).markdown;
   const again = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
   expect(strip(again)).toBe(strip(md));
   return strip(md);
@@ -105,29 +109,50 @@ async function imported(body: string, footnotes?: string): Promise<string> {
 
 const HEADERLESS = '+------+-----+\n| Name | Age |\n+------+-----+\n| Ann  | 30  |\n+------+-----+';
 const PIPE = '| Name | Age |\n| --- | --- |\n| Ann | 30 |';
+const BOLD_HEADERLESS = '+----------+---------+\n| **Name** | **Age** |\n+----------+---------+\n| Ann      | 30      |\n+----------+---------+';
+
+/** A first row of Name and Age, each a run with `rPr`, in `pStyle` */
+const firstRow = (rPr = '', pStyle = '') => row([cell(run('Name', rPr), pStyle), cell(run('Age', rPr), pStyle)]);
 
 describe('the header row of a Word table', () => {
-  test('a Table Grid table with its first row turned on and plain has no header row', async () => {
+  test('a Table Grid table with Header Row on and a plain first row has no header row', async () => {
     // Word's Insert Table: Table Grid's first row looks like the rest
-    expect(await imported(table([row([cell(run('Name')), cell(run('Age'))]), BODY]))).toBe(HEADERLESS);
+    expect(await imported(table([firstRow(), BODY]))).toBe(HEADERLESS);
+    // Nor a table of no style, or of a style that sets nothing for its first
+    // row, or one whose part for it sets nothing
+    expect(await imported(table([firstRow(), BODY], ''))).toBe(HEADERLESS);
+    expect(await imported(table([firstRow(), BODY], 'Banded'))).toBe(HEADERLESS);
+    expect(await imported(table([firstRow(), BODY], 'EmptyPart'))).toBe(HEADERLESS);
   });
 
-  test('a table whose first row is turned off and plain has no header row', async () => {
-    expect(await imported(table([row([cell(run('Name')), cell(run('Age'))]), BODY], 'TableGrid', LOOK_OFF))).toBe(HEADERLESS);
-    expect(await imported(table([row([cell(run('Name')), cell(run('Age'))]), BODY], '', ''))).toBe(HEADERLESS);
+  test('with Header Row off, a first row is a header only where Word repeats it, as before', async () => {
+    expect(await imported(table([firstRow(), BODY], 'TableGrid', LOOK_OFF))).toBe(HEADERLESS);
+    expect(await imported(table([firstRow(), BODY], '', ''))).toBe(HEADERLESS);
+    // A tblLook of its bits alone, as Word 2007 writes it
+    expect(await imported(table([firstRow(), BODY], 'TableGrid', '<w:tblLook w:val="04A0"/>'))).toBe(HEADERLESS);
+    // In bold, or in a style that formats a first row, too
+    expect(await imported(table([firstRow('<w:b/>'), BODY], 'TableGrid', LOOK_OFF))).toBe(BOLD_HEADERLESS);
+    expect(await imported(table([firstRow('<w:b/>'), BODY], '', ''))).toBe(BOLD_HEADERLESS);
+    expect(await imported(table([firstRow(), BODY], 'GridTable4-Accent1', LOOK_OFF))).toBe(HEADERLESS);
   });
 
   test('a first row in bold is a header, its bold dropped as for a header export writes', async () => {
-    const bold = row([cell(run('Name', '<w:b/>')), cell(run('Age', '<w:b/>'))]);
-    expect(await imported(table([bold, BODY]))).toBe(PIPE);
-    // With the first row's part turned off, and with no style
-    expect(await imported(table([bold, BODY], 'TableGrid', LOOK_OFF))).toBe(PIPE);
-    expect(await imported(table([bold, BODY], '', ''))).toBe(PIPE);
+    expect(await imported(table([firstRow('<w:b/>'), BODY]))).toBe(PIPE);
+    expect(await imported(table([firstRow('<w:b/>'), BODY], ''))).toBe(PIPE);
   });
 
-  test('a first row in bold from a style is a header', async () => {
-    expect(await imported(table([row([cell(run('Name', '<w:rStyle w:val="Strong"/>')), cell(run('Age', '<w:rStyle w:val="Strong"/>'))]), BODY]))).toBe(PIPE);
-    expect(await imported(table([row([cell(run('Name'), 'BoldPara'), cell(run('Age'), 'BoldPara')]), BODY]))).toBe(PIPE);
+  test('a first row that may be bold, by any style or for complex scripts, is a header', async () => {
+    expect(await imported(table([firstRow('<w:rStyle w:val="Strong"/>'), BODY]))).toBe(PIPE);
+    expect(await imported(table([firstRow('', 'BoldPara'), BODY]))).toBe(PIPE);
+    // Bold for complex scripts alone, as Arabic's, and bold on with it off
+    expect(await imported(table([firstRow('<w:bCs/>'), BODY]))).toBe(PIPE);
+    expect(await imported(table([firstRow('<w:b/><w:bCs w:val="0"/>'), BODY]))).toBe(PIPE);
+    // Bold a run turns off over its character style's, bold of a paragraph
+    // style and a character style both, which Word turns off, and a
+    // character style styles.xml doesn't have
+    expect(await imported(table([firstRow('<w:rStyle w:val="Strong"/><w:b w:val="0"/><w:bCs w:val="0"/>'), BODY]))).toBe(PIPE);
+    expect(await imported(table([firstRow('<w:rStyle w:val="Strong"/>', 'BoldPara'), BODY]))).toBe(PIPE);
+    expect(await imported(table([firstRow('<w:rStyle w:val="Missing"/>'), BODY]))).toBe(PIPE);
   });
 
   test('a first row in bold but for whitespace, and empty cells, is a header', async () => {
@@ -139,9 +164,6 @@ describe('the header row of a Word table', () => {
   test('a first row only partly in bold has no header row, and keeps its bold', async () => {
     const md = await imported(table([row([cell(run('Name', '<w:b/>')), cell(run('Age'))]), BODY]));
     expect(md).toBe('+----------+-----+\n| **Name** | Age |\n+----------+-----+\n| Ann      | 30  |\n+----------+-----+');
-    // Bold turned off on a run of a Strong one
-    expect(await imported(table([row([cell(run('Name', '<w:rStyle w:val="Strong"/>')), cell(run('Age', '<w:rStyle w:val="Strong"/><w:b w:val="0"/>'))]), BODY])))
-      .toBe('+------+-----+\n| Name | Age |\n+------+-----+\n| Ann  | 30  |\n+------+-----+');
   });
 
   test('a first row of no text has no header row', async () => {
@@ -150,50 +172,37 @@ describe('the header row of a Word table', () => {
     expect(md).not.toContain('| --- |');
   });
 
-  test('a gallery style whose first row is bold and shaded makes its first row a header', async () => {
-    const plain = row([cell(run('Name')), cell(run('Age'))]);
-    expect(await imported(table([plain, BODY], 'GridTable4-Accent1'))).toBe(PIPE);
-    // Through a style based on it
-    expect(await imported(table([plain, BODY], 'MyGallery'))).toBe(PIPE);
-    // But not with the first row's part turned off, though its first
-    // column's is bold
-    expect(await imported(table([plain, BODY], 'GridTable4-Accent1', LOOK_OFF))).toBe(HEADERLESS);
-  });
-
-  test('a style whose first row\'s part draws a border makes its first row a header, by each side it takes from its base', async () => {
-    const plain = row([cell(run('Name')), cell(run('Age'))]);
-    expect(await imported(table([plain, BODY], 'Ruled'))).toBe(PIPE);
-    // Based on it, with its bottom border off, which leaves the top one
-    expect(await imported(table([plain, BODY], 'RuledAbove'))).toBe(PIPE);
-    expect(await imported(table([plain, BODY], 'Unruled'))).toBe(HEADERLESS);
-    // A paragraph's borders, its top one off, which leaves the bottom one
-    expect(await imported(table([plain, BODY], 'Lined'))).toBe(PIPE);
-    expect(await imported(table([plain, BODY], 'LinedBelow'))).toBe(PIPE);
-    // With the first row's part turned off
-    expect(await imported(table([plain, BODY], 'RuledAbove', LOOK_OFF))).toBe(HEADERLESS);
+  test('a style with a part for the first row makes it a header, whatever the part sets', async () => {
+    // Grid Table 4 Accent 1, directly, through a style based on it, and as
+    // the default table style of a table of no style of its own
+    expect(await imported(table([firstRow(), BODY], 'GridTable4-Accent1'))).toBe(PIPE);
+    expect(await imported(table([firstRow(), BODY], 'MyGallery'))).toBe(PIPE);
+    const galleryDefault = STYLES.replace(' w:default="1" w:styleId="TableNormal"', ' w:styleId="TableNormal"')
+      .replace('w:styleId="GridTable4-Accent1"', 'w:default="1" w:styleId="GridTable4-Accent1"');
+    expect(await imported(table([firstRow(), BODY], ''), undefined, galleryDefault)).toBe(PIPE);
+    // What Word shows apart or not, as before
+    for (const style of ['KeepNext', 'LeftFirstRow', 'TableShaded', 'Ruled', 'Unruled']) {
+      expect(await imported(table([firstRow(), BODY], style))).toBe(PIPE);
+    }
   });
 
   test('a symbol and a non-breaking hyphen count for a first row in bold', async () => {
     // A symbol's run, or a hyphen's, not in bold, beside bold text, is a
     // body row, which the next export doesn't make bold
     const symbol = (char: string, rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:sym w:font="Symbol" w:char="' + char + '"/></w:r>';
-    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell(symbol('F061'))]), BODY], 'TableGrid', LOOK_OFF)))
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell(symbol('F061'))]), BODY])))
       .toBe('+----------+-----+\n| **Name** | α   |\n+----------+-----+\n| Ann      | 30  |\n+----------+-----+');
     const hyphenated = (rPr: string) => cell(run('A', '<w:b/>') + '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:noBreakHyphen/></w:r>' + run('B', '<w:b/>'));
-    expect(await imported(table([row([cell(run('Name', '<w:b/>')), hyphenated('')]), BODY], 'TableGrid', LOOK_OFF)))
-      .toBe('+----------+-------------+\n| **Name** | **A**\u2011**B** |\n+----------+-------------+\n| Ann      | 30          |\n+----------+-------------+');
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), hyphenated('')]), BODY])))
+      .toBe('+----------+-------------+\n| **Name** | **A**‑**B** |\n+----------+-------------+\n| Ann      | 30          |\n+----------+-------------+');
     // A symbol of a font import can't read, which Word shows still
-    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell('<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r>')]), BODY], 'TableGrid', LOOK_OFF)))
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell('<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r>')]), BODY])))
       .not.toContain('| --- |');
     // In bold, they're a header row's, as symbols alone are
-    expect(await imported(table([row([cell(run('Name', '<w:b/>')), hyphenated('<w:b/>')]), BODY], 'TableGrid', LOOK_OFF)))
-      .toBe('| Name | A\u2011B |\n| --- | --- |\n| Ann | 30 |');
-    expect(await imported(table([row([cell(symbol('F061', '<w:b/>')), cell(symbol('F062', '<w:b/>'))]), BODY], 'TableGrid', LOOK_OFF)))
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), hyphenated('<w:b/>')]), BODY])))
+      .toBe('| Name | A‑B |\n| --- | --- |\n| Ann | 30 |');
+    expect(await imported(table([row([cell(symbol('F061', '<w:b/>')), cell(symbol('F062', '<w:b/>'))]), BODY])))
       .toBe('| α | β |\n| --- | --- |\n| Ann | 30 |');
-  });
-
-  test('a style whose first row\'s part shows nothing leaves a plain first row a body row', async () => {
-    expect(await imported(table([row([cell(run('Name')), cell(run('Age'))]), BODY], 'Unshown'))).toBe(HEADERLESS);
   });
 
   test('a row Word repeats as a header is one', async () => {
@@ -203,7 +212,7 @@ describe('the header row of a Word table', () => {
   });
 
   test('a header row after a body row stays HTML, and a plain first row before it a body row', async () => {
-    const md = await imported(table([row([cell(run('Name')), cell(run('Age'))]), row([cell(run('H')), cell(run('I'))], '<w:tblHeader/>'), BODY]));
+    const md = await imported(table([firstRow(), row([cell(run('H')), cell(run('I'))], '<w:tblHeader/>'), BODY]));
     expect(md).toContain('<td>');
     expect(md).toContain('<th>');
     expect(md.indexOf('<td>')).toBeLessThan(md.indexOf('<th>'));
@@ -212,9 +221,9 @@ describe('the header row of a Word table', () => {
   test('a note\'s table with a plain first row has no header row, and one in bold has', async () => {
     const note = (first: string) => '<w:footnote w:id="1"><w:p><w:r><w:t>Note.</w:t></w:r></w:p>' + table([first, BODY]) + '<w:p/></w:footnote>';
     const body = '<w:p><w:r><w:t>Text.</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>';
-    const plain = await imported(body, note(row([cell(run('Name')), cell(run('Age'))])));
+    const plain = await imported(body, note(firstRow()));
     expect(plain).toContain('    ' + HEADERLESS.split('\n').join('\n    '));
-    const bold = await imported(body, note(row([cell(run('Name', '<w:b/>')), cell(run('Age', '<w:b/>'))])));
+    const bold = await imported(body, note(firstRow('<w:b/>')));
     expect(bold).toContain('    ' + PIPE.split('\n').join('\n    '));
   });
 });
@@ -264,16 +273,15 @@ describe('the header row of a table export wrote', () => {
     expect((await roundTrip(md)).md).toBe(md);
   });
 
-  test('a grid table without a header row whose first row Word made bold has one', async () => {
-    // Word's records of the table are gone, as from a copy of it
-    const docx = (await convertMdToDocx('+-----+-----+\n| A   | B   |\n+-----+-----+\n| 1   | 2   |\n+-----+-----+\n')).docx;
-    const zip = await JSZip.loadAsync(docx);
+  test('a pipe table whose header Word stopped repeating stays a pipe table, by its bold', async () => {
+    // With Header Row on, which export writes with the header, and the
+    // bold export gives it
+    const md = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
-    const firstRow = /<w:tr>(?:(?!<\/w:tr>).)*<\/w:tr>/.exec(xml)![0];
-    zip.file('word/document.xml', xml.replace(firstRow, firstRow.replace(/<w:r>(<w:rPr>)?/g, (_, rPr) => '<w:r><w:rPr><w:b/>' + (rPr ? '' : '</w:rPr>'))));
-    zip.remove('docProps/custom.xml');
-    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(strip(md)).toBe('| A | B |\n| --- | --- |\n| 1 | 2 |');
+    expect(xml).toContain('<w:trPr><w:tblHeader/></w:trPr>');
+    zip.file('word/document.xml', xml.replace('<w:trPr><w:tblHeader/></w:trPr>', ''));
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe(md);
   });
 });
 

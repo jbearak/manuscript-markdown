@@ -1681,9 +1681,6 @@ interface NoteBodyContext {
 
 export interface TableRow {
   isHeader: boolean;
-  // A first row that's a header by its bold alone, which it is where
-  // export didn't write its table (see firstRowHeader)
-  boldHeader?: boolean;
   cells: TableCell[];
   // The change Word tracks the row's insertion or deletion with, which its
   // cells' text is in (see rowRevision)
@@ -1709,13 +1706,13 @@ function cellParagraphs(nodes: XmlNode[]): XmlNode[] {
 
 /** A style's own properties in styles.xml: its w:pPr's children and its
  *  w:rPr's, its base's ID, and a table style's for parts of a table, by
- *  each w:tblStylePr's type, with its cells' (w:tcPr), and how many rows
- *  and columns a band of it takes, where it sets them */
+ *  each w:tblStylePr's type, with whether the part sets anything, and how
+ *  many rows and columns a band of it takes, where it sets them */
 interface StyleProperties {
   pPr: XmlNode[];
   rPr: XmlNode[];
   basedOn: string;
-  parts: Map<string, { pPr: XmlNode[]; rPr: XmlNode[]; tcPr: XmlNode[] }>;
+  parts: Map<string, { pPr: XmlNode[]; rPr: XmlNode[]; formats: boolean }>;
   rowBand?: number;
   colBand?: number;
 }
@@ -1900,7 +1897,8 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
       basedOn: getAttr(children.find(c => c['w:basedOn'] !== undefined), 'val'),
       parts: new Map(children.filter(c => c['w:tblStylePr'] !== undefined).map(c => [getAttr(c, 'type'), {
         pPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:pPr'), rPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:rPr'),
-        tcPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:tcPr'),
+        formats: ['w:pPr', 'w:rPr', 'w:tblPr', 'w:trPr', 'w:tcPr'].some(tag => childrenOf(asXmlNodes(c['w:tblStylePr']), tag)
+          .some(property => Object.keys(property).some(key => key !== ':@' && key !== '#text'))),
       }])),
       rowBand: band('w:tblStyleRowBandSize'), colBand: band('w:tblStyleColBandSize'),
     };
@@ -6141,9 +6139,8 @@ function parseNoteBody(
             }
             rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells, ...(ownChange ? { revision: ownChange } : {}) });
           }
-          if (firstRowIsHeader === true && rawRows.length > 0) rawRows[0].isHeader = true;
+          if (firstRowIsHeader && rawRows.length > 0) rawRows[0].isHeader = true;
           const rows = computeRowspans(rawRows);
-          if (firstRowIsHeader === 'bold' && rows.length > 0 && !rows[0].isHeader) rows[0].boldHeader = true;
           if (rows.length > 0) {
             // As in extractDocumentContent: a tracked mark before the table
             if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
@@ -6875,94 +6872,52 @@ function cellParagraphMarks(cellContent: ContentItem[]): { marks?: (RevisionInfo
   return marks.some(mark => mark) ? { marks } : {};
 }
 
+function tableHasFirstRowHeader(tblChildren: XmlNode[]): boolean {
+  const tblPrNode = tblChildren.find((c) => c['w:tblPr'] !== undefined);
+  if (!tblPrNode) return false;
+  const tblPrChildren = asXmlNodes(tblPrNode['w:tblPr']);
+  const tblLookNode = tblPrChildren.find((c) => c['w:tblLook'] !== undefined);
+  if (!tblLookNode) return false;
+  return xmlOn(getAttr(tblLookNode, 'firstRow'));
+}
+
 /**
- * Whether a table's first row is a header row as Word shows one, besides
- * a row of its own w:tblHeader, which Word repeats on each page (see
- * rowHasHeaderProp): where its style shows it apart (see
- * styleShowsFirstRow), or where Word shows all its text in bold (see
- * firstRowBold). tblLook's firstRow alone doesn't make it one, as Word
- * turns that on for each table it inserts, whose Table Grid shows the row
- * as it shows the rest. 'bold' for a row that's a header by its bold alone
- * with tblLook's firstRow off, as export writes a table whose first row
- * isn't its header, so that one export wrote without a header row, its
- * first row bold, as `**a**` in each cell, stays without one (see
- * buildMarkdownOnce). With firstRow on, which export writes only with a
- * header first row, the bold makes it one, as where Word took the row's
- * tblHeader off.
+ * Whether a table's first row is a header row, besides a row of its own
+ * w:tblHeader, which Word repeats on each page (see rowHasHeaderProp):
+ * where tblLook's firstRow, Header Row in Word, is on (see
+ * tableHasFirstRowHeader), but not where the table's style has no part for
+ * the row that sets anything (see styleFormatsFirstRow) and the row isn't
+ * all bold (see firstRowBold). Word turns Header Row on for each table it
+ * inserts, whose Table Grid has no such part, so a first row it shows like
+ * the rest isn't one.
  */
-function firstRowHeader(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean | 'bold' {
-  if (styleShowsFirstRow(tblChildren, layouts, look)) return true;
-  if (!firstRowBold(tblChildren, layouts, look)) return false;
-  return look.firstRow || 'bold';
+function firstRowHeader(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
+  return tableHasFirstRowHeader(tblChildren) && (styleFormatsFirstRow(tblChildren, layouts) || firstRowBold(tblChildren, layouts, look));
 }
 
-/** Whether a w:shd shades anything: with a pattern, or a fill but none or
- *  automatic */
-function shades(node: XmlNode): boolean {
-  const val = getAttr(node, 'val');
-  const fill = getAttr(node, 'fill');
-  return val !== 'nil' && (val !== '' && val !== 'clear' || fill !== '' && fill !== 'auto' || getAttr(node, 'themeFill') !== '');
-}
-
-/** What of a part of a table style Word shows the text of its cells, or
- *  the cells, with, by the properties it's in and its element, and whether
- *  the element's value shows it: a toggle on, as bold, an underline, a
- *  colour, a highlight, a size or a font, an alignment but left, as Word
- *  shows a paragraph of none, or shading; and borders, by their elements
- *  (see TABLE_PART_BORDERS) */
-const TABLE_PART_SHOWS: (readonly [kind: 'pPr' | 'rPr' | 'tcPr', tag: string, shows: (node: XmlNode, tag: string) => boolean])[] = [
-  ...['w:b', 'w:i', 'w:caps', 'w:smallCaps', 'w:strike', 'w:dstrike', 'w:outline', 'w:shadow', 'w:emboss', 'w:imprint']
-    .map(tag => ['rPr', tag, (node: XmlNode) => isToggleOn([node], tag)] as const),
-  ['rPr', 'w:u', node => getAttr(node, 'val') !== 'none'],
-  ['rPr', 'w:color', node => getAttr(node, 'val') !== 'auto' || getAttr(node, 'themeColor') !== ''],
-  ['rPr', 'w:highlight', node => getAttr(node, 'val') !== 'none'],
-  ['rPr', 'w:shd', shades],
-  ['rPr', 'w:sz', () => true],
-  ['rPr', 'w:rFonts', () => true],
-  ['pPr', 'w:jc', node => ['center', 'right', 'end'].includes(getAttr(node, 'val'))],
-  ['pPr', 'w:shd', shades],
-  ['tcPr', 'w:shd', shades],
-];
-
-/** The borders of a part of a table style, by the properties they're in
- *  and their element, which holds an element for each side */
-const TABLE_PART_BORDERS: (readonly [kind: 'pPr' | 'tcPr', tag: string])[] = [['pPr', 'w:pBdr'], ['tcPr', 'w:tcBorders']];
-
-/** Whether a table's style shows its first row apart: where tblLook turns
- *  on the style's part for it, and the part, its own or else its base's,
- *  for each property, as styledProperty reads a part, sets something Word
- *  shows (see TABLE_PART_SHOWS), or a border, of a style, not none or nil,
- *  on any side, each side its own or else its base's, as a style that
- *  turns one side off keeps its base's others (see TABLE_PART_BORDERS).
- *  Table Grid, the style of a table Word inserts, has no such part. */
-function styleShowsFirstRow(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
-  if (!look.firstRow || !layouts) return false;
-  const table = styleChain(layouts.table, styleById(layouts.table, tableStyleId(tblChildren, layouts)) ?? styleById(layouts.table, layouts.defaultTableStyle));
-  const parts = table.map(style => style.parts.get('firstRow'));
-  // The element `tag` that `kind` properties of the part have first, nearest
-  // the table's style, of the element `inner` holds within it, where given
-  const value = (kind: 'pPr' | 'rPr' | 'tcPr', tag: string, inner?: string) => firstValue(parts.map(part => part?.[kind]), properties => {
-    const node = properties.find(c => c[tag] !== undefined);
-    return node && inner !== undefined ? asXmlNodes(node[tag]).find(c => c[inner] !== undefined) : node;
-  });
-  return TABLE_PART_SHOWS.some(([kind, tag, shows]) => {
-    const node = value(kind, tag);
-    return node !== undefined && shows(node, tag);
-  }) || TABLE_PART_BORDERS.some(([kind, tag]) => {
-    const sides = new Set(parts.flatMap(part => (part?.[kind] ?? []).filter(c => c[tag] !== undefined)
-      .flatMap(c => asXmlNodes(c[tag]).flatMap(side => Object.keys(side).filter(key => key !== ':@' && key !== '#text')))));
-    return [...sides].some(side => !['', 'none', 'nil'].includes(getAttr(value(kind, tag, side), 'val')));
-  });
+/** Whether a table's style, or a style it's based on, has a part for its
+ *  first row that sets anything, whatever it sets: a w:tblStylePr of type
+ *  firstRow with properties in it. A table without a style of its own, or
+ *  with one styles.xml doesn't have, takes the default table style, as for
+ *  its cells' properties (see styledProperty). */
+function styleFormatsFirstRow(tblChildren: XmlNode[], layouts: StyleLayouts | undefined): boolean {
+  if (!layouts) return false;
+  const style = styleById(layouts.table, tableStyleId(tblChildren, layouts)) ?? styleById(layouts.table, layouts.defaultTableStyle);
+  return styleChain(layouts.table, style).some(style => style.parts.get('firstRow')?.formats);
 }
 
 /**
- * Whether Word shows all the text of a table's first row in bold, as a row
- * of headings: each run of text but whitespace alone, which shows no bold,
+ * Whether all the text of a table's first row may be bold, as a row of
+ * headings: each run of text but whitespace alone, which shows no bold,
  * with its symbols and the characters export writes back as them (see
- * withCharactersAsText), and not a hidden run's, in the elements the walk of a table's runs reads
- * (see TABLE_CONTENT), its bold its own or else its styles', for where its
- * cell is in the table (see styledProperty), and some text. Not where a
- * run's bold is unknown, as from a character style styles.xml doesn't have.
+ * withCharactersAsText), and not a hidden run's, in the elements the walk
+ * of a table's runs reads (see TABLE_CONTENT), and some text. A run is bold
+ * where bold, or bold for complex scripts, as Arabic's, is on in its own
+ * properties or any style it takes, for where its cell is in the table
+ * (see styledProperty), though another turns it off, as Word turns off
+ * bold that a paragraph style and a character style both turn on, and
+ * where a style it takes is unknown, as a character style styles.xml
+ * doesn't have, so that a first row is one where it may show as one.
  */
 function firstRowBold(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
   const rows = tblChildren.filter(c => c['w:tr'] !== undefined);
@@ -6992,7 +6947,9 @@ function firstRowBold(tblChildren: XmlNode[], layouts: StyleLayouts | undefined,
       : child['w:delText'] !== undefined ? nodeText(asXmlNodes(child['w:delText'])) : '').join('');
     if (!/\S/.test(shown) && !runChildren.some(child => child['w:sym'] !== undefined)) return true;
     text = true;
-    return styledProperty(layouts, 'rPr', rPrChildren, { style: paragraphStyle, tableStyle, place }, rPr => toggleIn(rPr, 'w:b'))?.value === true;
+    const on = styledProperty(layouts, 'rPr', rPrChildren, { style: paragraphStyle, tableStyle, place },
+      rPr => isToggleOn(rPr, 'w:b') || isToggleOn(rPr, 'w:bCs') || undefined);
+    return on === undefined ? layouts !== undefined : on.value === true;
   }));
   let col = 0;
   for (const tc of asXmlNodes(rows[0]['w:tr']).filter(c => c['w:tc'] !== undefined)) {
@@ -7922,9 +7879,8 @@ export async function extractDocumentContent(
             }
             rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells, ...(ownChange ? { revision: ownChange } : {}) });
           }
-          if (firstRowIsHeader === true && rawRows.length > 0) rawRows[0].isHeader = true;
+          if (firstRowIsHeader && rawRows.length > 0) rawRows[0].isHeader = true;
           const rows = computeRowspans(rawRows);
-          if (firstRowIsHeader === 'bold' && rows.length > 0 && !rows[0].isHeader) rows[0].boldHeader = true;
           if (rows.length > 0) {
             // A tracked mark before the table is the break that ends the
             // paragraph before it (see joinTrackedParagraphBreaks), which an
@@ -15506,13 +15462,6 @@ function buildMarkdownOnce(
   const indicesRead = (tables: Set<number> | null | undefined): Set<number> | undefined => tables && writtenAt
     ? new Set(writtenAt.flatMap((at, index) => at !== undefined && tables.has(at) ? [index] : []))
     : tables ?? undefined;
-  // A first row that's a header by its bold alone is one where export
-  // didn't write its table (see firstRowHeader): one without the format
-  // export writes for each table it writes
-  const tableFormats = settingsRead(options?.tableFormatMapping);
-  tablesRead.forEach(({ rows }, index) => {
-    if (rows[0]?.boldHeader && !tableFormats?.has(String(index))) rows[0].isHeader = true;
-  });
   const embedDirectiveMapping = settingsRead(options?.embedDirectiveMapping);
   // How many tables the body and each note have with each first row and
   // text, which the HTML export wrote around one goes to no other while
@@ -15932,7 +15881,7 @@ function buildMarkdownOnce(
     noteLabels,
     imageFormatMapping: options?.imageFormatMapping ?? undefined,
     noteImageFormatMapping: options?.noteImageFormatMapping ?? undefined,
-    tableFormatMapping: tableFormats,
+    tableFormatMapping: settingsRead(options?.tableFormatMapping),
     pipeTableAlignedMapping: settingsRead(options?.pipeTableAlignedMapping),
     gridSourceColWidthsMapping: settingsRead(options?.gridSourceColWidthsMapping),
     tableFontSizeMapping: settingsRead(options?.tableFontSizeMapping),
