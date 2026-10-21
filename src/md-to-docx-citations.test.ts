@@ -1269,6 +1269,8 @@ describe('BibLaTeX\'s pubstate as citeproc\'s status', () => {
   // with no status
   const status = (fields: string) => buildItemData(parseBibtex('@article{a,\n' + fields + '\n}').get('a')!).status;
   const NOCASE = '<span class="nocase">';
+  // Display math's delimiter, two dollar signs together
+  const DISPLAY = '$' + '$';
 
   it.each([
     ['inpreparation', 'in preparation'],
@@ -1302,6 +1304,9 @@ describe('BibLaTeX\'s pubstate as citeproc\'s status', () => {
     ['a key among other words in \\url\'s argument as written', String.raw`{\url{a inpress}}`, 'a inpress'],
     ['a key after a command\'s name, which TeX joins to it, as written', String.raw`{\emph inpress}`, String.raw`\emph inpress`],
     ['a key in math as written', '{$a inpress$}', '$a inpress$'],
+    // Whose delimiters, two dollar signs together, each started and ended
+    // math, so the key in it read as in press
+    ['a key in display math as written', '{' + DISPLAY + 'a inpress b' + DISPLAY + '}', DISPLAY + 'a inpress b' + DISPLAY],
     ['a key with a tie as written', '{inpress~now}', 'inpress\u00A0now'],
     ['a key in quotes as its state', '"inpress"', 'in press'],
     ['a key with no braces or quotes as its state', 'inpress', 'in press'],
@@ -1310,6 +1315,9 @@ describe('BibLaTeX\'s pubstate as citeproc\'s status', () => {
     ['a key with an empty group after it as its state', '{inpress{}}', 'in press'],
     ['a key after a command\'s empty group as its state', String.raw`{\ss{} inpress}`, '\u00DF in press'],
     ['a key after a command\'s argument as its state', String.raw`{\emph{x} inpress}`, String.raw`\emph{x} in press`],
+    ['a key after display math as its state', '{' + DISPLAY + 'x' + DISPLAY + ' inpress}', DISPLAY + 'x' + DISPLAY + ' in press'],
+    // Which the dollar sign that ends the first ends, as the parser reads it
+    ['a key after inline math right after inline math as its state', '{$a$' + '$b$ inpress}', '$a$' + '$b$ in press'],
   ])('reads %s, as pandoc does', (_name, pubstate, expected) => {
     expect(status('  pubstate = ' + pubstate)).toBe(expected);
   });

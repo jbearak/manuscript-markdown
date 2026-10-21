@@ -1252,16 +1252,23 @@ describe('A source\'s publication state', () => {
     expect(JSON.parse(decodeXmlEntities(field![1])).citationItems[0].itemData.status).toBe('forthcoming');
   });
 
-  test('comes back as a pubstate from a document with no .bib file in it', async () => {
+  // A status that holds a key as written, as inpress, in a group around
+  // the whole value, as export would read the key as in press
+  test.each([
+    ['{forthcoming}', 'forthcoming', '{forthcoming}'],
+    ['{inpress}', 'in press', '{in press}'],
+    ['{{inpress}}', 'inpress', '{{inpress}}'],
+    ['{{to appear inpress}}', 'to appear inpress', '{{to appear inpress}}'],
+  ])('comes back as the status it was from a document with no .bib file in it: pubstate = %s', async (pubstate, status, written) => {
     // Where import writes the .bib file from the citations' data, as for a
     // document from Word
     const JSZip = (await import('jszip')).default;
-    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx);
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex: bibtex.replace('{forthcoming}', pubstate) })).docx);
     const customXml = await zip.file('docProps/custom.xml')!.async('string');
     zip.file('docProps/custom.xml', customXml.replace(/<property[^>]*name="MANUSCRIPT_BIB_DATA_[^"]*"[^>]*>[\s\S]*?<\/property>/g, ''));
     const result = await convertDocx(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })));
-    expect(result.bibtex).toContain('pubstate = {forthcoming}');
+    expect(result.bibtex).toContain('pubstate = ' + written + ',');
     const [entry] = parseBibtex(result.bibtex).values();
-    expect(buildItemData(entry).status).toBe('forthcoming');
+    expect(buildItemData(entry).status).toBe(status);
   });
 });

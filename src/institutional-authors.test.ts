@@ -13,7 +13,7 @@ import {
   ZoteroCitation,
   CitationMetadata,
 } from './converter';
-import { BibtexEntry } from './bibtex-parser';
+import { BibtexEntry, parseBibtex } from './bibtex-parser';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
 
@@ -294,6 +294,29 @@ describe('generateBibTeX with institutional authors and additional fields', () =
     expect(bib).toContain('note = {A note.}');
     expect(bib).toContain('series = {Lecture Notes}');
     expect(bib).toContain('pubstate = {in press}');
+  });
+
+  // Which export would read as the state the key names, as in press
+  it.each([
+    ['inpress', '{{inpress}}'],
+    ['to appear inpress', '{{to appear inpress}}'],
+    ['in press', '{in press}'],
+    ['inpress,', '{inpress,}'],
+    ['<span class="nocase">inpress</span>', '{{{inpress}}}'],
+  ])('writes a status of %j that holds one of biblatex\'s keys in a group around the whole pubstate, which export reads back as it was', (status, written) => {
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(Test)',
+      items: [{
+        authors: [{ family: 'Test', given: 'A' }],
+        title: 'T', year: '2020', journal: '', volume: '',
+        pages: '', doi: '', type: 'article-journal',
+        fullItemData: { status },
+      }],
+    }];
+    const bib = generateBibTeX(citations, buildCitationKeyMap(citations));
+    expect(bib).toContain('pubstate = ' + written + ',');
+    const [entry] = parseBibtex(bib).values();
+    expect(buildItemData(entry).status).toBe(status);
   });
 
   it('preserves URL and DOI verbatim without LaTeX escaping', () => {

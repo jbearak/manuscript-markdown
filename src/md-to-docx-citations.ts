@@ -793,7 +793,11 @@ const COMMAND_NAME_AT = /[A-Za-z]+/y;
  *  its comma is none. */
 function withPubstateStates(written: string): string {
   let depth = 0;
+  // Whether a word is in math, as the parser reads it (see readUrlsAndMath):
+  // display math between two dollar signs together, which a dollar sign
+  // alone doesn't end, and inline math between two alone
   let math = false;
+  let display = false;
   let afterCommand = false;
   return written.replace(/[^ \t\n\r\f]+/g, word => {
     const state = depth === 0 && !math && !afterCommand ? PUBSTATE_STRINGS.get(word.replace(/\{\}/g, '')) : undefined;
@@ -807,7 +811,17 @@ function withPubstateStates(written: string): string {
         afterCommand = name !== null && i === word.length - 1;
       } else if (word[i] === '{') depth++;
       else if (word[i] === '}') depth = Math.max(0, depth - 1);
-      else if (word[i] === '$') math = !math;
+      else if (word[i] === '$') {
+        const two = word[i + 1] === '$';
+        if (!math) {
+          math = true;
+          display = two;
+          if (two) i++;
+        } else if (!display || two) {
+          math = false;
+          if (display) i++;
+        }
+      }
     }
     return state ?? word;
   });
