@@ -6889,7 +6889,8 @@ const CAPTION_STYLE_XML = '<w:style w:type="paragraph" w:styleId="Caption">\n'
  *  the styles lack it: a template's Caption, of any type, as it's found, by
  *  its ID or, in a template from Word in another language, by its name */
 function withCaptionStyle(xml: string, ids: Map<string, string>): string {
-  return findStyleElement(xml, 'Caption', ids, true) ? xml : withStyleAdded(xml, CAPTION_STYLE_XML);
+  // Without the size its base gives it too (dirty-flag invariant #5)
+  return findStyleElement(xml, 'Caption', ids, true) ? xml : withoutInheritedSizes(withStyleAdded(xml, CAPTION_STYLE_XML), ['Caption'], ids);
 }
 
 /** A template's styles with export's own, where it lacks them */
@@ -9881,6 +9882,30 @@ function captionKeeps(run: MdRun): boolean {
   return run.type === 'text' || run.type === 'softbreak' || run.type === 'math' && !run.display;
 }
 
+/** A run a caption can't hold, as text: its Markdown, which holds all of
+ *  it, as `{>>note<<}` for a comment, `[^n]` for a note's reference and
+ *  `{~~old~>new~~}` for a substitution, and a space for a line break */
+function captionFallbackText(run: MdRun): string {
+  const comment = (id: string | undefined, text: string | undefined) =>
+    '{' + (id !== undefined ? '#' + id : '') + '>>' + (run.author ? '@' + run.author + ' | ' : '') + (text ?? '') + '<<}';
+  switch (run.type) {
+    case 'hardbreak': case 'softbreak': return ' ';
+    case 'citation': return '[' + run.text + ']';
+    case 'footnote_ref': return '[^' + (run.footnoteLabel ?? '') + ']';
+    case 'critic_add': return '{++' + run.text + '++}';
+    case 'critic_del': return '{--' + run.text + '--}';
+    case 'critic_sub': return '{~~' + run.text + '~>' + (run.newText ?? '') + '~~}';
+    case 'critic_highlight': return '{==' + run.text + '==}';
+    case 'critic_comment': return comment(undefined, run.commentText);
+    case 'comment_body_with_id': return comment(run.commentId, run.commentText);
+    // A caption's label's ID is # and the label (see commentRangeRule)
+    case 'comment_range_start': return '{' + (run.commentId?.startsWith('#') ? '' : '#') + (run.commentId ?? '') + '}';
+    case 'comment_range_end': return '{/' + (run.commentId ?? '') + '}';
+    case 'image': return run.imageSource ?? run.imageAlt ?? '';
+    default: return run.text;
+  }
+}
+
 /**
  * The caption of the figure whose image is `image`, as Word's Insert
  * Caption writes one: a paragraph in the Caption style, which a template
@@ -9893,11 +9918,13 @@ function captionKeeps(run: MdRun): boolean {
  * The bookmark's name is the label as Word can name one (see
  * captionBookmarkName), which import reads the label back by, or else by
  * the custom property MANUSCRIPT_CAPTION_LABELS_. Its ID is the next of
- * those of the notes' bookmarks, which no other bookmark has.
+ * those of the notes' bookmarks, which no other bookmark has. Where the
+ * captions go, the custom property MANUSCRIPT_FIG_CAP_LOCATION keeps.
  *
- * Text Word's caption would show other than as import reads it back, as a
- * citation, a note, a comment, a tracked change or a line break, goes as
- * the image's alt text does, as text.
+ * A caption with what Word's caption would show other than as import reads
+ * it back, as a citation, a note, a comment, a tracked change or a line
+ * break, gets each of those as its Markdown, as text (see
+ * captionFallbackText), so Word shows all of it.
  */
 function figureCaptionXml(image: MdRun, state: DocxGenState, options: MdToDocxOptions | undefined, bibEntries: Map<string, BibtexEntry> | undefined, citeprocEngine: CiteprocEngine | undefined): string {
   const { attributes: { label }, captionRuns } = image.figure!;
@@ -9907,9 +9934,8 @@ function figureCaptionXml(image: MdRun, state: DocxGenState, options: MdToDocxOp
   if (labelOfBookmark(name) !== label) state.captionLabels.set(name, label);
   let runs = captionRuns;
   if (!runs.every(captionKeeps)) {
-    const text = runs.map(run => run.type === 'hardbreak' || run.type === 'softbreak' ? ' ' : run.type === 'image' ? run.imageAlt ?? '' : run.text).join('');
-    runs = text ? [{ type: 'text', text }] : [];
-    state.warnings.push('The caption of figure {#' + label + '} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as text in its caption.');
+    runs = runs.map(run => captionKeeps(run) ? run : { type: 'text', text: captionFallbackText(run) });
+    state.warnings.push('The caption of figure {#' + label + '} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
   }
   const hasText = runs.some(run => run.type !== 'softbreak' && (run.type === 'math' || run.text.length > 0));
   const separator = captionSeparator(titleDelim, hasText);
@@ -12937,6 +12963,9 @@ export async function convertMdToDocx(
     pushAll(customProps, commentIdMappingProps(state.commentIdMap));
     // The labels of captions their bookmarks' names don't give (see figureCaptionXml)
     if (state.captionLabels.size > 0) pushAll(customProps, chunkCustomProps('MANUSCRIPT_CAPTION_LABELS_', JSON.stringify(Object.fromEntries(state.captionLabels))));
+    // Where the figures' captions went, which import can't always tell, as
+    // where a plain picture is next to a figure's (see readFigureCaptions)
+    if (state.figureNumber > 0) customProps.push({ name: 'MANUSCRIPT_FIG_CAP_LOCATION', value: state.captions.figCapLocation });
     pushAll(customProps, footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
     pushAll(customProps, footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));
     pushAll(customProps, codeBlockLanguageProps(state.codeBlockLanguages));

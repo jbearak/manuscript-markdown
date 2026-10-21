@@ -623,13 +623,14 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
     // Quarto's `crossref:` mapping, of whose keys export reads fig-title,
     // tbl-title and title-delim, each a value of YAML's, in quotes or none,
     // on its line, at the indentation of the mapping's first key: a line
-    // indented more is a value of a key it doesn't read
+    // indented more is a value of a key it doesn't read. A comment, at any
+    // indentation, ends no mapping in YAML, nor here.
     if (key === 'crossref') {
       const crossref: CrossrefOptions = {};
       let keyIndent = -1;
       while (lineIdx + 1 < yamlLines.length) {
         const nextLine = yamlLines[lineIdx + 1];
-        if (nextLine.length > 0 && !nextLine.startsWith(' ') && !nextLine.startsWith('\t')) break;
+        if (nextLine.length > 0 && !nextLine.startsWith(' ') && !nextLine.startsWith('\t') && !nextLine.startsWith('#')) break;
         lineIdx++;
         const inner = nextLine.trimStart();
         if (!inner || inner.startsWith('#')) continue;

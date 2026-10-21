@@ -29,7 +29,7 @@ import { extractZoteroKey } from './zotero-link';
 import { styleFence } from './style-fence';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
-import { captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, labelOfBookmark, quotedAttributeValue, type CaptionLocation, type CaptionParagraph } from './captions';
+import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, labelOfBookmark, quotedAttributeValue, type CaptionLocation, type CaptionParagraph } from './captions';
 import { asUtf8, decodeXml, parsePart, relatedPartPath } from './template-sections';
 
 // --- Implementation notes ---
@@ -4356,6 +4356,14 @@ async function extractCaptionLabels(zip: JSZip): Promise<Map<string, string> | u
   }
 }
 
+/** Where export put the captions of its figures, which it keeps in a
+ *  custom property for a document with figures (see figureCaptionXml in
+ *  md-to-docx.ts) */
+async function extractFigureCaptionLocation(zip: JSZip): Promise<CaptionLocation | undefined> {
+  const value = await extractStringCustomProp(zip, 'MANUSCRIPT_FIG_CAP_LOCATION');
+  return value === 'top' || value === 'bottom' ? value : undefined;
+}
+
 /** The SEQ fields of each identifier in the parts of the document Word
  *  numbers them in: its body, its notes, its headers and its footers (see
  *  countSeqFields) */
@@ -8500,6 +8508,26 @@ function exportedCaptionPiece(run: MdRun): { text?: string; latex?: string; form
   return { text: run.text, formatting: run, href: run.href };
 }
 
+// Private-use characters that stand for a caption's [ and ] while
+// buildMarkdown writes its text, which then go as \[ and \]: in the image's
+// label the caption goes in, a ] would end it, and a [ with no ] after it
+// would keep the label from ending, where buildMarkdown leaves them as
+// they are in a paragraph
+const CAPTION_OPEN_BRACKET = '\uF8F0';
+const CAPTION_CLOSE_BRACKET = '\uF8F1';
+
+/** The Markdown of a caption's text, `items`, for an image's label, each
+ *  [ and ] of its text escaped, or undefined where the text holds one of
+ *  the characters that stand for them */
+function captionMarkdown(items: ContentItem[]): string | undefined {
+  if (items.length === 0) return '';
+  if (items.some(item => item.type === 'text' && /[\uF8F0\uF8F1]/.test(item.text))) return undefined;
+  const marked = items.map(item => item.type === 'text' && /[[\]]/.test(item.text)
+    ? { ...item, text: item.text.replace(/\[/g, CAPTION_OPEN_BRACKET).replace(/\]/g, CAPTION_CLOSE_BRACKET) } : item);
+  return buildMarkdown(marked, new Map()).replace(/\n+$/, '')
+    .split(CAPTION_OPEN_BRACKET).join('\\[').split(CAPTION_CLOSE_BRACKET).join('\\]');
+}
+
 /**
  * Reads the captions of the figures in `content`, the body's items, which
  * Word's Insert Caption wrote, or export as it does, each in a paragraph
@@ -8521,12 +8549,21 @@ function exportedCaptionPiece(run: MdRun): { text?: string; latex?: string; form
  * gives one title (see captionOptions). A number Word didn't update goes
  * as export numbers it.
  *
+ * Where every caption of a series has a picture before it and one after
+ * it, either place would pair each with a picture, so the series converts
+ * only where `stored`, what export recorded, gives the place; else it
+ * stays text, which never takes a caption to another figure's picture. A
+ * caption's separator is the stored delimiter's where it starts with it,
+ * so each export writes reads back, or one of punctuation Word's captions
+ * use (see captionSeparatorAt).
+ *
  * Each figure's label is that its caption's bookmark gives, by its name
  * (see labelOfBookmark), or by `labelsByBookmark`, the custom property
  * export keeps the others in, or else one made of the caption's first
  * words (see captionSlug), each other than those before it, as `-2`
- * after it makes it. Its picture's alt text, where export wouldn't write
- * it from the caption, goes in fig-alt.
+ * after it makes it. Its picture's alt text, where it has one export
+ * wouldn't write from the caption, goes in fig-alt; a picture with none
+ * takes the caption's, as export gives a figure.
  *
  * Returns what the captions show of the frontmatter's caption options,
  * where a series converts: the delimiter only where a caption has text.
@@ -8537,8 +8574,10 @@ function readFigureCaptions(
   seqCounts: ReadonlyMap<string, number>,
   labelsByBookmark: ReadonlyMap<string, string> | undefined,
   imageFormatMapping: Map<string, string> | null | undefined,
+  stored: { location?: CaptionLocation; delim?: string },
 ): { figTitle: string; titleDelim?: string; figCapLocation: CaptionLocation } | undefined {
   if (!captionParagraphs || captionParagraphs.size === 0) return undefined;
+  const storedSeparator = stored.delim !== undefined ? captionSeparator(stored.delim, true) : undefined;
   interface Candidate {
     paragraph: CaptionParagraph;
     start: number; // its first item, its para item where it has one
@@ -8574,7 +8613,8 @@ function readFigureCaptions(
     const labelText = before + result;
     if (!leading.startsWith(labelText)) return undefined;
     const rest = leading.slice(labelText.length);
-    const separator = captionSeparatorAt(rest);
+    const storedOne = storedSeparator !== undefined && rest.startsWith(storedSeparator);
+    const separator = storedOne ? storedSeparator : captionSeparatorAt(rest);
     const labelEnd = labelText.length + separator.length;
     // The label's items, as export writes them, in no formatting, link or
     // comment, and its text's, the rest, the item they share split
@@ -8599,7 +8639,7 @@ function readFigureCaptions(
     const hasText = caption.some(item => item.type === 'math' || item.type === 'text' && item.text.trim() !== '');
     // With no text, nothing after the number Word shows
     if (!hasText && rest.trim() !== '') return undefined;
-    const delim = hasText ? delimiterOfSeparator(separator) : undefined;
+    const delim = !hasText ? undefined : storedOne ? stored.delim : delimiterOfSeparator(separator);
     if (hasText && delim === undefined) return undefined;
     // The picture right before it, alone in its paragraph, and the one
     // right after it, of a paragraph of its own
@@ -8617,8 +8657,9 @@ function readFigureCaptions(
     const { title } = candidates[0];
     const delims = new Set(candidates.flatMap(candidate => candidate.delim !== undefined ? [candidate.delim] : []));
     if (candidates.some(candidate => candidate.title !== title) || delims.size > 1) continue;
-    const location: CaptionLocation | undefined = candidates.every(candidate => candidate.image.bottom !== undefined) ? 'bottom'
-      : candidates.every(candidate => candidate.image.top !== undefined) ? 'top' : undefined;
+    const below = candidates.every(candidate => candidate.image.bottom !== undefined);
+    const above = candidates.every(candidate => candidate.image.top !== undefined);
+    const location: CaptionLocation | undefined = below && above ? stored.location : below ? 'bottom' : above ? 'top' : undefined;
     if (!location || chosen && chosen.candidates.length >= candidates.length) continue;
     chosen = { candidates, location, delim: [...delims][0] };
   }
@@ -8627,8 +8668,8 @@ function readFigureCaptions(
   // Each caption's text's Markdown, which export reads back as Word has it
   const figures: Array<{ candidate: Candidate; image: ContentItem & { type: 'image' }; caption: string; readAlt: string }> = [];
   for (const candidate of chosen.candidates) {
-    const caption = candidate.caption.length > 0 ? buildMarkdown(candidate.caption, new Map()).replace(/\n+$/, '') : '';
-    if (caption.includes('\n')) return undefined;
+    const caption = captionMarkdown(candidate.caption);
+    if (caption === undefined || caption.includes('\n')) return undefined;
     const tokens = parseMd('![' + caption + '](x.png){#fig-x}');
     const run = tokens.length === 1 && tokens[0].type === 'paragraph' && tokens[0].runs.length === 1 ? tokens[0].runs[0] : undefined;
     if (run?.type !== 'image' || !run.figure) return undefined;
@@ -8650,7 +8691,7 @@ function readFigureCaptions(
     const base = label;
     for (let k = 2; used.has(label); k++) label = base + '-' + k;
     used.add(label);
-    image.figure = { label, caption, ...(image.alt !== readAlt ? { alt: image.alt } : {}) };
+    image.figure = { label, caption, ...(image.alt && image.alt !== readAlt ? { alt: image.alt } : {}) };
   }
   for (let n = figures.length - 1; n >= 0; n--) {
     const { start, end } = figures[n].candidate;
@@ -19583,7 +19624,10 @@ export async function convertDocx(
   // The figures' captions, which go with their pictures, before anything
   // counts the body's paragraphs (see readFigureCaptions)
   const figureCaptions = captionParagraphs
-    ? readFigureCaptions(docContent, captionParagraphs, await seqFieldCountsOf(zip), await extractCaptionLabels(zip), imageFormatMapping)
+    ? readFigureCaptions(docContent, captionParagraphs, await seqFieldCountsOf(zip), await extractCaptionLabels(zip), imageFormatMapping, {
+      location: await extractFigureCaptionLocation(zip) ?? storedSettings?.figCapLocation,
+      delim: storedSettings?.crossref?.titleDelim,
+    })
     : undefined;
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first

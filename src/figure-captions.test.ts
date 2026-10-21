@@ -15,6 +15,7 @@ import { fastestRun, fastestRunAsync } from './test-timing';
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const dir = mkdtempSync(join(tmpdir(), 'figure-captions-'));
 writeFileSync(join(dir, 'map.png'), PNG);
+writeFileSync(join(dir, 'plain.png'), PNG);
 // Where import puts a Word document's image, for its Markdown's export
 mkdirSync(join(dir, 'media'));
 writeFileSync(join(dir, 'media', 'image1.png'), PNG);
@@ -150,9 +151,27 @@ describe('exporting a figure', () => {
     ]);
   });
 
-  it('adds no Caption style to a document with no figure', async () => {
-    const { styles } = await exported('![Plain](map.png)\n');
+  it('writes as its Markdown each part of a caption Word\'s caption can\'t hold, and warns', async () => {
+    const { body, warnings } = await exported('![A *b* [@key, p. 3] {>>@me | note<<} {++ins++} {--del--} {~~old~>new~~} {==hl==}{>>c<<} [^n] {#1}r{/1}{#1>>body<<} x\\\ny](map.png){#fig-x}\n\n[^n]: Note.\n');
+    const captionParagraph = paragraphs(body).find(p => p.includes('Caption'))!;
+    expect(captionParagraph.replace(/<w:instrText[^>]*>[^<]*<\/w:instrText>|<[^>]+>/g, '')).toBe('Figure 1: A b [@key, p. 3] {&gt;&gt;@me | note&lt;&lt;} {++ins++} {--del--} {~~old~&gt;new~~} {==hl==}{&gt;&gt;c&lt;&lt;} [^n] {#1}r{/1}{#1&gt;&gt;body&lt;&lt;} x y');
+    // Its formatting, where it has some, stays
+    expect(captionParagraph).toContain('<w:r><w:rPr><w:i/></w:rPr><w:t>b</w:t></w:r>');
+    expect(warnings).toContain('The caption of figure {#fig-x} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
+  });
+
+  it('adds no Caption style to a document with no figure, and keeps where its figures\' captions go', async () => {
+    const { styles, custom } = await exported('![Plain](map.png)\n');
     expect(styles).not.toContain('w:styleId="Caption"');
+    expect(custom ?? '').not.toContain('MANUSCRIPT_FIG_CAP_LOCATION');
+    expect((await exported('![A](map.png){#fig-a}\n')).custom).toContain('name="MANUSCRIPT_FIG_CAP_LOCATION"><vt:lpwstr>bottom</vt:lpwstr>');
+    expect((await exported('---\nfig-cap-location: top\n---\n\n![A](map.png){#fig-a}\n')).custom).toContain('name="MANUSCRIPT_FIG_CAP_LOCATION"><vt:lpwstr>top</vt:lpwstr>');
+  });
+
+  it('gives the Caption style it adds no size its base gives it (dirty-flag invariant #5)', async () => {
+    const caption = (styles: string) => styles.match(/<w:style w:type="paragraph" w:styleId="Caption">[\s\S]*?<\/w:style>/)![0];
+    expect(caption((await exported('---\nfont-size: 9\n---\n\n![A](map.png){#fig-a}\n')).styles)).not.toMatch(/<w:sz(?:Cs)? /);
+    expect(caption((await exported('![A](map.png){#fig-a}\n')).styles)).toContain('<w:sz w:val="18"/><w:szCs w:val="18"/>');
   });
 
   it('keeps a template\'s Caption style, and adds Word\'s where the template has none', async () => {
@@ -168,34 +187,36 @@ describe('exporting a figure', () => {
 describe('importing Word\'s captions', () => {
   it('reads each caption, with its image, as a figure with a label', async () => {
     const md = await imported(await wordDocx(para('Intro.') + picture() + caption(1, 'Rates by region', { bookmark: '_Ref1' }) + picture('alt words') + caption(2, 'Second one') + para('After.')));
-    expect(md).toBe('Intro.\n\n![Rates by region](media/image1.png){#fig-rates-by-region width=100 height=100 fig-alt=""}\n\n![Second one](media/image1.png){#fig-second-one width=100 height=100 fig-alt="alt words"}\n\nAfter.\n');
+    expect(md).toBe('Intro.\n\n![Rates by region](media/image1.png){#fig-rates-by-region width=100 height=100}\n\n![Second one](media/image1.png){#fig-second-one width=100 height=100 fig-alt="alt words"}\n\nAfter.\n');
   });
 
   it('keeps the caption\'s separator, title and place in the frontmatter', async () => {
     expect(await imported(await wordDocx(picture() + caption(1, 'Rates', { simple: true, sep: '. ' }) + picture() + caption(2, 'More', { simple: true, sep: '. ' }))))
-      .toBe('---\ncrossref:\n  title-delim: "."\n---\n\n![Rates](media/image1.png){#fig-rates width=100 height=100 fig-alt=""}\n\n![More](media/image1.png){#fig-more width=100 height=100 fig-alt=""}\n');
+      .toBe('---\ncrossref:\n  title-delim: "."\n---\n\n![Rates](media/image1.png){#fig-rates width=100 height=100}\n\n![More](media/image1.png){#fig-more width=100 height=100}\n');
     expect(await imported(await wordDocx(para('Intro.') + caption(1, 'Top one') + picture() + caption(2, 'Top two') + picture())))
-      .toBe('---\nfig-cap-location: top\n---\n\nIntro.\n\n![Top one](media/image1.png){#fig-top-one width=100 height=100 fig-alt=""}\n\n![Top two](media/image1.png){#fig-top-two width=100 height=100 fig-alt=""}\n');
+      .toBe('---\nfig-cap-location: top\n---\n\nIntro.\n\n![Top one](media/image1.png){#fig-top-one width=100 height=100}\n\n![Top two](media/image1.png){#fig-top-two width=100 height=100}\n');
     expect(await imported(await wordDocx(picture() + caption(1, 'Karte', { title: 'Abbildung', id: 'Abbildung', style: 'Beschriftung' }), { captionStyle: wordCaptionStyle('Beschriftung') })))
-      .toBe('---\ncrossref:\n  fig-title: Abbildung\n---\n\n![Karte](media/image1.png){#fig-karte width=100 height=100 fig-alt=""}\n');
-    expect(await imported(await wordDocx(picture() + caption(1, 'Dashed', { sep: ' \u2014 ' }) + picture() + caption(2, 'Tabbed', { title: 'Fig.', id: 'Fig', sep: '\t' }))))
+      .toBe('---\ncrossref:\n  fig-title: Abbildung\n---\n\n![Karte](media/image1.png){#fig-karte width=100 height=100}\n');
+    expect(await imported(await wordDocx(picture() + caption(1, 'Dashed', { sep: ' \u2014 ' }))))
       .toContain('crossref:\n  title-delim: " \u2014"\n---\n\n![Dashed]');
+    expect(await imported(await wordDocx(picture() + caption(1, 'Tabbed', { title: 'Fig.', id: 'Fig', sep: '\t' }))))
+      .toContain('crossref:\n  fig-title: Fig.\n  title-delim: "\\t"\n---\n\n![Tabbed]');
   });
 
   it('takes the label of a bookmark export named, and numbers the figures afresh', async () => {
     expect(await imported(await wordDocx(picture() + caption(7, 'Map', { bookmark: 'fig_map' }) + picture() + caption(3, 'Map'))))
-      .toBe('![Map](media/image1.png){#fig-map width=100 height=100 fig-alt=""}\n\n![Map](media/image1.png){#fig-map-2 width=100 height=100 fig-alt=""}\n');
+      .toBe('![Map](media/image1.png){#fig-map width=100 height=100}\n\n![Map](media/image1.png){#fig-map-2 width=100 height=100}\n');
     expect(await imported(await wordDocx(picture() + caption(1, '')))).toBe('![](media/image1.png){#fig-1 width=100 height=100}\n');
   });
 
   it('reads a caption\'s formatting, math and links', async () => {
     const formatted = captionOf('<w:r><w:t xml:space="preserve">A </w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>map</w:t></w:r><w:r><w:t xml:space="preserve"> of </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>rates</w:t></w:r><w:r><w:t xml:space="preserve"> and H</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>2</w:t></w:r><w:r><w:t xml:space="preserve">O </w:t></w:r><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>hi</w:t></w:r><w:r><w:t xml:space="preserve"> [see] *star*</w:t></w:r>');
     expect(await imported(await wordDocx(picture() + formatted)))
-      .toBe('![A *map* of **rates** and H<sub>2</sub>O ==hi== [see] \\*star\\*](media/image1.png){#fig-a-map-of-rates-and width=100 height=100 fig-alt=""}\n');
+      .toBe('![A *map* of **rates** and H<sub>2</sub>O ==hi== \\[see\\] \\*star\\*](media/image1.png){#fig-a-map-of-rates-and width=100 height=100}\n');
     expect(await imported(await wordDocx(picture() + captionOf('<w:r><w:t xml:space="preserve">Rate </w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>'))))
-      .toBe('![Rate $x$](media/image1.png){#fig-rate width=100 height=100 fig-alt=""}\n');
+      .toBe('![Rate $x$](media/image1.png){#fig-rate width=100 height=100}\n');
     expect(await imported(await wordDocx(picture() + captionOf('<w:hyperlink r:id="rId20"><w:r><w:t>link</w:t></w:r></w:hyperlink>'))))
-      .toBe('![[link](https://example.com/a)](media/image1.png){#fig-link width=100 height=100 fig-alt=""}\n');
+      .toBe('![[link](https://example.com/a)](media/image1.png){#fig-link width=100 height=100}\n');
   });
 
   // A caption export can't write as Word has it stays as it is, as text, and
@@ -222,9 +243,15 @@ describe('importing Word\'s captions', () => {
     expect(md).not.toContain('crossref');
   });
 
+  it('leaves as text captions each between two pictures, where nothing says which is theirs', async () => {
+    const md = await imported(await wordDocx(picture() + caption(1, 'A') + picture() + caption(2, 'B') + picture()));
+    expect(md).not.toContain('{#fig-');
+    expect(md).toContain('Figure 1: A');
+  });
+
   it('reads the series with the most captions, and leaves the others as text', async () => {
-    const md = await imported(await wordDocx(picture() + caption(1, 'A') + picture() + caption(2, 'B') + picture() + caption(1, 'S', { title: 'Supplementary Figure', id: 'SFig' })));
-    expect(md).toBe('![A](media/image1.png){#fig-a width=100 height=100 fig-alt=""}\n\n![B](media/image1.png){#fig-b width=100 height=100 fig-alt=""}\n\n![](media/image1.png){width=100 height=100}\n\nSupplementary Figure 1: S\n');
+    const md = await imported(await wordDocx(picture() + caption(1, 'S', { title: 'Supplementary Figure', id: 'SFig' }) + picture() + caption(1, 'A') + picture() + caption(2, 'B')));
+    expect(md).toBe('![](media/image1.png){width=100 height=100}\n\nSupplementary Figure 1: S\n\n![A](media/image1.png){#fig-a width=100 height=100}\n\n![B](media/image1.png){#fig-b width=100 height=100}\n');
   });
 
   it('gives a comment named as a caption\'s label a number, as its {#fig-map} would start no range', () => {
@@ -244,7 +271,16 @@ describe('figures\' round trips', () => {
       ['Intro.\n\n![A *map* of rates](map.png){#fig-map}\n\nAfter.\n', 'Intro.\n\n![A *map* of rates](media/map.png){#fig-map width=1 height=1}\n\nAfter.\n'],
       ['---\ncrossref:\n  fig-title: Fig.\n  title-delim: "."\nfig-cap-location: top\n---\n\n![A map](map.png){#fig-map}\n\n![Second $x^2$ **bold**](map.png){#fig-two}\n',
         '---\ncrossref:\n  fig-title: Fig.\n  title-delim: "."\nfig-cap-location: top\n---\n\n![A map](media/map.png){#fig-map width=1 height=1}\n\n![Second $x^2$ **bold**](media/map.png){#fig-two width=1 height=1}\n'],
-      ['![](map.png){#fig-a_b}\n\n![Rates [2010] \\*](map.png){#fig-rates fig-alt="A \\"map\\""}\n', '![](media/map.png){#fig-a_b width=1 height=1}\n\n![Rates [2010] \\*](media/map.png){#fig-rates width=1 height=1 fig-alt="A \\"map\\""}\n'],
+      ['![](map.png){#fig-a_b}\n\n![Rates [2010] \\*](map.png){#fig-rates fig-alt="A \\"map\\""}\n', '![](media/map.png){#fig-a_b width=1 height=1}\n\n![Rates \\[2010\\] \\*](media/map.png){#fig-rates width=1 height=1 fig-alt="A \\"map\\""}\n'],
+      // A bracket with no other, which import escapes, as the image's label would end at a ] or not at a [
+      ['![95% CI \\[0, 1)](map.png){#fig-ci}\n\n![a \\] b $[0, 1)$](map.png){#fig-b}\n', '![95% CI \\[0, 1)](media/map.png){#fig-ci width=1 height=1}\n\n![a \\] b $[0, 1)$](media/map.png){#fig-b width=1 height=1}\n'],
+      // A delimiter of any characters, which import reads as export stored it
+      ['---\ncrossref:\n  title-delim: ")"\n---\n\n![A](map.png){#fig-a}\n', '---\ncrossref:\n  title-delim: ")"\n---\n\n![A](media/map.png){#fig-a width=1 height=1}\n'],
+      ['---\ncrossref:\n  title-delim: "::"\n---\n\n![A](map.png){#fig-a}\n\n![](map.png){#fig-e}\n', '---\ncrossref:\n  title-delim: "::"\n---\n\n![A](media/map.png){#fig-a width=1 height=1}\n\n![](media/map.png){#fig-e width=1 height=1}\n'],
+      // A plain picture next to a figure's, which either place of the
+      // captions would pair them with, where export stored their place
+      ['---\nfig-cap-location: top\n---\n\n![](plain.png)\n\n![A](map.png){#fig-a}\n\n![B](map.png){#fig-b}\n', '---\nfig-cap-location: top\n---\n\n![](media/plain.png){width=1 height=1}\n\n![A](media/map.png){#fig-a width=1 height=1}\n\n![B](media/map.png){#fig-b width=1 height=1}\n'],
+      ['![A](map.png){#fig-a}\n\n![B](map.png){#fig-b}\n\n![](plain.png)\n', '![A](media/map.png){#fig-a width=1 height=1}\n\n![B](media/map.png){#fig-b width=1 height=1}\n\n![](media/plain.png){width=1 height=1}\n'],
       ['![Caption](map.png){#fig-x}\n\n![Caption](map.png){#fig-x}\n', '![Caption](media/map.png){#fig-x width=1 height=1}\n\n![Caption](media/map.png){#fig-x-2 width=1 height=1}\n'],
       ['![[link](https://example.com/a) and ==hi==](map.png){#fig-k}\n', '![[link](https://example.com/a) and ==hi==](media/map.png){#fig-k width=1 height=1}\n'],
     ]) {
@@ -259,7 +295,8 @@ describe('figures\' round trips', () => {
     const { body } = await exported(await imported(word));
     expect(paragraphs(body).filter(p => p.includes('Caption')).map(p => p.replace(/<w:instrText[^>]*>[^<]*<\/w:instrText>|<[^>]+>/g, ''))).toEqual(['Figure 1. Rates by region', 'Figure 2. More']);
     const { document } = await exported(await imported(word));
-    expect(document.match(/descr="[^"]*"/g)).toEqual(['descr=""', 'descr="Alt"']);
+    // Word's picture with no alt text takes its caption's, as export gives a figure
+    expect(document.match(/descr="[^"]*"/g)).toEqual(['descr="Rates by region"', 'descr="Alt"']);
   });
 });
 

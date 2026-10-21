@@ -823,6 +823,8 @@ fig-cap-location: top
 ---
 ```
 
+A caption's citation, note, comment, tracked change, line break or image, which Word's caption can't hold as import would read it back, goes to Word as its Markdown, as text, as `{>>note<<}`, with a warning.
+
 An image with a label that isn't alone in its paragraph, or is in a list, a quote, a table, a note, a link, a style block or a tracked change, gets no caption, with a warning. A `{#fig-…}` or `{#tbl-…}` that labels nothing, as in a sentence, starts no comment range (see [ID Format](#id-format)): export writes nothing for it, with a warning, and the preview shows nothing. Export doesn't caption tables yet, so `{#tbl-…}` always warns.
 
 DOCX import reads Word's figure captions back as figures (see [Figure Captions](converter.md#figure-captions)).

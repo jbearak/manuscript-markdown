@@ -143,6 +143,11 @@ describe('crossref frontmatter', () => {
     expect(fieldOrder).toEqual(['title', 'crossref', 'fig-cap-location']);
   });
 
+  it('reads the crossref keys past a comment, at any indentation, as YAML does', () => {
+    expect(parseFrontmatter('---\ncrossref:\n# a comment\n  fig-title: Fig.\n# another\n  title-delim: "."\n# more\nfig-cap-location: top\n---\nBody\n').metadata)
+      .toEqual({ crossref: { figTitle: 'Fig.', titleDelim: '.' }, figCapLocation: 'top' });
+  });
+
   it('writes them back as it reads them', () => {
     for (const crossref of [{ figTitle: 'Fig.' }, { titleDelim: '.' }, { titleDelim: ' —' }, { figTitle: 'Supplementary Figure', tblTitle: 'Tab', titleDelim: '' }, { titleDelim: ':' }]) {
       const yaml = serializeFrontmatter({ crossref, figCapLocation: 'top' });
