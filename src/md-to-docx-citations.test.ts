@@ -1263,6 +1263,71 @@ describe('BibTeX groups in citeproc\'s data', () => {
   });
 });
 
+describe('BibLaTeX\'s pubstate as citeproc\'s status', () => {
+  // Which citeproc didn't get, so chicago-author-date showed a forthcoming
+  // article with no volume or pages as "ahead of print", its term for one
+  // with no status
+  const status = (fields: string) => buildItemData(parseBibtex('@article{a,\n' + fields + '\n}').get('a')!).status;
+  const NOCASE = '<span class="nocase">';
+
+  it.each([
+    ['inpreparation', 'in preparation'],
+    ['submitted', 'submitted'],
+    ['forthcoming', 'forthcoming'],
+    ['inpress', 'in press'],
+    ['prepublished', 'pre-published'],
+  ])('reads biblatex\'s key %s as the state it names, as pandoc does', (key, expected) => {
+    expect(status('  pubstate = {' + key + '}')).toBe(expected);
+  });
+
+  it.each([
+    ['a state that is no key as written', 'under review', 'under review'],
+    ['a key in another case as written', 'InPress', 'InPress'],
+    ['a key with punctuation as written', 'inpress,', 'inpress,'],
+    ['a key in a group as written', '{inpress} now', NOCASE + 'inpress</span> now'],
+    ['a key among other words in a group as written', '{a inpress} inpress', NOCASE + 'a inpress</span> in press'],
+    ['a key in a command\'s argument as written', String.raw`\emph{a inpress}`, String.raw`\emph{a inpress}`],
+    ['a key among other words as its state', 'to appear inpress', 'to appear in press'],
+  ])('reads %s, as pandoc does', (_name, pubstate, expected) => {
+    expect(status('  pubstate = {' + pubstate + '}')).toBe(expected);
+  });
+
+  it('reads a status field as written, where there is no pubstate', () => {
+    expect(status('  status = {Accepted}')).toBe('Accepted');
+    expect(status('  status = {inpress}')).toBe('inpress');
+    expect(status('  status = {Accepted},\n  pubstate = {inpress}')).toBe('in press');
+    expect(status('  status = {Accepted},\n  pubstate = {}')).toBe('Accepted');
+    expect(status('  title = {T}')).toBeUndefined();
+  });
+
+  it('reads a pubstate in linear time', () => {
+    const time = (n: number) => {
+      const entry = parseBibtex('@article{a,\n  pubstate = {' + String.raw`inpress {a inpress} \emph{b inpress} `.repeat(n) + '}\n}').get('a')!;
+      expect(buildItemData(entry).status!.startsWith('in press ' + NOCASE + 'a inpress</span> ' + String.raw`\emph{b inpress} in press`)).toBe(true);
+      return fastestRun(() => buildItemData(entry));
+    };
+    time(16000);
+    const small = time(16000);
+    const large = time(64000);
+    expect(large).toBeLessThan(8 * small + 100);
+    expect(large).toBeLessThan(2000);
+  }, 60000);
+
+  it.each([
+    ['chicago-author-date', 'pubstate = {forthcoming}', '<i>American Economic Journal: Applied Economics</i>, Forthcoming. https://doi.org/10.1257/app.20240026.'],
+    ['chicago-author-date', 'pubstate = {inpress}', '<i>American Economic Journal: Applied Economics</i>, In press. https://doi.org/10.1257/app.20240026.'],
+    ['chicago-author-date', 'status = {Accepted}', '<i>American Economic Journal: Applied Economics</i>, Accepted. https://doi.org/10.1257/app.20240026.'],
+    // A note is no state, to pandoc either
+    ['chicago-author-date', 'note = {Forthcoming}', '<i>American Economic Journal: Applied Economics</i>, ahead of print. https://doi.org/10.1257/app.20240026.'],
+    ['apa', 'pubstate = {inpress}', '<i>American Economic Journal: Applied Economics</i>. In press. https://doi.org/10.1257/app.20240026'],
+  ])('shows the state in %s for %s as pandoc does', (style, field, expected) => {
+    const bib = '@article{k,\n  author = {Kleven, Henrik},\n  title = {The Geography},\n  journal = {American Economic Journal: Applied Economics},\n  year = {2026},\n  ' + field + ',\n  doi = {10.1257/app.20240026}\n}';
+    const engine = createCiteprocEngine(parseBibtex(bib), style)!;
+    engine.updateItems(['k']);
+    expect(renderBibliography(engine)!.entries[0]).toContain(expected);
+  });
+});
+
 describe('orderRPr', () => {
   it('puts run properties in schema order', () => {
     expect(orderRPr('<w:i/><w:b/><w:vertAlign w:val="superscript"/><w:smallCaps/><w:highlight w:val="red"/><w:sz w:val="18"/>'))

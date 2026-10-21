@@ -277,6 +277,7 @@ describe('generateBibTeX with institutional authors and additional fields', () =
           abstract: 'An abstract.',
           note: 'A note.',
           'collection-title': 'Lecture Notes',
+          status: 'in press',
         },
       }],
     }];
@@ -292,6 +293,7 @@ describe('generateBibTeX with institutional authors and additional fields', () =
     expect(bib).toContain('abstract = {An abstract.}');
     expect(bib).toContain('note = {A note.}');
     expect(bib).toContain('series = {Lecture Notes}');
+    expect(bib).toContain('pubstate = {in press}');
   });
 
   it('preserves URL and DOI verbatim without LaTeX escaping', () => {

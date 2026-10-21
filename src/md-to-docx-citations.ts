@@ -42,6 +42,7 @@ export interface CiteprocItemData {
   abstract?: string;
   note?: string;
   'collection-title'?: string;
+  status?: string;
   'citation-key'?: string;
   'x-institution'?: string;
 }
@@ -768,6 +769,30 @@ const CITEPROC_NOTE_FIELD = /\{:(?:[-_a-z]+|[A-Z]+):[^}]+\}/;
 // The fields citeproc reads as numbers
 const NUMBER_FIELDS: ReadonlySet<string> = new Set(['volume', 'pages', 'number', 'edition']);
 
+// BibLaTeX's publication states, the keys its pubstate field takes, as
+// biblatex's English strings (english.lbx) give them, as pandoc does
+const PUBSTATE_STRINGS: ReadonlyMap<string, string> = new Map([
+  ['inpreparation', 'in preparation'],
+  ['submitted', 'submitted'],
+  ['forthcoming', 'forthcoming'],
+  ['inpress', 'in press'],
+  ['prepublished', 'pre-published'],
+]);
+
+/** A pubstate's text as CSL's status, as pandoc reads it: each word that is
+ *  one of biblatex's keys, in its case, as the state it names, so inpress
+ *  is in press, and the rest as written, as under review. A word ends at a
+ *  space, so inpress, with its comma is none, and one in a group or a
+ *  command's argument, as {inpress}, stays as written, as pandoc leaves it. */
+function pubstateAsStatus(pubstate: string): string {
+  let depth = 0;
+  return pubstate.replace(/[^ ]+/g, word => {
+    const state = depth === 0 ? PUBSTATE_STRINGS.get(word) : undefined;
+    for (const [, open] of word.matchAll(/(<span\b|\{)|<\/span>|\}/g)) depth = Math.max(0, depth + (open ? 1 : -1));
+    return state ?? word;
+  });
+}
+
 /** A BibTeX field's text as citeproc's data holds it, with its groups'
  *  braces off, which keep its case in BibTeX, as citeproc's nocase, which a
  *  style that changes the case, as a title's or a publisher's first letter,
@@ -881,6 +906,15 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
 
   const series = text('series');
   if (series) itemData['collection-title'] = series;
+
+  // BibLaTeX's pubstate as CSL's status, as pandoc reads it, or, without
+  // one, a status field's text as written, which pandoc doesn't read. So
+  // chicago-author-date shows a forthcoming article as Forthcoming, not as
+  // "ahead of print", its term for an article with no volume, issue, pages
+  // or status.
+  const pubstate = text('pubstate');
+  const status = pubstate ? pubstateAsStatus(pubstate) : text('status');
+  if (status) itemData.status = status;
 
   return itemData;
 }

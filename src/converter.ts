@@ -18109,6 +18109,8 @@ const CSL_TO_BIBTEX: Record<string, string> = {
   'abstract': 'abstract',
   'note': 'note',
   'collection-title': 'series',
+  // As BibLaTeX's publication state, which export gives citeproc as status
+  'status': 'pubstate',
 };
 
 export function generateBibTeX(
