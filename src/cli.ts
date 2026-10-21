@@ -239,6 +239,10 @@ async function runDocxToMd(options: CliOptions) {
     fs.writeFileSync(bibPath, result.bibtex);
     console.log(bibPath);
   }
+
+  for (const warning of result.warnings) {
+    console.error(`Warning: ${warning}`);
+  }
 }
 
 export function deriveMdToDocxPath(inputPath: string, outputPath?: string): string {
