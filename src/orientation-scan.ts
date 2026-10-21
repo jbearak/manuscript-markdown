@@ -77,7 +77,9 @@ function blockDirectives(source: string, text: string, lineOffset: (line: number
   // tables, quotes and LaTeX environments, as a grid table's placeholder,
   // which ends a list it was indented in, with the line of `source` each
   // comes from. `source`'s line ends are \n, as directivesOf gives them.
-  const blocks = preprocessBlocks(source);
+  // A note's body as export reads a note's, which leaves a quote's or a
+  // list item's environment as written (see preprocessBlocks).
+  const blocks = preprocessBlocks(source, inNote);
   const { parsed, starts } = withCriticMarkup(blocks.output);
   blockParser.block.parse(parsed, blockParser, {}, tokens);
   const directives: Directive[] = [];

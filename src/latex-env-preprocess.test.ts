@@ -10,6 +10,7 @@ import MarkdownIt from 'markdown-it';
 import { manuscriptMarkdownPlugin } from './preview/manuscript-markdown-plugin';
 import { vscodeMath } from './preview-math-read';
 import { wrapBareLatexEnvironmentsWithMap } from './preview/preprocess-with-map';
+import { preprocessBlocks } from './block-preprocess';
 
 describe('wrapBareLatexEnvironments', () => {
 	test('wraps a bare equation environment', () => {
@@ -898,5 +899,474 @@ describe('every shape of the probes, many times in each layout, in time linear i
 		'dollar signs after a long tag': (n: number) => over + '<span title="' + 'x'.repeat(8 * n) + '">' + ' $'.repeat(n) + '\n',
 	}))('reads many %s after an environment its paragraph\'s read wraps in linear time', (_name, make) => {
 		linear(make);
+	}, 120000);
+});
+
+describe('a bare environment in a quote, an alert or a list item', () => {
+	const D = '$' + '$';
+	// Main found a bare environment only at a line's start, after up to
+	// three spaces, so one after a quote's marker, or four spaces in or more
+	// in a list item, went to Word as text, as import kept it. Export reads
+	// the container's paragraph past its prefixes, so the fences go on the
+	// lines of the \begin{...} and the \end{...}, inside it
+	const contained: Array<[string, string, string, string]> = [
+		['in a quote after its text', '> quote\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n',
+			'> quote\n> ' + D + '\\begin{equation}\n> x = 1\n> \\end{equation}' + D + '\n', '> quote\n> ' + D + '\n> x = 1\n> ' + D + '\n'],
+		['alone in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n',
+			'> ' + D + '\\begin{equation}\n> x = 1\n> \\end{equation}' + D + '\n', '> ' + D + '\n> x = 1\n> ' + D + '\n'],
+		['in an alert', '> [!NOTE]\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n',
+			'> [!NOTE]\n> ' + D + '\\begin{equation}\n> x = 1\n> \\end{equation}' + D + '\n', '> [!NOTE]\n> ' + D + '\n> x = 1\n> ' + D + '\n'],
+		['in a quote in a quote', '> > \\begin{equation}\n> > x = 1\n> > \\end{equation}\n',
+			'> > ' + D + '\\begin{equation}\n> > x = 1\n> > \\end{equation}' + D + '\n', '> > ' + D + '\n> > x = 1\n> > ' + D + '\n'],
+		['in a quote on a list item\'s marker line', '- > \\begin{equation}\n  > x = 1\n  > \\end{equation}\n',
+			'- > ' + D + '\\begin{equation}\n  > x = 1\n  > \\end{equation}' + D + '\n', '- \n  > ' + D + '\n  > x = 1\n  > ' + D + '\n'],
+		['on a list item\'s marker line', '- \\begin{equation}\n  x = 1\n  \\end{equation}\n',
+			'- ' + D + '\\begin{equation}\n  x = 1\n  \\end{equation}' + D + '\n', '- ' + D + '\n  x = 1\n  ' + D + '\n'],
+		['on an ordered item\'s marker line', '1. \\begin{equation}\n   x = 1\n   \\end{equation}\n',
+			'1. ' + D + '\\begin{equation}\n   x = 1\n   \\end{equation}' + D + '\n', '1. ' + D + '\n   x = 1\n   ' + D + '\n'],
+		['in a nested item', '- a\n  - b\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n',
+			'- a\n  - b\n    ' + D + '\\begin{equation}\n    x = 1\n    \\end{equation}' + D + '\n', '- a\n  - b\n    ' + D + '\n    x = 1\n    ' + D + '\n'],
+		['after a wide marker', '10. a\n\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n',
+			'10. a\n\n    ' + D + '\\begin{equation}\n    x = 1\n    \\end{equation}' + D + '\n', '10. a\n\n    ' + D + '\n    x = 1\n    ' + D + '\n'],
+		['in a list item in a quote', '> - a\n>   \\begin{equation}\n>   x = 1\n>   \\end{equation}\n',
+			'> - a\n>   ' + D + '\\begin{equation}\n>   x = 1\n>   \\end{equation}' + D + '\n', '> a\n> ' + D + '\n> x = 1\n> ' + D + '\n'],
+		['in a quote after a fence in a code span', '> Use `' + D + '` here.\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n',
+			'> Use `' + D + '` here.\n> ' + D + '\\begin{equation}\n> x = 1\n> \\end{equation}' + D + '\n', '> Use `' + D + '` here.\n> ' + D + '\n> x = 1\n> ' + D + '\n'],
+	];
+	const word = async (md: string) => {
+		const { docx } = await convertMdToDocx(md);
+		const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+		return {
+			docx,
+			text: [...xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/g, '').matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join(''),
+			equations: [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)].map(m => [...m[1].matchAll(/<m:t[^>]*>([^<]*)<\/m:t>/g)].map(t => t[1]).join('')),
+		};
+	};
+	// VS Code's preview, with its math extension's rules (see
+	// preview-math-read.ts) and the preview's plugin, which runs the wrapper
+	const preview = (md: string) => {
+		const it = new MarkdownIt({ html: true });
+		vscodeMath(it);
+		it.use(manuscriptMarkdownPlugin);
+		const maths: string[] = [];
+		const texts: string[] = [];
+		const visit = (tokens: ReturnType<MarkdownIt['parse']>) => {
+			for (const token of tokens) {
+				if (token.type.startsWith('math')) maths.push(token.content);
+				else if (token.type === 'text' || token.type === 'code_block') texts.push(token.content);
+				if (token.children) visit(token.children);
+			}
+		};
+		visit(it.parse(md, {}));
+		return { maths, texts: texts.join('') };
+	};
+
+	test.each(contained)('wraps a bare environment %s in fences inside it', (_name, md, wrapped) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(wrapped);
+		// The orientation scan reads the text with the wraps too
+		expect(wrapBareLatexEnvironmentsWithLines(md).output).toBe(wrapped);
+	});
+
+	test.each(contained)('exports a bare environment %s as an equation, which import writes back as display math in it, and the preview shows', async (_name, md, _wrapped, imported) => {
+		const out = await word(md);
+		expect(out.equations).toHaveLength(1);
+		expect(out.equations[0].replace(/\s/g, '')).toBe('x=1');
+		expect(out.text).not.toContain('begin{equation}');
+		const once = (await convertDocx(out.docx)).markdown;
+		expect(once).toBe(imported);
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+		const shown = preview(md);
+		expect(shown.maths).toHaveLength(1);
+		expect(shown.maths[0]).toContain('x = 1');
+		expect(shown.texts).not.toContain('begin{equation}');
+	});
+
+	// Where the container's shape is uncertain, or a rule of export's that
+	// the paragraph's read doesn't have comes before the environment, main's
+	// decision holds, and the environment stays as written
+	test.each([
+		['in a quote\'s indented code block', '>     \\begin{equation}\n>     x = 1\n>     \\end{equation}\n'],
+		['in a list item\'s indented code block', '- a\n\n      \\begin{equation}\n      x = 1\n      \\end{equation}\n'],
+		['in a fenced code block in a quote', '> ```\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> ```\n'],
+		['in a comment in a quote', '> <!--\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> -->\n'],
+		['with a lazy line in its quote', '> \\begin{equation}\nx = 1\n> \\end{equation}\n'],
+		['with a lazy line in its item', '- a\n  - b\n    \\begin{equation}\nx = 1\n    \\end{equation}\n'],
+		['in a quote in a list item in a quote', '> - > \\begin{equation}\n>   > x = 1\n>   > \\end{equation}\n'],
+		['over its quote\'s end', '> \\begin{equation}\n> x = 1\n\n\\end{equation}\n'],
+		['with a blank line in its quote', '> \\begin{equation}\n> x = 1\n>\n> \\end{equation}\n'],
+		['in display math in a quote', '> ' + D + '\n> \\begin{aligned}\n> a &= b\n> \\end{aligned}\n> ' + D + '\n'],
+		['in a quote between two fences of text', 'A ' + D + ' sign.\n\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n\nB ' + D + ' sign.\n'],
+		['after a link in its quote', '> See [a](u)\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['after CriticMarkup in its quote', '> {++a++}\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['four spaces past its item\'s text', '- a\n      \\begin{equation}\n      x = 1\n      \\end{equation}\n'],
+		['with a tab in its quote\'s prefix', '>\t\\begin{equation}\n>\tx = 1\n>\t\\end{equation}\n'],
+		// A paragraph's environments are wrapped together or not at all: the
+		// dollar signs in these two, one of which a code span's zone holds,
+		// from the backtick to the one after the blank line, paired, and with
+		// the first one wrapped, Word got it and the second as text
+		['in a quote\'s paragraph with another that a code span\'s zone holds', '> P\n> \\begin{equation}\n> x = 1 % $\n> \\end{equation}\n> `\n> \\begin{equation}\n> y = 2 % $\n> \\end{equation}\n>\n> A ` b.\n'],
+		['in a quote\'s paragraph with a \\begin with no end', '> P\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> \\begin{equation}\n> y\n'],
+		// Whose empty equation import wrote as a line of the item's indent
+		// alone, which the next trip dropped
+		['with nothing in it after a wide marker', '10. a\n\n    \\begin{equation}\n    \\end{equation}\n    - item\n'],
+	])('leaves a bare environment %s as main leaves it', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+	});
+
+	// VS Code's preview reads display math from a fence at a line's start to
+	// the next line with a fence, and drops the rest of that line, and reads
+	// a fence after the opening one on its line as closing it only at the
+	// line's end. So prose after a wrap's \end{...}, which Word keeps, went
+	// from the preview, and the equation lost its \end{...}. Prose before a
+	// \begin{...} on its line makes it no environment at a line's start
+	const prose: Array<[string, string]> = [
+		['after its \\end{...} in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation} important prose\n'],
+		['after its \\end{...} in an alert', '> [!NOTE]\n> \\begin{equation}\n> x = 1\n> \\end{equation} important prose\n'],
+		['after its \\end{...} in a nested item', '- a\n  - b\n    \\begin{equation}\n    x = 1\n    \\end{equation} important prose\n'],
+		['after its \\end{...} on its one line in a quote', '> \\begin{equation}x = 1\\end{equation} important prose\n'],
+		['after the \\end{...} of the second environment in its quote\'s paragraph', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n> \\begin{equation}\n> y = 2\n> \\end{equation} important prose\n'],
+		['before its \\begin{...} in a quote', '> important prose \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['before its \\begin{...} in an alert', '> [!NOTE]\n> important prose \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['before its \\begin{...} in a nested item', '- a\n  - b\n    important prose \\begin{equation}\n    x = 1\n    \\end{equation}\n'],
+	];
+	test.each(prose)('leaves a bare environment with prose %s as main leaves it, which the preview shows', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const shown = preview(md);
+		expect(shown.maths).toHaveLength(0);
+		expect(shown.texts).toContain('important prose');
+	});
+
+	// And the preview's display math ends its paragraph there, so the next
+	// line starts a block, as a paragraph's line doesn't: a lone tag's HTML
+	// block, a definition, a list from 2 or an empty item, or a code block
+	// four spaces in, where Word and main's preview read on in the paragraph
+	const next: Array<[string, string]> = [
+		['a lone tag in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n> <b>\n> important prose\n'],
+		['a definition in an alert', '> [!NOTE]\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> [important]: prose\n'],
+		['an item numbered 2 in a nested item', '- a\n  - b\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n    2. important prose\n'],
+		['an empty item in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n> +\n> important prose\n'],
+		['a line four spaces in in a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\n>     important prose\n'],
+	];
+	test.each(next)('leaves a bare environment with %s on the line after its \\end{...} as main leaves it, which the preview shows', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const shown = preview(md);
+		expect(shown.maths).toHaveLength(0);
+		expect(shown.texts).toContain('important');
+	});
+
+	test('wraps a bare environment in a quote with a tag and text on the line after its \\end{...}, which the preview reads on in a paragraph', () => {
+		const md = '> \\begin{equation}\n> x = 1\n> \\end{equation}\n> <b>important</b> prose\n';
+		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{equation}\n> x = 1\n> \\end{equation}' + D + '\n> <b>important</b> prose\n');
+		const shown = preview(md);
+		expect(shown.maths).toEqual(['\\begin{equation}\nx = 1\n\\end{equation}']);
+		expect(shown.texts).toContain('important');
+	});
+
+	// Export ends a quote before a line without its > (see
+	// deLazifyBlockquotesWithLines in block-preprocess.ts) before the wrap,
+	// and the preview reads the line on in the quote's paragraph, which
+	// leaves it as written. So export wrapped the environment and the
+	// preview didn't. Both read the paragraph as written, with its lazy line
+	const lazy: Array<[string, string]> = [
+		['a quote', '> \\begin{equation}\n> x = 1\n> \\end{equation}\nlazy text\n'],
+		['an alert', '> [!NOTE]\n> \\begin{equation}\n> x = 1\n> \\end{equation}\nlazy text\n'],
+		['a nested item', '- a\n  - b\n    \\begin{equation}\n    x = 1\n    \\end{equation}\nlazy text\n'],
+		['a quote on a list item\'s marker line', '- > \\begin{equation}\n  > x = 1\n  > \\end{equation}\nlazy text\n'],
+	];
+	test.each(lazy)('leaves a bare environment in %s with a lazy line after its \\end{...} as main leaves it, in export and the preview', async (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		const blocks = preprocessBlocks(md);
+		expect(blocks.output).toBe(blocks.deLazified);
+		const out = await word(md);
+		expect(out.equations).toHaveLength(0);
+		expect(out.text).toContain('begin{equation}');
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('leaves a bare environment in a quote of a list item, four spaces in, which export ends the quote before, as main leaves it, in export and the preview', async () => {
+		// The preview reads the line four spaces in on the item's quote, and
+		// export puts a blank line before it, which ends the paragraph inside
+		// the environment
+		const md = '- > P\n  >\n  > \\begin{align*}\n    > a = b\n  > \\end{align*}\n';
+		expect(wrapBareLatexEnvironmentsWithMap(md).output).toBe(md);
+		const blocks = preprocessBlocks(md);
+		expect(blocks.output).toBe(blocks.deLazified);
+		expect((await word(md)).equations).toHaveLength(0);
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('leaves a bare environment in a quote in a note as main leaves it, in export and the preview', async () => {
+		// Export reads the note on its own, and the preview on the note's
+		// indented lines in the document
+		const md = 'Text[^n].\n\n[^n]: A note.\n\n    > \\begin{equation}\n    > x = 1\n    > \\end{equation}\n';
+		const { docx } = await convertMdToDocx(md);
+		const notes = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+		expect(notes).not.toContain('<m:oMath>');
+		expect(notes).toContain('begin{equation}');
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('leaves a bare environment in a quote after a lazy line as main leaves it, in export and the preview', async () => {
+		const md = '> P\nlazy\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n';
+		const blocks = preprocessBlocks(md);
+		expect(blocks.output).toBe(blocks.deLazified);
+		expect((await word(md)).equations).toHaveLength(0);
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	// The preview's display math splits the paragraph, so emphasis, strong
+	// emphasis or strikethrough from before an environment to after it, which
+	// Word keeps, showed as its delimiters, and a line break before it as a
+	// backslash. Main's preview showed the formatting, with the environment
+	// as text in it. A paragraph with any *, _ or ~ out of its environments
+	// stays as written
+	const formats = (md: string) => {
+		const it = new MarkdownIt({ html: true });
+		vscodeMath(it);
+		it.use(manuscriptMarkdownPlugin);
+		const opens: string[] = [];
+		const visit = (tokens: ReturnType<MarkdownIt['parse']>) => {
+			for (const token of tokens) {
+				if (['em_open', 'strong_open', 's_open'].includes(token.type)) opens.push(token.type);
+				if (token.children) visit(token.children);
+			}
+		};
+		visit(it.parse(md, {}));
+		return opens;
+	};
+	const spanning: Array<[string, string, string]> = [
+		['emphasis in a quote', '> *before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after*\n', 'em_open'],
+		['emphasis of underscores in a quote', '> _before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after_\n', 'em_open'],
+		['strong emphasis in an alert', '> [!NOTE]\n> **before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after**\n', 'strong_open'],
+		['strikethrough in a nested item', '- a\n  - b\n    ~~before\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n    after~~\n', 's_open'],
+		['emphasis in a nested item', '- a\n  - b\n    *before\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n    after*\n', 'em_open'],
+		['strikethrough in an alert', '> [!NOTE]\n> ~~before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after~~\n', 's_open'],
+	];
+	test.each(spanning)('leaves a bare environment in %s over it as main leaves it, which the preview shows in it', (_name, md, open) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(preview(md).maths).toHaveLength(0);
+		expect(formats(md)).toEqual([open]);
+	});
+
+	test.each([
+		['highlight in a quote', '> ==before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after==\n'],
+		['a code span in a quote', '> `before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n> after`\n'],
+		['emphasis before it in a quote', '> *a* before\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['a line break before it in a quote', '> before\\\n> \\begin{equation}\n> x = 1\n> \\end{equation}\n'],
+		['a line break before it in a nested item', '- a\n  - b\n    before\\\n    \\begin{equation}\n    x = 1\n    \\end{equation}\n'],
+	])('leaves a bare environment with %s as main leaves it', (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('wraps a bare environment of a starred name with an underscore in it in a quote, whose * and _ are its own', () => {
+		const md = '> \\begin{align*}\n> a_1 &= b^*\n> \\end{align*}\n';
+		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{align*}\n> a_1 &= b^*\n> \\end{align*}' + D + '\n');
+		expect(preview(md).maths).toEqual(['\\begin{align*}\na_1 &= b^*\n\\end{align*}']);
+	});
+
+	// An environment whose equation shows nothing, though its LaTeX holds
+	// more than white space: export wrote an empty equation, which import
+	// wrote back after a wide marker as a line of the item's indent alone,
+	// which the next trip dropped. Export's own conversion says which (see
+	// equationShowsText in latex-to-omml.ts)
+	const showsNothing: Array<[string, string]> = [
+		['a \\label', '\\label{x}'],
+		['a \\notag', '\\notag'],
+		['a \\nonumber', '\\nonumber'],
+		['an empty \\text{}', '\\text{}'],
+		['a \\label and a \\notag', '\\label{x}\\notag'],
+		['comments', '% a comment\n% another'],
+		['a phantom', '\\phantom{x}'],
+	];
+	const inContainers: Array<[string, (lines: string[]) => string]> = [
+		['a quote', lines => lines.map(line => '> ' + line).join('\n') + '\n'],
+		['an alert', lines => '> [!NOTE]\n' + lines.map(line => '> ' + line).join('\n') + '\n'],
+		['a nested item', lines => '- a\n  - b\n' + lines.map(line => '    ' + line).join('\n') + '\n'],
+		['an item after a wide marker', lines => '10. a\n\n' + lines.map(line => '    ' + line).join('\n') + '\n'],
+	];
+	test.each(showsNothing.flatMap(([body, latex]) => inContainers.map(([where, make]) => [body, where, make(['\\begin{equation}', ...latex.split('\n'), '\\end{equation}'])])))('leaves a bare environment of %s alone in %s as main leaves it, which two round trips keep', async (_body, _where, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(wrapBareLatexEnvironmentsWithMap(md).output).toBe(md);
+		expect((await word(md)).equations).toHaveLength(0);
+		expect(preview(md).maths).toHaveLength(0);
+		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+		expect(once).toContain('begin{equation}');
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+	});
+
+	// A dollar sign Word shows as text, which import wrote back unescaped,
+	// and which the next trip paired, past the wrap's display math, with
+	// one after it, as for display math written so in a quote on main
+	test.each([
+		['an escaped one before it and inline math after it in a quote', '> Text cost \\$\n> \\begin{equation}\n> x\n> \\end{equation}\n> $\\alpha$ here.\n'],
+		['an entity before it and inline math after it in an alert', '> [!NOTE]\n> Text cost &#36;\n> \\begin{equation}\n> x\n> \\end{equation}\n> $\\alpha$ here.\n'],
+		['escaped ones before and after it in a nested item', '- a\n  - b\n    Text cost \\$\n    \\begin{equation}\n    x\n    \\end{equation}\n    more \\$ here.\n'],
+		['escaped ones before and after it in an item after a wide marker', '10. a\n\n    Text cost \\$\n    \\begin{equation}\n    x\n    \\end{equation}\n    more \\$ here.\n'],
+	])('leaves a bare environment with a dollar sign of text, %s, as main leaves it, which two round trips keep', async (_name, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(preview(md).maths.filter(m => m.includes('begin{equation}'))).toHaveLength(0);
+		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+	});
+
+	// An environment that holds another \begin{, as a nested one: the
+	// search for its \end{...} took a nested one's of the same name for its
+	// own, so the closing fence went in it, the preview got a matrix with no
+	// end, and Word the rest of it as text. Main's decision holds for each
+	const nested: Array<[string, string[]]> = [
+		['a pmatrix in a pmatrix', ['\\begin{pmatrix}', 'a & \\begin{pmatrix}', 'b \\\\ c', '\\end{pmatrix}', '\\end{pmatrix}']],
+		['an aligned in an equation', ['\\begin{equation}', '\\begin{aligned}', 'a &= b', '\\end{aligned}', '\\end{equation}']],
+		['cases in cases', ['\\begin{cases}', 'a & \\begin{cases} b & c \\end{cases}', '\\end{cases}']],
+		['three pmatrix, one in another', ['\\begin{pmatrix}', '\\begin{pmatrix}', '\\begin{pmatrix} a \\end{pmatrix}', '\\end{pmatrix}', '\\end{pmatrix}']],
+	];
+	test.each(nested.flatMap(([nest, lines]) => inContainers.map(([where, make]) => [nest, where, make(lines)])))('leaves %s in %s as main leaves it, which two round trips keep', async (_nest, _where, md) => {
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(wrapBareLatexEnvironmentsWithMap(md).output).toBe(md);
+		expect((await word(md)).equations).toHaveLength(0);
+		expect(preview(md).maths).toHaveLength(0);
+		const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+		expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+	});
+
+	// A citation in an environment that a note leaves as written in its
+	// quote or list item, as a note holds no container's environment. The
+	// citation pre-scan, which registers a note's citations where its
+	// reference is, read the note as the body, wrapped the environment and
+	// missed the citation, which the note's own parse writes as a field: a
+	// numeric style then showed author-year text for it, and the
+	// bibliography left its reference out. A CriticMarkup comment beside it
+	// keeps main's decision, and a comment's own text holds no field.
+	const bib = '@article{smith2020, author={Smith, John}, title={Alpha}, journal={J}, year={2020}}\n'
+		+ '@article{jones2021, author={Jones, Ann}, title={Beta}, journal={J}, year={2021}}';
+	const cited = async (md: string, part: string) => {
+		const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex: bib })).docx);
+		const doc = await zip.file('word/document.xml')!.async('string');
+		const note = await zip.file('word/' + part + '.xml')!.async('string');
+		const text = (xml: string) => [...xml.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join('');
+		return { note: text(note), fields: (note.match(/ZOTERO_ITEM/g) ?? []).length, bibliography: text(doc.slice(doc.indexOf('ZOTERO_BIBL'))) };
+	};
+	const inNotes: Array<[string, string]> = [
+		['a quote in a note', '[^n]: A note.\n\n    > \\begin{equation}\n    > x [@jones2021]\n    > \\end{equation}\n'],
+		['a quote on a note\'s line', '[^n]: > \\begin{equation}\n    > x [@jones2021]\n    > \\end{equation}\n'],
+		['an alert in a note', '[^n]: A note.\n\n    > [!NOTE]\n    > \\begin{equation}\n    > x [@jones2021]\n    > \\end{equation}\n'],
+		['a list item in a note', '[^n]: A note.\n\n    - \\begin{equation}\n      x [@jones2021]\n      \\end{equation}\n'],
+		['a quote in a note, with a comment', '[^n]: A note.\n\n    > \\begin{equation}\n    > x [@jones2021] {>>a remark<<}\n    > \\end{equation}\n'],
+	];
+	const styles: Array<[string, string]> = [['vancouver', '(2)'], ['ieee', '[2]'], ['apa', '(Jones, 2021)'], ['chicago-author-date', '(Jones 2021)']];
+	test.each(inNotes.flatMap(([where, note]) => styles.flatMap(([style, shown]) => ['footnotes', 'endnotes'].map(notes => [where, style, notes, note, shown]))))('numbers and lists a citation in an environment in %s, which the note leaves as written, with %s in %s', async (_where, style, notes, note, shown) => {
+		const md = '---\ncsl: ' + style + '\nnotes: ' + notes + '\n---\n\nBody [@smith2020].[^n]\n\n' + note;
+		const out = await cited(md, notes);
+		expect(out.fields).toBe(1);
+		expect(out.note).toContain('x ' + shown);
+		expect(out.bibliography).toContain('Alpha');
+		expect(out.bibliography).toContain('Beta');
+	});
+
+	test('numbers and lists a citation in an environment in a quote with a comment, which keeps main\'s decision', async () => {
+		const md = '---\ncsl: vancouver\n---\n\nBody [@smith2020].\n\n> \\begin{equation}\n> x [@jones2021] {>>a remark<<}\n> \\end{equation}\n';
+		const out = await cited(md, 'document');
+		expect(out.fields).toBe(2);
+		expect(out.note).toContain('x (2)');
+		expect(out.bibliography).toContain('Beta');
+	});
+
+	test('wraps a bare environment of a phantom and text in a quote, whose equation shows the text', () => {
+		const md = '> \\begin{equation}\n> \\phantom{x} y\n> \\end{equation}\n';
+		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{equation}\n> \\phantom{x} y\n> \\end{equation}' + D + '\n');
+	});
+
+	test('leaves a bare environment on its one line in a quote, with white space after it, as main leaves it', () => {
+		// Whose closing fence, before the white space, the preview read as
+		// none, and so the fence in its equation
+		const md = '> \\begin{equation}x = 1\\end{equation}  \n';
+		expect(wrapBareLatexEnvironments(md)).toBe(md);
+		expect(preview(md).maths).toHaveLength(0);
+	});
+
+	test('wraps a bare environment in a quote with white space after its \\end{...}, which the preview shows whole', () => {
+		const md = '> \\begin{equation}\n> x = 1\n> \\end{equation}   \n';
+		expect(wrapBareLatexEnvironments(md)).toBe('> ' + D + '\\begin{equation}\n> x = 1\n> \\end{equation}' + D + '   \n');
+		expect(preview(md).maths).toEqual(['\\begin{equation}\nx = 1\n\\end{equation}']);
+	});
+
+	test('wraps an environment in a list item two spaces in, which main finds, as main wraps it', () => {
+		const md = '- a\n  \\begin{equation}\n  x = 1\n  \\end{equation}\n';
+		expect(wrapBareLatexEnvironments(md)).toBe('- a\n  ' + D + '\\begin{equation}\n  x = 1\n  \\end{equation}' + D + '\n');
+	});
+
+	test('leaves the indented code block of a quote as code in Word', async () => {
+		const md = '>     \\begin{equation}\n>     x = 1\n>     \\end{equation}\n';
+		const out = await word(md);
+		expect(out.equations).toHaveLength(0);
+		expect(out.text).toContain('begin{equation}');
+	});
+});
+
+describe('bare environments in quotes, alerts and list items in time linear in the text', () => {
+	// Each paragraph of a container is read on its own, once with its wraps,
+	// and its environments' ends are searched for once for all of them (see
+	// decideContainers), through the wrapper, the orientation scan the
+	// language server runs after each edit, and the preview's wrapper, in
+	// many containers and in one paragraph of many environments
+	const D = '$' + '$';
+	const env = '\\begin{equation}\nx\n\\end{equation}';
+	const each = (first: string, rest: string, blank: string) => (md: string) =>
+		md.split('\n').map((line, i) => (line === '' ? blank : (i === 0 ? first : rest) + line)).join('\n');
+	const containers: Array<[string, (md: string) => string]> = [
+		['a quote', each('> ', '> ', '>')],
+		['an alert', md => '> [!NOTE]\n' + each('> ', '> ', '>')(md)],
+		['a nested item', md => '- a\n  - b\n' + each('    ', '    ', '')(md)],
+		['an item after a wide marker', md => '10. a\n\n' + each('    ', '    ', '')(md)],
+		['a quote on a list item\'s marker line', each('- > ', '  > ', '  >')],
+		['a list item in a quote', each('> - ', '>   ', '>')],
+	];
+	const shapes: Array<[string, string]> = [
+		['an environment', env],
+		['text and an environment', 'Some text.\n' + env],
+		['a fence in a code span and an environment', 'Use `' + D + '` here.\n' + env],
+		['inline equations and an environment', 'Both $a$ and $b$.\n' + env],
+		['a \\begin with no end', '\\begin{equation}\nx'],
+		['a link and an environment', 'See [a](u)\n' + env],
+		['an environment with prose after its end', env + ' and prose'],
+		['an environment with a [ on the line after it', env + '\n[a b'],
+		['emphasis over an environment', '*a\n' + env + '\nb*'],
+		['an environment whose equation shows nothing', '\\begin{equation}\n\\label{x}\\notag % c\n\\end{equation}'],
+		['a dollar sign of text and an environment', 'Cost \\$5 and &#36;6.\n' + env],
+		['an environment in an environment', '\\begin{pmatrix}\na & \\begin{pmatrix} b \\end{pmatrix}\n\\end{pmatrix}'],
+	];
+	const works: Array<(text: string) => unknown> = [wrapBareLatexEnvironmentsWithLines, scanOrientationDirectives, text => wrapBareLatexEnvironmentsWithMap(text)];
+	const linear = (make: (n: number) => string, through: Array<(text: string) => unknown>) => {
+		for (const work of through) {
+			const time = (n: number) => {
+				let fastest = Infinity;
+				for (let k = 0; k < 2; k++) {
+					const text = make(n);
+					fastest = Math.min(fastest, fastestRun(() => work(text), 1));
+				}
+				return fastest;
+			};
+			work(make(4000));
+			const small = time(4000);
+			expect(time(16000) / small).toBeLessThan(8);
+		}
+	};
+	const rows = containers.flatMap(([where, contain]) => shapes.map(([what, shape]) => [what, where, contain, shape] as const));
+
+	test.each(rows)('reads many of %s in %s in linear time', (_what, _where, contain, shape) => {
+		// In a container each, and in one container's paragraph
+		const one = contain(shape) + '\n\n';
+		linear(n => one.repeat(n), works);
+		linear(n => contain((shape + '\n').repeat(n)) + '\n', works.slice(0, 1));
+	}, 120000);
+
+	test.each([
+		['at a lazy line after it', '> ' + env.replace(/\n/g, '\n> ') + '\nlazy\n\n'],
+		['at a lazy line before it', '> P\nlazy\n> ' + env.replace(/\n/g, '\n> ') + '\n\n'],
+		['in it, at a line four spaces into its item', '- > P\n  >\n  > \\begin{equation}\n    > x\n  > \\end{equation}\n\n'],
+	])('reads many quotes of an environment that export ends %s in linear time', (_where, one) => {
+		// Whose paragraphs export reads before it ends the quotes, as the
+		// orientation scan does (see preprocessBlocks)
+		linear(n => one.repeat(n), works.concat([text => preprocessBlocks(text)]));
 	}, 120000);
 });

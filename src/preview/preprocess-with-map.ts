@@ -14,6 +14,7 @@
 import { LineMap } from './line-map';
 import { preprocessGridTables } from '../grid-table-preprocess';
 import { wrapBareLatexEnvironments } from '../latex-env-preprocess';
+import { paragraphsExportEnds } from '../block-preprocess';
 import { preprocessCriticMarkup, restoreCriticLineBreaks } from '../critic-markup';
 
 /**
@@ -159,9 +160,11 @@ export function preprocessGridTablesWithMap(src: string): { output: string; map:
   return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
 }
 
-/** Preprocess bare LaTeX environments and return the output with a line map. */
+/** Preprocess bare LaTeX environments and return the output with a line
+ *  map, leaving those in a quote's paragraph export ends the quote inside,
+ *  which export leaves (see paragraphsExportEnds) */
 export function wrapBareLatexEnvironmentsWithMap(src: string): { output: string; map: LineMap } {
-  const output = wrapBareLatexEnvironments(src);
+  const output = wrapBareLatexEnvironments(src, '', { lazy: paragraphsExportEnds(src) });
   if (output === src) return { output, map: LineMap.identity() };
   return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
 }

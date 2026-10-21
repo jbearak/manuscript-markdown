@@ -8,6 +8,7 @@ import MarkdownIt from 'markdown-it';
 import { HTML_OPEN_CLOSE_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import type Token from 'markdown-it/lib/token.mjs';
 import blockquote from 'markdown-it/lib/rules_block/blockquote.mjs';
+import paragraph from 'markdown-it/lib/rules_block/paragraph.mjs';
 import { parseGfmAlertMarker } from './gfm';
 import { commentEnds } from './inline-html-comments';
 import { normalizeNewlines } from './newlines';
@@ -51,6 +52,28 @@ export interface MarkdownRegions {
 	 *  from the start of the first to the start of the line after the last,
 	 *  sorted */
 	inlineBlocks: CodeRegion[];
+	/** With `containedParagraphs`, each paragraph in a list item or a quote
+	 *  whose text holds a \begin{, sorted */
+	containedParagraphs: ContainedParagraph[];
+}
+
+/** A paragraph in list items or quotes, from the start of its first line
+ *  to the start of the line after its last */
+export interface ContainedParagraph extends CodeRegion {
+	/** The list items and quotes it is in, outermost first */
+	containers: Array<'item' | 'quote'>;
+	/** Its text, as markdown-it's inline parse reads it, past each line's
+	 *  prefix, of the items' indents and the quotes' markers */
+	content: string;
+	/** Where each line of `content` starts, in it and in the text, or null
+	 *  where a line of it isn't the end of its line in the text, as where
+	 *  markdown-it cut a tab in an indent (see inlineLines) */
+	lines: Array<{ content: number; source: number }> | null;
+	/** Whether a line of it goes on it lazily, without its quotes' markers
+	 *  or its item's indent, which export, which ends a quote there (see
+	 *  deLazifyBlockquotesWithLines in block-preprocess.ts), and VS Code's
+	 *  preview read otherwise */
+	lazy: boolean;
 }
 
 export interface MarkdownRegionOptions {
@@ -67,6 +90,8 @@ export interface MarkdownRegionOptions {
 	inlineHtml?: boolean;
 	/** With it, inlineBlocks */
 	inlineBlocks?: boolean;
+	/** With `html` 'all', containedParagraphs */
+	containedParagraphs?: boolean;
 	/** With `html`, read a quote as ending before a line with text that
 	 *  doesn't start as a quote's line does, as export does, which puts a
 	 *  blank line before each (see deLazifyBlockquotesWithLines in
@@ -79,6 +104,22 @@ export interface MarkdownRegionOptions {
 
 const blockParser = new MarkdownIt();
 const htmlBlockParser = new MarkdownIt({ html: true });
+// For containedParagraphs, the first line of each paragraph with a line
+// that goes on it lazily: less indented than its item's text, or, in a
+// quote, without the quote's marker, which the blockquote rule marks so
+htmlBlockParser.block.ruler.at('paragraph', (state, startLine, endLine, silent) => {
+	if (!paragraph(state, startLine, endLine, silent)) return false;
+	const lazy: Set<number> | undefined = state.env.lazyParagraphs;
+	if (lazy) {
+		for (let line = startLine + 1; line < state.line; line++) {
+			if (state.sCount[line] < state.blkIndent) {
+				lazy.add(startLine);
+				break;
+			}
+		}
+	}
+	return true;
+});
 /** The same, but for a quote, which ends at each of its env's `quoteEnds`,
  *  sorted, a line markdown-it would read as going on it (see exportQuotes) */
 const exportBlockParser = new MarkdownIt({ html: true });
@@ -351,6 +392,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	const tableRegions: CodeRegion[] = [];
 	const inlineHtmlRegions: CodeRegion[] = [];
 	const inlineBlocks: CodeRegion[] = [];
+	const containedParagraphs: ContainedParagraph[] = [];
 	const outerItemRegions: CodeRegion[] = [];
 	const itemClosedStarts: number[] = [];
 	// The list items and quotes each token is in, innermost last
@@ -364,7 +406,8 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 	// retain its line-ending semantics (including bare CR documents), which
 	// lineStarts counts the same way.
 	const normalizedBlockText = normalizeNewlines(text);
-	const env: { quoteEnds?: number[] } = {};
+	const contained = options?.html === 'all' && !exportQuotes && !!options.containedParagraphs;
+	const env: { quoteEnds?: number[]; lazyParagraphs?: Set<number> } = contained ? { lazyParagraphs: new Set() } : {};
 	if (exportQuotes && normalizedBlockText.includes('>')) {
 		// Each line with text after a quote's line, or a line export keeps on
 		// its paragraph, that doesn't start as one, but one export keeps on it
@@ -394,13 +437,23 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 			&& (before?.type === 'paragraph_open' || before?.type === 'heading_open')) {
 			pushInlineHtml(token, text, lineStarts, inlineHtmlRegions);
 		}
-		if (options?.includeLists) {
+		if (options?.includeLists || contained) {
 			if (token.type === 'list_item_close' || token.type === 'blockquote_close') containers.pop();
 			else if (token.type === 'blockquote_open') containers.push('quote');
 			else if (token.type === 'list_item_open') {
-				if (!containers.includes('item') && token.map) outerItemRegions.push({ start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length });
+				if (options?.includeLists && !containers.includes('item') && token.map) outerItemRegions.push({ start: lineStarts[token.map[0]] ?? text.length, end: lineStarts[token.map[1]] ?? text.length });
 				containers.push('item');
-			} else if (containers[containers.length - 1] === 'item' && token.map && closedByItem(token, blockLines, textEnd)) itemClosedStarts.push(lineStarts[token.map[0]]);
+			} else if (options?.includeLists && containers[containers.length - 1] === 'item' && token.map && closedByItem(token, blockLines, textEnd)) itemClosedStarts.push(lineStarts[token.map[0]]);
+		}
+		if (contained && token.type === 'inline' && token.map && before?.type === 'paragraph_open' && containers.length > 0 && token.content.includes('\\begin{')) {
+			containedParagraphs.push({
+				start: lineStarts[token.map[0]] ?? text.length,
+				end: lineStarts[token.map[1]] ?? text.length,
+				containers: containers.slice(),
+				content: token.content,
+				lines: inlineLines(token, text, lineStarts),
+				lazy: env.lazyParagraphs!.has(token.map[0]),
+			});
 		}
 		if (!token.map) continue;
 		if (options?.inlineBlocks && token.type === 'inline' && lineStarts[token.map[0]] !== inlineBlocks[inlineBlocks.length - 1]?.start) {
@@ -453,6 +506,7 @@ export function computeMarkdownRegions(text: string, options?: MarkdownRegionOpt
 		inlineHtmlRegions,
 		// In the order of the tokens, which is the text's
 		inlineBlocks,
+		containedParagraphs,
 	};
 }
 
