@@ -6,7 +6,7 @@ import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { styleFinder } from './style-element';
-import { replaceXmlElements, universalMeasure, xmlAttribute, xmlElement, xmlInteger, xmlNumber, xmlOn, xmlStartTag, xmlTwips } from './xml-elements';
+import { replaceXmlElements, universalMeasure, XML_TAG_ATTRIBUTES, xmlAttribute, xmlElement, xmlInteger, xmlMatches, xmlNumber, xmlOn, xmlStartTag, xmlTwips } from './xml-elements';
 import { xmlBuilder, xmlParser } from './xml-parser';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
@@ -2151,6 +2151,9 @@ export interface ConvertResult {
   zoteroPrefs?: ZoteroDocPrefs;
   zoteroBiblData?: ZoteroBiblData;
   images?: Map<string, Uint8Array>;
+  /** What the Markdown can't keep of the document, for the user, as the
+   *  tracked formatting changes import accepts (see formatChangesWarning) */
+  warnings: string[];
 }
 
 // XML helpers
@@ -19035,6 +19038,74 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptio
   return result;
 }
 
+// The records of Word's tracked formatting changes (ECMA-376 Part 1,
+// 17.13.5): what a run's, a paragraph's, a section's, a table's, a row's
+// exceptions to its table's, a row's or a cell's properties, a table's grid
+// or a paragraph's numbering were before a reviewer changed them with Track
+// Changes on. Word shows each record as one change. CriticMarkup has no
+// syntax for one, so import reads the properties as they are now, which
+// accepts the change.
+const FORMAT_CHANGES = ['rPrChange', 'pPrChange', 'sectPrChange', 'tblPrChange', 'tblPrExChange', 'trPrChange', 'tcPrChange', 'tblGridChange', 'numberingChange'];
+
+// A record's start tag or a text box's, with its attributes as XML may
+// spell them, or the end tag of a paragraph's properties or a text box
+const FORMAT_CHANGE_TAGS = new RegExp('<(w:(?:' + FORMAT_CHANGES.join('|') + '|txbxContent))' + XML_TAG_ATTRIBUTES + '(/?)>|</(w:(?:pPr|txbxContent))\\s*>');
+
+/**
+ * The tracked formatting changes in a part's XML (see FORMAT_CHANGES), in
+ * order, each as the author it names, or undefined for none: one for each
+ * record, as Word shows them, in a deleted or inserted run as in any other,
+ * each read as an XML parser reads it, not in a comment, a CDATA section
+ * or a processing instruction (see xmlMatches). Not one in a text box,
+ * which import doesn't read, and whose text Word writes twice, for readers
+ * that know its drawing and for those that don't. Nor one in the
+ * properties of the document's last section, which come after every
+ * paragraph's properties, as a section break's are in its paragraph's:
+ * export keeps a template's (see template-sections.ts), so a round trip
+ * with the document as its template keeps the change.
+ */
+export function trackedFormatChanges(xml: string): Array<string | undefined> {
+  const authors: Array<string | undefined> = [];
+  // Those in a section's properties since the last paragraph's properties
+  // ended, which are a section break's where another paragraph's end after
+  // them
+  let section: Array<string | undefined> = [];
+  let textBoxes = 0;
+  for (const [tag, name, empty, end] of xmlMatches(xml, FORMAT_CHANGE_TAGS)) {
+    if (end === 'w:pPr') {
+      pushAll(authors, section);
+      section = [];
+    } else if (end === 'w:txbxContent') {
+      textBoxes = Math.max(0, textBoxes - 1);
+    } else if (name === 'w:txbxContent') {
+      if (!empty) textBoxes++;
+    } else if (textBoxes === 0) {
+      (name === 'w:sectPrChange' ? section : authors).push(xmlAttribute(tag, 'w:author'));
+    }
+  }
+  return authors;
+}
+
+/** The warning for the tracked formatting changes in the parts of `zip`
+ *  whose text import writes as Markdown, the body, the notes and the
+ *  comments (see trackedFormatChanges), which import accepts, or undefined
+ *  for none, with the authors they name where they're three or fewer, as a
+ *  table's grid's names none. Not those in the styles, whose definitions
+ *  import writes none of, nor in a header or footer, which it doesn't
+ *  read: export keeps a template's, records and all. */
+async function formatChangesWarning(zip: JSZip): Promise<string | undefined> {
+  const parts = await Promise.all(['word/document.xml', 'word/footnotes.xml', 'word/endnotes.xml', 'word/comments.xml'].map(path => readZipText(zip, path)));
+  const authors: Array<string | undefined> = [];
+  for (const xml of parts) if (xml !== undefined) pushAll(authors, trackedFormatChanges(xml));
+  if (authors.length === 0) return undefined;
+  const names = [...new Set(authors.filter(author => author?.trim()))];
+  const by = names.length > 0 && names.length <= 3
+    ? ' by ' + (names.length === 1 ? names[0] : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]) : '';
+  const one = authors.length === 1;
+  return 'Accepted ' + authors.length + ' tracked formatting change' + (one ? '' : 's') + by + '; Markdown has no syntax for '
+    + (one ? 'it' : 'them') + ', so the text shows ' + (one ? 'its' : 'their') + ' new formatting.';
+}
+
 /** The style most of the body's quote paragraphs are in, the first's on a
  *  tie, which export writes them all in, so the fewest change, however
  *  they group in quotes; GitHub, its default, needs no setting. */
@@ -19115,6 +19186,7 @@ export async function convertDocx(
     defaultTableDigits,
     defaultTableDecimalMark,
     defaultTableDigitGrouping,
+    formatChanges,
   } = await allNamed({
     inputs: documentContentInputs(zip, format, options?.imageFolder),
     zoteroPrefs: extractZoteroPrefs(zip),
@@ -19175,6 +19247,7 @@ export async function convertDocx(
     defaultTableDigits: extractDefaultTableDigits(zip),
     defaultTableDecimalMark: extractDefaultTableDecimalMark(zip),
     defaultTableDigitGrouping: extractDefaultTableDigitGrouping(zip),
+    formatChanges: formatChangesWarning(zip),
   });
 
   // Resolve pipeTableMaxLineWidth: explicit override > stored DOCX value > caller default > 120
@@ -19956,5 +20029,5 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images };
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: formatChanges === undefined ? [] : [formatChanges] };
 }

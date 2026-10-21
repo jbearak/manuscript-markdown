@@ -65,8 +65,10 @@ function* markupMatches(xml: string, { scan, groups }: MarkupScan, from: number)
 
 // An XML start tag's attributes after its name, as an XML parser reads
 // them: each after whitespace, with any whitespace around its =, and its
-// value in double or single quotes, which may hold a >
-const XML_TAG_ATTRIBUTES = '(?:\\s+[^\\s=/>]+\\s*=\\s*(?:"[^"]*"|\'[^\']*\'))*\\s*';
+// value in double or single quotes, which may hold a >. Also for a scan of
+// start and end tags together (see xmlMatches), as import's count of
+// tracked formatting changes (see trackedFormatChanges in converter.ts)
+export const XML_TAG_ATTRIBUTES = '(?:\\s+[^\\s=/>]+\\s*=\\s*(?:"[^"]*"|\'[^\']*\'))*\\s*';
 
 /** The start tag of the first element `name` in `xml` from `from`, as
  *  `<w:sz w:val="22"/>`, with its attributes as XML may spell them (see

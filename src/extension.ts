@@ -731,7 +731,11 @@ export function activate(context: vscode.ExtensionContext) {
 					await vscode.window.showTextDocument(bibDoc, vscode.ViewColumn.Beside);
 				}
 
-				vscode.window.showInformationMessage('Exported to Markdown successfully');
+				if (result.warnings.length > 0) {
+					vscode.window.showWarningMessage(`Exported to Markdown with warnings: ${result.warnings.join('; ')}`);
+				} else {
+					vscode.window.showInformationMessage('Exported to Markdown successfully');
+				}
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
 				vscode.window.showErrorMessage(`DOCX conversion failed: ${message}`);

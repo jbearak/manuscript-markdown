@@ -33,6 +33,8 @@ manuscript-markdown paper.docx
 
 Produces `paper.md` and `paper.bib` (if citations are present).
 
+Each warning goes to stderr, as for the tracked formatting changes import accepts, which Markdown has no syntax for (see [DOCX Converter](converter.md)).
+
 ### Markdown to DOCX
 
 ```sh
