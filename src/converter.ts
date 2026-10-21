@@ -1182,8 +1182,10 @@ function hostsIn(markdown: string, text: string, own: RunFormatting, limit: numb
  *  text back; undefined where they don't, as for [@a,p. 2]. Export runs a
  *  prefix's spaces together, and keeps one locator and one - for each key,
  *  the last, so [see  also @a] and [@a, p. 1; @a, p. 2] don't, nor does
- *  one with a line break in it. */
-function citationKeyRanges(text: string, open: number, close: number): Array<[number, number]> | undefined {
+ *  one with a line break in it. Read as Word's text (see readCitationItems)
+ *  but where `escapes` says to read it as export does (see
+ *  fallbackCitation). */
+function citationKeyRanges(text: string, open: number, close: number, escapes = false): Array<[number, number]> | undefined {
   const inner = text.slice(open + 1, close);
   // A line break, which export would read as a backslash and a line's end,
   // and where a line in it that starts a block, as <table> or #, would read
@@ -1197,7 +1199,7 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
   // isn't the one written from the items
   // As Word's text, whose backslashes import escapes, so they escape none
   // (see readCitationItems)
-  const items = readCitationItems(inner, false).map(item => {
+  const items = readCitationItems(inner, escapes).map(item => {
     if (item.markStart !== -1) raw.push([open + 1 + item.itemStart + item.markStart, open + 1 + item.itemEnd]);
     if (item.locator !== undefined) locators.set(item.key, item.locator);
     if (item.suppressed) suppressed.add(item.key);
@@ -1216,7 +1218,8 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
  *  text, or where a locator's backslash at its end would escape the ; after
  *  it, as in [@a, x\; @b], so @b would be more of the locator. Such a
  *  citation is text, as one of keys export doesn't know is (see
- *  citationKnown), each [ in it escaped. */
+ *  citationKnown), each [ in it escaped, but where it's export's own text
+ *  (see fallbackCitation). */
 function citationBoundsMove(text: string, open: number, close: number): boolean {
   if (escapedClose(text, close)) return true;
   const inner = text.slice(open + 1, close);
@@ -1230,6 +1233,36 @@ function citationBoundsMove(text: string, open: number, close: number): boolean 
 // An odd run of backslashes at the end, the last of which escapes what
 // comes after
 const ESCAPE_AT_END_RE = /(?:^|[^\\])(?:\\\\)*\\$/;
+
+/** Where citationBoundsMove finds that export would read the citation from
+ *  the [ at `open` in Word's `text` with other bounds, to the ] at `close`,
+ *  where export ends it (see citationEndInText), the ranges of its keys and
+ *  locators as export reads them (see citationKeyRanges), where the text is
+ *  the one export writes from those items for a citation it can't cite, as
+ *  for a missing key or in a deletion, of a key it knows (see
+ *  citationKnown). That text, as [@a, x\] y], [@a, p. 3\] or [@a, x\; y],
+ *  written as it is, reads back as that citation, as main kept one. Not
+ *  where a prefix has a backslash, which import escapes, so the item it
+ *  ends would end elsewhere, nor where the citation has a [ no backslash
+ *  escapes, as the inner one of [@a, [*see* @b, p. 2\], whose prefix's
+ *  stars import escapes, so a citation from it would read otherwise; such
+ *  text is text. */
+function fallbackCitation(text: string, open: number, close: number): Array<[number, number]> | undefined {
+  if (close === -1) return undefined;
+  const inner = text.slice(open + 1, close);
+  if (UNESCAPED_OPEN_RE.test(inner)) return undefined;
+  const items = readCitationItems(inner);
+  if (items.some(item => item.prefix.includes('\\'))) return undefined;
+  if (citationsNoted && !items.some(item => item.markStart !== -1 && knownCitationKeys.has(item.key))) return undefined;
+  return citationKeyRanges(text, open, close, true);
+}
+
+/** Export's own text for a citation it can't cite, from a [ in Word's text
+ *  (see fallbackCitation), and the ] export ends the citation at */
+type Fallback = { end: number; raw?: Array<[number, number]> };
+
+// A [ after an even run of backslashes, which escape none of it
+const UNESCAPED_OPEN_RE = /(?:^|[^\\])(?:\\\\)*\[/;
 
 /** Whether a key of the citation from the [ at `open` to the ] at `close`
  *  in `text` is one export knows (see knownCitationKeys), so it may have
@@ -1361,6 +1394,35 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     for (let i = text.indexOf('['); i !== -1; i = text.indexOf('[', i + 1)) escaped.add(i);
     for (let i = text.indexOf(']'); i !== -1; i = text.indexOf(']', i + 1)) escaped.add(i);
   }
+  // Export's own text for a citation it can't cite (see fallbackCitation),
+  // from a [ export would read with other bounds than Word's text gives
+  // (see citationBoundsMove), where the loop below needs to know, as before
+  // a ( it would be a link's: from the left, each [ once, and none in the
+  // text of one that isn't, whose ] export reads past to the same ] from
+  // each [ in it, which a backslash escapes, so no text is read again
+  const fallbacks = new Map<number, Fallback>();
+  /** Export's own text from the [ at i (see Fallback), but none where `skip` */
+  const fallbackFrom = (i: number, skip: boolean): Fallback => {
+    let found = fallbacks.get(i);
+    if (!found) {
+      const end = skip ? -1 : citationEndInText(text, i);
+      fallbacks.set(i, found = { end, raw: fallbackCitation(text, i, end) });
+    }
+    return found;
+  };
+  if (text.includes('\\')) {
+    let failedUntil = -1;
+    for (let i = text.indexOf('['), close = -1, inner = -1; i !== -1; i = text.indexOf('[', i + 1)) {
+      if (close <= i) close = text.indexOf(']', i);
+      if (close === -1) break;
+      if (inner <= i) inner = text.indexOf('[', i + 1);
+      if (inner !== -1 && inner < close || text[i - 1] === '!' || !/^-?@/.test(text.slice(i + 1, i + 3))
+        || !'([{'.includes(text[close + 1] ?? (after?.first || ' ')) || citationEndInText(text, i, false) !== close
+        || !citationBoundsMove(text, i, close)) continue;
+      const found = fallbackFrom(i, i < failedUntil);
+      if (!found.raw) failedUntil = Math.max(failedUntil, found.end);
+    }
+  }
   // A [ that would start a link, image, note reference or span: [a](b),
   // [a][b], [a]{.underline} or [^1]. From the right, as an escaped [ inside
   // one doesn't nest. Each [ that isn't escaped closes at the nearest ]
@@ -1399,8 +1461,8 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     // With no [ before its ], so each citation's text is read once, nor a
     // ! before it, which makes it an image's
     else if (close !== undefined && (inner === -1 || inner > close) && text[i - 1] !== '!' && /^-?@/.test(text.slice(i + 1, i + 3))
-      && citationEndInText(text, i, false) === close && citationKeyRanges(text, i, close) && citationKnown(text, i, close)
-      && !citationBoundsMove(text, i, close)) opens = false;
+      && citationEndInText(text, i, false) === close && (citationBoundsMove(text, i, close) ? fallbacks.get(i)?.raw
+        : citationKeyRanges(text, i, close) && citationKnown(text, i, close))) opens = false;
     else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
     else if (!after) opens = true;
     else {
@@ -1431,6 +1493,9 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   // The next < from the citation at hand, found once for the whole text,
   // not again from each citation's [
   let tag = text.indexOf('<');
+  // The ] export reads to from the last [ whose text isn't export's own,
+  // where it would read other bounds (see fallbacks above)
+  let failedUntil = -1;
   // As export reads one: an @ after the [ takes it to the next ], past any
   // [ before it, and whatever follows, as [@a[b] or [@a](b) do; any other
   // [ starts one only with no [ before its ] (see citationEnd)
@@ -1441,7 +1506,12 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     const open = text.indexOf('[', i + 1);
     if (open !== -1 && open < close && !/^-?@/.test(text.slice(i + 1, i + 3))) continue;
     if (citationEndInText(text, i, false) !== close) continue;
-    const raw = citationKeyRanges(text, i, close);
+    // Where export would read it with other bounds, export's own text for a
+    // citation it can't cite, to the ] export ends it at
+    const moves = citationBoundsMove(text, i, close);
+    const fallback = moves ? fallbackFrom(i, i < failedUntil) : undefined;
+    if (fallback && !fallback.raw) failedUntil = Math.max(failedUntil, fallback.end);
+    const raw = fallback?.raw ?? citationKeyRanges(text, i, close);
     if (!raw) {
       escaped.add(i);
       continue;
@@ -1449,11 +1519,12 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     // Text, as is each [ in it, which export would read as a citation's once
     // the first is escaped, as in [@a[@b], or in [@a, [*see* @b, p. 2\],
     // whose inner one's stars are escaped
-    if (!citationKnown(text, i, close) || citationBoundsMove(text, i, close)) {
+    if (!fallback?.raw && (moves || !citationKnown(text, i, close))) {
       for (let k = i; k !== -1 && k < close; k = text.indexOf('[', k + 1)) escaped.add(k);
       i = close;
       continue;
     }
+    if (fallback?.raw) close = fallback.end;
     for (const [start, end] of raw) for (let k = start; k < end; k++) keys.add(k);
     // A tag in a prefix, which export decodes, has its < escaped, not
     // written as a reference, whose ; would end an item

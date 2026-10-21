@@ -10726,17 +10726,57 @@ describe('Word text that reads as Markdown', () => {
     expect(buildMarkdown(items, new Map()).trim()).toBe(md);
   });
 
-  test.each([
-    ['[@a, x\\] *y*]', ['a']], ['[@a, x\\; @b]', ['a', 'b']],
-  ])('escapes %s, Word\'s text of a key export knows, whose backslash would escape its ] or a ;', async (text, keys) => {
-    // Its key and its locator were written as they were, so export read
-    // the \] as text, and the citation to the last ], with the stars'
-    // escapes in it, or the \; as text, and @b as more of the locator
+  test.each(['[@a, x\\] *y*]', '[@a, x\\; @b]'])('writes %s, Word\'s text of a key export knows, whose backslash escapes its ] or a ;, as export writes a citation whose key is missing, as it is', async (text) => {
+    // Its stars were escaped, as text after its first ], so export read
+    // their escapes into its locator, which Word then showed; then its [ was
+    // escaped, so it was text. Export reads it to the last ], or as one
+    // item with the \; as text, and writes it so for a missing key, so it
+    // stays as it is (see fallbackCitation in converter.ts)
     const { line, markdown } = await importCited(text, '[@a]');
+    expect(line).toBe('P ' + text + ' Q.');
     expect((await exported(markdown)).text[1]).toBe('P ' + text + ' Q.');
     expect(await roundTrip(markdown)).toBe(markdown);
-    // No citation export reads in it, or one of the keys Word's text has
-    for (const run of parseMd(line).flatMap(token => token.runs ?? []).filter(run => run.type === 'citation')) expect(run.keys).toEqual(keys);
+    expect(parseMd(line).flatMap(token => token.runs ?? []).filter(run => run.type === 'citation').map(run => run.keys)).toEqual([['a']]);
+  });
+
+  // Export's text for a citation it can't cite, of a missing key or a
+  // deleted citation, with a \] a later ] ends it after, or none does, a \[
+  // and a \] in its locator, or a \;, which import read with other bounds,
+  // as Word's own text, so it escaped its [, and the citation, with its
+  // note of missing data, was gone after the next trip. Each Markdown, in
+  // a document whose .bib has doe2020, and the keys whose data export
+  // notes missing.
+  const BIB_DOE = '@book{doe2020,\n  author = {Doe, Jane},\n  title = {One},\n  year = {2020}\n}\n';
+  test.each([
+    ['a missing key', 'A [@missing, x\\] y] b.', ['missing']],
+    ['a missing key whose citation a \\] ends', 'A [@missing, p. 3\\] b.', ['missing']],
+    ['a missing key with a \\[ and a \\] in its locator', 'A [@missing, p. 4 \\[n. 2\\]] b.', ['missing']],
+    ['a missing key with stars after a \\]', 'A [@missing, x\\] *y*] b.', ['missing']],
+    ['a missing key with a ( after a \\]', 'A [@missing, x\\](y) z] b.', ['missing']],
+    ['a missing key with a \\; in its locator', 'A [@missing, x\\; y] b.', ['missing']],
+    ['a missing key whose author is suppressed', 'A [-@missing, x\\] y] b.', ['missing']],
+    ['a missing key after a prefix', 'A [see @missing, x\\] y] b.', ['missing']],
+    ['a missing key after an escaped backslash', 'A \\\\[@missing, x\\] y] b.', ['missing']],
+    ['a deleted citation', 'A {--[@doe2020, x\\] y]--} b.', []],
+    ['a deleted citation with a \\;', 'A {--[@doe2020, x\\; y]--} b.', []],
+    ['a deleted citation whose author is suppressed', 'A {--[-@doe2020, x\\] y]--} b.', []],
+    ['a deleted citation with a ( after a \\]', 'A {--[@doe2020, x\\](y) z]--} b.', []],
+    ['a missing key in an insertion', 'A {++[@missing, x\\] y]++} b.', ['missing']],
+    ['a citation a substitution deletes', 'A {~~[@doe2020, x\\] y]~>new~~} b.', []],
+    ['a missing key a substitution inserts', 'A {~~old~>[@missing, x\\] y]~~} b.', ['missing']],
+    ['a missing key in a note', 'A[^1] b.\n\n[^1]: N [@missing, x\\] y] n.', []],
+    ['a citation deleted in a note', 'A[^1] b.\n\n[^1]: N {--[@doe2020, x\\] y]--} n.', []],
+    ['a missing key in a table cell', '| a | b |\n| --- | --- |\n| [@missing, x\\] y] | c |', ['missing']],
+    ['a citation deleted in a table cell', '| a | b |\n| --- | --- |\n| {--[@doe2020, x\\] y]--} | c |', []],
+    ['a missing key a comment is on', 'A {==[@missing, x\\] y]==}{>>c<<} b.', ['missing']],
+    ['a missing key in a comment', 'A {==x==}{>>see [@missing, x\\] y]<<} b.', []],
+  ])('keeps export\'s text for %s, as a citation over two trips', async (_name, md, missing) => {
+    const notes = missing.map(key => '\n\nCitation data for @' + key + ' was not found in the bibliography file.').join('');
+    let markdown = md + '\n';
+    for (let trip = 0; trip < 2; trip++) {
+      markdown = strip((await convertDocx((await convertMdToDocx(markdown, { bibtex: BIB_DOE })).docx)).markdown);
+      expect(markdown).toBe(md + notes + '\n');
+    }
   });
 
   // Which escaped only the outer [, so the inner one, whose prefix's stars
@@ -10782,6 +10822,18 @@ describe('Word text that reads as Markdown', () => {
     };
     const small = time(5000);
     expect(time(20000) / small).toBeLessThan(8);
+  }, 30000);
+
+  test.each([
+    ['a space', '[@a,  x\\] \\'], ['a (', '[@a,  x\\](\\'],
+  ])('writes Word\'s text of many citations, each with a \\] and %s after it, which export reads to the last ], in linear time', (_name, unit) => {
+    // Each [ looked for export's own text for a citation from it, to that
+    // ], where none was from the [ before it (see fallbackCitation)
+    const time = (n: number) => {
+      return fastestRun(() => buildMarkdown([{ type: 'text', text: unit.repeat(n) + 'y]', commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map(), { citationKeys: new Set(['a']) }));
+    };
+    const small = time(2000);
+    expect(time(8000) / small).toBeLessThan(8);
   }, 30000);
 
   test('reads the keys of deleted text of many [ in linear time', () => {
