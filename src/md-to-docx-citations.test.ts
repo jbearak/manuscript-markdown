@@ -1292,6 +1292,36 @@ describe('BibLaTeX\'s pubstate as citeproc\'s status', () => {
     expect(status('  pubstate = {' + pubstate + '}')).toBe(expected);
   });
 
+  // Whose TeX the value's text has lost, as the group around the whole of
+  // {{inpress}} or the \url of \url{inpress}, which read as in press
+  it.each([
+    ['a key in a group around the whole value as written', '{{inpress}}', 'inpress'],
+    ['a key in a group around the whole value, with spaces, as written', '{ {inpress} }', 'inpress'],
+    ['a key in a group around a quoted value as written', '"{inpress}"', NOCASE + 'inpress</span>'],
+    ['a key in \\url\'s argument as written', String.raw`{\url{inpress}}`, 'inpress'],
+    ['a key among other words in \\url\'s argument as written', String.raw`{\url{a inpress}}`, 'a inpress'],
+    ['a key after a command\'s name, which TeX joins to it, as written', String.raw`{\emph inpress}`, String.raw`\emph inpress`],
+    ['a key in math as written', '{$a inpress$}', '$a inpress$'],
+    ['a key with a tie as written', '{inpress~now}', 'inpress\u00A0now'],
+    ['a key in quotes as its state', '"inpress"', 'in press'],
+    ['a key with no braces or quotes as its state', 'inpress', 'in press'],
+    ['a key with spaces around it as its state', '{  inpress  }', 'in press'],
+    ['a key with an empty group in it as its state', '{in{}press}', 'in press'],
+    ['a key with an empty group after it as its state', '{inpress{}}', 'in press'],
+    ['a key after a command\'s empty group as its state', String.raw`{\ss{} inpress}`, '\u00DF in press'],
+    ['a key after a command\'s argument as its state', String.raw`{\emph{x} inpress}`, String.raw`\emph{x} in press`],
+  ])('reads %s, as pandoc does', (_name, pubstate, expected) => {
+    expect(status('  pubstate = ' + pubstate)).toBe(expected);
+  });
+
+  it('reads a pubstate\'s text as it is where it has changed since it was read, or wasn\'t', () => {
+    const entry = parseBibtex('@article{a,\n  pubstate = {inpress}\n}').get('a')!;
+    entry.fields.set('pubstate', 'inpress now');
+    entry.texFields!.set('pubstate', 'inpress now');
+    expect(buildItemData(entry).status).toBe('inpress now');
+    expect(buildItemData({ type: 'article', key: 'a', fields: new Map([['pubstate', 'inpress']]) }).status).toBe('inpress');
+  });
+
   it('reads a status field as written, where there is no pubstate', () => {
     expect(status('  status = {Accepted}')).toBe('Accepted');
     expect(status('  status = {inpress}')).toBe('inpress');
