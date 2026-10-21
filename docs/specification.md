@@ -96,7 +96,9 @@ After a trip through Word, `title` and `author` come from the document, so an ed
 
 A Word document without those properties, such as one created in Word or exported by an earlier version, imports as before, without those keys.
 
-Export reads a line under another key that names one of its own settings, such as `font: Arial` in a mapping under `format`, as that setting, and writes it to Word. A key with such a line isn't kept: import writes the setting it read in its place, as before.
+Export reads a line under another key that names one of its own settings, such as `font: Arial` in a mapping under `format`, as that setting, and writes it to Word. A key with such a line isn't kept: import writes the setting it read in its place, as before. Nor is a key in quotes that names a setting, such as `"title"`.
+
+Kept keys come back with their lines exactly as written, including spaces at line ends and the blank lines a `|+` or `>+` value keeps at the end of the frontmatter. Nothing is kept, and import writes the frontmatter as before, where the frontmatter isn't a plain block mapping with each key at the start of its line: a flow mapping in `{` and `}`, frontmatter indented as a whole, a `?` key, or a `...` line. Nothing is kept either where a key that isn't kept defines an anchor, such as `title: &t Title`, since a kept key could refer to it.
 
 ### Heading and Title Font Configuration
 

@@ -82,7 +82,11 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
     ['a literal value with its line ends kept', '---\nnocite: |+\n  @a, @b\n\nauthor: A\n---\n\nBody.\n'],
     ['a blank line after a key held, before a key import writes', '---\ndate: 2024\n\n\n# Title\ntitle: T\n---\n\nBody.\n', '---\ndate: 2024\n\n\ntitle: T\n---\n\nBody.\n'],
     ['a list of mappings', '---\ntitle: T\naffiliations:\n- id: 1\n  name: "Uni, Dept."\n- id: 2\n  name: Lab\n---\n\nBody.\n'],
-    ['a key in quotes and a key of a name export reads in another case', '---\n"title": Quoted\nTitle: Cased\n---\n\nBody.\n'],
+    ['a key in quotes and a key of a name export reads in another case', '---\n"date": Quoted\nTitle: Cased\n---\n\nBody.\n'],
+    ['a last literal value with spaces at its end', '---\ntitle: T\nabstract: |\n  Text   \n---\n\nBody.\n'],
+    ['a last literal value with its line ends kept', '---\ntitle: T\nnocite: |+\n  @a\n\n\n---\n\nBody.\n'],
+    ['a last folded value with its line ends kept', '---\ndescription: >+\n  Folded\n  text\n\n---\n\nBody.\n'],
+    ['an anchor and an alias in keys held', '---\nbase: &b x\nother: *b\ntitle: T\n---\n\nBody.\n'],
     ['tabs and spaces at line ends', '---\ndate: 2024\t \nformat:\n\tdocx: default\n---\n\nBody.\n'],
   ])('come back as written: %s', async (_, markdown, expected = markdown) => {
     expect(await roundTrip(markdown)).toBe(expected);
@@ -116,8 +120,8 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
     expect(await roundTrip(markdown, removeTitle)).toBe('---\ndate: 2024\nauthor: A\nlang: en\n---\n\nBody.\n');
     const removeAuthor = editPart('docProps/core.xml', xml => xml.replace(/<dc:creator>A<\/dc:creator>\n?/, ''));
     expect(await roundTrip(markdown, removeAuthor)).toBe('---\ntitle: T\n\ndate: 2024\nlang: en\n---\n\nBody.\n');
-    // Nor at its end, as export reads it without one there
-    expect(await roundTrip('---\nlang: en\n\ntitle: T\n---\n\nBody.\n', removeTitle)).toBe('---\nlang: en\n---\n\nBody.\n');
+    // A blank line it ends with stays, as a `|+` value's would
+    expect(await roundTrip('---\nlang: en\n\ntitle: T\n---\n\nBody.\n', removeTitle)).toBe('---\nlang: en\n\n---\n\nBody.\n');
   });
 
   it('take the values Word has for the keys import writes, with an edit in Word', async () => {
@@ -147,6 +151,24 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
   it('leave out an entry of a record export didn\'t write, with a line that would close the frontmatter', async () => {
     const tamper = editPart('docProps/custom.xml', xml => xml.replace('{"text":"date: 2024"}', '{"text":"date: 2024\\n---\\nlang: en"}'));
     expect(await roundTrip('---\ntitle: T\ndate: 2024\n---\n\nBody.\n', tamper)).toBe('---\ntitle: T\n---\n\nBody.\n');
+  });
+
+  it.each([
+    ['a flow mapping', '---\n{\ndate: 2024,\nlang: en\n}\n---\n\nBody.\n', 'Body.\n'],
+    ['a flow mapping on one line', '---\n{date: 2024, lang: en}\n---\n\nBody.\n', 'Body.\n'],
+    ['frontmatter indented as a whole', '---\n  date: 2024\n  lang: en\n---\n\nBody.\n', 'Body.\n'],
+    ['a list before any key', '---\n- date\nlang: en\n---\n\nBody.\n', 'Body.\n'],
+    ['a complex key', '---\n? date\n: 2024\nlang: en\n---\n\nBody.\n', 'Body.\n'],
+    ['the end of a YAML document', '---\ndate: 2024\n...\nlang: en\n---\n\nBody.\n', 'Body.\n'],
+    ['a key with a comment before its colon', '---\ndate # when: 2024\n---\n\nBody.\n', 'Body.\n'],
+    ['an anchor in a key that goes, which a key held could refer to', '---\ntitle: &t T\nsubtitle: *t\n---\n\nBody.\n', '---\ntitle: &t T\n---\n\nBody.\n'],
+  ])('are no record of frontmatter that isn\'t a block mapping read exactly, which goes as before: %s', async (_, markdown, before) => {
+    expect(await recordValues(markdown)).toEqual([]);
+    expect(await roundTrip(markdown)).toBe(before);
+  });
+
+  it('are no record of a key in quotes YAML reads as one export reads, as it writes that key from Word', async () => {
+    expect(await recordValues('---\n"title": Quoted\n\'csl\': x\ndate: 1\n---\n\nBody.\n')).toEqual(['[{"text":"date: 1"}]']);
   });
 
   it('are no record of frontmatter with only keys export reads, nor of one it reads a setting from', async () => {
