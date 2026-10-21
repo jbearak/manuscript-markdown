@@ -1681,6 +1681,9 @@ interface NoteBodyContext {
 
 export interface TableRow {
   isHeader: boolean;
+  // A first row that's a header by its bold alone, which it is where
+  // export didn't write its table (see firstRowHeader)
+  boldHeader?: boolean;
   cells: TableCell[];
   // The change Word tracks the row's insertion or deletion with, which its
   // cells' text is in (see rowRevision)
@@ -1706,13 +1709,13 @@ function cellParagraphs(nodes: XmlNode[]): XmlNode[] {
 
 /** A style's own properties in styles.xml: its w:pPr's children and its
  *  w:rPr's, its base's ID, and a table style's for parts of a table, by
- *  each w:tblStylePr's type, and how many rows and columns a band of it
- *  takes, where it sets them */
+ *  each w:tblStylePr's type, with its cells' (w:tcPr), and how many rows
+ *  and columns a band of it takes, where it sets them */
 interface StyleProperties {
   pPr: XmlNode[];
   rPr: XmlNode[];
   basedOn: string;
-  parts: Map<string, { pPr: XmlNode[]; rPr: XmlNode[] }>;
+  parts: Map<string, { pPr: XmlNode[]; rPr: XmlNode[]; tcPr: XmlNode[] }>;
   rowBand?: number;
   colBand?: number;
 }
@@ -1895,8 +1898,10 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
     const style: StyleProperties = {
       pPr: childrenOf(children, 'w:pPr'), rPr: childrenOf(children, 'w:rPr'),
       basedOn: getAttr(children.find(c => c['w:basedOn'] !== undefined), 'val'),
-      parts: new Map(children.filter(c => c['w:tblStylePr'] !== undefined).map(c => [getAttr(c, 'type'),
-        { pPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:pPr'), rPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:rPr') }])),
+      parts: new Map(children.filter(c => c['w:tblStylePr'] !== undefined).map(c => [getAttr(c, 'type'), {
+        pPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:pPr'), rPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:rPr'),
+        tcPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:tcPr'),
+      }])),
       rowBand: band('w:tblStyleRowBandSize'), colBand: band('w:tblStyleColBandSize'),
     };
     if (!styles.byId.has(id)) styles.byId.set(id, style);
@@ -6101,9 +6106,9 @@ function parseNoteBody(
           const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
           const rawRows: Parameters<typeof computeRowspans>[0] = [];
-          const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
           // Where each cell is, for its table style's parts
           const look = tableLook(tblChildren);
+          const firstRowIsHeader = firstRowHeader(tblChildren, context.styleLayouts, look);
           const rowCount = tblChildren.filter((c) => c['w:tr'] !== undefined).length;
           const columnCount = tableColumnCount(tblChildren);
           for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
@@ -6136,10 +6141,9 @@ function parseNoteBody(
             }
             rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells, ...(ownChange ? { revision: ownChange } : {}) });
           }
-          if (firstRowHeaderByLook && rawRows.length > 0) {
-            rawRows[0].isHeader = true;
-          }
+          if (firstRowIsHeader === true && rawRows.length > 0) rawRows[0].isHeader = true;
           const rows = computeRowspans(rawRows);
+          if (firstRowIsHeader === 'bold' && rows.length > 0 && !rows[0].isHeader) rows[0].boldHeader = true;
           if (rows.length > 0) {
             // As in extractDocumentContent: a tracked mark before the table
             if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
@@ -6871,13 +6875,123 @@ function cellParagraphMarks(cellContent: ContentItem[]): { marks?: (RevisionInfo
   return marks.some(mark => mark) ? { marks } : {};
 }
 
-function tableHasFirstRowHeader(tblChildren: XmlNode[]): boolean {
-  const tblPrNode = tblChildren.find((c) => c['w:tblPr'] !== undefined);
-  if (!tblPrNode) return false;
-  const tblPrChildren = asXmlNodes(tblPrNode['w:tblPr']);
-  const tblLookNode = tblPrChildren.find((c) => c['w:tblLook'] !== undefined);
-  if (!tblLookNode) return false;
-  return xmlOn(getAttr(tblLookNode, 'firstRow'));
+/**
+ * Whether a table's first row is a header row as Word shows one, besides
+ * a row of its own w:tblHeader, which Word repeats on each page (see
+ * rowHasHeaderProp): where its style shows it apart (see
+ * styleShowsFirstRow), or where Word shows all its text in bold (see
+ * firstRowBold). tblLook's firstRow alone doesn't make it one, as Word
+ * turns that on for each table it inserts, whose Table Grid shows the row
+ * as it shows the rest. 'bold' for a row that's a header by its bold alone
+ * with tblLook's firstRow off, as export writes a table whose first row
+ * isn't its header, so that one export wrote without a header row, its
+ * first row bold, as `**a**` in each cell, stays without one (see
+ * buildMarkdownOnce). With firstRow on, which export writes only with a
+ * header first row, the bold makes it one, as where Word took the row's
+ * tblHeader off.
+ */
+function firstRowHeader(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean | 'bold' {
+  if (styleShowsFirstRow(tblChildren, layouts, look)) return true;
+  if (!firstRowBold(tblChildren, layouts, look)) return false;
+  return look.firstRow || 'bold';
+}
+
+/** Whether a border's element, as a w:tcBorders or a w:pBdr, draws any
+ *  border: one of a style, not none or nil */
+function drawsBorder(node: XmlNode, tag: string): boolean {
+  return asXmlNodes(node[tag]).some(side => !['', 'none', 'nil'].includes(getAttr(side, 'val')));
+}
+
+/** Whether a w:shd shades anything: with a pattern, or a fill but none or
+ *  automatic */
+function shades(node: XmlNode): boolean {
+  const val = getAttr(node, 'val');
+  const fill = getAttr(node, 'fill');
+  return val !== 'nil' && (val !== '' && val !== 'clear' || fill !== '' && fill !== 'auto' || getAttr(node, 'themeFill') !== '');
+}
+
+/** What of a part of a table style Word shows the text of its cells, or
+ *  the cells, with, by the properties it's in and its element, and whether
+ *  the element's value shows it: a toggle on, as bold, an underline, a
+ *  colour, a highlight, a size or a font, an alignment but left, as Word
+ *  shows a paragraph of none, shading or a border */
+const TABLE_PART_SHOWS: (readonly [kind: 'pPr' | 'rPr' | 'tcPr', tag: string, shows: (node: XmlNode, tag: string) => boolean])[] = [
+  ...['w:b', 'w:i', 'w:caps', 'w:smallCaps', 'w:strike', 'w:dstrike', 'w:outline', 'w:shadow', 'w:emboss', 'w:imprint']
+    .map(tag => ['rPr', tag, (node: XmlNode) => isToggleOn([node], tag)] as const),
+  ['rPr', 'w:u', node => getAttr(node, 'val') !== 'none'],
+  ['rPr', 'w:color', node => getAttr(node, 'val') !== 'auto' || getAttr(node, 'themeColor') !== ''],
+  ['rPr', 'w:highlight', node => getAttr(node, 'val') !== 'none'],
+  ['rPr', 'w:shd', shades],
+  ['rPr', 'w:sz', () => true],
+  ['rPr', 'w:rFonts', () => true],
+  ['pPr', 'w:jc', node => ['center', 'right', 'end'].includes(getAttr(node, 'val'))],
+  ['pPr', 'w:shd', shades],
+  ['pPr', 'w:pBdr', drawsBorder],
+  ['tcPr', 'w:shd', shades],
+  ['tcPr', 'w:tcBorders', drawsBorder],
+];
+
+/** Whether a table's style shows its first row apart: where tblLook turns
+ *  on the style's part for it, and the part, its own or else its base's,
+ *  for each property, as styledProperty reads a part, sets something Word
+ *  shows (see TABLE_PART_SHOWS). Table Grid, the style of a table Word
+ *  inserts, has no such part. */
+function styleShowsFirstRow(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
+  if (!look.firstRow || !layouts) return false;
+  const table = styleChain(layouts.table, styleById(layouts.table, tableStyleId(tblChildren, layouts)) ?? styleById(layouts.table, layouts.defaultTableStyle));
+  const parts = table.map(style => style.parts.get('firstRow'));
+  return TABLE_PART_SHOWS.some(([kind, tag, shows]) => {
+    const node = firstValue(parts.map(part => part?.[kind]), properties => properties.find(c => c[tag] !== undefined));
+    return node !== undefined && shows(node, tag);
+  });
+}
+
+/**
+ * Whether Word shows all the text of a table's first row in bold, as a row
+ * of headings: each run of text but whitespace alone, which shows no bold,
+ * and not a hidden run's, in the elements the walk of a table's runs reads
+ * (see TABLE_CONTENT), its bold its own or else its styles', for where its
+ * cell is in the table (see styledProperty), and some text. Not where a
+ * run's bold is unknown, as from a character style styles.xml doesn't have.
+ */
+function firstRowBold(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
+  const rows = tblChildren.filter(c => c['w:tr'] !== undefined);
+  if (rows.length === 0) return false;
+  const tableStyle = tableStyleId(tblChildren, layouts);
+  const cols = tableColumnCount(tblChildren);
+  let text = false;
+  // Whether each run of text in `nodes`, at `level` of the table, is bold
+  const bold = (nodes: XmlNode[], level: TableLevel, place: CellPlace, paragraphStyle?: string): boolean => nodes.every(node => Object.keys(node).every(key => {
+    if (key === ':@' || !Array.isArray(node[key]) || TABLE_SHOWS_NOTHING.has(key)) return true;
+    const children = asXmlNodes(node[key]);
+    const inner = Object.hasOwn(TABLE_CONTENT[level], key) ? TABLE_CONTENT[level][key] : undefined;
+    if (key === 'w:p' && inner) {
+      const pPr = children.find(c => c['w:pPr'] !== undefined);
+      const pStyle = pPr && asXmlNodes(pPr['w:pPr']).find(c => c['w:pStyle'] !== undefined);
+      return bold(children, inner, place, pStyle ? documentStyleId(pStyle) : undefined);
+    }
+    if (inner) return bold(children, inner, place, paragraphStyle);
+    if (key !== 'w:r' || level !== 'paragraph') return true;
+    const rPr = children.find(c => c['w:rPr'] !== undefined);
+    const rPrChildren = rPr ? asXmlNodes(rPr['w:rPr']) : [];
+    if (isToggleOn(rPrChildren, 'w:vanish')) return true;
+    const shown = children.map(child => child['w:t'] !== undefined ? nodeText(asXmlNodes(child['w:t']))
+      : child['w:delText'] !== undefined ? nodeText(asXmlNodes(child['w:delText'])) : '').join('');
+    if (!/\S/.test(shown)) return true;
+    text = true;
+    return styledProperty(layouts, 'rPr', rPrChildren, { style: paragraphStyle, tableStyle, place }, rPr => toggleIn(rPr, 'w:b'))?.value === true;
+  }));
+  let col = 0;
+  for (const tc of asXmlNodes(rows[0]['w:tr']).filter(c => c['w:tc'] !== undefined)) {
+    const tcChildren = asXmlNodes(tc['w:tc']);
+    const tcPr = tcChildren.find(c => c['w:tcPr'] !== undefined);
+    const gridSpan = tcPr && asXmlNodes(tcPr['w:tcPr']).find(c => c['w:gridSpan'] !== undefined);
+    const val = gridSpan ? xmlInteger(getAttr(gridSpan, 'val')) ?? NaN : NaN;
+    const span = val > 1 ? val : 1;
+    if (!bold(tcChildren, 'cell', { row: 0, rows: rows.length, col, span, cols, look })) return false;
+    col += span;
+  }
+  return text;
 }
 
 function rowHasHeaderProp(trChildren: XmlNode[]): boolean {
@@ -7759,9 +7873,9 @@ export async function extractDocumentContent(
           const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
           const rawRows: Parameters<typeof computeRowspans>[0] = [];
-          const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
           // Where each cell is, for its table style's parts
           const look = tableLook(tblChildren);
+          const firstRowIsHeader = firstRowHeader(tblChildren, styleLayouts, look);
           const rowCount = tblChildren.filter((c) => c['w:tr'] !== undefined).length;
           const columnCount = tableColumnCount(tblChildren);
           for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
@@ -7795,10 +7909,9 @@ export async function extractDocumentContent(
             }
             rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells, ...(ownChange ? { revision: ownChange } : {}) });
           }
-          if (firstRowHeaderByLook && rawRows.length > 0) {
-            rawRows[0].isHeader = true;
-          }
+          if (firstRowIsHeader === true && rawRows.length > 0) rawRows[0].isHeader = true;
           const rows = computeRowspans(rawRows);
+          if (firstRowIsHeader === 'bold' && rows.length > 0 && !rows[0].isHeader) rows[0].boldHeader = true;
           if (rows.length > 0) {
             // A tracked mark before the table is the break that ends the
             // paragraph before it (see joinTrackedParagraphBreaks), which an
@@ -15380,6 +15493,13 @@ function buildMarkdownOnce(
   const indicesRead = (tables: Set<number> | null | undefined): Set<number> | undefined => tables && writtenAt
     ? new Set(writtenAt.flatMap((at, index) => at !== undefined && tables.has(at) ? [index] : []))
     : tables ?? undefined;
+  // A first row that's a header by its bold alone is one where export
+  // didn't write its table (see firstRowHeader): one without the format
+  // export writes for each table it writes
+  const tableFormats = settingsRead(options?.tableFormatMapping);
+  tablesRead.forEach(({ rows }, index) => {
+    if (rows[0]?.boldHeader && !tableFormats?.has(String(index))) rows[0].isHeader = true;
+  });
   const embedDirectiveMapping = settingsRead(options?.embedDirectiveMapping);
   // How many tables the body and each note have with each first row and
   // text, which the HTML export wrote around one goes to no other while
@@ -15799,7 +15919,7 @@ function buildMarkdownOnce(
     noteLabels,
     imageFormatMapping: options?.imageFormatMapping ?? undefined,
     noteImageFormatMapping: options?.noteImageFormatMapping ?? undefined,
-    tableFormatMapping: settingsRead(options?.tableFormatMapping),
+    tableFormatMapping: tableFormats,
     pipeTableAlignedMapping: settingsRead(options?.pipeTableAlignedMapping),
     gridSourceColWidthsMapping: settingsRead(options?.gridSourceColWidthsMapping),
     tableFontSizeMapping: settingsRead(options?.tableFontSizeMapping),

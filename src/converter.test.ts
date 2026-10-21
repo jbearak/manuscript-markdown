@@ -93,7 +93,7 @@ describe('DOCX table conversion', () => {
     const xml = wrapDocumentXml(
       '<w:tbl>'
       + '<w:tblPr><w:tblLook w:firstRow=\"1\"/></w:tblPr>'
-      + '<w:tr>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr>'
       + '<w:tc><w:p><w:r><w:t>H1</w:t></w:r></w:p></w:tc>'
       + '<w:tc><w:p><w:r><w:t>H2</w:t></w:r></w:p></w:tc>'
       + '</w:tr>'
@@ -186,7 +186,7 @@ describe('DOCX table conversion', () => {
     const xml = wrapDocumentXml(
       '<w:tbl>'
       + '<w:tblPr><w:tblLook w:firstRow=\"1\"/></w:tblPr>'
-      + '<w:tr><w:tc><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:tc></w:tr>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:tc></w:tr>'
       + '<w:tr><w:tc><w:p>'
       + '<w:commentRangeStart w:id="1"/>'
       + '<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>annotated</w:t></w:r>'
@@ -226,6 +226,15 @@ describe('DOCX table conversion', () => {
     const withHeader = wrapDocumentXml(
       '<w:tbl>'
       + '<w:tblPr><w:tblLook w:firstRow=\"1\"/></w:tblPr>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:p><w:r><w:t>H</w:t></w:r></w:p></w:tc></w:tr>'
+      + '<w:tr><w:tc><w:p><w:r><w:t>D</w:t></w:r></w:p></w:tc></w:tr>'
+      + '</w:tbl>'
+    );
+    // tblLook's firstRow alone, which Word turns on for each table it
+    // inserts, with no style that shows the row apart, is no header
+    const firstRowOnly = wrapDocumentXml(
+      '<w:tbl>'
+      + '<w:tblPr><w:tblLook w:firstRow=\"1\"/></w:tblPr>'
       + '<w:tr><w:tc><w:p><w:r><w:t>H</w:t></w:r></w:p></w:tc></w:tr>'
       + '<w:tr><w:tc><w:p><w:r><w:t>D</w:t></w:r></w:p></w:tc></w:tr>'
       + '</w:tbl>'
@@ -239,17 +248,19 @@ describe('DOCX table conversion', () => {
 
     const withHeaderMd = (await convertDocx(await buildSyntheticDocx(withHeader), 'authorYearTitle', { pipeTableMaxLineWidth: 0, gridTableMaxLineWidth: 0 })).markdown;
     const withoutHeaderMd = (await convertDocx(await buildSyntheticDocx(withoutHeader), 'authorYearTitle', { pipeTableMaxLineWidth: 0, gridTableMaxLineWidth: 0 })).markdown;
+    const firstRowOnlyMd = (await convertDocx(await buildSyntheticDocx(firstRowOnly), 'authorYearTitle', { pipeTableMaxLineWidth: 0, gridTableMaxLineWidth: 0 })).markdown;
 
     expect(withHeaderMd).toContain('<th>');
     expect(withoutHeaderMd).not.toContain('<th>');
     expect(withoutHeaderMd).toContain('<td>');
+    expect(firstRowOnlyMd).toBe(withoutHeaderMd);
   });
 
   test('indents table tags with default 2-space indent', async () => {
     const xml = wrapDocumentXml(
       '<w:tbl>'
       + '<w:tblPr><w:tblLook w:firstRow="1"/></w:tblPr>'
-      + '<w:tr><w:tc><w:p><w:r><w:t>H</w:t></w:r></w:p></w:tc></w:tr>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:p><w:r><w:t>H</w:t></w:r></w:p></w:tc></w:tr>'
       + '<w:tr><w:tc><w:p><w:r><w:t>D</w:t></w:r></w:p></w:tc></w:tr>'
       + '</w:tbl>'
     );
@@ -524,7 +535,7 @@ describe('Pipe table rendering', () => {
     const result = await buildAndConvertTable(
       '<w:tbl>'
       + '<w:tblPr><w:tblLook w:firstRow="1"/></w:tblPr>'
-      + '<w:tr>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr>'
       + '<w:tc><w:p><w:r><w:t>H1</w:t></w:r></w:p></w:tc>'
       + '<w:tc><w:p><w:r><w:t>H2</w:t></w:r></w:p></w:tc>'
       + '</w:tr>'
@@ -19613,6 +19624,8 @@ describe('Track changes (CriticMarkup)', () => {
       + texts.map(text => cell(text, kind, runsTracked)).join('') + '</w:tr>';
     const table = (...rows: string[]) => '<w:tbl><w:tblPr><w:tblLook w:firstRow="1"/></w:tblPr>'
       + '<w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>' + rows.join('') + '</w:tbl>';
+    /** A row of `texts` Word repeats as a header */
+    const header = (texts: string[]) => row(texts).replace('<w:tr>', '<w:tr><w:trPr><w:tblHeader/></w:trPr>');
     /** Each row's tracked change in a DOCX's first table, by its element */
     const rowChanges = async (docx: Uint8Array) => {
       const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
@@ -19623,7 +19636,7 @@ describe('Track changes (CriticMarkup)', () => {
     test('keeps the rows Word tracks as inserted and deleted', async () => {
       // Each cell's text came back in a change, but the row with none, so
       // accepting the deletion, or rejecting the insertion, left it empty
-      const docx = await buildSyntheticDocx(wrapDocumentXml(table(row(['a', 'b']), row(['c', 'd'], 'ins'), row(['e', 'f'], 'del'))));
+      const docx = await buildSyntheticDocx(wrapDocumentXml(table(header(['a', 'b']), row(['c', 'd'], 'ins'), row(['e', 'f'], 'del'))));
       const markdown = (await convertDocx(docx)).markdown;
       expect(markdown).toBe('| a | b |\n| --- | --- |\n| {++c++} | {++d++} |\n| {--e--} | {--f--} |\n');
       const again = (await convertMdToDocx(markdown)).docx;
@@ -19632,7 +19645,7 @@ describe('Track changes (CriticMarkup)', () => {
     });
 
     test('keeps a row Word tracks as inserted whose runs it doesn\'t', async () => {
-      const docx = await buildSyntheticDocx(wrapDocumentXml(table(row(['a', 'b']), row(['c', 'd'], 'ins', false))));
+      const docx = await buildSyntheticDocx(wrapDocumentXml(table(header(['a', 'b']), row(['c', 'd'], 'ins', false))));
       const markdown = (await convertDocx(docx)).markdown;
       expect(markdown).toBe('| a | b |\n| --- | --- |\n| {++c++} | {++d++} |\n');
       expect(await rowChanges((await convertMdToDocx(markdown)).docx)).toEqual(['', 'ins']);
