@@ -87,6 +87,8 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
     ['a last literal value with its line ends kept', '---\ntitle: T\nnocite: |+\n  @a\n\n\n---\n\nBody.\n'],
     ['a last folded value with its line ends kept', '---\ndescription: >+\n  Folded\n  text\n\n---\n\nBody.\n'],
     ['an anchor and an alias in keys held', '---\nbase: &b x\nother: *b\ntitle: T\n---\n\nBody.\n'],
+    ['quotes in literal values, where they open none', '---\nabstract: |\n  "open quote\n  \'another\n  key: "x\nlist:\n- a: |\n    "x\n  b: y\ntitle: T\n---\n\nBody.\n'],
+    ['quotes in plain values and closed in flow lists', '---\ntitle: it\'s\ndate: don\'t "x\nurl: http://x.org/"a\nmore: [a, "b, c", {d: e}]\n---\n\nBody.\n'],
     ['tabs and spaces at line ends', '---\ndate: 2024\t \nformat:\n\tdocx: default\n---\n\nBody.\n'],
   ])('come back as written: %s', async (_, markdown, expected = markdown) => {
     expect(await roundTrip(markdown)).toBe(expected);
@@ -162,6 +164,15 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
     ['the end of a YAML document', '---\ndate: 2024\n...\nlang: en\n---\n\nBody.\n', 'Body.\n'],
     ['a key with a comment before its colon', '---\ndate # when: 2024\n---\n\nBody.\n', 'Body.\n'],
     ['an anchor in a key that goes, which a key held could refer to', '---\ntitle: &t T\nsubtitle: *t\n---\n\nBody.\n', '---\ntitle: &t T\n---\n\nBody.\n'],
+    ['a value in double quotes on lines after it, one like a key\'s', '---\nabstract: "hello\ntitle: world"\n---\n\nBody.\n', '---\ntitle: world\n---\n\nBody.\n'],
+    ['a value in single quotes on lines after it, one like a key\'s', '---\nabstract: \'hello\ntitle: world\'\n---\n\nBody.\n', '---\ntitle: world\n---\n\nBody.\n'],
+    ['a value in quotes on an indented line after it', '---\nformat:\n  note: "a\n  b"\ndate: 1\n---\n\nBody.\n', 'Body.\n'],
+    ['a value in quotes that ends its line with an escape', '---\ntitle: T\ndate: "a \\\nb"\n---\n\nBody.\n', '---\ntitle: T\n---\n\nBody.\n'],
+    ['a flow mapping as a value on lines after it, one like a key\'s', '---\ncrossref: {a: 1,\nb: 2}\n---\n\nBody.\n', 'Body.\n'],
+    ['a flow list as a value on lines after it', '---\nkeywords: [a,\n  b]\ndate: 1\n---\n\nBody.\n', 'Body.\n'],
+    ['a plain value on a line at its start after it', '---\ndate: a long\nvalue\n---\n\nBody.\n', 'Body.\n'],
+    ['a key in double quotes with an escape, which could spell one export reads', '---\n"\\x74itle": Original\ndate: 1\n---\n\nBody.\n', 'Body.\n'],
+    ['a key in single quotes with a quote in it', '---\n\'it\'\'s\': x\ndate: 1\n---\n\nBody.\n', 'Body.\n'],
   ])('are no record of frontmatter that isn\'t a block mapping read exactly, which goes as before: %s', async (_, markdown, before) => {
     expect(await recordValues(markdown)).toEqual([]);
     expect(await roundTrip(markdown)).toBe(before);
@@ -218,6 +229,9 @@ describe('frontmatterLayout', () => {
       (n: number) => 'keywords:\n' + '  - a\n'.repeat(n),
       (n: number) => '# c\n\n'.repeat(n) + 'date: 1',
       (n: number) => 'format:\n' + '  docx:\n    toc: true\n'.repeat(n / 2),
+      (n: number) => 'more: [' + '"a, b", {c: \'d\'}, '.repeat(n / 4) + 'e]',
+      (n: number) => 'date: ' + 'it\'s "x" '.repeat(n / 2),
+      (n: number) => 'abstract: |\n' + '  "a: \'b\n'.repeat(n),
     ];
     for (const shape of shapes) {
       const [small, large] = [16000, 64000].map(n => '---\n' + shape(n) + '\n---\n');

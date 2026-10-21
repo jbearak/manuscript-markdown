@@ -127,8 +127,13 @@ function isListItem(content: string): boolean {
  * it, past \" in double quotes and '' in single, or -1 where none does
  */
 function closingQuoteAt(text: string): number {
-  const quote = text[0];
-  for (let k = 1; k < text.length; k++) {
+  return closingQuoteFrom(text, 0);
+}
+
+/** For a quote at `start` in text, the index of the quote that closes it, as closingQuoteAt has it */
+function closingQuoteFrom(text: string, start: number): number {
+  const quote = text[start];
+  for (let k = start + 1; k < text.length; k++) {
     if (quote === '"' && text[k] === '\\') k++;
     else if (text[k] === quote && quote === "'" && text[k + 1] === "'") k++;
     else if (text[k] === quote) return k;
@@ -786,26 +791,86 @@ export type FrontmatterLayout = Array<string | { text: string }>;
 
 /**
  * The key of a line YAML reads as a key of a block mapping at the line's
- * start, without its quotes: one in quotes, or plain, which starts with no
- * character YAML reads otherwise there, as `{`, `[`, `-`, `?`, `&` or
- * `%`, and has no comment, then a colon before a space, a tab or the
- * line's end. Undefined where YAML reads no such key there, as at a flow
- * mapping's `{` or `}`, a document's end, `...`, or a directive.
+ * start, without its quotes: one in quotes, with no escape, as `\x74` or
+ * `''`, or plain, which starts with no character YAML reads otherwise
+ * there, as `{`, `[`, `-`, `?`, `&` or `%`, and has no comment, then a
+ * colon before a space, a tab or the line's end. Undefined where YAML
+ * reads no such key there, as at a flow mapping's `{` or `}`, a document's
+ * end, `...`, or a directive, and for a key with an escape, which could
+ * spell one parseFrontmatter reads, as `"\x74itle"` does `title`.
  */
 function blockKeyOf(line: string): string | undefined {
   if (line[0] === '"' || line[0] === "'") {
     const close = closingQuoteAt(line);
     if (close < 0) return undefined;
+    const key = line.slice(1, close);
+    if (key.includes(line[0] === '"' ? '\\' : "''")) return undefined;
     let k = close + 1;
     while (line[k] === ' ' || line[k] === '\t') k++;
     if (line[k] !== ':' || !(k + 1 === line.length || line[k + 1] === ' ' || line[k + 1] === '\t')) return undefined;
-    return line[0] === "'" ? line.slice(1, close).replace(/''/g, "'") : line.slice(1, close);
+    return key;
   }
   if (/^[\s\-?:,[\]{}#&*!|>'"%@`]/.test(line)) return undefined;
   const colon = line.search(/:(?=[ \t]|$)/);
   if (colon < 0) return undefined;
   const key = line.slice(0, colon).trimEnd();
   return /[ \t]#/.test(key) ? undefined : key;
+}
+
+/**
+ * How a line of frontmatter's YAML ends, for its splitting into entries:
+ * 'open' where a value in quotes or a flow collection, as `[a,` or
+ * `{a: 1,`, that starts in it goes on past it, as onto a line at its start
+ * that looks like a key's, or where a literal or folded value starts in
+ * it, as at `|` or `>-`, the column its lines are past, or undefined. A
+ * quote in plain text, as in `it's`, starts no value, nor does one in a
+ * comment. Some lines YAML reads otherwise read as 'open', which only
+ * keeps less.
+ */
+function yamlLineEnd(line: string): 'open' | number | undefined {
+  let depth = 0;
+  // Whether a value can start here, where a quote opens one
+  let nodeStart = true;
+  // The column of the node a value here is under, and of the last value
+  // that started outside flow collections, as a key
+  let parent = indentOf(line);
+  let scalarStart = -1;
+  for (let k = parent; k < line.length; k++) {
+    const c = line[k];
+    if (c === ' ' || c === '\t') continue;
+    // A comment
+    if (c === '#' && (k === 0 || line[k - 1] === ' ' || line[k - 1] === '\t')) break;
+    const spaceAfter = k + 1 === line.length || line[k + 1] === ' ' || line[k + 1] === '\t';
+    if (nodeStart && (c === '"' || c === "'")) {
+      const close = closingQuoteFrom(line, k);
+      if (close < 0) return 'open';
+      if (depth === 0) scalarStart = k;
+      k = close;
+      nodeStart = false;
+    } else if ((c === '[' || c === '{') && (nodeStart || depth > 0)) {
+      depth++;
+      nodeStart = true;
+    } else if ((c === ']' || c === '}') && depth > 0) {
+      depth--;
+      nodeStart = false;
+    } else if (c === ',' && depth > 0) {
+      nodeStart = true;
+    } else if ((c === '-' || c === '?') && nodeStart && spaceAfter) {
+      if (depth === 0) parent = k;
+    } else if (c === ':' && (spaceAfter || depth > 0)) {
+      if (depth === 0 && scalarStart >= 0) parent = scalarStart;
+      nodeStart = true;
+    } else if ((c === '|' || c === '>') && nodeStart && depth === 0) {
+      return parent;
+    } else if ((c === '&' || c === '!') && nodeStart) {
+      // An anchor or a tag, before the value
+      while (k + 1 < line.length && line[k + 1] !== ' ' && line[k + 1] !== '\t') k++;
+    } else {
+      if (nodeStart && depth === 0) scalarStart = k;
+      nodeStart = false;
+    }
+  }
+  return depth > 0 ? 'open' : undefined;
 }
 
 /**
@@ -823,15 +888,33 @@ const ANCHOR_RE = /(?:^|[ \t[{,])&[^ \t[\]{},]/;
  * or a literal value's, and a list's items. The comments and blank lines at
  * the end go with the last entry. Undefined where a line is none of those,
  * as in a flow mapping, `{`, then its keys, then `}`, or frontmatter
- * indented as a whole, whose entries would read otherwise apart.
+ * indented as a whole, or where a value goes on past its line other than
+ * as a literal or folded one, whose lines are indented, as a value in
+ * quotes or a flow collection does, which a line at its start that looks
+ * like a key's could be part of (see yamlLineEnd). Their entries would read
+ * otherwise apart. A line at its start in a plain value of several lines,
+ * as YAML reads one, is no key's, and none of the others.
  */
 function topLevelEntries(lines: readonly string[]): { key: string; yamlKey: string; start: number; end: number }[] | undefined {
   const entries: { key: string; yamlKey: string; start: number; end: number }[] = [];
   // The last line not a comment or blank, after which the next entry starts
   let content = -1;
+  // The column a literal or folded value's lines are past, in one
+  let literal = -1;
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k].replace(/\r$/, '');
+    if (literal >= 0) {
+      if (isBlankLine(line)) continue;
+      if (indentOf(line) > literal) {
+        content = k;
+        continue;
+      }
+      literal = -1;
+    }
     if (isBlankLine(line) || line[0] === '#') continue;
+    const end = yamlLineEnd(line);
+    if (end === 'open') return undefined;
+    if (end !== undefined) literal = end;
     if (line[0] === ' ' || line[0] === '\t' || isListItem(line)) {
       // A line of the key before it
       if (entries.length === 0) return undefined;
