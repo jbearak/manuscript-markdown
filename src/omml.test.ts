@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
 import { XMLParser } from 'fast-xml-parser';
+import JSZip from 'jszip';
 import { unicodeToLatex, escapeLatex, isMultiLetter, ommlToLatex } from './omml';
 import { latexToOmml } from './latex-to-omml';
-import { parserOptions } from './test-omml-helpers';
+import { convertMdToDocx } from './md-to-docx';
+import { convertDocx } from './converter';
+import { GREEK_LETTERS, parserOptions } from './test-omml-helpers';
 
 // ---------------------------------------------------------------------------
 // Helpers: build OMML node structures matching fast-xml-parser preserveOrder
@@ -26,15 +29,7 @@ function makeRun(text: string, style?: string): Record<string, any> {
 // ---------------------------------------------------------------------------
 
 const KNOWN_UNICODE_LATEX: [string, string][] = [
-  ['α', '\\alpha'], ['β', '\\beta'], ['γ', '\\gamma'], ['δ', '\\delta'],
-  ['ϵ', '\\epsilon'], ['ε', '\\varepsilon'], ['ζ', '\\zeta'], ['η', '\\eta'], ['θ', '\\theta'], ['ϑ', '\\vartheta'],
-  ['ι', '\\iota'], ['κ', '\\kappa'], ['λ', '\\lambda'], ['μ', '\\mu'],
-  ['ν', '\\nu'], ['ξ', '\\xi'], ['π', '\\pi'], ['ϖ', '\\varpi'], ['ρ', '\\rho'], ['ϱ', '\\varrho'],
-  ['σ', '\\sigma'], ['ς', '\\varsigma'], ['τ', '\\tau'], ['υ', '\\upsilon'], ['ϕ', '\\phi'], ['φ', '\\varphi'],
-  ['χ', '\\chi'], ['ψ', '\\psi'], ['ω', '\\omega'],
-  ['Γ', '\\Gamma'], ['Δ', '\\Delta'], ['Θ', '\\Theta'], ['Λ', '\\Lambda'],
-  ['Ξ', '\\Xi'], ['Π', '\\Pi'], ['Σ', '\\Sigma'], ['Υ', '\\Upsilon'], ['Φ', '\\Phi'],
-  ['Ψ', '\\Psi'], ['Ω', '\\Omega'],
+  ...GREEK_LETTERS.map(([cmd, ch]): [string, string] => [ch, cmd]),
   ['×', '\\times'], ['÷', '\\div'], ['±', '\\pm'], ['∓', '\\mp'],
   ['≤', '\\leq'], ['≥', '\\geq'], ['≠', '\\neq'], ['≈', '\\approx'],
   ['∞', '\\infty'], ['∂', '\\partial'], ['∇', '\\nabla'],
@@ -1496,5 +1491,31 @@ describe('An on/off property of an equation, in any spelling', () => {
   });
   it.each(OFF)('shows an n-ary operator\'s limits where m:subHide and m:supHide are off, %s', (_name, onOff) => {
     expectRoundTrip(nary(onOff('m:subHide') + onOff('m:supHide')), '\\sum_i^nx');
+  });
+});
+
+// Each Greek letter in a Word equation imports as LaTeX's command for it, so
+// the plain ε that most keyboards and fonts give is \varepsilon, the letter
+// LaTeX draws so, and ϵ is \epsilon, and each exports as the same letter
+// again (#716)
+describe('Greek letters', () => {
+  it.each(GREEK_LETTERS.map(([cmd, ch]) => [ch, cmd]))('%s imports as %s', (ch, cmd) => {
+    expect(ommlToLatex([makeRun(ch)])).toBe(cmd);
+    expect(ommlToLatex([makeRun(ch + 'x')])).toBe(cmd + ' x');
+    expect(ommlToLatex([makeRun('x' + ch)])).toBe('x' + cmd);
+  });
+
+  it('a Word equation of each, in one run, comes back from Word as the same letters', async () => {
+    const D = '$';
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A ' + D + 'x' + D + ' B.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const letters = GREEK_LETTERS.map(([, ch]) => ch).join('');
+    zip.file('word/document.xml', xml.replace(/<m:oMath>[\s\S]*?<\/m:oMath>/, () => '<m:oMath><m:r><m:t>' + letters + '</m:t></m:r></m:oMath>'));
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('A ' + D + GREEK_LETTERS.map(([cmd]) => cmd).join('') + D + ' B.\n');
+
+    const back = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    const equation = /<m:oMath>([\s\S]*?)<\/m:oMath>/.exec(back)![1];
+    expect([...equation.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1]).join('')).toBe(letters);
   });
 });

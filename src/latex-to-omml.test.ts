@@ -1,8 +1,11 @@
 // src/latex-to-omml.test.ts
 
 import { describe, test, expect } from 'bun:test';
+import JSZip from 'jszip';
 import { latexToOmml } from './latex-to-omml';
-import { roundTrip } from './test-omml-helpers';
+import { convertMdToDocx } from './md-to-docx';
+import { convertDocx } from './converter';
+import { GREEK_LETTERS, roundTrip } from './test-omml-helpers';
 
 describe('latexToOmml', () => {
   test('empty input', () => {
@@ -699,20 +702,53 @@ describe('bracketed operands of n-ary operators and functions', () => {
   });
 });
 
-describe('Greek variant letters', () => {
-  // Same code points as zotero-link.ts uses for BibTeX
-  const letters: [string, string][] = [
-    ['\\epsilon', 'ϵ'], ['\\varepsilon', 'ε'],
-    ['\\phi', 'ϕ'], ['\\varphi', 'φ'],
-    ['\\vartheta', 'ϑ'], ['\\varpi', 'ϖ'], ['\\varrho', 'ϱ'], ['\\varsigma', 'ς'],
-    ['\\Upsilon', 'Υ'],
-  ];
-
-  test.each(letters)('%s exports as %s', (cmd, ch) => {
+// v1.6.0 wrote \varepsilon, \vartheta, \varphi, \varpi, \varrho, \varsigma
+// and \Upsilon into Word as their text, as <m:t>\varepsilon</m:t>, and
+// \epsilon and \phi as ε and φ, the characters LaTeX draws for \varepsilon
+// and \varphi (#716)
+describe('Greek letters', () => {
+  test.each(GREEK_LETTERS)('%s exports as %s', (cmd, ch) => {
     expect(latexToOmml(cmd)).toBe('<m:r><m:t>' + ch + '</m:t></m:r>');
   });
 
-  test.each(letters)('%s round-trips', (cmd) => {
+  test.each(GREEK_LETTERS)('%s round-trips', (cmd) => {
+    expect(roundTrip(cmd)).toBe(cmd);
     expect(roundTrip(cmd + ' x')).toBe(cmd + ' x');
+  });
+
+  // Those of #716 by the code point each is, as their glyphs look alike
+  test.each([
+    ['\\epsilon', 'U+03F5'], ['\\varepsilon', 'U+03B5'], ['\\phi', 'U+03D5'], ['\\varphi', 'U+03C6'],
+    ['\\vartheta', 'U+03D1'], ['\\varpi', 'U+03D6'], ['\\varrho', 'U+03F1'], ['\\varsigma', 'U+03C2'],
+    ['\\Upsilon', 'U+03A5'],
+  ])('%s exports as %s', (cmd, codePoint) => {
+    expect(latexToOmml(cmd)).toBe('<m:r><m:t>' + String.fromCodePoint(parseInt(codePoint.slice(2), 16)) + '</m:t></m:r>');
+  });
+
+  const D = '$';
+  const commands = GREEK_LETTERS.map(([cmd]) => cmd).join(' ');
+  const exportDocument = async (md: string) =>
+    (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+  /** The text of each of a document's equations, from Word */
+  const equationTexts = (xml: string) => [...xml.matchAll(/<m:oMath>([\s\S]*?)<\/m:oMath>/g)]
+    .map(([, omml]) => [...omml.matchAll(/<m:t(?: [^>]*)?>([^<]*)<\/m:t>/g)].map(m => m[1]).join(''));
+  const markdownBack = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['inline', 'A ' + D + commands + D + ' B.\n'],
+    ['display', D + D + '\n' + commands + '\n' + D + D + '\n'],
+  ])('each comes back from Word as written, %s', async (_name, md) => {
+    expect(equationTexts(await exportDocument(md))).toEqual([GREEK_LETTERS.map(([, ch]) => ch).join(' ')]);
+    const back = await markdownBack(md);
+    expect(back).toBe(md);
+    expect(await markdownBack(back)).toBe(md);
+  });
+
+  test('\\varepsilon in the equation of #716 exports as ε', async () => {
+    const md = 'Model: ' + D + 'y = \\tau(x) \\cdot z + \\varepsilon' + D + '\n';
+    const xml = await exportDocument(md);
+    expect(equationTexts(xml)).toEqual(['y = τ(x) · z + ε']);
+    expect(xml).not.toContain('varepsilon');
+    expect(await markdownBack(md)).toBe(md);
   });
 });
