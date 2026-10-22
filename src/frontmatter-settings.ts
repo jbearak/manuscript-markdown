@@ -11,6 +11,8 @@ export const FRONTMATTER_MENU_SETTINGS: readonly FrontmatterMenuSetting[] = [
 	{ key: 'author', label: 'Author', group: 'document' },
 	{ key: 'timezone', label: 'Timezone', group: 'document' },
 	{ key: 'breaks', label: 'Hard Line Breaks', group: 'document' },
+	{ key: 'crossref', label: 'Caption Titles', group: 'document' },
+	{ key: 'fig-cap-location', label: 'Figure Caption Location', group: 'document' },
 
 	{ key: 'font', label: 'Body Font', group: 'typography' },
 	{ key: 'font-size', label: 'Body Font Size', group: 'typography' },

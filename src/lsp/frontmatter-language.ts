@@ -32,7 +32,8 @@ type FieldKind =
 	| 'timezone'         // +HH:MM / -HH:MM
 	| 'bib-path'         // bibliography — file existence check
 	| 'csl'              // special: CSL style name (delegates to csl-language)
-	| 'styles-block';    // the styles: key itself
+	| 'styles-block'     // the styles: key itself
+	| 'crossref-block';  // the crossref: key itself
 
 interface FieldDef {
 	/** Canonical YAML key name */
@@ -148,6 +149,11 @@ const PARAGRAPH_INDENT_VALUES: readonly EnumValue[] = [
 	{ value: 'none', description: 'No first-line indent' },
 ];
 
+const FIG_CAP_LOCATION_VALUES: readonly EnumValue[] = [
+	{ value: 'bottom', description: 'Below the figure' },
+	{ value: 'top', description: 'Above the figure' },
+];
+
 const COL_WIDTHS_VALUES: readonly EnumValue[] = [
 	{ value: 'equal', description: 'Equal column widths' },
 	{ value: 'auto', description: 'Automatic column widths' },
@@ -247,6 +253,20 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 		description: 'First-line paragraph indent in inches.\n\n**Accepted values:** Non-negative number (inches) or `none`.' },
 	{ key: 'bibliography-hanging-indent', kind: 'boolean', enumValues: BOOLEAN_VALUES,
 		description: 'Whether bibliography entries use a hanging indent.\n\n**Accepted values:** `true`, `false`.' },
+	{ key: 'crossref', kind: 'crossref-block',
+		description: 'Quarto\u2019s cross-reference options. Under it, set `fig-title`, the word a figure\u2019s caption starts with (default `Figure`), `tbl-title`, a table\u2019s (default `Table`), and `title-delim`, what follows the number (default `:`).\n\n**Accepted values:** Nested YAML block.' },
+	{ key: 'fig-cap-location', kind: 'enum', enumValues: FIG_CAP_LOCATION_VALUES,
+		description: 'Where a figure\u2019s caption goes. Default: `bottom`.\n\n**Accepted values:** `top`, `bottom`.' },
+];
+
+/** The keys of `crossref:` export reads, Quarto\u2019s */
+export const CROSSREF_SUB_PROPS: readonly FieldDef[] = [
+	{ key: 'fig-title', kind: 'free-text',
+		description: 'The word a figure\u2019s caption starts with, before its number, as `Figure 1`. Default: `Figure`.\n\n**Accepted values:** Any string.' },
+	{ key: 'tbl-title', kind: 'free-text',
+		description: 'The word a table\u2019s caption starts with, before its number. Default: `Table`.\n\n**Accepted values:** Any string.' },
+	{ key: 'title-delim', kind: 'free-text',
+		description: 'What follows a caption\u2019s number, before a space and its text, as the `:` of `Figure 1: Rates`. Default: `:`.\n\n**Accepted values:** Any string, in quotes where YAML needs them, as `\":\"`.' },
 ];
 
 export const STYLES_SUB_PROPS: readonly FieldDef[] = [
@@ -290,6 +310,8 @@ const STYLES_SUB_MAP = new Map<string, FieldDef>();
 for (const def of STYLES_SUB_PROPS) {
 	STYLES_SUB_MAP.set(def.key, def);
 }
+
+const CROSSREF_SUB_MAP = new Map<string, FieldDef>(CROSSREF_SUB_PROPS.map(def => [def.key, def]));
 
 function resolveCanonical(key: string): string {
 	return ALIAS_TO_CANONICAL.get(key) ?? key;
@@ -457,6 +479,9 @@ interface FmLine {
 	styleName?: string;
 	/** Depth: 0 = top-level, 1 = style name, 2 = sub-property */
 	stylesDepth?: number;
+	/** Whether this line is inside the crossref: block: 1 for one of its
+	 *  keys, 2 for a line under one, which export doesn't read */
+	crossrefDepth?: 1 | 2;
 	/**
 	 * Whether the line is an item of a block list, as `  - One` after
 	 * `title:` (see blockListAfter), its value its text as export reads it.
@@ -505,6 +530,15 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 	let inStylesBlock = false;
 	let stylesNameIndent = -1;
 	let currentStyleName: string | undefined;
+	// Whether the lines are under `crossref:`, and the indent of its keys,
+	// as parseFrontmatter reads them
+	let inCrossrefBlock = false;
+	let crossrefKeyIndent = -1;
+	const crossrefDepthOf = (indent: number): 1 | 2 | undefined => {
+		if (!inCrossrefBlock || indent === 0) return undefined;
+		if (crossrefKeyIndent < 0) crossrefKeyIndent = indent;
+		return indent === crossrefKeyIndent ? 1 : 2;
+	};
 	// The items of block lists after the keys before, by their lines' indices
 	const listed = new Map<number, FmLine>();
 
@@ -563,7 +597,10 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 					inStylesBlock = false;
 					currentStyleName = undefined;
 				}
+				inCrossrefBlock = key === 'crossref';
+				crossrefKeyIndent = -1;
 			}
+			const crossrefDepth = crossrefDepthOf(indent);
 
 			let stylesDepth: number | undefined;
 			let lineInStylesBlock = false;
@@ -595,6 +632,7 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 				inStylesBlock: lineInStylesBlock,
 				styleName: lineStyleName,
 				stylesDepth,
+				...(crossrefDepth ? { crossrefDepth } : {}),
 			};
 			lines.push(keyLine);
 
@@ -603,7 +641,7 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 			// frontmatter.ts), past a comment as the key's value. An item is
 			// its line: the lines after it that go with it are read as
 			// before, as export reads them.
-			const list = key !== 'styles' ? blockListAfter(rawLines, lineIdx) : undefined;
+			const list = key !== 'styles' && key !== 'crossref' && !crossrefDepth ? blockListAfter(rawLines, lineIdx) : undefined;
 			if (list) {
 				keyLine.rawValue = '';
 				keyLine.items = [];
@@ -652,9 +690,12 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 				stylesDepth = indent <= stylesNameIndent ? 1 : 2;
 			} else if (indent === 0) {
 				inStylesBlock = false;
+				inCrossrefBlock = false;
 			}
+			const crossrefDepth = crossrefDepthOf(indent);
 
 			lines.push({
+				...(crossrefDepth ? { crossrefDepth } : {}),
 				key: trimmed,
 				rawValue: '',
 				keyStart,
@@ -677,7 +718,7 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 // ---------------------------------------------------------------------------
 
 export interface FrontmatterLocation {
-	kind: 'key' | 'value' | 'styles-key' | 'styles-value' | 'styles-name' | 'outside';
+	kind: 'key' | 'value' | 'styles-key' | 'styles-value' | 'styles-name' | 'crossref-key' | 'crossref-value' | 'outside';
 	/** The canonical key name (or raw name if unknown). For 'value', this is the key whose value is being edited. */
 	key: string;
 	keyStart: number;
@@ -735,7 +776,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	const declaredKeys = new Set<string>();
 	const declaredKeyCounts = new Map<string, number>();
 	for (const line of parsed.lines) {
-		if (!line.listItem && (!line.inStylesBlock || line.indent === 0)) {
+		if (!line.listItem && !line.crossrefDepth && (!line.inStylesBlock || line.indent === 0)) {
 			const canonical = resolveCanonical(line.key);
 			declaredKeys.add(canonical);
 			declaredKeyCounts.set(canonical, (declaredKeyCounts.get(canonical) ?? 0) + 1);
@@ -750,7 +791,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	const completionValueRange = (
 		line: FmLine,
 	): { start: number; end: number; suppress?: boolean; prefix?: string; suffix?: string } => {
-		const def = line.inStylesBlock ? STYLES_SUB_MAP.get(line.key) : lookupDef(line.key);
+		const def = line.inStylesBlock ? STYLES_SUB_MAP.get(line.key) : line.crossrefDepth ? undefined : lookupDef(line.key);
 		if (!def?.arrayField || offset < line.valueStart || offset > line.valueEnd) {
 			return { start: line.valueStart, end: line.valueEnd };
 		}
@@ -851,6 +892,21 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 					listItem: true,
 					completionPrefix: separator + (valueRange.prefix ?? ''),
 					completionSuffix: valueRange.suffix,
+					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
+				};
+			}
+
+			if (line.crossrefDepth) {
+				// One of crossref's keys, or a line under one, which takes
+				// no completions
+				const key = line.crossrefDepth === 1 ? line.key : '';
+				return {
+					kind: offset <= colonOffset ? 'crossref-key' : 'crossref-value', key,
+					keyStart: line.keyStart, keyEnd: line.keyEnd,
+					valueStart: line.valueStart, valueEnd: line.valueEnd,
+					valueQuote: line.valueQuote, declaredKeys,
+					inFrontmatter: true, frontmatterClosed: parsed.closed,
+					suppressCompletions: line.crossrefDepth === 2,
 					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 				};
 			}
@@ -962,6 +1018,23 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 		}
 		return { valueStart, valueEnd, valueQuote };
 	};
+
+	// A line under `crossref:`, of its keys' indent or the first, which
+	// takes crossref's keys
+	const crossrefLine = [...parsed.lines].reverse().find(line => line.keyStart < offset && (line.indent === 0 || line.crossrefDepth === 1));
+	if (indent > 0 && (crossrefLine?.key === 'crossref' && crossrefLine.indent === 0 || crossrefLine?.crossrefDepth === 1 && indent === crossrefLine.indent)) {
+		const actualKeyStart = lineStart + indent;
+		const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
+		const colonIdx = trimmed.indexOf(':');
+		const key = colonIdx >= 0 ? trimmed.slice(0, colonIdx).trim() : trimmed;
+		const value = colonIdx >= 0 ? fallbackValueRange(actualKeyStart, colonIdx) : { valueStart: actualEnd, valueEnd: actualEnd };
+		return {
+			kind: colonIdx >= 0 && offset > actualKeyStart + key.length ? 'crossref-value' : 'crossref-key', key,
+			keyStart, keyEnd: actualKeyStart + key.length, ...value, keyCompletionPrefix,
+			declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+			fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
+		};
+	}
 
 	// Check if we're in the styles block based on surrounding lines
 	let inStyles = false;
@@ -1114,7 +1187,11 @@ export function getFrontmatterCompletionItems(
 		return getKeyCompletions(location, STYLES_SUB_PROPS);
 	}
 
-	if (location.kind === 'value' || location.kind === 'styles-value') {
+	if (location.kind === 'crossref-key') {
+		return getKeyCompletions(location, CROSSREF_SUB_PROPS);
+	}
+
+	if (location.kind === 'value' || location.kind === 'styles-value' || location.kind === 'crossref-value') {
 		// A block list's item is one item of the key's inline array, so it
 		// gets what an item of that array gets: values for a key whose array
 		// takes one per item, and none for a key that takes one value or for
@@ -1200,7 +1277,7 @@ function getValueCompletions(location: FrontmatterLocation, platform: string, ca
 	const canonicalKey = resolveCanonical(location.key);
 	const def = location.kind === 'styles-value'
 		? STYLES_SUB_MAP.get(location.key)
-		: SCHEMA_MAP.get(canonicalKey);
+		: location.kind === 'crossref-value' ? CROSSREF_SUB_MAP.get(location.key) : SCHEMA_MAP.get(canonicalKey);
 	if (!def) return [];
 
 	switch (def.kind) {
@@ -1293,13 +1370,13 @@ export function getFrontmatterHover(location: FrontmatterLocation): FrontmatterH
 
 	if (location.kind === 'styles-name') return undefined;
 
-	if (location.kind === 'styles-key' || location.kind === 'styles-value') {
-		const def = STYLES_SUB_MAP.get(location.key);
+	if (location.kind === 'styles-key' || location.kind === 'styles-value' || location.kind === 'crossref-key' || location.kind === 'crossref-value') {
+		const def = (location.kind.startsWith('styles') ? STYLES_SUB_MAP : CROSSREF_SUB_MAP).get(location.key);
 		if (!def) return undefined;
 		return {
 			markdown: '**' + def.key + '**\n\n' + def.description,
 			hoverStart: location.keyStart,
-			hoverEnd: location.kind === 'styles-value' ? location.valueEnd : location.keyEnd,
+			hoverEnd: location.kind.endsWith('value') ? location.valueEnd : location.keyEnd,
 		};
 	}
 
@@ -1349,7 +1426,7 @@ export interface FrontmatterBibliographyValue {
 export function findBibliographyValue(text: string): FrontmatterBibliographyValue | undefined {
 	const parsed = parseFrontmatterLines(text);
 	if (!parsed) return undefined;
-	const line = parsed.lines.find(l => !l.inStylesBlock && l.rawValue && resolveCanonical(l.key) === 'bibliography');
+	const line = parsed.lines.find(l => !l.inStylesBlock && !l.crossrefDepth && l.rawValue && resolveCanonical(l.key) === 'bibliography');
 	if (!line) return undefined;
 	// The value as written, to its line's end, without the spaces there, and
 	// then a quote at each end, as parseFrontmatter reads it
@@ -1399,10 +1476,17 @@ export async function validateFrontmatter(
 	const diagnostics: FrontmatterDiagnostic[] = [];
 	const seenCanonical = new Map<string, FmLine>(); // canonical → first occurrence
 
+	// crossref's keys, each once
+	const crossrefKeys = new Set<string>();
 	for (const line of parsed.lines) {
 		if (line.items) validateListItems(line, diagnostics);
 		// A block list's items are values, checked with their key's
 		if (line.listItem) continue;
+
+		if (line.crossrefDepth) {
+			if (line.crossrefDepth === 1) validateCrossrefKey(line, crossrefKeys, diagnostics);
+			continue;
+		}
 
 		// Skip styles sub-properties for duplicate/typo detection at top level
 		if (line.inStylesBlock && line.indent > 0) {
@@ -1483,7 +1567,7 @@ export async function validateFrontmatter(
 		}
 
 		// Value validation
-		if (line.rawValue || def.kind === 'styles-block') {
+		if (line.rawValue || def.kind === 'styles-block' || def.kind === 'crossref-block') {
 			const valueDiag = validateValue(def, line);
 			if (valueDiag) diagnostics.push(valueDiag);
 		}
@@ -1508,6 +1592,30 @@ export async function validateFrontmatter(
 	await validateBibPath(parsed, callbacks, diagnostics);
 
 	return diagnostics;
+}
+
+/**
+ * Check one of crossref's keys: one export reads, once, or another of
+ * Quarto's, which export leaves out, with the key it may be a misspelling
+ * of, or in another case.
+ */
+function validateCrossrefKey(line: FmLine, seen: Set<string>, diagnostics: FrontmatterDiagnostic[]): void {
+	const at = { start: line.keyStart, end: line.keyEnd };
+	if (CROSSREF_SUB_MAP.has(line.key)) {
+		if (seen.has(line.key)) diagnostics.push({ message: 'Duplicate key `' + line.key + '`.', severity: 'warning', ...at });
+		seen.add(line.key);
+		return;
+	}
+	const lower = line.key.toLowerCase();
+	const caseMatch = CROSSREF_SUB_PROPS.find(def => def.key === lower);
+	const near = CROSSREF_SUB_PROPS.filter(def => damerauLevenshtein(lower, def.key) <= (lower.length <= 5 ? 1 : 2));
+	diagnostics.push({
+		message: caseMatch ? 'Frontmatter keys are case-sensitive. Did you mean `' + caseMatch.key + '`?'
+			: near.length > 0 ? 'Did you mean ' + near.map(def => '`' + def.key + '`').join(', ') + '?'
+				: 'Export reads only `fig-title`, `tbl-title` and `title-delim` of `crossref`, so Word gets nothing from `' + line.key + '`.',
+		severity: 'information',
+		...at,
+	});
 }
 
 /**
@@ -1680,6 +1788,14 @@ function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | und
 			break;
 		}
 
+		case 'crossref-block':
+			// Its keys on the lines after it, as `  fig-title: Fig.`, and none
+			// on its line, as a mapping in braces, which export doesn't read
+			if (value) {
+				return { message: 'Export reads `crossref`\u2019s keys on the lines after it, each indented, as `  fig-title: Fig.`, not on its line.', severity: 'warning', start: line.valueStart, end: line.valueEnd };
+			}
+			break;
+
 		// free-text, font, code-font, bib-path, csl, styles-block: no sync validation
 	}
 
@@ -1734,7 +1850,7 @@ async function validateBibPath(
 
 	// Find the bibliography line
 	for (const line of parsed.lines) {
-		if (line.inStylesBlock) continue;
+		if (line.inStylesBlock || line.crossrefDepth) continue;
 		const canonical = resolveCanonical(line.key);
 		if (canonical !== 'bibliography') continue;
 		if (!line.rawValue) continue;

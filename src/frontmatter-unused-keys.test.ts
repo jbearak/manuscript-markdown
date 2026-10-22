@@ -197,6 +197,21 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
   });
 });
 
+describe('crossref and fig-cap-location, which export reads', () => {
+  it('are no record where export reads a setting from crossref, and keep their places', async () => {
+    expect(await recordValues('---\ncrossref:\n  fig-title: Fig.\nfig-cap-location: top\n---\n\nBody.\n')).toEqual([]);
+    const markdown = '---\ndate: 1\ncrossref:\n  fig-title: Fig.\n  title-delim: "."\nfig-cap-location: top\nlang: en\n---\n\nBody.\n';
+    expect(await recordValues(markdown)).toEqual(['[{"text":"date: 1"},"crossref","fig-cap-location",{"text":"lang: en"}]']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  it('hold a crossref export reads nothing from as written, as Quarto\'s other keys', async () => {
+    const markdown = '---\ntitle: T\ncrossref: {fig-prefix: Figure}\ndate: 1\n---\n\nBody.\n';
+    expect(frontmatterLayout(markdown)).toEqual(['title', { text: 'crossref: {fig-prefix: Figure}\ndate: 1' }]);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
 describe('frontmatterLayout', () => {
   it('names the keys parseFrontmatter reads and holds the rest as written, with the comments and blank lines before them', () => {
     expect(frontmatterLayout('---\n# T\ntitle: T\n\n# Dates\ndate: 2024\nyear: 2024\nauthor: A\n  more: x\nlang: en\n# end\n---\nBody'))

@@ -57,6 +57,7 @@ manuscript-markdown paper.md      # Markdown → DOCX
 - **Citations**: Full Zotero roundtrip with BibTeX export and field code reconstruction
 - **Bibliographies**: Format citations according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.); bundles 18 common styles for offline use and downloads others as needed
 - **Equations**: LaTeX equation support (inline and display math), automatically converted to/from Word OMML
+- **Figure captions**: Quarto's `![Caption](map.png){#fig-map}` becomes a numbered Word caption, and Word's captions come back as figures
 
 ### Formatting & Authoring
 

@@ -71,10 +71,12 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `paragraph-indent` | First-line paragraph indentation in inches (e.g., `0.5`, `0.3`). Auto-enabled at 0.5 inches when `line-spacing` is non-single. Set to `none` to disable auto-indent while keeping line spacing. |
 | `bibliography-hanging-indent` | When `true` (default), bibliography entries use a hanging indent (0.5 inch) with single-line spacing regardless of document line spacing. Set to `false` to disable. |
 | `styles` | Custom paragraph style definitions. A YAML map of style names to property objects. See [Custom Styles](#custom-styles). |
+| `crossref` | The words of captions, as Quarto's keys indented under it: `fig-title`, the word before a figure's number (default `Figure`), `tbl-title`, a table's (default `Table`), and `title-delim`, what goes between the number and the caption's text (default `:`). Export reads no other key of Quarto's there. See [Figures](#figures). |
+| `fig-cap-location` | Where a figure's caption goes: `bottom` (default) or `top`. See [Figures](#figures). |
 
 ### Keys for Other Tools
 
-Frontmatter can hold keys that Manuscript Markdown doesn't read, such as Pandoc's `date`, `subtitle`, `abstract`, `keywords` and `lang`, or Quarto's `format`, `execute` and `crossref`. Export doesn't show them in the Word document. It keeps them in the document's custom properties (`MANUSCRIPT_FRONTMATTER_UNUSED_KEYS_*`, see [converter](converter.md#yaml-frontmatter)), and import writes them back as you wrote them, with their quotes, literal and folded values, mappings, lists and comments:
+Frontmatter can hold keys that Manuscript Markdown doesn't read, such as Pandoc's `date`, `subtitle`, `abstract`, `keywords` and `lang`, or Quarto's `format` and `execute`, and a `crossref` with none of the keys export reads (see [Figures](#figures)). Export doesn't show them in the Word document. It keeps them in the document's custom properties (`MANUSCRIPT_FRONTMATTER_UNUSED_KEYS_*`, see [converter](converter.md#yaml-frontmatter)), and import writes them back as you wrote them, with their quotes, literal and folded values, mappings, lists and comments:
 
 ```yaml
 ---
@@ -840,6 +842,35 @@ An image can be a link's text, or part of it, as in `[![alt text](image.png)](ht
 
 The curly-brace block after the image reference specifies dimensions. Bare numbers and `px` are pixels; absolute units `in`, `cm`, `mm`, `pt`, and `pc` are converted at 96 px per inch. Both `width` and `height` are optional — when only one is provided, the other is computed from the image's intrinsic aspect ratio. A brace escaped as `\{`, or written as `&#123;`, right after the image is text, not its block: `![alt text](image.png)\{x}`. DOCX import escapes one so after an image with no size. Export scales an image wider than its column down to fit it, keeping its aspect ratio: the width of its section's text, between its margins and any binding gutter, or of the narrowest of the template's columns, which each section takes, fitted to that text. A footnote's image fits one of the footnotes' own columns instead, where the template gives footnotes columns of their own, `w15:footnoteColumns`, as far apart as the section's columns, as Word lays them out.
 
+### Figures
+
+An image alone in its paragraph, with a label first in the attribute block after it, is a figure, as in Quarto. Its alt text is its caption:
+
+```markdown
+![Rates by region, 2010 to 2020](rates.png){#fig-rates width=4in}
+```
+
+A label is `fig-` and the characters of a comment's ID, `[A-Za-z0-9_-]`. The block may also hold `width`, `height`, and `fig-alt="..."`, the image's alt text where the caption shouldn't be, as `fig-alt=""` for none. A figure's block ends at its first `}`, on its line, with no `{` before it, so a value in quotes writes a `}` as `&#125;` and a line end as `&#10;`; a `\"` in quotes is a `"`.
+
+The preview shows each figure with its caption, numbered in document order, as `Figure 1: Rates by region, 2010 to 2020`. Export writes Word the image's paragraph, kept with the next, and below it the caption Word's Insert Caption writes: a paragraph in the Caption style, with `Figure `, a `SEQ Figure` field for the number, which Word renumbers when fields update, then `: ` and the caption's text, formatted as in the brackets. The title and number are in a bookmark named for the label, as `fig_rates`, which a cross-reference in Word can point at. Export adds Word's Caption style where the template has none, and keeps the template's where it has one. Where a label's bookmark name doesn't give the label back, as for `fig-a_b`, whose name `fig_a_b` reads as `fig-a-b`, the `MANUSCRIPT_CAPTION_LABELS_*` custom properties keep it.
+
+`crossref:` changes the title and the delimiter, and `fig-cap-location: top` puts each caption above its image, kept with it. A delimiter that ends in a space or tab, as `" — "`, takes no space after it, and a caption with no text, or whitespace alone, takes no delimiter, in the preview too.
+
+```yaml
+---
+crossref:
+  fig-title: Fig.
+  title-delim: "."
+fig-cap-location: top
+---
+```
+
+A caption's citation, note, comment, tracked change, line break or image, or an equation with CriticMarkup in it, which Word's caption can't hold as import would read it back, goes to Word as its Markdown, as text, as `{>>note {>>reply<<}<<}` or `$x{++y++}$`, with a warning.
+
+An image with a label that isn't alone in its paragraph, or is in a list, a quote, a table, a note, a link, a style block or a tracked change, gets no caption, with a warning. A `{#fig-…}` or `{#tbl-…}` that labels nothing, as in a sentence, starts no comment range (see [ID Format](#id-format)): export writes nothing for it, with a warning, and the preview shows nothing. Export doesn't caption tables yet, so `{#tbl-…}` always warns.
+
+DOCX import reads Word's figure captions back as figures (see [Figure Captions](converter.md#figure-captions)).
+
 ### HTML Image Syntax
 
 ```html
@@ -1053,7 +1084,7 @@ Export writes Word a range's markers only with its comment and both its ends, as
 
 #### ID Format
 
-IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`. On DOCX import, a comment keeps the ID it was exported with. The others, such as those added in Word, take the numbers no comment kept, in the order they first appear. So an ID stays the same from one round trip to the next, even after a comment written as `{==text==}{>>comment<<}`, whose ID doesn't show.
+IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. An ID that starts with `fig-` or `tbl-` is a caption's label (see [Figures](#figures)), so `{#fig-map}` starts no range, though `{#fig-map>>…<<}` is still a comment's body and `{/fig-map}` still ends a range. Import gives a comment that was exported with such an ID a number instead. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`. On DOCX import, a comment keeps the ID it was exported with. The others, such as those added in Word, take the numbers no comment kept, in the order they first appear. So an ID stays the same from one round trip to the next, even after a comment written as `{==text==}{>>comment<<}`, whose ID doesn't show.
 
 #### Backward Compatibility
 

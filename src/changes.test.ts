@@ -8,7 +8,7 @@ import { fastestRun } from './test-timing';
 // We'll test the regex pattern directly since we can't import vscode in tests
 // This is the same pattern used in changes.ts
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
-const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+const combinedPattern = /\{(?<!(?<!\\)(?:\\\\)*\\\{)(?:\+\+([\s\S]*?)\+\+\}|--([\s\S]*?)--\}|\~\~([\s\S]*?)\~\~\}|#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|>>([\s\S]*?)<<\}|#(?!(?:fig|tbl)-[a-zA-Z0-9_-])[a-zA-Z0-9_-]+\}|\/[a-zA-Z0-9_-]+\}|==([\s\S]*?)==\})|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\}|(?<!=)==(?<!(?<!\\)(?:\\\\)*\\==)(?<!(?<!\\)(?:\\\\)*\{==)([^}=]+)==(?<!(?<!\\)(?:\\\\)*\{==)(?![}=])|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Helper function to find all pattern matches in text, as getAllMatches
 // finds them
@@ -661,4 +661,11 @@ describe('Navigation steps past an opener with no closer after it', () => {
     // The ~~ of a {~~ with no ~~} strikes through to the next {~~'s
     expect(found.map(({ start, end }) => text.slice(start, end)).filter(m => !m.startsWith('~~'))).toEqual(['{++a++}', '{#1}']);
   }, 30000);
+});
+
+describe('Caption labels', () => {
+  it('stops at no caption label, which is no comment range\'s start, but at a range of an ID that is fig- alone', () => {
+    const text = '![Map](map.png){#fig-map} {#tbl-est} {#fig-}x{/fig-} {#fig-1>>c<<}';
+    expect(findAllPatterns(text).map(match => match.matched)).toEqual(['{#fig-}', '{/fig-}', '{#fig-1>>c<<}']);
+  });
 });

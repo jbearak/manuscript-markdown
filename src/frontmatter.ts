@@ -64,7 +64,7 @@ export const ARRAY_KEYS: ReadonlySet<string> = new Set([
  * A block list under one reads as the key repeated, which keeps one of its
  * items, as a repeated key keeps one of its values. Of the other keys it
  * reads, `title` takes several, one for each time it's written, and
- * `styles` a mapping.
+ * `styles` and `crossref` a mapping.
  */
 export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
   'author', 'csl', 'locale', 'zotero-notes', 'note-type', 'notes', 'timezone',
@@ -73,11 +73,18 @@ export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
   'table-font', 'table-font-size', 'pipe-table-max-line-width', 'grid-table-max-line-width',
   'table-borders', 'table-digits', 'table-decimal-mark', 'table-digit-grouping',
   'blockquote-style', 'callout-labels', 'colors', 'breaks', 'line-spacing', 'paragraph-indent',
-  'bibliography-hanging-indent',
+  'bibliography-hanging-indent', 'fig-cap-location',
 ]);
 
 /** The keys parseFrontmatter reads, each of which import writes from what the Word document has */
-const READ_KEYS: ReadonlySet<string> = new Set([...SINGLE_VALUE_KEYS, ...ARRAY_KEYS, 'title', 'styles']);
+const READ_KEYS: ReadonlySet<string> = new Set([...SINGLE_VALUE_KEYS, ...ARRAY_KEYS, 'title', 'styles', 'crossref']);
+
+/** Quarto's mappings, of whose keys export reads some: `crossref`'s
+ *  fig-title, tbl-title and title-delim. One with none of those, as
+ *  `crossref: {fig-prefix: Fig.}`, gives no setting import could write
+ *  back, so it goes as written, as a key export reads nothing from (see
+ *  frontmatterLayout). */
+const PARTLY_READ_KEYS: ReadonlySet<string> = new Set(['crossref']);
 
 /** An item of a block list in frontmatter, as `  - One` after `title:` */
 export interface BlockListItem {
@@ -289,6 +296,62 @@ function readBlockLists(lines: string[], warnings: string[]): string[] {
   return read;
 }
 
+/**
+ * The text of a YAML scalar on one line, `raw`, as after a key's colon:
+ * one in double quotes, with its escapes read, one in single quotes, where
+ * '' is a quote, or one in none, to a comment, which a space and a # start.
+ * Undefined where a quote doesn't close on the line or text follows it.
+ */
+export function yamlScalar(raw: string): string | undefined {
+  const text = raw.trim();
+  const quote = text[0];
+  if (quote !== '"' && quote !== "'") return text.replace(/(^|[ \t])#.*$/, '').trim();
+  let value = '';
+  let at = 1;
+  for (; at < text.length; at++) {
+    const c = text[at];
+    if (quote === "'") {
+      if (c !== "'") value += c;
+      else if (text[at + 1] === "'") value += text[++at];
+      else break;
+    } else if (c === '"') {
+      break;
+    } else if (c !== '\\') {
+      value += c;
+    } else {
+      const e = text[++at];
+      const hex = e === 'x' ? 2 : e === 'u' ? 4 : e === 'U' ? 8 : 0;
+      if (hex > 0) {
+        const digits = text.slice(at + 1, at + 1 + hex);
+        const code = parseInt(digits, 16);
+        if (digits.length < hex || !/^[0-9A-Fa-f]+$/.test(digits) || code > 0x10FFFF) return undefined;
+        value += String.fromCodePoint(code);
+        at += hex;
+      } else {
+        const escaped = YAML_ESCAPES[e];
+        if (escaped === undefined) return undefined;
+        value += escaped;
+      }
+    }
+  }
+  if (at >= text.length) return undefined;
+  const rest = text.slice(at + 1).trim();
+  return rest === '' || rest.startsWith('#') ? value : undefined;
+}
+
+const YAML_ESCAPES: Record<string, string> = {
+  '0': '\0', 'a': '\x07', 'b': '\b', 't': '\t', '\t': '\t', 'n': '\n', 'v': '\v', 'f': '\f', 'r': '\r', 'e': '\x1b',
+  ' ': ' ', '"': '"', '/': '/', '\\': '\\', 'N': '\x85', '_': '\xa0', 'L': '\u2028', 'P': '\u2029',
+};
+
+/** `value` as a YAML scalar yamlScalar reads back as it is: as written
+ *  where it's words, digits and periods YAML reads as text, in double
+ *  quotes otherwise */
+export function yamlScalarText(value: string): string {
+  if (/^[\p{L}\p{N}.(](?:[\p{L}\p{N} .()]*[\p{L}\p{N}.)])?$/u.test(value) && !/^(?:null|true|false|yes|no|on|off|y|n|[-+.\d][\d.e+-]*)$/i.test(value)) return value;
+  return JSON.stringify(value);
+}
+
 /** A value as parseFrontmatter reads it after a key, without a quote at its start or end */
 function unquote(value: string): string {
   return value.trim().replace(/^["']|["']$/g, '');
@@ -390,6 +453,17 @@ export interface Frontmatter {
   lineSpacing?: string | number;
   paragraphIndent?: number | 'none';
   bibliographyHangingIndent?: boolean;
+  /** Quarto's `crossref` keys export reads, the words and delimiter a caption shows (see captions.ts) */
+  crossref?: CrossrefOptions;
+  /** Quarto's fig-cap-location: whether a figure's caption goes above or below it */
+  figCapLocation?: 'top' | 'bottom';
+}
+
+/** The keys of Quarto's `crossref` mapping export reads */
+export interface CrossrefOptions {
+  figTitle?: string;
+  tblTitle?: string;
+  titleDelim?: string;
 }
 
 /**
@@ -585,6 +659,42 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
       continue;
     }
 
+    // Quarto's `crossref:` mapping, of whose keys export reads fig-title,
+    // tbl-title and title-delim, each a value of YAML's, in quotes or none,
+    // on its line, at the indentation of the mapping's first key: a line
+    // indented more is a value of a key it doesn't read. A comment, at any
+    // indentation, ends no mapping in YAML, nor here.
+    if (key === 'crossref') {
+      const crossref: CrossrefOptions = {};
+      let keyIndent = -1;
+      while (lineIdx + 1 < yamlLines.length) {
+        const nextLine = yamlLines[lineIdx + 1];
+        if (nextLine.length > 0 && !nextLine.startsWith(' ') && !nextLine.startsWith('\t') && !nextLine.startsWith('#')) break;
+        lineIdx++;
+        const inner = nextLine.trimStart();
+        if (!inner || inner.startsWith('#')) continue;
+        const indent = nextLine.length - inner.length;
+        if (keyIndent < 0) keyIndent = indent;
+        const innerColon = inner.indexOf(':');
+        if (indent !== keyIndent || innerColon < 0) continue;
+        const innerVal = yamlScalar(inner.slice(innerColon + 1));
+        if (innerVal === undefined) continue;
+        switch (inner.slice(0, innerColon).trim()) {
+          case 'fig-title':
+            if (innerVal) crossref.figTitle = innerVal;
+            break;
+          case 'tbl-title':
+            if (innerVal) crossref.tblTitle = innerVal;
+            break;
+          case 'title-delim':
+            crossref.titleDelim = innerVal;
+            break;
+        }
+      }
+      if (Object.keys(crossref).length > 0) metadata.crossref = crossref;
+      continue;
+    }
+
     switch (key) {
       case 'title':
         if (!metadata.title) metadata.title = [];
@@ -775,6 +885,9 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
         if (value === 'true') metadata.bibliographyHangingIndent = true;
         else if (value === 'false') metadata.bibliographyHangingIndent = false;
         break;
+      case 'fig-cap-location':
+        if (value === 'top' || value === 'bottom') metadata.figCapLocation = value;
+        break;
     }
   }
   return { metadata, fieldOrder };
@@ -958,7 +1071,7 @@ export function frontmatterLayout(markdown: string): FrontmatterLayout | undefin
     // list or mapping it reads goes past an entry's
     const { metadata, fieldOrder } = readFrontmatterLines(entryLines, []);
     const last = layout[layout.length - 1];
-    if (!READ_KEYS.has(entry.key) && !READ_KEYS.has(entry.yamlKey) && Object.keys(metadata).length === 0) {
+    if ((PARTLY_READ_KEYS.has(entry.key) || !READ_KEYS.has(entry.key) && !READ_KEYS.has(entry.yamlKey)) && Object.keys(metadata).length === 0) {
       // With those right before it, as nothing goes between them
       if (typeof last === 'object') last.text += '\n' + entryLines.join('\n');
       else layout.push({ text: entryLines.join('\n') });
@@ -1053,6 +1166,18 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'line-spacing': () => { if (metadata.lineSpacing !== undefined) lines.push('line-spacing: ' + metadata.lineSpacing); },
     'paragraph-indent': () => { if (metadata.paragraphIndent !== undefined) lines.push('paragraph-indent: ' + metadata.paragraphIndent); },
     'bibliography-hanging-indent': () => { if (metadata.bibliographyHangingIndent !== undefined) lines.push('bibliography-hanging-indent: ' + metadata.bibliographyHangingIndent); },
+    'crossref': () => {
+      const crossref = metadata.crossref;
+      if (!crossref) return;
+      const keys: string[] = [];
+      if (crossref.figTitle !== undefined) keys.push('  fig-title: ' + yamlScalarText(crossref.figTitle));
+      if (crossref.tblTitle !== undefined) keys.push('  tbl-title: ' + yamlScalarText(crossref.tblTitle));
+      if (crossref.titleDelim !== undefined) keys.push('  title-delim: ' + yamlScalarText(crossref.titleDelim));
+      if (keys.length === 0) return;
+      lines.push('crossref:');
+      pushAll(lines, keys);
+    },
+    'fig-cap-location': () => { if (metadata.figCapLocation) lines.push('fig-cap-location: ' + metadata.figCapLocation); },
   };
 
   // Default emission order (backward compatible)
@@ -1067,6 +1192,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'pipe-table-max-line-width', 'grid-table-max-line-width',
     'blockquote-style', 'callout-labels', 'colors', 'styles', 'breaks',
     'line-spacing', 'paragraph-indent', 'bibliography-hanging-indent',
+    'crossref', 'fig-cap-location',
   ];
 
   const aliasToCanonical: Record<string, string> = {

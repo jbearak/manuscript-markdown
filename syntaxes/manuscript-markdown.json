@@ -72,7 +72,7 @@
 			"contentName": "meta.comment"
 		},
 		"comment_range_start": {
-			"match": "(\\{#)([a-zA-Z0-9_-]++)(\\})",
+			"match": "(\\{#)(?!(?:fig|tbl)-[a-zA-Z0-9_-])([a-zA-Z0-9_-]++)(\\})",
 			"captures": {
 				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
 				"2": { "name": "entity.name.tag.manuscript-markdown" },

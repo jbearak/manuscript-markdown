@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 import { apartFromCurrency, asXmlNodes, endsInLatexComment, ommlToLatex, symbolFontCharacter, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
-import { FRONTMATTER_OPENING_RE, Frontmatter, type FrontmatterLayout, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
+import { FRONTMATTER_OPENING_RE, Frontmatter, type FrontmatterLayout, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CrossrefOptions, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
@@ -19,7 +19,7 @@ import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from '
 import { readCitationItems } from './citation-syntax';
 import { citationLocatorText } from './citation-locator';
 import { bibtexNameParts, buildItemData, citeprocFieldText } from './md-to-docx-citations';
-import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
+import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments, type MdRun } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -29,7 +29,8 @@ import { extractZoteroKey } from './zotero-link';
 import { styleFence } from './style-fence';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
-import { asUtf8, decodeXml, parsePart, relatedPartPath } from './template-sections';
+import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, isCaptionText, labelOfBookmark, quotedAttributeValue, type CaptionLocation, type CaptionParagraph } from './captions';
+import { asUtf8, decodeXml, parsePart, relatedPartPath, relatedPartPaths } from './template-sections';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -1644,7 +1645,9 @@ export type ContentItem =
   | { type: 'html_comment'; text: string; commentIds: Set<string>; otherLineEnds?: true }
   // href and link: as text's, of a w:hyperlink around the picture or its
   // docPr's a:hlinkClick
-  | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string; href?: string; link?: number }
+  // figure: the caption of the figure it is, as readFigureCaptions read
+  // it, which pictureMarkdown writes as Quarto's, ![Caption](map.png){#fig-map}
+  | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string; href?: string; link?: number; figure?: FigureCaption }
   | { type: 'landscape_open' }
   | { type: 'landscape_close' }
   | { type: 'portrait_open' }
@@ -1653,6 +1656,15 @@ export type ContentItem =
   // In a list item (`inItem`), as a block of its paragraphs in the style
   | { type: 'custom_style_open'; styleName: string; inItem?: ListContinuation }
   | { type: 'custom_style_close'; inItem?: ListContinuation };
+/** A figure's caption, as import writes it (see readFigureCaptions) */
+interface FigureCaption {
+  label: string;
+  /** Its text's Markdown, which goes in the image's brackets */
+  caption: string;
+  /** The image's alt text, where it isn't the caption's text */
+  alt?: string;
+}
+
 export interface FootnoteBody {
   id: string;
   content: ContentItem[];
@@ -1747,7 +1759,7 @@ export interface StyleLayouts {
 const BUILT_IN_PARAGRAPH_STYLES = new Map<string, string>([
   ['normal', 'Normal'],
   ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map(level => ['heading ' + level, 'Heading' + level] as [string, string]),
-  ['title', 'Title'], ['quote', 'Quote'], ['intense quote', 'IntenseQuote'],
+  ['title', 'Title'], ['quote', 'Quote'], ['intense quote', 'IntenseQuote'], ['caption', 'Caption'],
 ]);
 
 /** The document's own ID of each w:pStyle useBuiltInStyleIds gave a
@@ -4335,6 +4347,44 @@ export async function extractZoteroPrefs(data: Uint8Array | JSZip): Promise<Zote
  * - Flexible: PREFIX (index 1), PREFIX_2, PREFIX_3, … (prefix without trailing '_')
  * Returns null if no matching properties are found.
  */
+/** The label of each caption whose bookmark's name doesn't give it, by
+ *  the name, which export keeps in a custom property (see figureCaptionXml
+ *  in md-to-docx.ts) */
+async function extractCaptionLabels(zip: JSZip): Promise<Map<string, string> | undefined> {
+  const json = await extractChunkedCustomProp(zip, 'MANUSCRIPT_CAPTION_LABELS_');
+  if (!json) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    return new Map(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Where export put the captions of its figures, which it keeps in a
+ *  custom property for a document with figures (see figureCaptionXml in
+ *  md-to-docx.ts) */
+async function extractFigureCaptionLocation(zip: JSZip): Promise<CaptionLocation | undefined> {
+  const value = await extractStringCustomProp(zip, 'MANUSCRIPT_FIG_CAP_LOCATION');
+  return value === 'top' || value === 'bottom' ? value : undefined;
+}
+
+/** The SEQ fields of each identifier in the parts of the document Word
+ *  numbers them in: its body, its notes, its headers and its footers (see
+ *  countSeqFields), those the body's relationships name, whatever their
+ *  names, as a template's `header-cover.xml`, and those of Word's names */
+async function seqFieldCountsOf(zip: JSZip): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  const paths = new Set(Object.keys(zip.files).filter(path => /^word\/(?:document|footnotes|endnotes|header\d*|footer\d*)\.xml$/.test(path)));
+  for (const path of await relatedPartPaths(zip, 'word/document.xml', ['header', 'footer', 'footnotes', 'endnotes'])) paths.add(path);
+  for (const path of paths) {
+    const part = zip.file(path);
+    if (part) countSeqFields(asUtf8(decodeXml(await part.async('uint8array'))), counts);
+  }
+  return counts;
+}
+
 async function extractChunkedCustomProp(data: Uint8Array | JSZip, propPrefix: string): Promise<string | null> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
   const parsed = await readZipXml(zip, 'docProps/custom.xml');
@@ -5813,8 +5863,14 @@ function pictureMarkdown(item: ContentItem & { type: 'image' }, imageFormatMappi
       + (item.widthPx > 0 ? ' width="' + item.widthPx + '"' : '')
       + (item.heightPx > 0 ? ' height="' + item.heightPx + '"' : '') + '>');
   }
-  const safeAlt = imageLabelMarkdown(item, after);
   const size = [...(item.widthPx > 0 ? ['width=' + item.widthPx] : []), ...(item.heightPx > 0 ? ['height=' + item.heightPx] : [])];
+  // A figure's, its caption in its brackets, and its label first in its
+  // attributes, then its alt text where it's not the caption's
+  if (item.figure) {
+    const attributes = ['#' + item.figure.label, ...size, ...(item.figure.alt !== undefined ? ['fig-alt=' + quotedAttributeValue(item.figure.alt)] : [])];
+    return syntaxText('![' + item.figure.caption + '](' + formatHrefForMarkdown(item.src) + '){' + attributes.join(' ') + '}');
+  }
+  const safeAlt = imageLabelMarkdown(item, after);
   return syntaxText('![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')' + (size.length ? '{' + size.join(' ') + '}' : ''));
 }
 
@@ -6851,6 +6907,10 @@ function drawingImages(
 
 export interface DocumentContentResult {
   content: ContentItem[];
+  /** The paragraphs of the body that are captions as Word writes them, by
+   *  their first items (see captionParagraphOf), which readFigureCaptions
+   *  reads with their pictures */
+  captionParagraphs?: Map<ContentItem, CaptionParagraph>;
   /** Paragraphs of spaces and tabs alone before the content, which count
    *  among export's paragraphs (see dropBlankParagraphText) */
   leadingBlankParagraphs?: number;
@@ -7603,6 +7663,7 @@ export async function extractDocumentContent(
   let citationIdx = 0;
 
   const content: ContentItem[] = [];
+  const captionParagraphs = new Map<ContentItem, CaptionParagraph>();
   // The comments whose ranges are open, but not replies or those without a
   // body (see commentBodies)
   const activeComments = new Set<string>();
@@ -8400,6 +8461,19 @@ export async function extractDocumentContent(
               leadingBlankParagraphs++;
             }
           }
+          // A caption's paragraph, by its first item, which readFigureCaptions
+          // reads with the picture before or after it: a plain paragraph of
+          // the body's, with a para item of its own, but for the document's
+          // first, and one after a para item another paragraph left, as the
+          // spacer after a code block or a quote, or a section's start, which
+          // have none
+          if (target === content && !inTableCell && !sectionFence && !paraMarkRevision && !trackedBreak && !inBibliographyField
+            && !headingLevel && !listMeta && !isTitle && !blockquoteLevel && !isCodeBlock && !generatedListContinuation && !customStyle
+            && !horizontalRule && taskLevel === undefined && unnumberedListLevel === undefined
+            && (needsPara || targetLenBeforePara === 0 || target[targetLenBeforePara - 1].type === 'para') && target.length > targetLenBeforePara + (needsPara ? 1 : 0)) {
+            const caption = captionParagraphOf(paraChildren);
+            if (caption) captionParagraphs.set(target[targetLenBeforePara], caption);
+          }
           if (paraMarkRevision && canJoinTrackedBreak && !inBibliographyField && (target.length > targetLenBeforePara || emptyMarked)) {
             trackedParaMark = { revision: paraMarkRevision, target, end: target.length };
           }
@@ -8465,7 +8539,356 @@ export async function extractDocumentContent(
     const fence = templatePageSections?.has(sectionBreakOrdinal) ? undefined : sectionFenceOf(asXmlNodes(bodySectPr['w:sectPr']), sectionBreakOrdinal);
     endSection(content, fence, sectionBreakOrdinal);
   }
-  return { content, zoteroBiblData, imageEntries: imageFiles.entries.length > 0 ? imageFiles.entries : undefined, leadingBlankParagraphs };
+  return { content, zoteroBiblData, imageEntries: imageFiles.entries.length > 0 ? imageFiles.entries : undefined, leadingBlankParagraphs, ...(captionParagraphs.size > 0 ? { captionParagraphs } : {}) };
+}
+
+// The elements of a caption's paragraph export wouldn't write as Word has
+// them, or import reads as something else than its text: a tracked change, a
+// comment, a note, a line break, a picture, a symbol or alternate content,
+// or a paragraph mark that ends a section or records a change
+const NOT_IN_CAPTIONS = new Set([
+  'w:ins', 'w:del', 'w:moveFrom', 'w:moveTo', 'w:moveFromRangeStart', 'w:moveToRangeStart', 'w:delText', 'w:delInstrText',
+  'w:rPrChange', 'w:pPrChange', 'w:commentRangeStart', 'w:commentRangeEnd', 'w:commentReference', 'w:footnoteReference',
+  'w:endnoteReference', 'w:br', 'w:cr', 'w:drawing', 'w:pict', 'w:object', 'w:sym', 'mc:AlternateContent', 'w:sectPr',
+  'w:numPr', 'w:ruby', 'w:fldData',
+]);
+
+/**
+ * The label of a caption Word's Insert Caption wrote, in the paragraph of
+ * the children `paraChildren`: in the Caption style, its text before a SEQ
+ * field, as `Figure `, the field, `SEQ Figure \* ARABIC`, whose result is
+ * its number, and the names of the bookmarks it has. Undefined for one
+ * whose caption export wouldn't write as Word has it: of another style,
+ * with no SEQ field, with other switches, which number otherwise, or with
+ * another field, as a chapter's number's or a citation's, or with an
+ * element of NOT_IN_CAPTIONS.
+ */
+function captionParagraphOf(paraChildren: XmlNode[]): CaptionParagraph | undefined {
+  let style = false;
+  let phase = 'before' as 'before' | 'instruction' | 'result' | 'after';
+  let before = '';
+  let instruction = '';
+  let result = '';
+  const bookmarks: string[] = [];
+  const text = (shown: string) => {
+    if (phase === 'before') before += shown;
+    else if (phase === 'result') result += shown;
+  };
+  const visit = (nodes: XmlNode[]): boolean => {
+    for (const node of nodes) for (const key of Object.keys(node)) {
+      if (key === ':@' || key === '#text') continue;
+      if (NOT_IN_CAPTIONS.has(key)) return false;
+      const children = asXmlNodes(node[key]);
+      if (key === 'w:pStyle') {
+        style = getAttr(node, 'val') === 'Caption';
+      } else if (key === 'w:t') {
+        text(nodeText(children));
+      } else if (key in RUN_CHARACTERS) {
+        text(RUN_CHARACTERS[key]);
+      } else if (key === 'w:fldChar') {
+        const type = getAttr(node, 'fldCharType');
+        if (type === 'begin' && phase === 'before') phase = 'instruction';
+        else if (type === 'separate' && phase === 'instruction') phase = 'result';
+        else if (type === 'end' && (phase === 'instruction' || phase === 'result')) phase = 'after';
+        else return false;
+      } else if (key === 'w:instrText') {
+        if (phase !== 'instruction') return false;
+        instruction += nodeText(children);
+      } else if (key === 'w:fldSimple') {
+        if (phase !== 'before') return false;
+        instruction = getAttr(node, 'instr');
+        phase = 'result';
+        if (!visit(children)) return false;
+        phase = 'after';
+      } else if (key === 'w:bookmarkStart') {
+        bookmarks.push(getAttr(node, 'name'));
+      } else if ((key === 'm:oMath' || key === 'm:oMathPara') && phase !== 'after') {
+        return false;
+      } else if (!visit(children)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!visit(paraChildren) || !style || phase !== 'after' || !/^\d+$/.test(result)) return undefined;
+  // SEQ, its identifier, and \* ARABIC or \* MERGEFORMAT, which number as
+  // export does, any number of times
+  const words = instruction.trim().split(/\s+/);
+  if (words[0]?.toUpperCase() !== 'SEQ' || !words[1] || /["\\]/.test(words[1])) return undefined;
+  for (let k = 2; k < words.length; k += 2) {
+    if (words[k] !== '\\*' || !/^(?:ARABIC|MERGEFORMAT)$/i.test(words[k + 1] ?? '')) return undefined;
+  }
+  return { identifier: words[1], before, result, bookmarks };
+}
+
+/** Whether a para item is of a paragraph with nothing but its text, as a
+ *  figure's picture's or caption's is */
+function isPlainParaItem(item: ContentItem | undefined): boolean {
+  return item?.type === 'para' && isPlainEmptyParagraph({ ...item, emptyParagraphCount: 0 }) && !item.horizontalRule
+    && item.taskLevel === undefined && item.unnumberedListLevel === undefined && !item.alertType && !item.isBlockquoteSpacer
+    && !item.paraMarkRevision && !item.breakRevision && !item.listContinuation && !item.itemContinuation;
+}
+
+/** Whether a figure's caption can go on `item`, a picture alone in its
+ *  paragraph: one Word got from Markdown's syntax, in no link, comment or
+ *  tracked change */
+function takesCaption(item: ContentItem | undefined, imageFormatMapping: Map<string, string> | null | undefined): item is ContentItem & { type: 'image' } {
+  return item?.type === 'image' && !item.href && !item.revision && item.commentIds.size === 0 && item.markdown === undefined
+    && imageFormatMapping?.get(item.rId) !== 'html';
+}
+
+/** A caption's text, its runs as export writes them or import reads them,
+ *  for one to be compared with the other, as Word shows it: each piece of
+ *  text in a formatting, those next to each other in one joined however
+ *  the runs split them, and an equation, without the whitespace it ends
+ *  with, which Word doesn't show; undefined where it has something else.
+ *  Whitespace counts in no formatting, as Markdown moves it out of
+ *  emphasis, a highlight or a link, as `**A *B***` reads back as
+ *  `**A** ***B***`, whose space isn't bold, which Word shows alike. An
+ *  escape or a reference Markdown writes, or `_` for `*`, reads back as
+ *  the same text and formatting, so it shapes the same. A highlight's
+ *  color is its Markdown name, as `pieces` have it. */
+function captionTextShape(pieces: Array<{ text?: string; latex?: string; formatting?: Partial<RunFormatting>; href?: string }> | undefined): string | undefined {
+  if (!pieces) return undefined;
+  const shape: Array<{ text: string; key: string } | { latex: string }> = [];
+  let last: { text: string; key: string } | undefined;
+  const add = (text: string, key: string) => {
+    if (last && last.key === key) last.text += text;
+    else shape.push(last = { text, key });
+  };
+  for (const piece of pieces) {
+    if (piece.latex !== undefined) {
+      shape.push({ latex: piece.latex });
+      last = undefined;
+      continue;
+    }
+    if (!piece.text) continue;
+    const f = piece.formatting ?? {};
+    const key = JSON.stringify([!!f.bold, !!f.italic, !!f.underline, !!f.strikethrough, !!f.highlight && (f.highlightColor ?? 'yellow'),
+      !!f.superscript, !!f.subscript, !!f.code, piece.href ?? '']);
+    for (const part of piece.text.split(/(\s+)/)) if (part) add(part, /^\s/.test(part) ? '' : key);
+  }
+  // Its whitespace at the end, which Word doesn't show
+  if (last && shape[shape.length - 1] === last && last.key === '') shape.pop();
+  return JSON.stringify(shape);
+}
+
+/** A run of export's as a piece of a caption's text (see captionTextShape),
+ *  or undefined for one a caption's text can't have */
+function exportedCaptionPiece(run: MdRun): { text?: string; latex?: string; formatting?: Partial<RunFormatting>; href?: string } | undefined {
+  if (run.type === 'math' && !run.display) return { latex: run.text };
+  if (run.type !== 'text') return undefined;
+  return { text: run.text, formatting: run, href: run.href };
+}
+
+// Characters that stand for a caption's [, ] and \ while buildMarkdown
+// writes its text, which then go as \[, \] and \\: in the image's label
+// the caption goes in, a ] would end it, a [ with no ] after it would keep
+// the label from ending, and a \ would escape what comes after it, where
+// buildMarkdown leaves them as they are in a paragraph. Each is
+// punctuation, as the character it stands for, so that buildMarkdown
+// writes emphasis next to it as it reads next to that character. In code,
+// whose span holds the label's brackets and has no escapes, they stay.
+const CAPTION_STAND_INS: ReadonlyArray<readonly [string, string]> = [['[', '\u2E28'], [']', '\u2E29'], ['\\', '\u2E1E']];
+const CAPTION_STAND_IN_RE = /[\u2E28\u2E29\u2E1E]/;
+
+/** The Markdown of a caption's text, `items`, for an image's label, each
+ *  [, ] and \ of its text escaped, or undefined where the text holds one
+ *  of the characters that stand for them */
+function captionMarkdown(items: ContentItem[]): string | undefined {
+  if (items.length === 0) return '';
+  if (items.some(item => item.type === 'text' && CAPTION_STAND_IN_RE.test(item.text))) return undefined;
+  const marked = items.map(item => {
+    if (item.type !== 'text' || item.formatting.code || !/[[\]\\]/.test(item.text)) return item;
+    let text = item.text;
+    for (const [character, standIn] of CAPTION_STAND_INS) text = text.split(character).join(standIn);
+    return { ...item, text };
+  });
+  let markdown = buildMarkdown(marked, new Map()).replace(/\n+$/, '');
+  for (const [character, standIn] of CAPTION_STAND_INS) markdown = markdown.split(standIn).join('\\' + character);
+  return markdown;
+}
+
+/**
+ * Reads the captions of the figures in `content`, the body's items, which
+ * Word's Insert Caption wrote, or export as it does, each in a paragraph
+ * of its own right after or right before its picture, which is alone in
+ * its paragraph: its label and number, as `Figure 1`, the series' SEQ
+ * field, then a separator and its text, as `: Rates by region`. A figure
+ * whose caption converts is Quarto's, `![Rates by region](map.png){#fig-map}`:
+ * the caption's paragraph goes, and its picture's item holds the caption.
+ *
+ * The governing rule is that a caption converts only where the next export
+ * writes it as Word shows it, its label, number, separator and text, so
+ * each of a series of captions, by their SEQ field's identifier, converts,
+ * or none does, and its numbers stay as they were, as text: export
+ * numbers the figures in order, which Word does too, so a series converts
+ * only where every field of it Word numbers, in any part of the document
+ * (`seqCounts`), is one of these captions, of one title, separator and
+ * place, whose text export writes as Word has it (see captionTextShape),
+ * and only one series, the one of the most captions, as the frontmatter
+ * gives one title (see captionOptions). A number Word didn't update goes
+ * as export numbers it.
+ *
+ * Where every caption of a series has a picture before it and one after
+ * it, either place would pair each with a picture, so the series converts
+ * only where `stored`, what export recorded, gives the place; else it
+ * stays text, which never takes a caption to another figure's picture. A
+ * caption's separator is the stored delimiter's where it starts with it,
+ * so each export writes reads back, or one of punctuation Word's captions
+ * use (see captionSeparatorAt).
+ *
+ * Each figure's label is that its caption's bookmark gives, by its name
+ * (see labelOfBookmark), or by `labelsByBookmark`, the custom property
+ * export keeps the others in, or else one made of the caption's first
+ * words (see captionSlug), each other than those before it, as `-2`
+ * after it makes it. Its picture's alt text, where it has one export
+ * wouldn't write from the caption, goes in fig-alt; a picture with none
+ * takes the caption's, as export gives a figure.
+ *
+ * Returns what the captions show of the frontmatter's caption options,
+ * where a series converts: the delimiter only where a caption has text.
+ */
+function readFigureCaptions(
+  content: ContentItem[],
+  captionParagraphs: Map<ContentItem, CaptionParagraph> | undefined,
+  seqCounts: ReadonlyMap<string, number>,
+  labelsByBookmark: ReadonlyMap<string, string> | undefined,
+  imageFormatMapping: Map<string, string> | null | undefined,
+  stored: { location?: CaptionLocation; delim?: string },
+): { figTitle: string; titleDelim?: string; figCapLocation: CaptionLocation } | undefined {
+  if (!captionParagraphs || captionParagraphs.size === 0) return undefined;
+  const storedSeparator = stored.delim !== undefined ? captionSeparator(stored.delim, true) : undefined;
+  interface Candidate {
+    paragraph: CaptionParagraph;
+    start: number; // its first item, its para item where it has one
+    end: number; // past its last item
+    title: string;
+    delim?: string; // undefined where it has no text
+    caption: ContentItem[]; // its text's items
+    image: { bottom?: number; top?: number }; // the index of the picture's item before it, and after it
+  }
+  const series = new Map<string, Candidate[]>();
+  const failed = new Set<string>();
+  for (let start = 0; start < content.length; start++) {
+    const paragraph = captionParagraphs.get(content[start]);
+    if (!paragraph) continue;
+    let end = start + 1;
+    while (end < content.length && !isStructuralBoundaryItem(content[end])) end++;
+    const candidate = captionCandidate(paragraph, start, end);
+    if (!candidate) failed.add(paragraph.identifier);
+    else (series.get(paragraph.identifier) ?? series.set(paragraph.identifier, []).get(paragraph.identifier)!).push(candidate);
+  }
+
+  function captionCandidate(paragraph: CaptionParagraph, start: number, end: number): Candidate | undefined {
+    const own = content[start].type === 'para';
+    if (own && !isPlainParaItem(content[start])) return undefined;
+    const items = content.slice(own ? start + 1 : start, end);
+    const { before, result } = paragraph;
+    const title = before.slice(0, -1);
+    if (!before.endsWith(' ') || !/^\S(?:[^\t\n\r]*\S)?$/.test(title)) return undefined;
+    // The text its text items start with, to the first item of another kind
+    let leading = '';
+    let k = 0;
+    for (; k < items.length && items[k].type === 'text'; k++) leading += (items[k] as { text: string }).text;
+    const labelText = before + result;
+    if (!leading.startsWith(labelText)) return undefined;
+    const rest = leading.slice(labelText.length);
+    const storedOne = storedSeparator !== undefined && rest.startsWith(storedSeparator);
+    const separator = storedOne ? storedSeparator : captionSeparatorAt(rest);
+    const labelEnd = labelText.length + separator.length;
+    // The label's items, as export writes them, in no formatting, link or
+    // comment, and its text's, the rest, the item they share split
+    const caption: ContentItem[] = [];
+    let at = 0;
+    for (const item of items) {
+      if (item.type === 'text') {
+        const from = at;
+        at += item.text.length;
+        if (from < labelEnd && (hasFormatting(item.formatting) || item.href || item.commentIds.size > 0 || item.revision)) return undefined;
+        if (at > labelEnd) caption.push(from >= labelEnd ? item : { ...item, text: item.text.slice(labelEnd - from) });
+      } else if (at < labelEnd) {
+        return undefined;
+      } else {
+        caption.push(item);
+      }
+    }
+    for (const item of caption) {
+      if (item.type === 'text' ? item.commentIds.size > 0 || item.revision || item.text.includes('\n')
+        : !(item.type === 'math' && !item.display && item.commentIds.size === 0 && !item.revision && !item.href)) return undefined;
+    }
+    const hasText = caption.some(item => item.type === 'math' || item.type === 'text' && isCaptionText(item.text));
+    // With no text, nothing after the number Word shows
+    if (!hasText && rest.trim() !== '') return undefined;
+    const delim = !hasText ? undefined : storedOne ? stored.delim : delimiterOfSeparator(separator);
+    if (hasText && delim === undefined) return undefined;
+    // The picture right before it, alone in its paragraph, and the one
+    // right after it, of a paragraph of its own, with no empty paragraph
+    // between, which goes in the item between them (see emptyParagraphCount)
+    const image: Candidate['image'] = {};
+    const adjoins = (item: ContentItem | undefined) => isPlainParaItem(item) && !(item as { emptyParagraphCount?: number }).emptyParagraphCount;
+    if (own && adjoins(content[start]) && takesCaption(content[start - 1], imageFormatMapping) && (start === 1 || isPlainParaItem(content[start - 2]))) image.bottom = start - 1;
+    if (adjoins(content[end]) && takesCaption(content[end + 1], imageFormatMapping)
+      && (end + 2 >= content.length || isStructuralBoundaryItem(content[end + 2]))) image.top = end + 1;
+    return { paragraph, start, end, title, delim, caption: hasText ? caption : [], image };
+  }
+
+  // The series that convert, the one of the most captions first
+  let chosen: { candidates: Candidate[]; location: CaptionLocation; delim?: string } | undefined;
+  for (const [identifier, candidates] of series) {
+    if (failed.has(identifier) || seqCounts.get(identifier) !== candidates.length) continue;
+    const { title } = candidates[0];
+    const delims = new Set(candidates.flatMap(candidate => candidate.delim !== undefined ? [candidate.delim] : []));
+    if (candidates.some(candidate => candidate.title !== title) || delims.size > 1) continue;
+    const below = candidates.every(candidate => candidate.image.bottom !== undefined);
+    const above = candidates.every(candidate => candidate.image.top !== undefined);
+    const location: CaptionLocation | undefined = below && above ? stored.location : below ? 'bottom' : above ? 'top' : undefined;
+    if (!location || chosen && chosen.candidates.length >= candidates.length) continue;
+    chosen = { candidates, location, delim: [...delims][0] };
+  }
+  if (!chosen) return undefined;
+
+  // Each caption's text's Markdown, which export reads back as Word has it
+  const figures: Array<{ candidate: Candidate; image: ContentItem & { type: 'image' }; caption: string; readAlt: string }> = [];
+  for (const candidate of chosen.candidates) {
+    const caption = captionMarkdown(candidate.caption);
+    if (caption === undefined || caption.includes('\n')) return undefined;
+    const tokens = parseMd('![' + caption + '](x.png){#fig-x}');
+    const run = tokens.length === 1 && tokens[0].type === 'paragraph' && tokens[0].runs.length === 1 ? tokens[0].runs[0] : undefined;
+    if (run?.type !== 'image' || !run.figure) return undefined;
+    const exported = run.figure.captionRuns.map(exportedCaptionPiece);
+    // A highlight's color by its Markdown name, as export's runs have it
+    const read = candidate.caption.map(item => item.type === 'math' ? { latex: item.latex } : item.type !== 'text' ? undefined : {
+      text: item.text, href: item.href,
+      formatting: item.formatting.highlightColor ? { ...item.formatting, highlightColor: resolveMarkdownColor(item.formatting.highlightColor) ?? item.formatting.highlightColor } : item.formatting,
+    });
+    if (exported.includes(undefined) || read.includes(undefined)) return undefined;
+    if (captionTextShape(exported as NonNullable<(typeof exported)[number]>[]) !== captionTextShape(read as NonNullable<(typeof read)[number]>[])) return undefined;
+    const image = content[candidate.image[chosen.location]!] as ContentItem & { type: 'image' };
+    figures.push({ candidate, image, caption, readAlt: run.imageAlt ?? '' });
+  }
+
+  // Their labels, and the captions' paragraphs out, from the last
+  const used = new Set<string>();
+  for (let n = 0; n < figures.length; n++) {
+    const { candidate, image, caption, readAlt } = figures[n];
+    let label = candidate.paragraph.bookmarks.map(name => labelsByBookmark?.get(name) ?? labelOfBookmark(name))
+      .find((found): found is string => found !== undefined && FIGURE_LABEL_RE.test(found));
+    label ??= captionSlug(candidate.caption.map(item => item.type === 'text' ? item.text : ' ').join(''), n + 1);
+    const base = label;
+    for (let k = 2; used.has(label); k++) label = base + '-' + k;
+    used.add(label);
+    image.figure = { label, caption, ...(image.alt && isCaptionText(image.alt) && image.alt !== readAlt ? { alt: image.alt } : {}) };
+  }
+  for (let n = figures.length - 1; n >= 0; n--) {
+    const { start, end } = figures[n].candidate;
+    // A caption with no para item of its own, as one that starts the
+    // document, a section or the text after a code block's spacer, takes
+    // the picture's para item after it, as the picture then starts there
+    content.splice(start, end - start + (content[start].type !== 'para' ? 1 : 0));
+  }
+  const titled = figures[0].candidate.title;
+  return { figTitle: titled, ...(chosen.delim !== undefined ? { titleDelim: chosen.delim } : {}), figCapLocation: chosen.location };
 }
 
 // Markdown generation
@@ -15662,9 +16085,11 @@ function buildMarkdownOnce(
   // written inline, whose ID doesn't show, took the number of a later one
   // written with its ID, which took the next free number, so its ID changed
   // from one trip to the next.
+  // A name that's a caption's label, as fig-map, isn't one, as its {#fig-map}
+  // starts no range (see captions.ts), so the comment takes a number
   for (const id of commentsInOrder) {
     const mapped = options?.commentIdMapping?.get(id);
-    if (mapped && !usedRemapIds.has(mapped)) {
+    if (mapped && !usedRemapIds.has(mapped) && !isCaptionLabelId(mapped)) {
       usedRemapIds.add(mapped);
       commentIdRemap.set(id, mapped);
     }
@@ -19469,7 +19894,18 @@ export async function convertDocx(
   const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap };
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap };
 
-  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, contentOptions);
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs, captionParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, contentOptions);
+  // The figures' captions, which go with their pictures, before anything
+  // counts the body's paragraphs (see readFigureCaptions)
+  const exportedCaptionLocation = captionParagraphs ? await extractFigureCaptionLocation(zip) : undefined;
+  const figureCaptions = captionParagraphs
+    ? readFigureCaptions(docContent, captionParagraphs, await seqFieldCountsOf(zip), await extractCaptionLabels(zip), imageFormatMapping, {
+      location: exportedCaptionLocation ?? storedSettings?.figCapLocation,
+      // The default where export wrote the figures, as their place says, and
+      // the frontmatter set none
+      delim: storedSettings?.crossref?.titleDelim ?? (exportedCaptionLocation ? DEFAULT_CAPTION_OPTIONS.titleDelim : undefined),
+    })
+    : undefined;
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);
@@ -20137,6 +20573,19 @@ export async function convertDocx(
     fm.colors ??= storedSettings.colors;
     fm.breaks ??= storedSettings.breaks;
   }
+  // The captions' title, delimiter and place, as the figures' show them,
+  // or else as stored: the stored one where it's what they show, as one
+  // written as the default is, and none for the default
+  const captionOption = <T>(value: T | undefined, stored: T | undefined, fallback: T): T | undefined =>
+    value === undefined || value === (stored ?? fallback) ? stored : value === fallback ? undefined : value;
+  const crossref: CrossrefOptions = {
+    figTitle: captionOption(figureCaptions?.figTitle, storedSettings?.crossref?.figTitle, DEFAULT_CAPTION_OPTIONS.figTitle),
+    tblTitle: storedSettings?.crossref?.tblTitle,
+    titleDelim: captionOption(figureCaptions?.titleDelim, storedSettings?.crossref?.titleDelim, DEFAULT_CAPTION_OPTIONS.titleDelim),
+  };
+  if (Object.values(crossref).some(value => value !== undefined)) fm.crossref = crossref;
+  const figCapLocation = captionOption(figureCaptions?.figCapLocation, storedSettings?.figCapLocation, DEFAULT_CAPTION_OPTIONS.figCapLocation);
+  if (figCapLocation) fm.figCapLocation = figCapLocation;
   // Without a stored setting, as in a document from Word, the style its
   // quotes are in, which export would otherwise write as GitHub's
   fm.blockquoteStyle ??= inferredBlockquoteStyle(docContent);

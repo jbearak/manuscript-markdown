@@ -25,6 +25,7 @@ import { GRID_TABLE_PLACEHOLDER_PREFIX, gridColumnAlign } from '../grid-table-pr
 import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preprocessCriticMarkupWithMap } from './preprocess-with-map';
 import { LineMap } from './line-map';
 import { pushAll, spliceAll } from '../arrays';
+import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionLabelId, isCaptionText, type CaptionOptions, type FigureAttributes } from '../captions';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { parseFrontmatter, type ColorScheme } from '../frontmatter';
@@ -45,6 +46,8 @@ export interface ManuscriptMarkdownIt extends MarkdownIt {
 }
 
 interface PreviewEnvironment {
+  /** The words and separator a caption shows, and where it goes (see captions.ts) */
+  captions?: CaptionOptions;
   calloutLabels?: boolean;
   colorScheme?: ColorScheme;
   currentDocument?: string | { fsPath?: unknown };
@@ -1740,13 +1743,15 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
           return true;
         }
       }
-      // Check for {#id} range start marker
+      // Check for {#id} range start marker. A caption's label, as
+      // {#fig-map}, is none (see captions.ts): one an image doesn't take is
+      // a marker of no range, its ID one no comment has, which shows nothing
       if (idEnd < max && src.charCodeAt(idEnd) === 0x7D /* } */) {
         if (!silent) {
           const id = src.slice(start + 2, idEnd);
           const token = state.push('manuscript_markdown_range_marker', 'span', 0);
           token.attrSet('class', 'manuscript-markdown-range-marker');
-          token.meta = { id, type: 'start' };
+          token.meta = { id: isCaptionLabelId(id) ? '#' + id : id, type: 'start' };
         }
         state.pos = idEnd + 1;
         return true;
@@ -2231,6 +2236,71 @@ function getEmbedDocumentPath(md: ManuscriptMarkdownIt, state: StateCore): strin
 }
 
 /**
+ * Each figure, as Quarto's, which export gives a caption in Word (see
+ * figureImageOf in md-to-docx.ts): a paragraph at the top level, in no
+ * style block, whose one inline token is an image with a figure's label
+ * after it, as `![A map](map.png){#fig-map}`, which the image took (see
+ * imagePathsWithSpaces). The paragraph is a figure, with the label as its
+ * ID, and its caption, `Figure 1: A map`, numbered in order, below or above
+ * the image, as the frontmatter says. The image's alt text is its fig-alt,
+ * where it has one, and its width and height its attributes'.
+ */
+function figuresRule(state: StateCore): void {
+  const options = getPreviewEnvironment(state).captions ?? DEFAULT_CAPTION_OPTIONS;
+  const tokens = state.tokens;
+  let styleDepth = 0;
+  let number = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.type === 'html_block' && token.level === 0) {
+      const fence = styleFence(token.content || '');
+      if (fence?.kind === 'open') styleDepth++;
+      else if (fence?.kind === 'close') styleDepth = Math.max(0, styleDepth - 1);
+      continue;
+    }
+    if (token.type !== 'paragraph_open' || token.level !== 0 || token.hidden || styleDepth > 0) continue;
+    const inline = tokens[i + 1];
+    const image = inline?.type === 'inline' && inline.children?.length === 1 ? inline.children[0] : undefined;
+    const figure: FigureAttributes | undefined = image?.type === 'image' ? image.meta?.figure : undefined;
+    if (!image || !figure || tokens[i + 2]?.type !== 'paragraph_close') continue;
+    number++;
+    token.tag = 'figure';
+    tokens[i + 2].tag = 'figure';
+    token.attrSet('id', figure.label);
+    token.attrJoin('class', 'manuscript-markdown-figure');
+    const children = image.children ?? [];
+    const caption: Token[] = [];
+    const open = new state.Token('manuscript_figcaption_open', 'figcaption', 1);
+    const label = new state.Token('text', '', 0);
+    // Its delimiter only where it has text to show (see isCaptionText): an
+    // equation or an image, which export writes as its Markdown, is some,
+    // and a tag, as <b> or <br>, which export reads as formatting or a
+    // break, is none
+    const hasText = children.some(child => child.type.includes('math') || child.type === 'image'
+      || child.type !== 'html_inline' && isCaptionText(child.content));
+    label.content = captionLabelText(options.figTitle, number) + captionSeparator(options.titleDelim, hasText);
+    caption.push(open, label);
+    for (const child of children) caption.push(Object.assign(new state.Token(child.type, child.tag, child.nesting), child));
+    caption.push(new state.Token('manuscript_figcaption_close', 'figcaption', -1));
+    const alt = attributeValue(figure.block, 'fig-alt');
+    if (alt !== undefined) {
+      const text = new state.Token('text', '', 0);
+      text.content = alt;
+      image.children = [text];
+    }
+    const style: string[] = [];
+    for (const name of ['width', 'height'] as const) {
+      const value = attributeValue(figure.block, name);
+      if (value === undefined) continue;
+      if (/^\d+(?:\.\d+)?$/.test(value)) image.attrSet(name, value);
+      else if (/^\d*\.?\d+(?:px|in|cm|mm|pt|pc)$/.test(value)) style.push(name + ': ' + value);
+    }
+    if (style.length > 0) image.attrSet('style', style.join('; '));
+    inline.children = options.figCapLocation === 'top' ? [...caption, image] : [image, ...caption];
+  }
+}
+
+/**
  * Main plugin function that registers Manuscript Markdown parsing with markdown-it
  * @param md - The MarkdownIt instance to extend
  */
@@ -2268,6 +2338,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
     const defaultScheme = md.manuscriptColors ?? getDefaultColorScheme();
     const env = getPreviewEnvironment(state);
     env.calloutLabels = metadata.calloutLabels ?? true;
+    env.captions = captionOptions(metadata);
     env.colorScheme = metadata.colors || defaultScheme;
     md.set({ breaks: metadata.breaks ?? false });
     // Embed preprocessing runs first so embedded .md files with grid tables get
@@ -2416,8 +2487,11 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.core.ruler.after('manuscript_markdown_split_critic_blocks', 'manuscript_markdown_task_list', taskListRule);
   md.core.ruler.after('manuscript_markdown_task_list', 'manuscript_markdown_alert_blockquote', alertBlockquoteRule);
 
+  // Figures, before the style blocks' fences are divs
+  md.core.ruler.after('manuscript_markdown_alert_blockquote', 'manuscript_figures', figuresRule);
+
   // Core rule: wrap <!-- style: X -->...<!-- /style --> blocks in <div class="ms-custom-style ms-custom-style-{name}">
-  md.core.ruler.after('manuscript_markdown_alert_blockquote', 'manuscript_custom_style_wrap', (state: StateCore) => {
+  md.core.ruler.after('manuscript_figures', 'manuscript_custom_style_wrap', (state: StateCore) => {
     const tokens = state.tokens;
     // First pass (reverse): find close directives and record their indices
     const closeIndices: number[] = [];
@@ -2562,6 +2636,10 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.renderer.rules['manuscript_markdown_format_highlight_close'] = () => {
     return '</mark>';
   };
+
+  // A figure's caption, around its title, number and text (see figuresRule)
+  md.renderer.rules['manuscript_figcaption_open'] = () => '<figcaption>';
+  md.renderer.rules['manuscript_figcaption_close'] = () => '</figcaption>';
 
   // Renderer for range markers ({#id} and {/id}) without matching comments — render as empty string
   md.renderer.rules['manuscript_markdown_range_marker'] = () => {

@@ -365,7 +365,7 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 			const cachedCslStyles = await getCachedCslStyleNames();
 			const fmItems = getFrontmatterCompletionItems(fmLocation, process.platform, cachedCslStyles);
 			if (fmItems.length > 0) {
-				const isKey = fmLocation.kind === 'key' || fmLocation.kind === 'styles-key';
+				const isKey = fmLocation.kind === 'key' || fmLocation.kind === 'styles-key' || fmLocation.kind === 'crossref-key';
 				const isCsl = fmItems.some(i => i.isIncomplete);
 				const replaceStart = isKey ? fmLocation.keyStart : fmLocation.valueStart;
 				const defaultReplaceEnd = isKey ? fmLocation.keyEnd : fmLocation.valueEnd;
