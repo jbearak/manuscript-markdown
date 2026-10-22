@@ -167,7 +167,7 @@ describe('exporting a figure', () => {
     expect(captionParagraph.replace(/<w:instrText[^>]*>[^<]*<\/w:instrText>|<[^>]+>/g, '')).toBe('Figure 1: A b [@key, p. 3] {&gt;&gt;@me | note&lt;&lt;} {++ins++} {--del--} {~~old~&gt;new~~} {==hl==}{&gt;&gt;c&lt;&lt;} [^n] {#1}r{/1}{#1&gt;&gt;body&lt;&lt;} x y');
     // Its formatting, where it has some, stays
     expect(captionParagraph).toContain('<w:r><w:rPr><w:i/></w:rPr><w:t>b</w:t></w:r>');
-    expect(warnings).toContain('The caption of figure {#fig-x} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
+    expect(warnings).toContain('The caption of figure {#fig-x} has a citation, a cross-reference, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
   });
 
   it('writes a comment\'s replies and an equation\'s CriticMarkup in a caption as their Markdown', async () => {

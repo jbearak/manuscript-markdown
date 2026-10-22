@@ -2,6 +2,9 @@
     "injectionSelector": "L:text.html.markdown -string -meta.embedded -markup.inline.raw -markup.fenced_code",
     "patterns": [
         { "include": "#citation_list" },
+        { "include": "#cross_reference" },
+        { "include": "#cross_reference_in_citation" },
+        { "include": "#cross_reference_bare" },
         { "include": "#footnote_ref" },
         { "include": "#footnote_def" },
         { "include": "#colored_format_highlight" },
@@ -144,8 +147,34 @@
 			"match": "(?<!\\\\)(?:\\\\\\\\)*+\\\\\\{",
 			"name": "constant.character.escape.manuscript-markdown"
 		},
+		"cross_reference": {
+			"comment": "A cross-reference to a figure or a table, as export reads one (see crossRefAt in src/citation-syntax.ts): its key, a label's characters, alone in a citation's brackets, as [@fig-map], not after a backslash, which escapes the [",
+			"match": "(?<!\\\\)(\\[)(@)((?:[Ff]ig|[Tt]bl)-[A-Za-z0-9_-]+)(\\])",
+			"name": "meta.cross-reference.manuscript-markdown",
+			"captures": {
+				"1": {"name": "punctuation.definition.brackets.begin.manuscript-markdown"},
+				"2": {"name": "support.function.cross-reference.manuscript-markdown"},
+				"3": {"name": "support.function.cross-reference.manuscript-markdown"},
+				"4": {"name": "punctuation.definition.brackets.end.manuscript-markdown"}
+			}
+		},
+		"cross_reference_in_citation": {
+			"comment": "A citation's brackets with a cross-reference's key in them among other text, as [-@fig-map] or [see @fig-map], which citation_list begins none of and export reads as text",
+			"match": "(?<!\\\\)\\[(?=\\s*-?@|(?:[^\\[\\];`\\\\]|\\\\[^\\[\\];])*\\s-?@[\\p{L}\\p{N}_](?![^\\[\\]]*\\][(\\[]))(?=[^\\]]*?(?<![^\\s;\\[])-?@(?:[Ff]ig|[Tt]bl)-[^\\s,;\\]])[^\\]]*\\]",
+			"name": "meta.cross-reference.text.manuscript-markdown"
+		},
+		"cross_reference_bare": {
+			"comment": "A bare @ and a cross-reference's key, as Pandoc reads one, after none of a letter, a digit, _ . - / @ a backtick or a backslash, and not in a link's text, whose characters are a label's, [A-Za-z0-9_-], as export reads one (see isCrossRefLabelKey in src/citation-syntax.ts)",
+			"match": "(?<![\\p{L}\\p{N}_.\\-/@`\\\\])(@)((?:[Ff]ig|[Tt]bl)-[A-Za-z0-9_](?:[A-Za-z0-9_]|-(?=[A-Za-z0-9_]))*)(?![\\p{L}\\p{N}_]|[:.#$%&\\-+?<>~/][\\p{L}\\p{N}_])(?![^\\[\\]]*\\][(\\[])",
+			"name": "meta.cross-reference.manuscript-markdown",
+			"captures": {
+				"1": {"name": "support.function.cross-reference.manuscript-markdown"},
+				"2": {"name": "support.function.cross-reference.manuscript-markdown"}
+			}
+		},
 		"citation_list": {
-			"begin": "\\[(?=\\s*-?@|(?:[^\\[\\];`\\\\]|\\\\[^\\[\\];])*\\s-?@[\\p{L}\\p{N}_](?![^\\[\\]]*\\][(\\[]))",
+			"comment": "Not one with a cross-reference's key in it, as [@fig-map] or [see @fig-map], which export reads as no citation (see crossRefAt in src/citation-syntax.ts)",
+			"begin": "\\[(?![^\\[\\]]*?(?<![^\\s;\\[])-?@(?:[Ff]ig|[Tt]bl)-[^\\s,;\\]])(?=\\s*-?@|(?:[^\\[\\];`\\\\]|\\\\[^\\[\\];])*\\s-?@[\\p{L}\\p{N}_](?![^\\[\\]]*\\][(\\[]))",
 			"beginCaptures": {
 				"0": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
 			},

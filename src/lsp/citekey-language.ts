@@ -4,9 +4,10 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, BibtexSourceRange, parseBibtexWithRaw, stripOuterBraces } from '../bibtex-parser';
-import { isCitableKey, isCitationKeyChar, readCitationItems } from '../citation-syntax';
+import { isCitableKey, isCitationKeyChar, isCrossRefKey, readCitationItems } from '../citation-syntax';
 import { computeCodeRegions, isInsideCodeRegion, type CodeRegion } from '../code-regions';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
+import { scanCrossRefs } from './crossref-language';
 
 // --- Implementation notes ---
 // - BibTeX key offsets: locate keys starting after opening `{`, not first substring match
@@ -175,11 +176,29 @@ export function pathsEqual(a: string, b: string): boolean {
 	return canonicalizeFsPath(a) === canonicalizeFsPath(b);
 }
 
+/** A citation's brackets with a cross-reference's key in them, which
+ *  export reads as text, its keys none, from start to end, in order, as
+ *  export reads them, wherever the key is in them, and over lines (see
+ *  scanCrossRefs) */
+function literalCitations(text: string): Array<[number, number]> {
+	return scanCrossRefs(text).flatMap(usage => (usage.form === 'literal' ? [[usage.start, usage.end] as [number, number]] : []));
+}
+
+/** `usages`, in order, but those in `literals`, in order */
+function outsideLiterals(usages: CitekeyUsage[], literals: Array<[number, number]>): CitekeyUsage[] {
+	if (literals.length === 0) return usages;
+	let k = 0;
+	return usages.filter(usage => {
+		while (k < literals.length && literals[k][1] <= usage.keyStart) k++;
+		return !(k < literals.length && literals[k][0] < usage.keyStart);
+	});
+}
+
 export function scanCitationUsages(text: string): CitekeyUsage[] {
 	// Neutralize code regions so the bracket regex can't start matching from
 	// inside a code span (e.g. `[ ` [@a] — the `[` inside backticks must not
 	// anchor a bracket group that extends past the code span).
-	return scanBlankedCitationUsages(blankCodeRegions(text, computeCodeRegions(text)));
+	return outsideLiterals(scanBlankedCitationUsages(blankCodeRegions(text, computeCodeRegions(text))), literalCitations(text));
 }
 
 /** The keys main read in a segment's text, `inner`, from `offset`, over
@@ -190,6 +209,8 @@ function multilineUsages(inner: string, offset: number): CitekeyUsage[] {
 	CITEKEY_RE.lastIndex = 0;
 	while ((keyMatch = CITEKEY_RE.exec(inner)) !== null) {
 		const key = keyMatch[1];
+		// A cross-reference's, which cites nothing
+		if (isCrossRefKey(key)) continue;
 		const keyStart = offset + keyMatch.index + 1;
 		usages.push({ key, keyStart, keyEnd: keyStart + key.length });
 	}
@@ -220,7 +241,11 @@ function scanBlankedCitationUsages(
 		const segmentOffset = open + 1;
 		// Each item's key as export reads it (see readCitationItem), where an
 		// @ marks it
-		for (const item of readCitationItems(scanText.slice(open + 1, close))) {
+		const items = readCitationItems(scanText.slice(open + 1, close));
+		// A cross-reference's key cites nothing, nor does any other key in
+		// brackets with one, which are text (see crossRefAt)
+		if (items.some(item => item.markStart !== -1 && isCrossRefKey(item.key))) continue;
+		for (const item of items) {
 			if (item.markStart === -1 || !item.key) continue;
 			const keyStart = segmentOffset + item.itemStart + item.keyStart;
 			usages.push({
@@ -249,11 +274,13 @@ export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
 		}
 		return usages;
 	};
-	return scanBlankedCitationUsages(blankCodeRegions(text, computeCodeRegions(text)), multiline).filter(usage => usage.key === key);
+	return outsideLiterals(scanBlankedCitationUsages(blankCodeRegions(text, computeCodeRegions(text)), multiline).filter(usage => usage.key === key), literalCitations(text));
 }
 
 export function findCitekeyAtOffset(text: string, offset: number): string | undefined {
 	if (offset < 0 || offset >= text.length) return undefined;
+	// None in brackets export reads as text
+	if (literalCitations(text).some(([start, end]) => offset >= start && offset < end)) return undefined;
 	// The brackets and keys of the text with its code blanked, as
 	// scanCitationUsages reads them: a ] in code ends no citation, and code
 	// the scanned segment cuts in two is still code. And not undefined at

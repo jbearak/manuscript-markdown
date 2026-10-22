@@ -79,7 +79,125 @@ export function isCitationKeyChar(ch: string): boolean {
  *  comma or `@` (see readEntryKey), can be cited unless it has a `;`, a
  *  `]` or a backtick. */
 export function isCitableKey(key: string): boolean {
-  return key.length > 0 && [...key].every(isCitationKeyChar);
+  return key.length > 0 && [...key].every(isCitationKeyChar) && !isCrossRefKey(key);
+}
+
+/** Whether `key`, a citation's or a bare `@`'s, is a cross-reference's, as
+ *  Quarto reserves them: `fig-` or `tbl-` and more, or `Fig-` or `Tbl-` for
+ *  one that shows its title capitalized. No citation cites one, which a
+ *  .bib key of these can't be (see crossRefAt). */
+export function isCrossRefKey(key: string): boolean {
+  return key.length > 4 && /^(?:[Ff]ig|[Tt]bl)-/.test(key);
+}
+
+/** Whether `key`, a cross-reference's, is one a label can be, which a
+ *  figure or a table can have: `fig-` or `tbl-`, or `Fig-` or `Tbl-`, and
+ *  the characters of a comment's ID, `[A-Za-z0-9_-]`. One with another
+ *  character, as Pandoc reads `@fig-a.b`, refers to none, and is text, as
+ *  is a citation's brackets with it, so what Markdown reads in it, as a
+ *  tag in `@fig-a<sup>2</sup>`, is read as it is in other text. */
+export function isCrossRefLabelKey(key: string): boolean {
+  return /^(?:[Ff]ig|[Tt]bl)-[A-Za-z0-9_-]+$/.test(key);
+}
+
+/** The label of the figure or table a cross-reference's key `key` refers
+ *  to, as `fig-map` for `Fig-map` */
+export function crossRefLabel(key: string): string {
+  return key.charAt(0).toLowerCase() + key.slice(1);
+}
+
+/** A character a bare `@` comes after that keeps it text, as in an email
+ *  address, a URL's path or an escape: a letter, a digit, or one of
+ *  `_.-/@`, a backtick or a backslash. The grammar and the LSP read one
+ *  alike. */
+export const CROSS_REF_AFTER_RE = /[\p{L}\p{N}_.\-/@`\\]/u;
+
+// The key after a bare @, as Pandoc reads one: letters, digits and _, with
+// punctuation of :.#$%&-+?<>~/ inside it, each before another of those
+const BARE_KEY_RE = /[\p{L}\p{N}_](?:[\p{L}\p{N}_]|[:.#$%&\-+?<>~/](?=[\p{L}\p{N}_]))*/uy;
+
+/** The character before `at` in `src`, a whole one where a surrogate pair
+ *  ends there */
+function charBefore(src: string, at: number): string {
+  if (at <= 0) return '';
+  const low = src.charCodeAt(at - 1);
+  return low >= 0xDC00 && low <= 0xDFFF && at >= 2 ? src.slice(at - 2, at) : src.charAt(at - 1);
+}
+
+/** A cross-reference in Markdown (see crossRefAt) */
+export interface CrossRefSource {
+  /** Past its end */
+  end: number;
+  /** Its key, as `fig-map` or `Fig-map`, or '' for a citation's brackets
+   *  with one in them, which are text */
+  key: string;
+  form: 'bare' | 'bracket' | 'literal';
+}
+
+/**
+ * The cross-reference at `start` in `state`'s text, as Quarto writes one,
+ * as export and the preview read it: a bare `@` with a key after it, as
+ * Pandoc reads one, that a figure's or a table's label can be (see
+ * isCrossRefLabelKey), at
+ * the start or after a character CROSS_REF_AFTER_RE doesn't match, so
+ * that an email address stays text, or a citation's brackets with that
+ * key alone in them, as `[@fig-map]`, which reads as `@fig-map`; none in a
+ * link's text. Any other citation with one of these keys in it, as
+ * `[-@fig-map]`, `[see @fig-map]` or `[@fig-a; @fig-b]`, which Word's
+ * cross-references can't show, is its text, as written (`literal`).
+ * Undefined for none.
+ */
+export function crossRefAt(state: Pick<StateInline, 'src' | 'md' | 'env'> & { posMax?: number; linkLevel?: number }, start: number): CrossRefSource | undefined {
+  const { src } = state;
+  const max = state.posMax ?? src.length;
+  const ch = src.charAt(start);
+  // A link's text is the link's, which goes to its own place
+  if (state.linkLevel) return undefined;
+  if (ch === '@') {
+    if (CROSS_REF_AFTER_RE.test(charBefore(src, start))) return undefined;
+    BARE_KEY_RE.lastIndex = start + 1;
+    const key = BARE_KEY_RE.exec(src)?.[0];
+    if (!key || !isCrossRefLabelKey(key) || start + 1 + key.length > max) return undefined;
+    return { end: start + 1 + key.length, key, form: 'bare' };
+  }
+  if (ch !== '[') return undefined;
+  if (src.charAt(start + 1) === '@') {
+    // To the first character no key has, or a [, which a search from each
+    // [ in a run of them would read past again
+    let at = start + 2;
+    while (at < max && src.charAt(at) !== '[' && isCitationKeyChar(src.charAt(at))) at++;
+    const key = src.slice(start + 2, at);
+    if (at < max && src.charAt(at) === ']' && isCrossRefLabelKey(key)) return { end: at + 1, key, form: 'bracket' };
+  }
+  const end = bracketEnd(state, start);
+  return end !== -1 && end < max && holdsCrossRefKey(state, start, end) ? { end: end + 1, key: '', form: 'literal' } : undefined;
+}
+
+// A cross-reference's key where a citation reads a key: at the start of
+// an item, after a space or after its [, with the @ or -@ before it
+const CROSS_REF_MARK_RE = /(?<![^\s;[])-?@(?:[Ff]ig|[Tt]bl)-[^\s,;\]]/g;
+// Where each is in a state's text, found once for it
+const crossRefMarks = new WeakMap<object, { src: string; at: number[] }>();
+
+/** Whether the citation the [ at `start` opens, to the ] at `end`, has a
+ *  cross-reference's key in it, as a citation reads one (see
+ *  CROSS_REF_MARK_RE), which makes it none */
+function holdsCrossRefKey(state: Pick<StateInline, 'src'>, start: number, end: number): boolean {
+  let marks = crossRefMarks.get(state);
+  if (!marks || marks.src !== state.src) {
+    marks = { src: state.src, at: [...state.src.matchAll(CROSS_REF_MARK_RE)].map(match => match.index) };
+    crossRefMarks.set(state, marks);
+  }
+  // The first after the [
+  const { at } = marks;
+  let low = 0;
+  let high = at.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (at[mid] <= start) low = mid + 1;
+    else high = mid;
+  }
+  return low < at.length && at[low] < end;
 }
 // The ] the last search found, for each state searched. It's the first ]
 // for any [ from where that search started up to it, so a run of [ with no
@@ -316,8 +434,16 @@ export function citationPrefixText(state: Pick<StateInline, 'md'>, prefix: strin
   return state.md.utils.unescapeAll(prefix).replace(/\s+/g, ' ');
 }
 
-/** The ] that ends the citation the [ at `start` opens, or -1 */
+/** The ] that ends the citation the [ at `start` opens, or -1: none where
+ *  it has a cross-reference's key in it, which crossRefAt reads */
 export function citationEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: number): number {
+  const end = bracketEnd(state, start);
+  return end !== -1 && holdsCrossRefKey(state, start, end) ? -1 : end;
+}
+
+/** The ] that ends the brackets the [ at `start` opens where they read as
+ *  a citation, whatever its keys, or -1 */
+function bracketEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: number): number {
   // Match [@key], [-@key] (Pandoc suppress-author form), or [prefix @key]
   if (state.src.charAt(start) !== '[') return -1;
   const endPos = closeAfter(state, start);

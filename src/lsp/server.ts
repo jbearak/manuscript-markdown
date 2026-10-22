@@ -32,7 +32,8 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { BibtexEntry, BibtexSourceRange, bibtexFieldAsPlainText, parseBibtexWithRaw } from '../bibtex-parser';
-import { isCitableKey } from '../citation-syntax';
+import { isCitableKey, isCrossRefKey } from '../citation-syntax';
+import { crossRefCompletions, findCrossRefDefinition, findCrossRefProblems, getCrossRefCompletionContext } from './crossref-language';
 
 // --- Implementation notes ---
 // - References from markdown — intentional asymmetry: return only .bib declaration
@@ -113,6 +114,7 @@ const frontmatterDiagnostics = new Map<string, Diagnostic[]>();
 const orientationDiagnostics = new Map<string, Diagnostic[]>();
 const embedDiagnostics = new Map<string, Diagnostic[]>();
 const tableNumberDiagnostics = new Map<string, Diagnostic[]>();
+const crossRefDiagnostics = new Map<string, Diagnostic[]>();
 // For a .bib document, its keys no citation can cite
 const bibKeyDiagnostics = new Map<string, Diagnostic[]>();
 
@@ -129,7 +131,8 @@ function publishDiagnostics(uri: string): void {
 	const embed = embedDiagnostics.get(uri) ?? [];
 	const tableNumbers = tableNumberDiagnostics.get(uri) ?? [];
 	const bibKeys = bibKeyDiagnostics.get(uri) ?? [];
-	connection.sendDiagnostics({ uri, diagnostics: [...citekey, ...frontmatter, ...orientation, ...embed, ...tableNumbers, ...bibKeys] });
+	const crossRefs = crossRefDiagnostics.get(uri) ?? [];
+	connection.sendDiagnostics({ uri, diagnostics: [...citekey, ...frontmatter, ...orientation, ...embed, ...tableNumbers, ...bibKeys, ...crossRefs] });
 }
 
 interface OpenDocBibCache {
@@ -173,6 +176,7 @@ async function runValidationPipeline(doc: TextDocument): Promise<void> {
 		await validateFrontmatterDiags(doc);
 		validateOrientationDirectives(doc);
 		validateTableNumbers(doc);
+		validateCrossRefs(doc);
 		await validateEmbedDirectives(doc);
 	} catch (error) {
 		connection.console.error(
@@ -310,6 +314,7 @@ documents.onDidClose((event) => {
 		frontmatterDiagnostics.delete(event.document.uri);
 		orientationDiagnostics.delete(event.document.uri);
 		embedDiagnostics.delete(event.document.uri);
+		crossRefDiagnostics.delete(event.document.uri);
 		connection.sendDiagnostics({ uri: event.document.uri, diagnostics: [] });
 	}
 });
@@ -383,25 +388,38 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 		if (fmLocation.frontmatterClosed) return [];
 	}
 
+	// The labels of the document's figures and tables, after an @ that
+	// can start a cross-reference, with the citation keys where one can
+	// start a citation too
+	const crossRefContext = getCrossRefCompletionContext(text, offset);
+	const labelItems: CompletionItem[] = crossRefContext ? crossRefCompletions(text, crossRefContext).map(label => ({
+		label,
+		kind: CompletionItemKind.Reference,
+		detail: /^[Ff]/.test(label) ? 'Figure' : 'Table',
+		textEdit: { range: Range.create(doc.positionAt(crossRefContext.replaceStart), params.position), newText: label },
+		filterText: label,
+		sortText: label,
+	})) : [];
+
 	const completionContext = getCompletionContextAtOffset(text, offset);
 	if (!completionContext) {
-		return [];
+		return labelItems;
 	}
 
 	const bibPath = await resolveBibliographyPathAsync(doc.uri, text, workspaceRootPaths);
 	if (!bibPath) {
-		return [];
+		return labelItems;
 	}
 
 	const bibData = await getBibDataForPath(bibPath);
 	if (!bibData) {
-		return [];
+		return labelItems;
 	}
 
 	const prefix = completionContext.prefix.toLowerCase();
 	const replaceRange = Range.create(doc.positionAt(completionContext.replaceStart), params.position);
 	const sortedEntries = [...bibData.entries.values()].sort((a, b) => a.key.localeCompare(b.key));
-	const items: CompletionItem[] = [];
+	const items: CompletionItem[] = labelItems;
 
 	for (const entry of sortedEntries) {
 		if (prefix && !entry.key.toLowerCase().startsWith(prefix)) {
@@ -430,6 +448,13 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 });
 
 connection.onDefinition(async (params: DefinitionParams): Promise<Location | null> => {
+	// A cross-reference's figure or table, by its label, in the document
+	const doc = documents.get(params.textDocument.uri);
+	if (doc && isMarkdownUri(doc.uri, doc.languageId)) {
+		const text = doc.getText();
+		const definition = findCrossRefDefinition(text, doc.offsetAt(params.position));
+		if (definition) return Location.create(doc.uri, Range.create(doc.positionAt(definition.start), doc.positionAt(definition.end)));
+	}
 	const symbol = await resolveSymbolAtPosition(params.textDocument.uri, params.position);
 	if (!symbol || !symbol.bibPath) {
 		return null;
@@ -981,8 +1006,9 @@ function validateBibKeys(doc: TextDocument): void {
 		message,
 		source: 'manuscript-markdown',
 	});
-	const diagnostics: Diagnostic[] = findUncitableBibKeys(ranges).map(range => atKey(range,
-		'Citation key "' + range.key + '" can\'t be cited from Markdown: a citation doesn\'t read a key with a ;, a ] or a backtick whole.'));
+	const diagnostics: Diagnostic[] = findUncitableBibKeys(ranges).map(range => atKey(range, isCrossRefKey(range.key)
+		? 'Citation key "' + range.key + '" can\'t be cited from Markdown: @' + range.key + ' is a cross-reference to a figure or a table.'
+		: 'Citation key "' + range.key + '" can\'t be cited from Markdown: a citation doesn\'t read a key with a ;, a ] or a backtick whole.'));
 	for (const range of findRepeatedBibFields(ranges)) {
 		const names = range.repeatedFields.map(name => '"' + name + '"').join(', ');
 		const fields = range.repeatedFields.length === 1 ? 'field ' + names : 'fields ' + names;
@@ -990,6 +1016,17 @@ function validateBibKeys(doc: TextDocument): void {
 			'Entry "' + range.key + '" gives the ' + fields + ' more than once: BibTeX reads the first, but biber and this extension read the last.'));
 	}
 	bibKeyDiagnostics.set(doc.uri, diagnostics);
+	publishDiagnostics(doc.uri);
+}
+
+/** The diagnostics of the document's cross-references (see findCrossRefProblems) */
+function validateCrossRefs(doc: TextDocument): void {
+	crossRefDiagnostics.set(doc.uri, findCrossRefProblems(doc.getText()).map(problem => ({
+		severity: DiagnosticSeverity.Warning,
+		range: Range.create(doc.positionAt(problem.start), doc.positionAt(problem.end)),
+		message: problem.message,
+		source: 'manuscript-markdown',
+	})));
 	publishDiagnostics(doc.uri);
 }
 

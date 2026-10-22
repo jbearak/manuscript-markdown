@@ -121,7 +121,7 @@ const LAZY_LINE_RE = new RegExp('^' + QUOTE_START + '[^\\n]*\\n(?! {0,3}>)[^\\S\
  * paragraph, and the blank line goes before it. One that starts a block in
  * the Markdown as written too, as a fence, ends the quote already.
  */
-function deLazifyBlockquotesWithLines(markdown: string): { output: string; lines: number[] } {
+export function deLazifyBlockquotesWithLines(markdown: string): { output: string; lines: number[] } {
   const lines = markdown.split('\n');
   // Nothing to end: the blocks are read only where a line could be lazy
   if (!LAZY_LINE_RE.test(markdown)) return { output: markdown, lines: lines.map((_line, index) => index) };

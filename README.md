@@ -59,6 +59,7 @@ manuscript-markdown paper.md      # Markdown → DOCX
 - **Equations**: LaTeX equation support (inline and display math), automatically converted to/from Word OMML
 - **Figure captions**: Quarto's `![Caption](map.png){#fig-map}` becomes a numbered Word caption, and Word's figure captions come back as figures
 - **Table captions**: Quarto's `: Caption {#tbl-rates}` after a table becomes a numbered Word caption above it, and Word's table captions come back so
+- **Cross-references**: Quarto's `@fig-map` and `@tbl-rates` become Word cross-references that show `Figure 1` and `Table 1` and update with the captions, and come back as `@fig-map`; the preview shows and links them, and the editor completes and checks their labels
 
 ### Formatting & Authoring
 
