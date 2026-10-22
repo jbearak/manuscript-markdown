@@ -19909,12 +19909,16 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptio
     const pPrContent = xmlElement(live, 'w:pPr')?.content ?? '';
     const markRPr = xmlElement(pPrContent, 'w:rPr');
     const pPr = markRPr ? pPrContent.slice(0, markRPr.start) + pPrContent.slice(markRPr.end) : pPrContent;
-    const runs: string[] = [];
+    // The runs of text Word shows, or, in a line of deletions alone, the
+    // deleted ones, as export writes a title line's deletions in the line's
+    // font style (see titleRunsXml)
+    const shownRuns: string[] = [];
+    const deletedRuns: string[] = [];
     for (let run = xmlElement(live, 'w:r'); run; run = xmlElement(live, 'w:r', run.end)) {
-      // Text Word shows, deleted too, as export writes a title line's
-      // deletions in the line's font style (see titleRunsXml)
-      if (xmlStartTag(run.content, 'w:t') || xmlStartTag(run.content, 'w:delText')) runs.push(run.content);
+      if (xmlStartTag(run.content, 'w:t')) shownRuns.push(run.content);
+      else if (xmlStartTag(run.content, 'w:delText')) deletedRuns.push(run.content);
     }
+    const runs = shownRuns.length > 0 ? shownRuns : deletedRuns;
     const rPr = FONT_STYLE_TOGGLES.map(tag => {
       const on = runs.map(run => {
         const found = xmlStartTag(xmlElement(run, 'w:rPr')?.content ?? '', tag)?.tag;

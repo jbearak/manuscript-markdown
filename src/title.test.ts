@@ -232,6 +232,17 @@ describe('Title tracked changes', () => {
     expect(xml).not.toContain('<w:ins');
   });
 
+  it('ends a substitution\'s old side at its first closer', () => {
+    const state: DocxGenState = {
+      commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false,
+      listStartOverrides: [], hasComments: false, missingKeys: new Set<string>(), activeListStartOverrides: new Map(),
+    };
+    const xml = generateDocumentXml([], state, undefined, undefined, undefined, { title: ['{~~literal~~} then {~~old~>new~~}'] });
+    expect(xml).toContain('<w:t xml:space="preserve">{~~literal~~} then </w:t>');
+    expect(xml).toContain('<w:delText>old</w:delText>');
+    expect(xml).toContain('<w:t>new</w:t>');
+  });
+
   it('imports a title run\'s revision as CriticMarkup', () => {
     const ann = { author: 'Ann', date: '2026-01-01T00:00:00Z' };
     const content: ContentItem[] = [
@@ -270,6 +281,21 @@ describe('Title tracked changes', () => {
     const { docx } = await convertMdToDocx(md);
     const { metadata } = parseFrontmatter((await convertDocx(docx)).markdown);
     expect(metadata.title).toEqual(['A', '{--B--}']);
+    expect(metadata.titleFontStyle).toEqual(['bold', 'italic']);
+  });
+
+  it('MD→DOCX→MD reads a title line\'s font style from its shown text over its deletions', async () => {
+    const md = '---\ntitle: A\ntitle: X {--Y--}\ntitle-font-style: [bold, italic]\n---\n\nBody.';
+    const { docx } = await convertMdToDocx(md);
+    const zip = await (await import('jszip')).default.loadAsync(docx);
+    // Word's text of the deletion in another style than the line's
+    const xml = (await zip.file('word/document.xml')!.async('string'))
+      .replace(/(<w:del [^>]*><w:r><w:rPr><w:b w:val="0"\/>)<w:i\/>/, '$1<w:i w:val="0"/>');
+    zip.file('word/document.xml', xml);
+    const edited = await zip.generateAsync({ type: 'uint8array' });
+    const { metadata } = parseFrontmatter((await convertDocx(edited)).markdown);
+    expect(xml).toContain('<w:i w:val="0"/><w:caps w:val="0"/><w:smallCaps w:val="0"/><w:u w:val="none"/></w:rPr><w:delText>Y');
+    expect(metadata.title).toEqual(['A', 'X {--Y--}']);
     expect(metadata.titleFontStyle).toEqual(['bold', 'italic']);
   });
 

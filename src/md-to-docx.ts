@@ -11259,8 +11259,10 @@ function withoutUnwrittenMarkerSpaces(runs: MdRun[], edges: boolean): MdRun[] {
   return out.includes(emptied) ? out.filter(run => run !== emptied) : out;
 }
 
-/** A tracked change in a title line: an addition, a deletion or a substitution */
-const TITLE_CHANGE_RE = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{~~([\s\S]*?)~>([\s\S]*?)~~\}/g;
+/** A tracked change in a title line: an addition, a deletion or a
+ *  substitution, whose old side ends at the first ~~} after it, so a
+ *  {~~ with no ~> takes in no substitution after it */
+const TITLE_CHANGE_RE = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{~~((?:(?!~~\})[\s\S])*?)~>([\s\S]*?)~~\}/g;
 
 /**
  * The runs of a title line, in `rPr`, its additions, deletions and
