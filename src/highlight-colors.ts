@@ -1,6 +1,7 @@
 import { criticCloserSearch, type CriticCloserSearch } from './critic-markup';
 import { overlapsCodeRegion, type CodeRegion } from './code-regions';
 import { isEscapedAt } from './math-delimiters';
+import { pushAll } from './arrays';
 
 // --- Implementation notes ---
 // - ==text=={color} is unambiguous with CriticMarkup {==text==} (brace is before ==, not after)
@@ -282,6 +283,38 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
 }
 
 /**
+ * The text of the comment from `contentStart` to its <<} at `close`, as
+ * ranges, and the delimiters of the replies in it, as {>>note {>>reply<<}<<},
+ * which export reads as Word's replies (extractReplies in md-to-docx.ts):
+ * their {>> and <<} are delimiters, as the comment's own are, not its text,
+ * so the editor shows them as it does a comment's. A reply's text is all
+ * that's in it, as export writes it. The comment's text is one range, an
+ * empty one too, where it holds no reply. The scan reads the comment's text
+ * once, and no two comments' texts overlap.
+ */
+function commentTextRanges(
+  text: string, contentStart: number, close: number, closers: CriticCloserSearch,
+): { texts: Array<{ start: number; end: number }>; delimiters: Array<{ start: number; end: number }> } {
+  const texts: Array<{ start: number; end: number }> = [];
+  const delimiters: Array<{ start: number; end: number }> = [];
+  let from = contentStart;
+  for (let at = contentStart; at + 2 < close; at++) {
+    if (text.charCodeAt(at) !== 0x7B || text.charCodeAt(at + 1) !== 0x3E || text.charCodeAt(at + 2) !== 0x3E) continue; // {>>
+    const ci = closers.matching(at + 3);
+    if (ci === -1 || ci >= close) break;
+    if (at > from) texts.push({ start: from, end: at });
+    delimiters.push({ start: at, end: at + 3 });
+    if (ci > at + 3) texts.push({ start: at + 3, end: ci });
+    delimiters.push({ start: ci, end: ci + 3 });
+    from = ci + 3;
+    at = ci + 2;
+  }
+  if (from === contentStart) texts.push({ start: contentStart, end: close });
+  else if (close > from) texts.push({ start: from, end: close });
+  return { texts, delimiters };
+}
+
+/**
  * Extract CriticMarkup comment ranges {>>text<<} from document text.
  * Returns an array of offset ranges.
  */
@@ -299,7 +332,7 @@ export function extractCommentRanges(text: string): Array<{ start: number; end: 
         const contentStart = i + 3;
         const ci = closers.matching(contentStart);
         if (ci !== -1) {
-          ranges.push({ start: contentStart, end: ci });
+          pushAll(ranges, commentTextRanges(text, contentStart, ci, closers).texts);
           i = ci + 3; continue;
         }
       } else if (c2 === 0x23) { // {# — possible {#id>>
@@ -307,7 +340,7 @@ export function extractCommentRanges(text: string): Array<{ start: number; end: 
         if (contentStart !== -1) {
           const ci = closers.matching(contentStart);
           if (ci !== -1) {
-            ranges.push({ start: contentStart, end: ci });
+            pushAll(ranges, commentTextRanges(text, contentStart, ci, closers).texts);
             i = ci + 3; continue;
           }
         }
@@ -451,6 +484,12 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
   const highlightDelimiters: Array<{ start: number; end: number }> = [];
   const commentDelimiters: Array<{ start: number; end: number }> = [];
 
+  // A comment's text, and the delimiters of the replies in it
+  const pushComment = (contentStart: number, close: number) => {
+    const { texts, delimiters } = commentTextRanges(text, contentStart, close, closers);
+    pushAll(comments, texts);
+    pushAll(commentDelimiters, delimiters);
+  };
   const pushHighlight = (key: string, start: number, end: number) => {
     if (!highlights.has(key)) highlights.set(key, []);
     highlights.get(key)!.push({ start, end });
@@ -622,7 +661,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
         const ci = closers.matching(i + 3);
         if (ci !== -1) {
           commentDelimiters.push({ start: i, end: i + 3 });
-          comments.push({ start: i + 3, end: ci });
+          pushComment(i + 3, ci);
           commentDelimiters.push({ start: ci, end: ci + 3 });
           // Scan content for nested format highlights
           scanFormatHighlights(i + 3, ci);
@@ -634,7 +673,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           const ci = closers.matching(contentStart);
           if (ci !== -1) {
             commentDelimiters.push({ start: i, end: contentStart });
-            comments.push({ start: contentStart, end: ci });
+            pushComment(contentStart, ci);
             commentDelimiters.push({ start: ci, end: ci + 3 });
             scanFormatHighlights(contentStart, ci);
             i = ci + 3; continue;
@@ -706,7 +745,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
               const ci = closers.matching(k + 3);
               if (ci !== -1) {
                 commentDelimiters.push({ start: k, end: k + 3 });
-                comments.push({ start: k + 3, end: ci });
+                pushComment(k + 3, ci);
                 commentDelimiters.push({ start: ci, end: ci + 3 });
                 scanFormatHighlights(k + 3, ci);
                 hasContent = true; k = ci + 3; continue;
@@ -717,7 +756,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
                 const ci = closers.matching(innerContentStart);
                 if (ci !== -1) {
                   commentDelimiters.push({ start: k, end: innerContentStart });
-                  comments.push({ start: innerContentStart, end: ci });
+                  pushComment(innerContentStart, ci);
                   commentDelimiters.push({ start: ci, end: ci + 3 });
                   scanFormatHighlights(innerContentStart, ci);
                   hasContent = true; k = ci + 3; continue;

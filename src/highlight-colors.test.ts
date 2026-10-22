@@ -223,6 +223,16 @@ describe('Editor decorations skip an escaped CriticMarkup opener', () => {
     ['an insertion after an escaped backslash', 'a \\\\{++x++} b', ['{++', 'addition: x', '++}']],
     ['a substitution', 'a {~~x~>y~~} b', ['{~~', 'old: x', '~>', 'new: y', '~~}']],
     ['a critic highlight and its comment', 'a {==x==}{>>c<<} b', ['{==', 'critic: x', '==}', '{>>', 'comment: c', '<<}']],
+    // A reply's {>> and <<} in a comment are delimiters, as the comment's
+    // are, not its text, so the comment's text style doesn't color them
+    ['a comment with a reply in it', 'a {==x==}{>>c\n  {>>r<<}\n<<} b', ['{==', 'critic: x', '==}', '{>>', 'comment: c\n  ', '{>>', 'comment: r', '<<}', 'comment: \n', '<<}']],
+    ['a comment with two replies in it', '{>>c {>>r<<}{>>s<<}<<}', ['{>>', 'comment: c ', '{>>', 'comment: r', '<<}', '{>>', 'comment: s', '<<}', '<<}']],
+    ['a comment body with an ID with a reply in it', '{#1>>c {>>r<<}<<}', ['{#1>>', 'comment: c ', '{>>', 'comment: r', '<<}', '<<}']],
+    ['a comment with a reply in it in a format highlight', '==a {>>c {>>r<<}<<} b==', ['yellow: ==a {>>c {>>r<<}<<} b==', '{>>', 'comment: c ', '{>>', 'comment: r', '<<}', '<<}']],
+    // A reply's text is all that's in it, as export writes it
+    ['a reply to a reply', '{>>c {>>r {>>s<<}<<}<<}', ['{>>', 'comment: c ', '{>>', 'comment: r {>>s<<}', '<<}', '<<}']],
+    // Its empty text sorts after the <<} at the same place
+    ['an empty comment', '{>><<}', ['{>>', '<<}', 'comment: ']],
   ])('reads %s as export does', (_name, text, expected) => {
     expect(decorations(text)).toEqual(expected);
     // And extractHighlightRanges as extractAllDecorationRanges
@@ -329,6 +339,12 @@ describe('Comment-with-ID {#id>>...<<} handling', () => {
     const ranges = extractCommentRanges(text);
     expect(ranges.length).toBe(1);
     expect(text.slice(ranges[0].start, ranges[0].end)).toBe('hello');
+  });
+
+  it('extractCommentRanges leaves the delimiters of a comment\'s replies out of its text', () => {
+    const text = '{>>note {>>reply<<}<<} and {#x1>>with id {>>r<<}<<}';
+    expect(extractCommentRanges(text).map(r => text.slice(r.start, r.end))).toEqual(['note ', 'reply', 'with id ', 'r']);
+    expect(extractAllDecorationRanges(text, 'yellow').comments).toEqual(extractCommentRanges(text));
   });
 
   it('extractCommentRanges handles both plain and ID comments', () => {
