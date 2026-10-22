@@ -823,7 +823,7 @@ fig-cap-location: top
 ---
 ```
 
-A caption's citation, note, comment, tracked change, line break or image, which Word's caption can't hold as import would read it back, goes to Word as its Markdown, as text, as `{>>note<<}`, with a warning.
+A caption's citation, note, comment, tracked change, line break or image, or an equation with CriticMarkup in it, which Word's caption can't hold as import would read it back, goes to Word as its Markdown, as text, as `{>>note {>>reply<<}<<}` or `$x{++y++}$`, with a warning.
 
 An image with a label that isn't alone in its paragraph, or is in a list, a quote, a table, a note, a link, a style block or a tracked change, gets no caption, with a warning. A `{#fig-…}` or `{#tbl-…}` that labels nothing, as in a sentence, starts no comment range (see [ID Format](#id-format)): export writes nothing for it, with a warning, and the preview shows nothing. Export doesn't caption tables yet, so `{#tbl-…}` always warns.
 

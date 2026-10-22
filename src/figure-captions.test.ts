@@ -160,6 +160,13 @@ describe('exporting a figure', () => {
     expect(warnings).toContain('The caption of figure {#fig-x} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
   });
 
+  it('writes a comment\'s replies and an equation\'s CriticMarkup in a caption as their Markdown', async () => {
+    const { body } = await exported('![A $x{++y++}$ $p{==q==}$ {>>@me (2024-01-02 10:00) | parent {>>@you | reply<<} {>>second<<}<<} {#1>>body<<}{>>r2<<}](map.png){#fig-a}\n');
+    const captionParagraph = paragraphs(body).find(p => p.includes('Caption'))!;
+    expect(captionParagraph).not.toContain('<w:ins ');
+    expect(captionParagraph.replace(/<w:instrText[^>]*>[^<]*<\/w:instrText>|<[^>]+>/g, '')).toBe('Figure 1: A $x{++y++}$ $p{==q==}$ {&gt;&gt;@me (2024-01-02 10:00) | parent {&gt;&gt;@you | reply&lt;&lt;} {&gt;&gt;second&lt;&lt;}&lt;&lt;} {#1&gt;&gt;body&lt;&lt;}{&gt;&gt;r2&lt;&lt;}');
+  });
+
   it('adds no Caption style to a document with no figure, and keeps where its figures\' captions go', async () => {
     const { styles, custom } = await exported('![Plain](map.png)\n');
     expect(styles).not.toContain('w:styleId="Caption"');
@@ -232,6 +239,7 @@ describe('importing Word\'s captions', () => {
     ['no separator', picture() + caption(1, 'Joined', { sep: '' }), {}],
     ['a separator alone', picture() + caption(1, '', { sep: ':' }), {}],
     ['a paragraph between', picture() + '<w:p/>' + caption(1, 'Gap'), {}],
+    ['a paragraph between it and the picture below it', caption(1, 'Gap') + '<w:p/>' + picture() + para('After.'), {}],
     ['text by the image', '<w:p><w:r><w:t>x</w:t></w:r>' + picture().slice('<w:p>'.length) + caption(1, 'Mixed'), {}],
     ['a caption in a table', picture() + caption(1, 'Body') + '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' + caption(2, 'In a cell') + '</w:tc></w:tr></w:tbl>', {}],
     ['a caption in a note', picture() + caption(1, 'Body'), { footnotes: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p>' + seqField(2) + '</w:p></w:footnote></w:footnotes>' }],
@@ -283,6 +291,8 @@ describe('figures\' round trips', () => {
       ['![A](map.png){#fig-a}\n\n![B](map.png){#fig-b}\n\n![](plain.png)\n', '![A](media/map.png){#fig-a width=1 height=1}\n\n![B](media/map.png){#fig-b width=1 height=1}\n\n![](media/plain.png){width=1 height=1}\n'],
       ['![Caption](map.png){#fig-x}\n\n![Caption](map.png){#fig-x}\n', '![Caption](media/map.png){#fig-x width=1 height=1}\n\n![Caption](media/map.png){#fig-x-2 width=1 height=1}\n'],
       ['![[link](https://example.com/a) and ==hi==](map.png){#fig-k}\n', '![[link](https://example.com/a) and ==hi==](media/map.png){#fig-k width=1 height=1}\n'],
+      // An equation with a tracked change, which goes as text, so the series reads back
+      ['![A](map.png){#fig-a}\n\n![B $x{++y++}$](map.png){#fig-b fig-alt="B"}\n', '![A](media/map.png){#fig-a width=1 height=1}\n\n![B \\$x\\{++y+\\+}$](media/map.png){#fig-b width=1 height=1 fig-alt="B"}\n'],
     ]) {
       const once = await trip(md);
       expect(once).toBe(back);

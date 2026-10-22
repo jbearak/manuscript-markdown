@@ -9879,15 +9879,50 @@ function withKeepNext(paragraphXml: string): string {
  *  which import reads back as a caption's: text, in any formatting and
  *  link, and an inline equation */
 function captionKeeps(run: MdRun): boolean {
-  return run.type === 'text' || run.type === 'softbreak' || run.type === 'math' && !run.display;
+  // An equation with CriticMarkup in it, which Word gets as a tracked change
+  // or a comment in it, not
+  return run.type === 'text' || run.type === 'softbreak' || run.type === 'math' && !run.display && !run.mathParts;
+}
+
+/** A comment's Markdown, its ID's where it has one, with its author and
+ *  date, and its replies, in it or after it as they were written (see
+ *  consecutiveReplies), each in the one it replies to */
+function commentMarkdown(run: MdRun, id: string | undefined): string {
+  const header = (author: string | undefined, date: string | undefined) => author ? '@' + author + (date ? ' (' + date + ')' : '') + ' | ' : '';
+  const replies = run.replies ?? [];
+  // Each reply's replies, and the comment's, by the index of the one they reply to
+  const children = new Map<number | undefined, number[]>();
+  replies.forEach((reply, k) => {
+    const parent = reply.parentReply !== undefined && reply.parentReply < k ? reply.parentReply : undefined;
+    (children.get(parent) ?? children.set(parent, []).get(parent)!).push(k);
+  });
+  const reply = (k: number): string => '{>>' + header(replies[k].author, replies[k].date) + replies[k].text
+    + (children.get(k) ?? []).map(child => ' ' + reply(child)).join('') + '<<}';
+  const top = (children.get(undefined) ?? []).map(reply);
+  const open = '{' + (id !== undefined ? '#' + id : '') + '>>' + header(run.author, run.date) + (run.commentText ?? '');
+  return run.consecutiveReplies ? open + '<<}' + top.join('') : open + top.map(r => ' ' + r).join('') + '<<}';
+}
+
+/** An equation's Markdown, with the CriticMarkup in it */
+function mathMarkdown(run: MdRun): string {
+  if (!run.mathParts) return '$' + run.text + '$';
+  return '$' + run.mathParts.map(part => {
+    switch (part.type) {
+      case 'math': return part.content;
+      case 'addition': return '{++' + part.content + '++}';
+      case 'deletion': return '{--' + part.content + '--}';
+      case 'highlight': return '{==' + part.content + '==}';
+      case 'comment': return '{>>' + part.content + '<<}';
+      case 'substitution': return '{~~' + part.oldContent + '~>' + part.newContent + '~~}';
+    }
+  }).join('') + '$';
 }
 
 /** A run a caption can't hold, as text: its Markdown, which holds all of
- *  it, as `{>>note<<}` for a comment, `[^n]` for a note's reference and
- *  `{~~old~>new~~}` for a substitution, and a space for a line break */
+ *  it, as `{>>note<<}` for a comment, with its replies, `[^n]` for a note's
+ *  reference, `{~~old~>new~~}` for a substitution and `$x{++y++}$` for an
+ *  equation with CriticMarkup in it, and a space for a line break */
 function captionFallbackText(run: MdRun): string {
-  const comment = (id: string | undefined, text: string | undefined) =>
-    '{' + (id !== undefined ? '#' + id : '') + '>>' + (run.author ? '@' + run.author + ' | ' : '') + (text ?? '') + '<<}';
   switch (run.type) {
     case 'hardbreak': case 'softbreak': return ' ';
     case 'citation': return '[' + run.text + ']';
@@ -9896,8 +9931,9 @@ function captionFallbackText(run: MdRun): string {
     case 'critic_del': return '{--' + run.text + '--}';
     case 'critic_sub': return '{~~' + run.text + '~>' + (run.newText ?? '') + '~~}';
     case 'critic_highlight': return '{==' + run.text + '==}';
-    case 'critic_comment': return comment(undefined, run.commentText);
-    case 'comment_body_with_id': return comment(run.commentId, run.commentText);
+    case 'critic_comment': return commentMarkdown(run, undefined);
+    case 'comment_body_with_id': return commentMarkdown(run, run.commentId);
+    case 'math': return mathMarkdown(run);
     // A caption's label's ID is # and the label (see commentRangeRule)
     case 'comment_range_start': return '{' + (run.commentId?.startsWith('#') ? '' : '#') + (run.commentId ?? '') + '}';
     case 'comment_range_end': return '{/' + (run.commentId ?? '') + '}';

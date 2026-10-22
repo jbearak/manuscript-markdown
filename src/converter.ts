@@ -8642,10 +8642,12 @@ function readFigureCaptions(
     const delim = !hasText ? undefined : storedOne ? stored.delim : delimiterOfSeparator(separator);
     if (hasText && delim === undefined) return undefined;
     // The picture right before it, alone in its paragraph, and the one
-    // right after it, of a paragraph of its own
+    // right after it, of a paragraph of its own, with no empty paragraph
+    // between, which goes in the item between them (see emptyParagraphCount)
     const image: Candidate['image'] = {};
-    if (own && takesCaption(content[start - 1], imageFormatMapping) && (start === 1 || isPlainParaItem(content[start - 2]))) image.bottom = start - 1;
-    if (isPlainParaItem(content[end]) && takesCaption(content[end + 1], imageFormatMapping)
+    const adjoins = (item: ContentItem | undefined) => isPlainParaItem(item) && !(item as { emptyParagraphCount?: number }).emptyParagraphCount;
+    if (own && adjoins(content[start]) && takesCaption(content[start - 1], imageFormatMapping) && (start === 1 || isPlainParaItem(content[start - 2]))) image.bottom = start - 1;
+    if (adjoins(content[end]) && takesCaption(content[end + 1], imageFormatMapping)
       && (end + 2 >= content.length || isStructuralBoundaryItem(content[end + 2]))) image.top = end + 1;
     return { paragraph, start, end, title, delim, caption: hasText ? caption : [], image };
   }
