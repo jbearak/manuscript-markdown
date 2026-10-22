@@ -30,7 +30,7 @@ import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
-import { attributeValue, captionBookmarkName, captionOptions, captionSeparator, isCaptionLabelId, labelOfBookmark, seqIdentifier, type CaptionOptions, type FigureAttributes } from './captions';
+import { attributeValue, captionBookmarkName, captionOptions, captionSeparator, isCaptionLabelId, isCaptionText, labelOfBookmark, seqIdentifier, type CaptionOptions, type FigureAttributes } from './captions';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
 import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters } from './xml-parser';
 import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
@@ -9981,7 +9981,7 @@ function figureCaptionXml(image: MdRun, state: DocxGenState, options: MdToDocxOp
     runs = runs.map(run => captionKeeps(run) ? run : { type: 'text', text: captionFallbackText(run) });
     state.warnings.push('The caption of figure {#' + label + '} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
   }
-  const hasText = runs.some(run => run.type !== 'softbreak' && (run.type === 'math' || run.text.length > 0));
+  const hasText = runs.some(run => run.type === 'math' || run.type === 'text' && isCaptionText(run.text));
   const separator = captionSeparator(titleDelim, hasText);
   const id = state.nextBookmarkId++;
   return '<w:p><w:pPr><w:pStyle w:val="Caption"/>' + (figCapLocation === 'top' ? '<w:keepNext/>' : '') + '</w:pPr>'

@@ -209,6 +209,15 @@ export function captionSeparator(titleDelim: string, hasText: boolean): string {
   return /\s$/.test(titleDelim) ? titleDelim : titleDelim + ' ';
 }
 
+/** Whether `text`, of a caption's, is text it shows after its number,
+ *  which takes the delimiter before it: text with more than whitespace in
+ *  it, as export, import and the preview read it alike, so that a caption
+ *  of spaces alone, as `![ ](map.png){#fig-x}`'s, takes none. An equation
+ *  is text too. */
+export function isCaptionText(text: string): boolean {
+  return /\S/.test(text);
+}
+
 /** A caption's label and number as Word and the preview show them, as
  *  `Figure 1` */
 export function captionLabelText(title: string, number: number): string {

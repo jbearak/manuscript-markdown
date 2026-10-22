@@ -842,7 +842,7 @@ A label is `fig-` and the characters of a comment's ID, `[A-Za-z0-9_-]`. The blo
 
 The preview shows each figure with its caption, numbered in document order, as `Figure 1: Rates by region, 2010 to 2020`. Export writes Word the image's paragraph, kept with the next, and below it the caption Word's Insert Caption writes: a paragraph in the Caption style, with `Figure `, a `SEQ Figure` field for the number, which Word renumbers when fields update, then `: ` and the caption's text, formatted as in the brackets. The title and number are in a bookmark named for the label, as `fig_rates`, which a cross-reference in Word can point at. Export adds Word's Caption style where the template has none, and keeps the template's where it has one. Where a label's bookmark name doesn't give the label back, as for `fig-a_b`, whose name `fig_a_b` reads as `fig-a-b`, the `MANUSCRIPT_CAPTION_LABELS_*` custom properties keep it.
 
-`crossref:` changes the title and the delimiter, and `fig-cap-location: top` puts each caption above its image, kept with it. A delimiter that ends in a space or tab, as `" — "`, takes no space after it, and a caption with no text takes no delimiter.
+`crossref:` changes the title and the delimiter, and `fig-cap-location: top` puts each caption above its image, kept with it. A delimiter that ends in a space or tab, as `" — "`, takes no space after it, and a caption with no text, or whitespace alone, takes no delimiter, in the preview too.
 
 ```yaml
 ---

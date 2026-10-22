@@ -25,7 +25,7 @@ import { GRID_TABLE_PLACEHOLDER_PREFIX, gridColumnAlign } from '../grid-table-pr
 import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preprocessCriticMarkupWithMap } from './preprocess-with-map';
 import { LineMap } from './line-map';
 import { pushAll, spliceAll } from '../arrays';
-import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionLabelId, type CaptionOptions, type FigureAttributes } from '../captions';
+import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionLabelId, isCaptionText, type CaptionOptions, type FigureAttributes } from '../captions';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { parseFrontmatter, type ColorScheme } from '../frontmatter';
@@ -2272,7 +2272,13 @@ function figuresRule(state: StateCore): void {
     const caption: Token[] = [];
     const open = new state.Token('manuscript_figcaption_open', 'figcaption', 1);
     const label = new state.Token('text', '', 0);
-    label.content = captionLabelText(options.figTitle, number) + captionSeparator(options.titleDelim, children.length > 0);
+    // Its delimiter only where it has text to show (see isCaptionText): an
+    // equation or an image, which export writes as its Markdown, is some,
+    // and a tag, as <b> or <br>, which export reads as formatting or a
+    // break, is none
+    const hasText = children.some(child => child.type.includes('math') || child.type === 'image'
+      || child.type !== 'html_inline' && isCaptionText(child.content));
+    label.content = captionLabelText(options.figTitle, number) + captionSeparator(options.titleDelim, hasText);
     caption.push(open, label);
     for (const child of children) caption.push(Object.assign(new state.Token(child.type, child.tag, child.nesting), child));
     caption.push(new state.Token('manuscript_figcaption_close', 'figcaption', -1));

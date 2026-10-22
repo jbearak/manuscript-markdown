@@ -29,7 +29,7 @@ import { extractZoteroKey } from './zotero-link';
 import { styleFence } from './style-fence';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
-import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, labelOfBookmark, quotedAttributeValue, type CaptionLocation, type CaptionParagraph } from './captions';
+import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, isCaptionText, labelOfBookmark, quotedAttributeValue, type CaptionLocation, type CaptionParagraph } from './captions';
 import { asUtf8, decodeXml, parsePart, relatedPartPath, relatedPartPaths } from './template-sections';
 
 // --- Implementation notes ---
@@ -8322,11 +8322,13 @@ export async function extractDocumentContent(
           // A caption's paragraph, by its first item, which readFigureCaptions
           // reads with the picture before or after it: a plain paragraph of
           // the body's, with a para item of its own, but for the document's
-          // first, which has none
+          // first, and one after a para item another paragraph left, as the
+          // spacer after a code block or a quote, or a section's start, which
+          // have none
           if (target === content && !inTableCell && !sectionFence && !paraMarkRevision && !trackedBreak && !inBibliographyField
             && !headingLevel && !listMeta && !isTitle && !blockquoteLevel && !isCodeBlock && !generatedListContinuation && !customStyle
             && !horizontalRule && taskLevel === undefined && unnumberedListLevel === undefined
-            && (needsPara || targetLenBeforePara === 0) && target.length > targetLenBeforePara + (needsPara ? 1 : 0)) {
+            && (needsPara || targetLenBeforePara === 0 || target[targetLenBeforePara - 1].type === 'para') && target.length > targetLenBeforePara + (needsPara ? 1 : 0)) {
             const caption = captionParagraphOf(paraChildren);
             if (caption) captionParagraphs.set(target[targetLenBeforePara], caption);
           }
@@ -8494,14 +8496,24 @@ function takesCaption(item: ContentItem | undefined, imageFormatMapping: Map<str
 }
 
 /** A caption's text, its runs as export writes them or import reads them,
- *  for one to be compared with the other: each piece of text in a
- *  formatting, those next to each other in one joined, and an equation, without
- *  the whitespace it ends with, which Word doesn't show; undefined where
- *  it has something else */
+ *  for one to be compared with the other, as Word shows it: each piece of
+ *  text in a formatting, those next to each other in one joined however
+ *  the runs split them, and an equation, without the whitespace it ends
+ *  with, which Word doesn't show; undefined where it has something else.
+ *  Whitespace counts in no formatting, as Markdown moves it out of
+ *  emphasis, a highlight or a link, as `**A *B***` reads back as
+ *  `**A** ***B***`, whose space isn't bold, which Word shows alike. An
+ *  escape or a reference Markdown writes, or `_` for `*`, reads back as
+ *  the same text and formatting, so it shapes the same. A highlight's
+ *  color is its Markdown name, as `pieces` have it. */
 function captionTextShape(pieces: Array<{ text?: string; latex?: string; formatting?: Partial<RunFormatting>; href?: string }> | undefined): string | undefined {
   if (!pieces) return undefined;
-  const shape: Array<{ text: string } | { latex: string }> = [];
+  const shape: Array<{ text: string; key: string } | { latex: string }> = [];
   let last: { text: string; key: string } | undefined;
+  const add = (text: string, key: string) => {
+    if (last && last.key === key) last.text += text;
+    else shape.push(last = { text, key });
+  };
   for (const piece of pieces) {
     if (piece.latex !== undefined) {
       shape.push({ latex: piece.latex });
@@ -8512,17 +8524,10 @@ function captionTextShape(pieces: Array<{ text?: string; latex?: string; formatt
     const f = piece.formatting ?? {};
     const key = JSON.stringify([!!f.bold, !!f.italic, !!f.underline, !!f.strikethrough, !!f.highlight && (f.highlightColor ?? 'yellow'),
       !!f.superscript, !!f.subscript, !!f.code, piece.href ?? '']);
-    if (last && last.key === key) {
-      last.text += piece.text;
-    } else {
-      last = { text: piece.text, key };
-      shape.push(last);
-    }
+    for (const part of piece.text.split(/(\s+)/)) if (part) add(part, /^\s/.test(part) ? '' : key);
   }
-  if (last && shape[shape.length - 1] === last) {
-    last.text = last.text.replace(/[ \t]+$/, '');
-    if (!last.text) shape.pop();
-  }
+  // Its whitespace at the end, which Word doesn't show
+  if (last && shape[shape.length - 1] === last && last.key === '') shape.pop();
   return JSON.stringify(shape);
 }
 
@@ -8534,24 +8539,32 @@ function exportedCaptionPiece(run: MdRun): { text?: string; latex?: string; form
   return { text: run.text, formatting: run, href: run.href };
 }
 
-// Private-use characters that stand for a caption's [ and ] while
-// buildMarkdown writes its text, which then go as \[ and \]: in the image's
-// label the caption goes in, a ] would end it, and a [ with no ] after it
-// would keep the label from ending, where buildMarkdown leaves them as
-// they are in a paragraph
-const CAPTION_OPEN_BRACKET = '\uF8F0';
-const CAPTION_CLOSE_BRACKET = '\uF8F1';
+// Characters that stand for a caption's [, ] and \ while buildMarkdown
+// writes its text, which then go as \[, \] and \\: in the image's label
+// the caption goes in, a ] would end it, a [ with no ] after it would keep
+// the label from ending, and a \ would escape what comes after it, where
+// buildMarkdown leaves them as they are in a paragraph. Each is
+// punctuation, as the character it stands for, so that buildMarkdown
+// writes emphasis next to it as it reads next to that character. In code,
+// whose span holds the label's brackets and has no escapes, they stay.
+const CAPTION_STAND_INS: ReadonlyArray<readonly [string, string]> = [['[', '\u2E28'], [']', '\u2E29'], ['\\', '\u2E1E']];
+const CAPTION_STAND_IN_RE = /[\u2E28\u2E29\u2E1E]/;
 
 /** The Markdown of a caption's text, `items`, for an image's label, each
- *  [ and ] of its text escaped, or undefined where the text holds one of
- *  the characters that stand for them */
+ *  [, ] and \ of its text escaped, or undefined where the text holds one
+ *  of the characters that stand for them */
 function captionMarkdown(items: ContentItem[]): string | undefined {
   if (items.length === 0) return '';
-  if (items.some(item => item.type === 'text' && /[\uF8F0\uF8F1]/.test(item.text))) return undefined;
-  const marked = items.map(item => item.type === 'text' && /[[\]]/.test(item.text)
-    ? { ...item, text: item.text.replace(/\[/g, CAPTION_OPEN_BRACKET).replace(/\]/g, CAPTION_CLOSE_BRACKET) } : item);
-  return buildMarkdown(marked, new Map()).replace(/\n+$/, '')
-    .split(CAPTION_OPEN_BRACKET).join('\\[').split(CAPTION_CLOSE_BRACKET).join('\\]');
+  if (items.some(item => item.type === 'text' && CAPTION_STAND_IN_RE.test(item.text))) return undefined;
+  const marked = items.map(item => {
+    if (item.type !== 'text' || item.formatting.code || !/[[\]\\]/.test(item.text)) return item;
+    let text = item.text;
+    for (const [character, standIn] of CAPTION_STAND_INS) text = text.split(character).join(standIn);
+    return { ...item, text };
+  });
+  let markdown = buildMarkdown(marked, new Map()).replace(/\n+$/, '');
+  for (const [character, standIn] of CAPTION_STAND_INS) markdown = markdown.split(standIn).join('\\' + character);
+  return markdown;
 }
 
 /**
@@ -8662,7 +8675,7 @@ function readFigureCaptions(
       if (item.type === 'text' ? item.commentIds.size > 0 || item.revision || item.text.includes('\n')
         : !(item.type === 'math' && !item.display && item.commentIds.size === 0 && !item.revision && !item.href)) return undefined;
     }
-    const hasText = caption.some(item => item.type === 'math' || item.type === 'text' && item.text.trim() !== '');
+    const hasText = caption.some(item => item.type === 'math' || item.type === 'text' && isCaptionText(item.text));
     // With no text, nothing after the number Word shows
     if (!hasText && rest.trim() !== '') return undefined;
     const delim = !hasText ? undefined : storedOne ? stored.delim : delimiterOfSeparator(separator);
@@ -8702,7 +8715,11 @@ function readFigureCaptions(
     const run = tokens.length === 1 && tokens[0].type === 'paragraph' && tokens[0].runs.length === 1 ? tokens[0].runs[0] : undefined;
     if (run?.type !== 'image' || !run.figure) return undefined;
     const exported = run.figure.captionRuns.map(exportedCaptionPiece);
-    const read = candidate.caption.map(item => item.type === 'math' ? { latex: item.latex } : item.type === 'text' ? { text: item.text, formatting: item.formatting, href: item.href } : undefined);
+    // A highlight's color by its Markdown name, as export's runs have it
+    const read = candidate.caption.map(item => item.type === 'math' ? { latex: item.latex } : item.type !== 'text' ? undefined : {
+      text: item.text, href: item.href,
+      formatting: item.formatting.highlightColor ? { ...item.formatting, highlightColor: resolveMarkdownColor(item.formatting.highlightColor) ?? item.formatting.highlightColor } : item.formatting,
+    });
     if (exported.includes(undefined) || read.includes(undefined)) return undefined;
     if (captionTextShape(exported as NonNullable<(typeof exported)[number]>[]) !== captionTextShape(read as NonNullable<(typeof read)[number]>[])) return undefined;
     const image = content[candidate.image[chosen.location]!] as ContentItem & { type: 'image' };
@@ -8719,13 +8736,14 @@ function readFigureCaptions(
     const base = label;
     for (let k = 2; used.has(label); k++) label = base + '-' + k;
     used.add(label);
-    image.figure = { label, caption, ...(image.alt && image.alt !== readAlt ? { alt: image.alt } : {}) };
+    image.figure = { label, caption, ...(image.alt && isCaptionText(image.alt) && image.alt !== readAlt ? { alt: image.alt } : {}) };
   }
   for (let n = figures.length - 1; n >= 0; n--) {
     const { start, end } = figures[n].candidate;
-    // A caption that starts the document takes the picture's para item
-    // after it, which then starts it
-    content.splice(start, end - start + (start === 0 && content[start].type !== 'para' ? 1 : 0));
+    // A caption with no para item of its own, as one that starts the
+    // document, a section or the text after a code block's spacer, takes
+    // the picture's para item after it, as the picture then starts there
+    content.splice(start, end - start + (content[start].type !== 'para' ? 1 : 0));
   }
   const titled = figures[0].candidate.title;
   return { figTitle: titled, ...(chosen.delim !== undefined ? { titleDelim: chosen.delim } : {}), figCapLocation: chosen.location };

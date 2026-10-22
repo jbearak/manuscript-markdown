@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import JSZip from 'jszip';
+import fc from 'fast-check';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -68,6 +69,9 @@ function picture(descr = ''): string {
 
 const para = (text: string) => '<w:p><w:r><w:t xml:space="preserve">' + text + '</w:t></w:r></w:p>';
 
+/** A run of the text and run properties given */
+const run = (text: string, rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:t xml:space="preserve">' + text + '</w:t></w:r>';
+
 /** A caption whose text after its separator is the runs given */
 const captionOf = (inner: string) => caption(1, '', { sep: ': ', after: inner });
 
@@ -123,6 +127,11 @@ describe('exporting a figure', () => {
       '<w:p><w:pPr><w:pStyle w:val="Caption"/><w:keepNext/></w:pPr><w:bookmarkStart w:id="1" w:name="fig_e"/><w:r><w:t xml:space="preserve">Supplementary Fig. </w:t></w:r>' + seqField(2, 'Supplementary_Fig') + '<w:bookmarkEnd w:id="1"/></w:p>',
       '<w:p><w:r><DRAWING/></w:r></w:p>',
     ]);
+  });
+
+  it('writes no delimiter for a caption of whitespace alone, which shows no text', async () => {
+    const { body } = await exported('![ ](map.png){#fig-s}\n\n![\t](map.png){#fig-t}\n\n![<b> </b>](map.png){#fig-b}\n\n![A](map.png){#fig-a}\n');
+    expect(paragraphs(body).filter(p => p.includes('Caption')).map(p => p.replace(/<w:instrText[^>]*>[^<]*<\/w:instrText>|<[^>]+>/g, ''))).toEqual(['Figure 1', 'Figure 2', 'Figure 3', 'Figure 4: A']);
   });
 
   it('keeps in a property each label its bookmark\'s name doesn\'t give back', async () => {
@@ -227,6 +236,25 @@ describe('importing Word\'s captions', () => {
       .toBe('![[link](https://example.com/a)](media/image1.png){#fig-link width=100 height=100}\n');
   });
 
+  // Markdown writes some text and formatting its own way, which reads back
+  // as Word has it all the same: whitespace out of emphasis, a bracket or a
+  // backslash escaped, a highlight's color by its name
+  it.each([
+    ['whitespace in bold', run('Rates') + run(' by region', '<w:b/>'), 'Rates **by region**', 'rates-by-region'],
+    ['whitespace in bold at its end', run('Rates ', '<w:b/>') + run('by region'), '**Rates** by region', 'rates-by-region'],
+    ['emphasis in bold', run('A ', '<w:b/>') + run('B', '<w:b/><w:i/>'), '**A** ***B***', 'a-b'],
+    ['a bracket in bold after a letter', run('Lead') + run('[:', '<w:b/>'), 'Lead<b>\\[:</b>', 'lead'],
+    ['a backslash before a bracket', run('a \\] b'), 'a \\\\\\] b', 'a-b'],
+    ['a highlight\'s color', run('A ') + run('hi', '<w:highlight w:val="darkYellow"/>'), 'A ==hi=={dark-yellow}', 'a-hi'],
+  ])('reads a caption with %s, which Markdown writes its own way', async (_name, inner, md, label) => {
+    expect(await imported(await wordDocx(picture() + captionOf(inner)))).toBe('![' + md + '](media/image1.png){#fig-' + label + ' width=100 height=100}\n');
+  });
+
+  it('reads a caption of whitespace alone as one with no text', async () => {
+    expect(await imported(await wordDocx(picture() + caption(1, '', { sep: '  ' }) + picture() + caption(2, 'B'))))
+      .toBe('![](media/image1.png){#fig-1 width=100 height=100}\n\n![B](media/image1.png){#fig-b width=100 height=100}\n');
+  });
+
   // A caption export can't write as Word has it stays as it is, as text, and
   // so do the others of its numbers' series, which otherwise would number
   // from 1 again, and show a number twice
@@ -243,6 +271,7 @@ describe('importing Word\'s captions', () => {
     ['separators that differ', picture() + caption(1, 'A', { sep: '. ' }) + picture() + caption(2, 'B'), {}],
     ['no separator', picture() + caption(1, 'Joined', { sep: '' }), {}],
     ['a separator alone', picture() + caption(1, '', { sep: ':' }), {}],
+    ['a separator and whitespace alone', picture() + caption(1, '  ', { sep: ': ' }), {}],
     ['a paragraph between', picture() + '<w:p/>' + caption(1, 'Gap'), {}],
     ['a paragraph between it and the picture below it', caption(1, 'Gap') + '<w:p/>' + picture() + para('After.'), {}],
     ['text by the image', '<w:p><w:r><w:t>x</w:t></w:r>' + picture().slice('<w:p>'.length) + caption(1, 'Mixed'), {}],
@@ -306,12 +335,57 @@ describe('figures\' round trips', () => {
       ['![A](map.png){#fig-a}\n\n![B](map.png){#fig-b}\n\n![](plain.png)\n', '![A](media/map.png){#fig-a width=1 height=1}\n\n![B](media/map.png){#fig-b width=1 height=1}\n\n![](media/plain.png){width=1 height=1}\n'],
       ['![Caption](map.png){#fig-x}\n\n![Caption](map.png){#fig-x}\n', '![Caption](media/map.png){#fig-x width=1 height=1}\n\n![Caption](media/map.png){#fig-x-2 width=1 height=1}\n'],
       ['![[link](https://example.com/a) and ==hi==](map.png){#fig-k}\n', '![[link](https://example.com/a) and ==hi==](media/map.png){#fig-k width=1 height=1}\n'],
+      // Formatting Markdown writes its own way, as it reads back as Word has it
+      ['![**A *B***](map.png){#fig-a}\n\n![a\\\\\\] b **\\[c** ==hi=={dark-yellow}](map.png){#fig-b}\n', '![**A** ***B***](media/map.png){#fig-a width=1 height=1}\n\n![a\\\\\\] b **\\[c** ==hi=={dark-yellow}](media/map.png){#fig-b width=1 height=1}\n'],
+      // A caption of whitespace alone, with no delimiter, as one with no text
+      ['![ ](map.png){#fig-s}\n\n![B](map.png){#fig-b}\n', '![](media/map.png){#fig-s width=1 height=1}\n\n![B](media/map.png){#fig-b width=1 height=1}\n'],
       // An equation with a tracked change, which goes as text, so the series reads back
       ['![A](map.png){#fig-a}\n\n![B $x{++y++}$](map.png){#fig-b fig-alt="B"}\n', '![A](media/map.png){#fig-a width=1 height=1}\n\n![B \\$x\\{++y+\\+}$](media/map.png){#fig-b width=1 height=1 fig-alt="B"}\n'],
     ]) {
       const once = await trip(md);
       expect(once).toBe(back);
       expect(await trip(once)).toBe(once);
+    }
+  });
+
+  it('reads a Word caption in any formatting, with Markdown\'s punctuation, as a figure, and back the same', async () => {
+    const piece = fc.record({
+      text: fc.stringMatching(/^[ab *_[\]`~=<>&$\\#{}!^.:|-]{1,5}$/),
+      rPr: fc.subarray(['<w:b/>', '<w:i/>', '<w:strike/>', '<w:highlight w:val="darkYellow"/>', '<w:u w:val="single"/>', '<w:vertAlign w:val="superscript"/>']),
+    });
+    await fc.assert(fc.asyncProperty(fc.array(piece, { minLength: 1, maxLength: 4 }), async pieces => {
+      const inner = pieces.map(({ text, rPr }) => run(text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'), rPr.join(''))).join('');
+      const md = await imported(await wordDocx(picture() + caption(1, 'Lead', { after: inner })));
+      expect(md).toContain('{#fig-');
+      // Import puts the picture, from media/, in a media/ of its own
+      expect((await trip(md)).replace('](media/media/', '](media/')).toBe(md);
+    }), { numRuns: 40 });
+  });
+
+  it('reads back a caption that starts a section, or the text after a code block, quote, heading, page break or style block, the same each time', async () => {
+    const styles = 'styles:\n  wide:\n    font: Arial\n';
+    const bodies = [
+      '<!-- landscape -->\n\nFIG\n<!-- /landscape -->\n\nAfter.\n',
+      '<!-- landscape -->\nFIG<!-- /landscape -->\n',
+      'Intro.\n\n<!-- portrait -->\n\nFIG\n<!-- /portrait -->\n',
+      'Intro.\n\n<!-- pagebreak -->\n\nFIG',
+      'Intro.\n\n\\newpage\n\nFIG',
+      '# Head\n\nFIG',
+      '```\ncode\n```\n\nFIG',
+      '> quote\n\nFIG',
+      '<!-- style: wide -->\n\nText.\n\n<!-- /style -->\n\nFIG',
+      'FIG\n![B](map.png){#fig-b}\n',
+    ];
+    for (const location of ['top', 'bottom']) {
+      for (const body of bodies) {
+        const md = '---\nfig-cap-location: ' + location + '\n' + styles + '---\n\n' + body.replace('FIG', '![A](map.png){#fig-a}\n');
+        const back = md.replace(/\]\(map\.png\)\{(#fig-[ab])\}/g, (_match, label: string) => '](media/map.png){' + label + ' width=1 height=1}');
+        const once = await trip(md);
+        expect(once).toBe(back);
+        const twice = await trip(once);
+        expect(twice).toBe(once);
+        expect(await trip(twice)).toBe(once);
+      }
     }
   });
 
@@ -339,6 +413,15 @@ describe('previewing a figure', () => {
     expect(html).toContain('<p><img src="s.png" alt="Styled"></p>');
     expect(html).toContain('<p><img src="q.png" alt="Quoted"></p>');
     expect(html).toContain('<figure id="fig-e" class="manuscript-markdown-figure"><figcaption>Fig. 2</figcaption><img src="e.png" alt=""></figure>');
+  });
+
+  it('shows no delimiter after the number of a caption of whitespace alone', () => {
+    const html = renderWithPlugin('![ ](s.png){#fig-s}\n\n![<b> </b>](b.png){#fig-b}\n\n![A](a.png){#fig-a}\n\n![![](i.png)](c.png){#fig-c}\n');
+    expect(html).toContain('<figcaption>Figure 1 </figcaption>');
+    expect(html).toContain('<figcaption>Figure 2<b> </b></figcaption>');
+    expect(html).toContain('<figcaption>Figure 3: A</figcaption>');
+    // An image, which export writes as its Markdown, is text
+    expect(html).toContain('<figcaption>Figure 4: <img src="i.png" alt=""></figcaption>');
   });
 });
 
