@@ -721,7 +721,7 @@ tbl-cap-location: bottom
 ---
 ```
 
-A table's caption takes what a figure's does: a citation, note, comment, tracked change, line break or image in it, or an equation with CriticMarkup in it, goes to Word as its Markdown, as text, with a warning, and a caption with no text, as `: {#tbl-rates}`, or whitespace alone, takes no delimiter. A table an embed gives takes no caption. A `{#tbl-…}` anywhere else labels nothing, and export warns of it (see [Figures](#figures)).
+A table's caption takes what a figure's does: a citation, cross-reference, note, comment, tracked change, line break or image in it, or an equation with CriticMarkup in it, goes to Word as its Markdown, as text, with a warning, and a caption with no text, as `: {#tbl-rates}`, or whitespace alone, takes no delimiter. A table an embed gives takes no caption. A `{#tbl-…}` anywhere else labels nothing, and export warns of it (see [Figures](#figures)).
 
 DOCX import reads Word's table captions back so (see [Figure and Table Captions](converter.md#figure-and-table-captions)).
 
@@ -744,7 +744,7 @@ Separate keys with semicolons even after a prefix. Write `[e.g., @smith2020; @jo
 
 The text after a key's comma is read as Pandoc reads it: an English locator term, as `p.`, `chap.` or `§`, the locator, and the rest as the suffix. Text with no term or number first is all suffix. For documents written for earlier versions, a few texts Pandoc reads as a suffix are read as a label and a locator, as `ch. 2` and `sec. A` (see the table). See [Zotero Round-Trip](zotero-roundtrip.md#editing-citations-in-markdown) for the terms. The Zotero field holds the locator, its label and the suffix, and import writes them back the same way.
 
-A key is the text after the `@` to the item's comma, as written, so `[@smith.2020]` cites `smith.2020`, and the editor colors all of it. A key with a `;`, a `]` or a backtick can't be cited: a `;` or `]` ends the item or the citation there, and a backtick with another after it makes code of the text between, which the language server reads no citation in. The language server reports such a key in the `.bib` file and leaves it out of completions.
+A key is the text after the `@` to the item's comma, as written, so `[@smith.2020]` cites `smith.2020`, and the editor colors all of it. A key with a `;`, a `]` or a backtick can't be cited: a `;` or `]` ends the item or the citation there, and a backtick with another after it makes code of the text between, which the language server reads no citation in. The language server reports such a key in the `.bib` file and leaves it out of completions. So too a key that starts with `fig-` or `tbl-`, or `Fig-` or `Tbl-`, and goes on past its `-`, which is a cross-reference's (see [Cross-References](#cross-references)): brackets with one in them are no citation.
 
 Citations reference entries in a companion `.bib` file (see [BibTeX Companion File](#bibtex-companion-file) below).
 
@@ -801,6 +801,22 @@ When exported from Zotero via DOCX import, entries also include identity fields 
 - `zotero-uri` — the Zotero item URI
 
 These fields allow the Markdown-to-DOCX exporter to reconstruct Zotero field codes in the output document. See [Zotero Citation Roundtrip](zotero-roundtrip.md) for details.
+
+## Cross-References
+
+A cross-reference to a figure or a table is an `@` and its label, as in Quarto:
+
+```markdown
+As @fig-rates shows, the rates rose in the north (@tbl-rates).
+```
+
+The preview shows each as its figure's or table's title and number, as `Figure 1`, a link to it. Export writes Word the cross-reference Word's Cross-reference dialog writes to a caption's "Only label and number": a `REF` field to the caption's bookmark, as `REF fig_rates \h`, showing `Figure 1`, which Word renumbers with the caption when fields update, and which links to it. `@Fig-rates` or `@Tbl-rates` gives the title a capital, as `Figure` for a `fig-title` of `figure`, with the field's `\* FirstCap` switch. A reference takes the formatting, comments and tracked changes around it, as `**@fig-rates**` is bold, in the body and in a note.
+
+The label is read as Pandoc reads a citation's key after a bare `@`: letters, digits and `_`, and the punctuation `:.#$%&-+?<>~/` between two of them, so `@fig-rates.` ends before its period. The `@` follows none of a letter, a digit, `_`, `.`, `-`, `/`, `@`, a backtick or a backslash, so an email address, as `me@fig-rates.org`, stays text, and so does `\@fig-rates`. A label alone in a citation's brackets, as `[@fig-rates]`, is a cross-reference too, which reads where a bare one would go on, as in `[@fig-rates]a`. In a citation's brackets with anything else, as Quarto's `[-@fig-rates]`, a prefix, as `[see @fig-rates]`, or another key, as `[@fig-a; @fig-b]`, a cross-reference is text, all the brackets with it, and export warns of it. Code and a link's text hold none.
+
+A reference whose label no figure or table has goes to Word as its text, as `@fig-rates`, with a warning, and the preview shows it marked as missing. Where more than one figure or table has a label, its references go to the first, with a warning. A caption's cross-reference goes to Word as its Markdown, as text, with a warning, as a caption's citation does (see [Figures](#figures)).
+
+DOCX import reads Word's cross-references to captions back (see [Cross-References](converter.md#cross-references)).
 
 ## Footnotes
 
@@ -884,7 +900,7 @@ An image alone in its paragraph, with a label first in the attribute block after
 
 A label is `fig-` and the characters of a comment's ID, `[A-Za-z0-9_-]`. The block may also hold `width`, `height`, and `fig-alt="..."`, the image's alt text where the caption shouldn't be, as `fig-alt=""` for none. A figure's block ends at its first `}`, on its line, with no `{` before it, so a value in quotes writes a `}` as `&#125;` and a line end as `&#10;`; a `\"` in quotes is a `"`.
 
-The preview shows each figure with its caption, numbered in document order, as `Figure 1: Rates by region, 2010 to 2020`. Export writes Word the image's paragraph, kept with the next, and below it the caption Word's Insert Caption writes: a paragraph in the Caption style, with `Figure `, a `SEQ Figure` field for the number, which Word renumbers when fields update, then `: ` and the caption's text, formatted as in the brackets. The title and number are in a bookmark named for the label, as `fig_rates`, which a cross-reference in Word can point at. Export adds Word's Caption style where the template has none, and keeps the template's where it has one. Where a label's bookmark name doesn't give the label back, as for `fig-a_b`, whose name `fig_a_b` reads as `fig-a-b`, the `MANUSCRIPT_CAPTION_LABELS_*` custom properties keep it.
+The preview shows each figure with its caption, numbered in document order, as `Figure 1: Rates by region, 2010 to 2020`. Export writes Word the image's paragraph, kept with the next, and below it the caption Word's Insert Caption writes: a paragraph in the Caption style, with `Figure `, a `SEQ Figure` field for the number, which Word renumbers when fields update, then `: ` and the caption's text, formatted as in the brackets. The title and number are in a bookmark named for the label, as `fig_rates`, which a cross-reference in Word, as `@fig-rates`, points at (see [Cross-References](#cross-references)). Export adds Word's Caption style where the template has none, and keeps the template's where it has one. Where a label's bookmark name doesn't give the label back, as for `fig-a_b`, whose name `fig_a_b` reads as `fig-a-b`, the `MANUSCRIPT_CAPTION_LABELS_*` custom properties keep it.
 
 `crossref:` changes the title and the delimiter, and `fig-cap-location: top` puts each caption above its image, kept with it. A delimiter that ends in a space or tab, as `" — "`, takes no space after it, and a caption with no text, or whitespace alone, takes no delimiter, in the preview too.
 
@@ -897,7 +913,7 @@ fig-cap-location: top
 ---
 ```
 
-A caption's citation, note, comment, tracked change, line break or image, or an equation with CriticMarkup in it, which Word's caption can't hold as import would read it back, goes to Word as its Markdown, as text, as `{>>note {>>reply<<}<<}` or `$x{++y++}$`, with a warning.
+A caption's citation, cross-reference, note, comment, tracked change, line break or image, or an equation with CriticMarkup in it, which Word's caption can't hold as import would read it back, goes to Word as its Markdown, as text, as `{>>note {>>reply<<}<<}` or `$x{++y++}$`, with a warning.
 
 An image with a label that isn't alone in its paragraph, or is in a list, a quote, a table, a note, a link, a style block or a tracked change, gets no caption, with a warning. A `{#fig-…}` or `{#tbl-…}` that labels nothing, as in a sentence, starts no comment range (see [ID Format](#id-format)): export writes nothing for it, with a warning, and the preview shows nothing.
 

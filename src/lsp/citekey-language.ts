@@ -4,7 +4,7 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, BibtexSourceRange, parseBibtexWithRaw, stripOuterBraces } from '../bibtex-parser';
-import { isCitableKey, isCitationKeyChar, readCitationItems } from '../citation-syntax';
+import { isCitableKey, isCitationKeyChar, isCrossRefKey, readCitationItems } from '../citation-syntax';
 import { computeCodeRegions, isInsideCodeRegion, type CodeRegion } from '../code-regions';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
@@ -190,6 +190,8 @@ function multilineUsages(inner: string, offset: number): CitekeyUsage[] {
 	CITEKEY_RE.lastIndex = 0;
 	while ((keyMatch = CITEKEY_RE.exec(inner)) !== null) {
 		const key = keyMatch[1];
+		// A cross-reference's, which cites nothing
+		if (isCrossRefKey(key)) continue;
 		const keyStart = offset + keyMatch.index + 1;
 		usages.push({ key, keyStart, keyEnd: keyStart + key.length });
 	}
@@ -220,7 +222,11 @@ function scanBlankedCitationUsages(
 		const segmentOffset = open + 1;
 		// Each item's key as export reads it (see readCitationItem), where an
 		// @ marks it
-		for (const item of readCitationItems(scanText.slice(open + 1, close))) {
+		const items = readCitationItems(scanText.slice(open + 1, close));
+		// A cross-reference's key cites nothing, nor does any other key in
+		// brackets with one, which are text (see crossRefAt)
+		if (items.some(item => item.markStart !== -1 && isCrossRefKey(item.key))) continue;
+		for (const item of items) {
 			if (item.markStart === -1 || !item.key) continue;
 			const keyStart = segmentOffset + item.itemStart + item.keyStart;
 			usages.push({

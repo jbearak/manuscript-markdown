@@ -142,7 +142,7 @@ describe('exporting a table\'s caption', () => {
     const captionParagraph = blocks(body).find(p => p.includes('Caption'))!;
     expect(shown(captionParagraph)).toBe('Table 1: A b [^n] {&gt;&gt;c&lt;&lt;} {++d++}');
     expect(captionParagraph).toContain('<w:r><w:rPr><w:i/></w:rPr><w:t>b</w:t></w:r>');
-    expect(warnings).toContain('The caption of table {#tbl-x} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
+    expect(warnings).toContain('The caption of table {#tbl-x} has a citation, a cross-reference, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
   });
 
   it('gives no caption to a paragraph that isn\'t right after a table at the top level, and warns', async () => {

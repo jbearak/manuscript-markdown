@@ -36,7 +36,7 @@ import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 import { findDollarMathAt } from '../math-delimiters';
-import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from '../citation-syntax';
+import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText, crossRefAt, crossRefLabel } from '../citation-syntax';
 import { normalizeNewlines } from '../newlines';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
@@ -1401,6 +1401,29 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
+/** A cross-reference, as export reads one (see crossRefAt), which shows
+ *  its figure's or table's title and number once captionsRule numbers
+ *  them, or a citation's brackets with one in them, which are their text,
+ *  as in Word */
+function crossRefRule(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  // As a citation, none where markdown-it scans a link's label
+  if (silent && state.src.charAt(start) === '[') return false;
+  const ref = crossRefAt(state, start);
+  if (!ref) return false;
+  if (!silent) {
+    const token = state.push('manuscript_cross_reference', '', 0);
+    const source = restoreCriticLineBreaks(state.src.slice(start, ref.end));
+    token.content = ref.form === 'literal' ? state.md.utils.unescapeAll(source).replace(/\r\n?|\n/g, ' ') : source;
+    token.meta = { key: ref.key, form: ref.form };
+    const consumedBreakSourceOffsets = collectProtectedBreaks(state.src.slice(start, ref.end), inlineSourceOffset(state, start))
+      .map(sourceBreak => sourceBreak.sourceOffset);
+    if (consumedBreakSourceOffsets.length > 0) token.meta.manuscriptCriticConsumedBreakSourceOffsets = consumedBreakSourceOffsets;
+  }
+  state.pos = ref.end;
+  return true;
+}
+
 /** Whether the == at `at` is a {=='s, whose { no backslash escapes, as
  *  export reads it in a format highlight (findClosingHighlightMarker) */
 function opensCriticHighlight(src: string, at: number): boolean {
@@ -2312,6 +2335,9 @@ function captionsRule(state: StateCore): void {
   // last table starts, where HTML is before it
   let tableStart: number | undefined;
   let tableLine: number | undefined;
+  // What each label's first figure or table shows of its title and number,
+  // which a cross-reference to it shows
+  const targets = new Map<string, string>();
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     const afterTable = tableStart;
@@ -2346,6 +2372,7 @@ function captionsRule(state: StateCore): void {
       ? tableCaptionTokens(inline.content, inline.children ?? []) : undefined;
     if (table) {
       tableNumber++;
+      if (!targets.has(table.label)) targets.set(table.label, captionLabelText(options.tblTitle, tableNumber));
       token.attrSet('id', table.label);
       token.attrJoin('class', 'manuscript-markdown-table-caption');
       const label = new state.Token('text', '', 0);
@@ -2378,6 +2405,7 @@ function captionsRule(state: StateCore): void {
     const figure: FigureAttributes | undefined = image?.type === 'image' ? image.meta?.figure : undefined;
     if (!image || !figure || tokens[i + 2]?.type !== 'paragraph_close') continue;
     number++;
+    if (!targets.has(figure.label)) targets.set(figure.label, captionLabelText(options.figTitle, number));
     token.tag = 'figure';
     tokens[i + 2].tag = 'figure';
     token.attrSet('id', figure.label);
@@ -2407,6 +2435,17 @@ function captionsRule(state: StateCore): void {
     if (style.length > 0) image.attrSet('style', style.join('; '));
     inline.children = options.figCapLocation === 'top' ? [...caption, image] : [image, ...caption];
   }
+  // Each cross-reference's text, its first letter a capital for `@Fig-`
+  const shownIn = (children: Token[] | null): void => {
+    for (const child of children ?? []) {
+      if (child.type === 'manuscript_cross_reference' && child.meta?.form !== 'literal') {
+        const shown = targets.get(crossRefLabel(child.meta.key));
+        if (shown !== undefined) child.meta.shown = crossRefLabel(child.meta.key) === child.meta.key ? shown : shown.charAt(0).toUpperCase() + shown.slice(1);
+      }
+      shownIn(child.children);
+    }
+  };
+  for (const token of tokens) if (token.type === 'inline') shownIn(token.children);
 }
 
 /**
@@ -2586,6 +2625,18 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // A citation is text to export, as it is here, where export reads one
   md.inline.ruler.before('emphasis', 'manuscript_markdown_citation', citationRule);
+  // A cross-reference, before a citation, whose brackets it can take
+  md.inline.ruler.before('manuscript_markdown_citation', 'manuscript_markdown_cross_reference', crossRefRule);
+  // A link to its figure or table, by its label, showing its title and
+  // number, as Word's field does, or else, where none has its label, the
+  // reference, marked as missing, as a value of a .dta table's is
+  md.renderer.rules.manuscript_cross_reference = (tokens, idx) => {
+    const token = tokens[idx];
+    if (token.meta?.form === 'literal') return escapeHtmlText(token.content);
+    const label = crossRefLabel(token.meta?.key ?? '');
+    if (token.meta?.shown === undefined) return '<span class="mm-missing-value" title="No figure or table is labeled ' + escapeHtmlAttr('{#' + label + '}') + '">?@' + escapeHtmlText(token.meta?.key ?? '') + '</span>';
+    return '<a href="#' + escapeHtmlAttr(label) + '" class="manuscript-markdown-cross-reference">' + escapeHtmlText(token.meta.shown) + '</a>';
+  };
 
   // Register core rule to associate comments with annotated elements
   // Runs after inline parsing to post-process the token stream

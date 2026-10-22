@@ -30,7 +30,7 @@ import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
-import { attributeValue, captionBookmarkName, captionOptions, captionSeparator, isCaptionLabelId, isCaptionText, labelOfBookmark, seqIdentifiers, tableCaptionSource, type CaptionOptions, type FigureAttributes } from './captions';
+import { attributeValue, captionBookmarkName, captionLabelText, captionOptions, captionSeparator, isCaptionLabelId, isCaptionText, labelOfBookmark, seqIdentifiers, tableCaptionSource, type CaptionOptions, type FigureAttributes } from './captions';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
 import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters } from './xml-parser';
 import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
@@ -244,6 +244,8 @@ export interface MdRun {
   locators?: Map<string, string>; // key -> locator for [@key, p. 20]
   suppressAuthorKeys?: Set<string>; // per-key suppress-author: Set of keys with [-@key] form
   prefixes?: string[];      // Pandoc prefix per item for [e.g., @key], aligned with keys ('' = none)
+  // Cross-reference specific: text of a cross-reference's Markdown, as @fig-map, which a caption's REF field shows (see crossRefXml)
+  crossRef?: { key: string; form: CrossRefSource['form'] };
   // Math specific
   display?: boolean;        // display math ($$...$$) vs inline ($...$)
   // Image specific
@@ -393,7 +395,7 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
 import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, criticCloserSearch, criticCloserSearchOf, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml, criticBreaksLeftOver } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt } from './math-delimiters';
-import { citationEnd, citationPrefixText, readCitationItems } from './citation-syntax';
+import { citationEnd, citationPrefixText, crossRefAt, crossRefLabel, readCitationItems, type CrossRefSource } from './citation-syntax';
 import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments, type ContainerOptions } from './latex-env-preprocess';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines, withEnd } from './line-map';
 import { normalizeNewlines } from './newlines';
@@ -420,6 +422,7 @@ interface ManuscriptToken extends Token {
   display?: boolean;
   footnoteLabel?: string;
   criticMathParts?: CriticMathPart[];
+  crossRef?: CrossRefSource;
 }
 
 function pushManuscriptToken(state: StateInline, type: string, tag: string, nesting: 1 | 0 | -1): ManuscriptToken {
@@ -1188,6 +1191,25 @@ function citationRule(state: StateInline, silent: boolean): boolean {
 }
 
 
+/** A cross-reference to a figure or a table (see crossRefAt), as its
+ *  Markdown, which Word gets as a REF field to the caption, or a
+ *  citation's brackets with one in them, which Word gets as text */
+function crossRefRule(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  const ref = crossRefAt(state, start);
+  if (!ref) return false;
+  if (!silent) {
+    const token = pushManuscriptToken(state, 'cross_reference', '', 0);
+    const source = restoreCriticLineBreaks(state.src.slice(start, ref.end));
+    // The brackets' text as Word shows it, its escapes read and its line
+    // ends as spaces, as a softbreak's
+    token.content = ref.form === 'literal' ? state.md.utils.unescapeAll(source).replace(/\r\n?|\n/g, ' ') : source;
+    token.crossRef = ref;
+  }
+  state.pos = ref.end;
+  return true;
+}
+
 function pushMathToken(state: StateInline, content: string, display = false): void {
   const token = pushManuscriptToken(state, 'math', '', 0);
   token.content = content;
@@ -1367,6 +1389,7 @@ export function createMarkdownIt(): MarkdownIt {
   md.inline.ruler.before('emphasis', 'colored_highlight', coloredHighlightRule);
   md.inline.ruler.before('emphasis', 'critic_markup', criticMarkupRule);
   md.inline.ruler.before('emphasis', 'footnote_ref', footnoteRefRule);
+  md.inline.ruler.before('emphasis', 'cross_reference', crossRefRule);
   md.inline.ruler.before('emphasis', 'citation', citationRule);
   md.inline.ruler.before('emphasis', 'math', mathRule);
   // A note body parsed on its own resolves reference links with the
@@ -1500,6 +1523,8 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
     // Where a link starts, though the one before goes to the same place
     ...(run.linkStart ? { linkStart: true } : {}),
     ...(run.rawHtml ? { rawHtml: true } : {}),
+    // A cross-reference, which Word gets a field for in the change too
+    ...(run.crossRef ? { crossRef: run.crossRef } : {}),
     ...overrides,
   };
 }
@@ -4549,6 +4574,16 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         break;
       }
 
+      case 'cross_reference':
+        runs.push({
+          type: 'text',
+          text: token.content,
+          ...formatStack,
+          href: currentHref,
+          crossRef: { key: token.crossRef!.key, form: token.crossRef!.form },
+        });
+        break;
+
       case 'citation':
         runs.push({
           type: 'citation',
@@ -5640,6 +5675,10 @@ export interface DocxGenState {
   tableNumber: number; // the tables with captions numbered so far
   captionBookmarks: Set<string>; // the names of the bookmarks of the captions so far, in lower case, as Word compares them
   captionLabels: Map<string, string>; // each caption's bookmark's name, by which import reads its label, to the label, where the name alone doesn't give it (see labelOfBookmark)
+  captionTargets?: Map<string, CaptionTarget>; // each label's first caption, which a cross-reference to it shows (see crossRefXml)
+  labelsCaptioned?: Set<string>; // the labels of more than one caption
+  crossRefs?: CrossRef[]; // the cross-references written so far, each a field whose caption is known once the document is (see withCrossRefs)
+  tableRecords?: TableRecord[]; // each table's XML, whose identity is read once the cross-references in it are (see recordTableIdentity)
   captionedImages: Set<MdRun>; // the images of figures, which take a caption, and of no others (see figureImageOf)
   uncaptionedLabels: Set<string>; // the labels of images that aren't figures, each of which has had its warning
   firstLineIndentTwips?: number;   // undefined = no indent mode
@@ -5680,25 +5719,41 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
   if (token.tableHtmlAround && /\S/.test(token.tableHtmlAround.join('')) && !state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
 }
 
-/** Records a table's identity, which import finds its settings by, as its
- *  format and font, which recordTableMetadata records by its index, as one
- *  Word added or deleted would shift the tables' indices; and the HTML
+/** A table's XML, as generateTable wrote it, of the table at `index`, in
+ *  the note `scope` or the body (see recordTableIdentity) */
+interface TableRecord { token: MdToken; xml: string; index: number; scope: string }
+
+/** Records the table `token`, whose XML is `xml`, the state's table at
+ *  tableIndex, for its identity, read once the document is written (see
+ *  settleTableIdentities), when each cross-reference in it shows what
+ *  Word shows */
+function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, scope: string): void {
+  (state.tableRecords ??= []).push({ token, xml, index: state.tableIndex, scope });
+}
+
+/** Records each table's identity, which import finds its settings by, as
+ *  its format and font, which recordTableMetadata records by its index, as
+ *  one Word added or deleted would shift the tables' indices; and the HTML
  *  around it in its block with its identity, to put the HTML back with no
  *  other: its first row, as its cells' count and text, its text, as the
- *  Word table `xml` holds it, and the count of tables alike in both before
- *  it in the body or its note (`scope`), which import counts too, but for
- *  one it writes as its embed directive, whose HTML it doesn't write
- *  either, and, once all are written, the count of them all */
-function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, scope: string): void {
-  const texts = wordTableTexts(xml);
-  state.tableIdentities[state.tableIndex] = tableIdentity(texts, scope);
-  const firstRow = tableFirstRowText(texts[0] ?? []);
-  const contents = tableContentsFingerprint(texts);
-  const key = scope + '\n' + firstRow + '\n' + contents;
-  const alikeBefore = state.tablesAlike.get(key) ?? 0;
-  if (token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length) return;
-  state.tablesAlike.set(key, alikeBefore + 1);
-  if (token.tableHtmlAround) state.tableHtmlAround.set(state.tableIndex, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore), scope, '']);
+ *  Word table's XML holds it once `final` gives it, and the count of
+ *  tables alike in both before it in the body or its note (`scope`), in
+ *  the order they were written, which import counts too, but for one it
+ *  writes as its embed directive, whose HTML it doesn't write either, and,
+ *  once all are written, the count of them all */
+function settleTableIdentities(state: DocxGenState, final: (xml: string) => string): void {
+  for (const { token, xml, index, scope } of state.tableRecords ?? []) {
+    const texts = wordTableTexts(final(xml));
+    state.tableIdentities[index] = tableIdentity(texts, scope);
+    const firstRow = tableFirstRowText(texts[0] ?? []);
+    const contents = tableContentsFingerprint(texts);
+    const key = scope + '\n' + firstRow + '\n' + contents;
+    const alikeBefore = state.tablesAlike.get(key) ?? 0;
+    if (token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length) continue;
+    state.tablesAlike.set(key, alikeBefore + 1);
+    if (token.tableHtmlAround) state.tableHtmlAround.set(index, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore), scope, '']);
+  }
+  state.tableRecords = [];
 }
 
 interface CommentEntry {
@@ -8668,7 +8723,8 @@ function generateDeletedCriticContent(
     }
     if (run.type !== 'text' || !run.text) continue;
     const rPr = generateRPr(run, tableRunRPr(state, run));
-    emit('<w:r>' + (rPr ? rPr : '') + (holdsRawHtmlLineEnd(run) ? rawHtmlTextElements(run, 'w:delText') : delText(run.text)) + '</w:r>', run);
+    if (run.crossRef) emit(crossRefXml(run, state, rPr, true), run);
+    else emit('<w:r>' + (rPr ? rPr : '') + (holdsRawHtmlLineEnd(run) ? rawHtmlTextElements(run, 'w:delText') : delText(run.text)) + '</w:r>', run);
   }
   close();
   return xml;
@@ -8810,6 +8866,84 @@ function noteReferenceXml(label: string, state: DocxGenState, revision?: 'additi
     + '<w:r>' + rPr + '<w:fldChar w:fldCharType="end"/></w:r>';
 }
 
+/** A caption a cross-reference goes to: its bookmark's name, and what it
+ *  shows of its title and number, as `Figure 1` (see captionXml) */
+interface CaptionTarget { bookmark: string; text: string }
+
+/** A cross-reference written, as crossRefXml wrote it: its key, its
+ *  Markdown, its runs' properties, and whether it's deleted */
+interface CrossRef { key: string; text: string; rPr: string; deleted: boolean }
+
+// A cross-reference's field until the captions are known, once the
+// document is written (see withCrossRefs): its index after this, between
+// NULs, which no XML holds, as noteNumberMark, then the field as it would
+// be, but for its result, which is its Markdown, then CROSS_REF_END
+const CROSS_REF_MARK = '\x00MANUSCRIPT_CROSS_REF_';
+const CROSS_REF_END = '\x00MANUSCRIPT_CROSS_REF_END\x00';
+// eslint-disable-next-line no-control-regex
+const CROSS_REF_RE = /\x00MANUSCRIPT_CROSS_REF_(\d+)\x00[\s\S]*?\x00MANUSCRIPT_CROSS_REF_END\x00/g;
+
+/** A REF field to the bookmark `bookmark`, of instruction switches
+ *  `switches`, showing `shown`, each run of properties `rPr`, deleted
+ *  (`deleted`) or not, whose instruction Word keeps as w:delInstrText
+ *  inside a deletion */
+function refFieldXml(bookmark: string, switches: string, shown: string, rPr: string, deleted: boolean): string {
+  const instrTag = deleted ? 'w:delInstrText' : 'w:instrText';
+  return '<w:r>' + rPr + '<w:fldChar w:fldCharType="begin"/></w:r>'
+    + '<w:r>' + rPr + '<' + instrTag + ' xml:space="preserve"> REF ' + bookmark + switches + ' </' + instrTag + '></w:r>'
+    + '<w:r>' + rPr + '<w:fldChar w:fldCharType="separate"/></w:r>'
+    + '<w:r>' + rPr + (deleted ? delText(shown) : wt(shown)) + '</w:r>'
+    + '<w:r>' + rPr + '<w:fldChar w:fldCharType="end"/></w:r>';
+}
+
+/**
+ * A cross-reference, `run`, of runs of properties `rPr`, deleted or not
+ * (`deleted`): a REF field to its figure's or table's caption's bookmark,
+ * showing its title and number, as `Figure 1`, as Word's Cross-reference
+ * dialog writes one of "Only label and number", in a hyperlink to it
+ * (\h), its first letter a capital (\* FirstCap) for `@Fig-` or `@Tbl-`.
+ * Which caption that is, the document's first of the label, is known once
+ * the document is written, so this writes a mark of the field for
+ * withCrossRefs to write it in place of; one with no caption is its
+ * Markdown, as text. A citation's brackets with one in them are text.
+ */
+function crossRefXml(run: MdRun, state: DocxGenState, rPr: string, deleted = false): string {
+  if (run.crossRef!.form === 'literal') {
+    const warning = 'The citation [' + run.text.slice(1, -1) + '] has a cross-reference in it, which Word gets as text: a cross-reference is @fig-label or [@fig-label] alone, of a figure, or @tbl-label of a table.';
+    if (!state.warnings.includes(warning)) state.warnings.push(warning);
+    return '<w:r>' + rPr + (deleted ? delText(run.text) : wt(run.text)) + '</w:r>';
+  }
+  const index = (state.crossRefs ??= []).push({ key: run.crossRef!.key, text: run.text, rPr, deleted }) - 1;
+  return CROSS_REF_MARK + index + '\x00' + refFieldXml('', '', run.text, rPr, deleted) + CROSS_REF_END;
+}
+
+/** XML with each cross-reference's field, or its Markdown, in place of
+ *  the mark crossRefXml wrote, once the captions are known */
+function withCrossRefs(xml: string, state: DocxGenState): string {
+  if (!xml.includes(CROSS_REF_MARK)) return xml;
+  return xml.replace(CROSS_REF_RE, (_mark, index: string) => {
+    const { key, text, rPr, deleted } = state.crossRefs![Number(index)];
+    const target = state.captionTargets?.get(crossRefLabel(key));
+    if (!target) return '<w:r>' + rPr + (deleted ? delText(text) : wt(text)) + '</w:r>';
+    const capital = crossRefLabel(key) !== key;
+    const shown = capital ? target.text.charAt(0).toUpperCase() + target.text.slice(1) : target.text;
+    return refFieldXml(target.bookmark, ' \\h' + (capital ? ' \\* FirstCap' : ''), shown, rPr, deleted);
+  });
+}
+
+/** The warnings of the cross-references written: one for each label no
+ *  caption has, and one for each that more than one has */
+function crossRefWarnings(state: DocxGenState): void {
+  const warned = new Set<string>();
+  for (const { key } of state.crossRefs ?? []) {
+    const label = crossRefLabel(key);
+    if (warned.has(label)) continue;
+    warned.add(label);
+    if (!state.captionTargets?.has(label)) state.warnings.push('Cross-reference @' + key + ' has no figure or table labeled {#' + label + '}, so Word gets it as text.');
+    else if (state.labelsCaptioned?.has(label)) state.warnings.push('More than one figure or table is labeled {#' + label + '}; its cross-references go to the first.');
+  }
+}
+
 /** The ID of the relationship to `href`, in the notes' part in a note */
 function hyperlinkRelationshipId(href: string, state: DocxGenState): string {
   if (state.inNoteBody) {
@@ -8907,6 +9041,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       ri = end - 1;
     } else if (run.type === 'text' && holdsRawHtmlLineEnd(run)) {
       xml += '<w:r>' + generateRPr(run, tableRunRPr(state, run)) + rawHtmlTextElements(run, 'w:t') + '</w:r>';
+    } else if (run.type === 'text' && run.crossRef) {
+      xml += crossRefXml(run, state, generateRPr(run, tableRunRPr(state, run)));
     } else if (run.type === 'text') {
       const rPr = generateRPr(run, tableRunRPr(state, run));
       xml += generateRun(run.text, rPr);
@@ -9977,8 +10113,9 @@ function withKeepNext(paragraphXml: string): string {
  *  link, and an inline equation */
 function captionKeeps(run: MdRun): boolean {
   // An equation with CriticMarkup in it, which Word gets as a tracked change
-  // or a comment in it, not
-  return run.type === 'text' || run.type === 'softbreak' || run.type === 'math' && !run.display && !run.mathParts;
+  // or a comment in it, not, nor a cross-reference, whose field import
+  // reads in no caption
+  return run.type === 'text' && (!run.crossRef || run.crossRef.form === 'literal') || run.type === 'softbreak' || run.type === 'math' && !run.display && !run.mathParts;
 }
 
 /** A comment's Markdown, its ID's where it has one, with its author and
@@ -10068,10 +10205,14 @@ function captionXml(kind: 'figure' | 'table', label: string, captionRuns: MdRun[
   const number = kind === 'figure' ? ++state.figureNumber : ++state.tableNumber;
   const name = captionBookmarkName(label, state.captionBookmarks);
   if (labelOfBookmark(name) !== label) state.captionLabels.set(name, label);
+  // The first caption of a label is the one its cross-references go to
+  const targets = state.captionTargets ??= new Map();
+  if (targets.has(label)) (state.labelsCaptioned ??= new Set()).add(label);
+  else targets.set(label, { bookmark: name, text: captionLabelText(title, number) });
   let runs = captionRuns;
   if (!runs.every(captionKeeps)) {
     runs = runs.map(run => captionKeeps(run) ? run : { type: 'text', text: captionFallbackText(run) });
-    state.warnings.push('The caption of ' + kind + ' {#' + label + '} has a citation, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
+    state.warnings.push('The caption of ' + kind + ' {#' + label + '} has a citation, a cross-reference, a note, a comment, a tracked change, a line break or an image, which Word gets as its Markdown, as text, in its caption.');
   }
   const hasText = runs.some(run => run.type === 'math' || run.type === 'text' && isCaptionText(run.text));
   const separator = captionSeparator(titleDelim, hasText);
@@ -12905,6 +13046,13 @@ export async function convertMdToDocx(
   for (const entry of state.footnoteEntries) entry.bodyXml = withNoteNumbers(entry.bodyXml, state.noteNumbers ?? new Map(), state.noteNumbering ?? noteNumberingOf(state));
   state.inNoteBody = false;
 
+  // Each cross-reference's field, to its caption, now that the captions
+  // are known, and the tables' identities, with the fields in them
+  const documentXmlWithRefs = withCrossRefs(documentXml, state);
+  for (const entry of state.footnoteEntries) entry.bodyXml = withCrossRefs(entry.bodyXml, state);
+  settleTableIdentities(state, xml => withCrossRefs(xml, state));
+  crossRefWarnings(state);
+
   // Warn for orphaned references (use footnoteLabelToId, not the pre-body-processing
   // snapshot, so cross-references allocated during footnote body generation are covered)
   for (const [label] of state.footnoteLabelToId) {
@@ -12950,7 +13098,7 @@ export async function convertMdToDocx(
   for (const id of state.commentIdMap.values()) if (!commentsWritten.has(id)) unwritten.add(id);
   for (const { replyId } of state.replyRanges) if (!commentsWritten.has(replyId)) unwritten.add(replyId);
   for (const entry of state.footnoteEntries) entry.bodyXml = withoutCommentMarkers(entry.bodyXml, unwritten);
-  let finalDocumentXml = withoutCommentMarkers(documentXml, unwritten);
+  let finalDocumentXml = withoutCommentMarkers(documentXmlWithRefs, unwritten);
   if (actualFixedCount < state.rIdOffset) {
     const shift = state.rIdOffset - actualFixedCount;
     // Remap dynamic rId references in XML attribute contexts only
