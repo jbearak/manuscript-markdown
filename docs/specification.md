@@ -72,6 +72,34 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `bibliography-hanging-indent` | When `true` (default), bibliography entries use a hanging indent (0.5 inch) with single-line spacing regardless of document line spacing. Set to `false` to disable. |
 | `styles` | Custom paragraph style definitions. A YAML map of style names to property objects. See [Custom Styles](#custom-styles). |
 
+### Keys for Other Tools
+
+Frontmatter can hold keys that Manuscript Markdown doesn't read, such as Pandoc's `date`, `subtitle`, `abstract`, `keywords` and `lang`, or Quarto's `format`, `execute` and `crossref`. Export doesn't show them in the Word document. It keeps them in the document's custom properties (`MANUSCRIPT_FRONTMATTER_UNUSED_KEYS_*`, see [converter](converter.md#yaml-frontmatter)), and import writes them back as you wrote them, with their quotes, literal and folded values, mappings, lists and comments:
+
+```yaml
+---
+title: A Study of Things
+date: 2024-05-01
+# Quarto
+format:
+  docx:
+    toc: true # a table of contents
+abstract: |
+  First paragraph.
+
+  Second paragraph.
+author: Jane Smith
+---
+```
+
+After a trip through Word, `title` and `author` come from the document, so an edit made in Word wins, and the other keys come back as written, in their places among them. If a co-author deletes the title in Word, `date` becomes the first key and the others keep their order. A key the Word document adds, such as a title typed in Word where the Markdown had none, goes after the others, as it does without them. A comment goes with the key after it, and a blank line with the kept key next to it. Comments before the keys import writes, and blank lines between two of them, are dropped, as before.
+
+A Word document without those properties, such as one created in Word or exported by an earlier version, imports as before, without those keys.
+
+Export reads a line under another key that names one of its own settings, such as `font: Arial` in a mapping under `format`, as that setting, and writes it to Word. A key with such a line isn't kept: import writes the setting it read in its place, as before. Nor is a key in quotes that names a setting, such as `"title"`.
+
+Kept keys come back with their lines exactly as written, including spaces at line ends and the blank lines a `|+` or `>+` value keeps at the end of the frontmatter. Nothing is kept, and import writes the frontmatter as before, where the frontmatter isn't a plain block mapping with each key at the start of its line: a flow mapping in `{` and `}`, frontmatter indented as a whole, a `?` key, a `...` line, or a plain value that goes on at the start of the next line. Nothing is kept either where a value in quotes, or a flow list or mapping in `[` and `]` or `{` and `}`, goes on past its line, as `abstract: "First line` with the rest on the next lines, or where a key in quotes holds an escape, as `"\x74itle"` or `'it''s'`. A literal or folded value (`|` or `>`) can run over as many lines as it needs. Nothing is kept either where a key that isn't kept defines an anchor, such as `title: &t Title`, since a kept key could refer to it.
+
 ### Heading and Title Font Configuration
 
 The `header-font`, `header-font-size`, and `header-font-style` fields control heading typography independently of body text. Each field accepts a single value (applied to all heading levels) or a comma-separated list of up to six values (one per heading level H1–H6).

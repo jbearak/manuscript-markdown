@@ -76,6 +76,9 @@ export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
   'bibliography-hanging-indent',
 ]);
 
+/** The keys parseFrontmatter reads, each of which import writes from what the Word document has */
+const READ_KEYS: ReadonlySet<string> = new Set([...SINGLE_VALUE_KEYS, ...ARRAY_KEYS, 'title', 'styles']);
+
 /** An item of a block list in frontmatter, as `  - One` after `title:` */
 export interface BlockListItem {
   /** The index of its line among the frontmatter's */
@@ -109,6 +112,11 @@ function indentOf(line: string): number {
   return k;
 }
 
+/** Whether a line is blank, as the line after frontmatter's opening one can't be */
+function isBlankLine(line: string): boolean {
+  return /^[ \t]*\r?$/.test(line);
+}
+
 /** Whether text after a line's indentation is an item of a block list: a `-`, then a space, a tab or the line's end */
 function isListItem(content: string): boolean {
   return content[0] === '-' && (content.length === 1 || content[1] === ' ' || content[1] === '\t');
@@ -119,8 +127,13 @@ function isListItem(content: string): boolean {
  * it, past \" in double quotes and '' in single, or -1 where none does
  */
 function closingQuoteAt(text: string): number {
-  const quote = text[0];
-  for (let k = 1; k < text.length; k++) {
+  return closingQuoteFrom(text, 0);
+}
+
+/** For a quote at `start` in text, the index of the quote that closes it, as closingQuoteAt has it */
+function closingQuoteFrom(text: string, start: number): number {
+  const quote = text[start];
+  for (let k = start + 1; k < text.length; k++) {
     if (quote === '"' && text[k] === '\\') k++;
     else if (text[k] === quote && quote === "'" && text[k + 1] === "'") k++;
     else if (text[k] === quote) return k;
@@ -457,23 +470,42 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
   if (bodyStart === undefined) {
     return { metadata: {}, body: markdown, fieldOrder: [] };
   }
-  const trimmed = markdown.trimStart();
+  const body = markdown.slice(bodyStart);
+  const warnings: string[] = [];
+  const { metadata, fieldOrder } = readFrontmatterLines(frontmatterYaml(markdown).trimEnd().split('\n'), warnings);
 
+  // Title inline array: if exactly one title entry looks like [v1, v2, ...], expand it
+  if (metadata.title && metadata.title.length === 1) {
+    const t = metadata.title[0];
+    if (t.startsWith('[') && t.endsWith(']')) {
+      metadata.title = parseInlineArray(t);
+    }
+  }
+
+  return warnings.length > 0 ? { metadata, body, fieldOrder, warnings } : { metadata, body, fieldOrder };
+}
+
+/**
+ * The YAML of frontmatter the Markdown has, from the line after the opening
+ * one, with its indentation, which says whether a key there opens a block
+ * list, as the language server reads it, to the line end before the
+ * closing one
+ */
+function frontmatterYaml(markdown: string): string {
+  const trimmed = markdown.trimStart();
   const endMatch = trimmed.substring(3).match(FRONTMATTER_CLOSING_RE)!;
   const endIdx = endMatch.index! + 3;
+  return trimmed.slice(3, endIdx).replace(/^[ \t]*\r?\n/, '');
+}
 
-  // From the line after the opening one, with its indentation, which says
-  // whether a key there opens a block list, as the language server reads it
-  const yamlBlock = trimmed.slice(3, endIdx).replace(/^[ \t]*\r?\n/, '').trimEnd();
-  const body = markdown.slice(bodyStart);
-
+/** The settings frontmatter's lines give, and the keys they have, in order, as parseFrontmatter reads them */
+function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: Frontmatter; fieldOrder: string[] } {
   const metadata: Frontmatter = {};
   const fieldOrder: string[] = [];
   const seenFields = new Set<string>();
-  const warnings: string[] = [];
   // Each block list as the lines it stands for, as `title:` then `  - One`
   // and `  - Two` as `title: One` and `title: Two`
-  const yamlLines = readBlockLists(yamlBlock.split('\n'), warnings);
+  const yamlLines = readBlockLists(lines, warnings);
   for (let lineIdx = 0; lineIdx < yamlLines.length; lineIdx++) {
     const line = yamlLines[lineIdx];
     const colonIdx = line.indexOf(':');
@@ -745,23 +777,218 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         break;
     }
   }
+  return { metadata, fieldOrder };
+}
 
-  // Title inline array: if exactly one title entry looks like [v1, v2, ...], expand it
-  if (metadata.title && metadata.title.length === 1) {
-    const t = metadata.title[0];
-    if (t.startsWith('[') && t.endsWith(']')) {
-      metadata.title = parseInlineArray(t);
+/**
+ * Frontmatter's top-level keys in their order, for a Word document to keep
+ * for import: the name of each key parseFrontmatter reads, whose value
+ * import takes from the document, so that an edit in Word wins, and as
+ * written each key it reads nothing from, as `date`, `abstract` or
+ * Quarto's `format`, which import puts back where it was among them.
+ */
+export type FrontmatterLayout = Array<string | { text: string }>;
+
+/**
+ * The key of a line YAML reads as a key of a block mapping at the line's
+ * start, without its quotes: one in quotes, with no escape, as `\x74` or
+ * `''`, or plain, which starts with no character YAML reads otherwise
+ * there, as `{`, `[`, `-`, `?`, `&` or `%`, and has no comment, then a
+ * colon before a space, a tab or the line's end. Undefined where YAML
+ * reads no such key there, as at a flow mapping's `{` or `}`, a document's
+ * end, `...`, or a directive, and for a key with an escape, which could
+ * spell one parseFrontmatter reads, as `"\x74itle"` does `title`.
+ */
+function blockKeyOf(line: string): string | undefined {
+  if (line[0] === '"' || line[0] === "'") {
+    const close = closingQuoteAt(line);
+    if (close < 0) return undefined;
+    const key = line.slice(1, close);
+    if (key.includes(line[0] === '"' ? '\\' : "''")) return undefined;
+    let k = close + 1;
+    while (line[k] === ' ' || line[k] === '\t') k++;
+    if (line[k] !== ':' || !(k + 1 === line.length || line[k + 1] === ' ' || line[k + 1] === '\t')) return undefined;
+    return key;
+  }
+  if (/^[\s\-?:,[\]{}#&*!|>'"%@`]/.test(line)) return undefined;
+  const colon = line.search(/:(?=[ \t]|$)/);
+  if (colon < 0) return undefined;
+  const key = line.slice(0, colon).trimEnd();
+  return /[ \t]#/.test(key) ? undefined : key;
+}
+
+/**
+ * How a line of frontmatter's YAML ends, for its splitting into entries:
+ * 'open' where a value in quotes or a flow collection, as `[a,` or
+ * `{a: 1,`, that starts in it goes on past it, as onto a line at its start
+ * that looks like a key's, or where a literal or folded value starts in
+ * it, as at `|` or `>-`, the column its lines are past, or undefined. A
+ * quote in plain text, as in `it's`, starts no value, nor does one in a
+ * comment. Some lines YAML reads otherwise read as 'open', which only
+ * keeps less.
+ */
+function yamlLineEnd(line: string): 'open' | number | undefined {
+  let depth = 0;
+  // Whether a value can start here, where a quote opens one
+  let nodeStart = true;
+  // The column of the node a value here is under, and of the last value
+  // that started outside flow collections, as a key
+  let parent = indentOf(line);
+  let scalarStart = -1;
+  for (let k = parent; k < line.length; k++) {
+    const c = line[k];
+    if (c === ' ' || c === '\t') continue;
+    // A comment
+    if (c === '#' && (k === 0 || line[k - 1] === ' ' || line[k - 1] === '\t')) break;
+    const spaceAfter = k + 1 === line.length || line[k + 1] === ' ' || line[k + 1] === '\t';
+    if (nodeStart && (c === '"' || c === "'")) {
+      const close = closingQuoteFrom(line, k);
+      if (close < 0) return 'open';
+      if (depth === 0) scalarStart = k;
+      k = close;
+      nodeStart = false;
+    } else if ((c === '[' || c === '{') && (nodeStart || depth > 0)) {
+      depth++;
+      nodeStart = true;
+    } else if ((c === ']' || c === '}') && depth > 0) {
+      depth--;
+      nodeStart = false;
+    } else if (c === ',' && depth > 0) {
+      nodeStart = true;
+    } else if ((c === '-' || c === '?') && nodeStart && spaceAfter) {
+      if (depth === 0) parent = k;
+    } else if (c === ':' && (spaceAfter || depth > 0)) {
+      if (depth === 0 && scalarStart >= 0) parent = scalarStart;
+      nodeStart = true;
+    } else if ((c === '|' || c === '>') && nodeStart && depth === 0) {
+      return parent;
+    } else if ((c === '&' || c === '!') && nodeStart) {
+      // An anchor or a tag, before the value
+      while (k + 1 < line.length && line[k + 1] !== ' ' && line[k + 1] !== '\t') k++;
+    } else {
+      if (nodeStart && depth === 0) scalarStart = k;
+      nodeStart = false;
     }
   }
+  return depth > 0 ? 'open' : undefined;
+}
 
-  return warnings.length > 0 ? { metadata, body, fieldOrder, warnings } : { metadata, body, fieldOrder };
+/**
+ * An anchor, as `&base` before a value, which an alias, `*base`, refers to
+ * elsewhere, in a line of frontmatter. Some text that isn't one matches
+ * too, which only keeps less.
+ */
+const ANCHOR_RE = /(?:^|[ \t[{,])&[^ \t[\]{},]/;
+
+/**
+ * Frontmatter's top-level entries, by the indices of their lines, where
+ * it's a block mapping, as YAML reads it, of keys at their lines' start:
+ * each a key's line, with the comments and blank lines right before it and
+ * the lines after it up to the next one's, those indented, as a mapping's
+ * or a literal value's, and a list's items. The comments and blank lines at
+ * the end go with the last entry. Undefined where a line is none of those,
+ * as in a flow mapping, `{`, then its keys, then `}`, or frontmatter
+ * indented as a whole, or where a value goes on past its line other than
+ * as a literal or folded one, whose lines are indented, as a value in
+ * quotes or a flow collection does, which a line at its start that looks
+ * like a key's could be part of (see yamlLineEnd). Their entries would read
+ * otherwise apart. A line at its start in a plain value of several lines,
+ * as YAML reads one, is no key's, and none of the others.
+ */
+function topLevelEntries(lines: readonly string[]): { key: string; yamlKey: string; start: number; end: number }[] | undefined {
+  const entries: { key: string; yamlKey: string; start: number; end: number }[] = [];
+  // The last line not a comment or blank, after which the next entry starts
+  let content = -1;
+  // The column a literal or folded value's lines are past, in one
+  let literal = -1;
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k].replace(/\r$/, '');
+    if (literal >= 0) {
+      if (isBlankLine(line)) continue;
+      if (indentOf(line) > literal) {
+        content = k;
+        continue;
+      }
+      literal = -1;
+    }
+    if (isBlankLine(line) || line[0] === '#') continue;
+    const end = yamlLineEnd(line);
+    if (end === 'open') return undefined;
+    if (end !== undefined) literal = end;
+    if (line[0] === ' ' || line[0] === '\t' || isListItem(line)) {
+      // A line of the key before it
+      if (entries.length === 0) return undefined;
+    } else {
+      const yamlKey = blockKeyOf(line);
+      if (yamlKey === undefined) return undefined;
+      if (entries.length > 0) entries[entries.length - 1].end = content + 1;
+      // The key as parseFrontmatter reads it too, to the first colon
+      entries.push({ key: line.slice(0, line.indexOf(':')).trim(), yamlKey, start: content + 1, end: lines.length });
+    }
+    content = k;
+  }
+  return entries;
+}
+
+/**
+ * The layout of the Markdown's frontmatter (see FrontmatterLayout), where
+ * it has a key export reads nothing from: one whose name parseFrontmatter
+ * doesn't read, as YAML reads it or as parseFrontmatter does, none of whose
+ * lines gives a setting. A line of a key it reads, in a mapping or a
+ * literal value under the key, gives one, which export writes to Word, and
+ * the key goes as before, as import writes the setting. Each key held is
+ * its lines as written, quotes, comments, spaces at line ends and all, with
+ * the comments and blank lines before it, and those at the frontmatter's
+ * end after the last, which a literal value that keeps its line ends, as
+ * `|+`, has. Undefined, so that the keys go as before, where the
+ * frontmatter isn't a block mapping topLevelEntries reads, or a key that
+ * goes has an anchor, which a key held could refer to.
+ */
+export function frontmatterLayout(markdown: string): FrontmatterLayout | undefined {
+  if (frontmatterBodyStartOffset(markdown) === undefined) return undefined;
+  const lines = frontmatterYaml(markdown).split('\n');
+  const entries = topLevelEntries(lines);
+  if (!entries) return undefined;
+  const layout: FrontmatterLayout = [];
+  const named = new Set<string>();
+  let unused = false;
+  for (const entry of entries) {
+    const entryLines = lines.slice(entry.start, entry.end);
+    // As parseFrontmatter reads its lines among the others', as no block
+    // list or mapping it reads goes past an entry's
+    const { metadata, fieldOrder } = readFrontmatterLines(entryLines, []);
+    const last = layout[layout.length - 1];
+    if (!READ_KEYS.has(entry.key) && !READ_KEYS.has(entry.yamlKey) && Object.keys(metadata).length === 0) {
+      // With those right before it, as nothing goes between them
+      if (typeof last === 'object') last.text += '\n' + entryLines.join('\n');
+      else layout.push({ text: entryLines.join('\n') });
+      unused = true;
+      continue;
+    }
+    if (entryLines.some(line => ANCHOR_RE.test(line))) return undefined;
+    // The blank lines it starts with, after a key held, go with that key,
+    // as a literal value's that keeps its line ends, as `|+`, do
+    let blank = 0;
+    while (blank < entryLines.length && isBlankLine(entryLines[blank])) blank++;
+    if (typeof last === 'object' && blank > 0) last.text += '\n' + entryLines.slice(0, blank).join('\n');
+    for (const key of fieldOrder) {
+      if (!READ_KEYS.has(key) || named.has(key)) continue;
+      named.add(key);
+      layout.push(key);
+    }
+  }
+  return unused ? layout : undefined;
 }
 
 /**
  * Serialize a Frontmatter object to a YAML frontmatter string.
- * Returns empty string if metadata has no fields.
+ * Returns empty string if metadata has no fields. With a layout (see
+ * frontmatterLayout), its keys export reads nothing from go back where they
+ * were among the keys written from `metadata`, whose order is the
+ * layout's, then `fieldOrder`'s for the rest, and a key in neither, as one
+ * added in Word, goes after them all.
  */
-export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[]): string {
+export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[], layout?: FrontmatterLayout): string {
   const lines: string[] = [];
   const emitArr = (key: string, arr: (string | number)[] | undefined) => {
     if (!arr || arr.length === 0) return;
@@ -859,8 +1086,8 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
   const order = fieldOrder && fieldOrder.length > 0 ? fieldOrder : defaultOrder;
   const emitted = new Set<string>();
 
-  for (const key of order) {
-    if (emitted.has(key)) continue;
+  const emit = (key: string) => {
+    if (emitted.has(key)) return;
     emitted.add(key);
     const canonical = aliasToCanonical[key];
     if (canonical) {
@@ -872,7 +1099,22 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     if (aliases) for (const a of aliases) emitted.add(a);
     const emitter = emitters[key];
     if (emitter) emitter();
+  };
+  // The keys export read nothing from, as written, each after the keys
+  // before it in the Markdown that are written here and before those after
+  // it. One that's first goes without the blank lines it starts with,
+  // which would make the opening --- a rule.
+  for (const item of layout ?? []) {
+    if (typeof item === 'string') {
+      emit(item);
+      continue;
+    }
+    const held = item.text.split('\n');
+    let start = 0;
+    if (lines.length === 0) while (start < held.length && isBlankLine(held[start])) start++;
+    pushAll(lines, held.slice(start));
   }
+  for (const key of order) emit(key);
 
   // Emit any remaining fields not in the provided order
   for (const key of defaultOrder) {
