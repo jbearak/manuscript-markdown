@@ -19247,9 +19247,40 @@ export function generateBibTeX(
   return entries.join('\n\n');
 }
 
+/** A run of a title line's text, and the tracked change it's in */
+type TitleRun = { text: string; revision?: RevisionInfo };
+
+/**
+ * A title line's text, with its tracked changes as CriticMarkup, as export
+ * reads them (see titleRunsXml in md-to-docx.ts): the runs of one revision
+ * in one span, and a deletion right before an addition of the same author
+ * and time as a substitution, `{~~old~>new~~}`, as in the body.
+ */
+function titleLineMarkdown(runs: TitleRun[]): string {
+  const spans: TitleRun[] = [];
+  for (const run of runs) {
+    const last = spans[spans.length - 1];
+    if (last && revisionsEqual(last.revision, run.revision)) last.text += run.text;
+    else spans.push({ ...run });
+  }
+  let line = '';
+  for (let k = 0; k < spans.length; k++) {
+    const { text, revision } = spans[k];
+    const next = spans[k + 1];
+    if (revision?.type === 'deletion' && next?.revision?.type === 'addition'
+      && next.revision.author === revision.author && next.revision.date === revision.date) {
+      line += '{~~' + text + '~>' + next.text + '~~}';
+      k++;
+    } else if (revision) line += (revision.type === 'addition' ? '{++' : '{--') + text + (revision.type === 'addition' ? '++}' : '--}');
+    else line += text;
+  }
+  return line;
+}
+
 /**
  * Extract consecutive Title-styled paragraphs from the beginning of the document.
- * Returns the plain text of each title paragraph, a line of the title for
+ * Returns the text of each title paragraph, with its tracked changes as
+ * CriticMarkup (see titleLineMarkdown), a line of the title for
  * each line its line breaks give it, as export writes each line in a Title
  * paragraph of its own, but none for one at its start or end. Removes the
  * extracted items (para markers and their text runs) from the content array
@@ -19273,13 +19304,14 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
     // Collect text runs following this title para marker
     const startIdx = i;
     i++;
-    const lines = [''];
+    const lineRuns: TitleRun[][] = [[]];
     while (i < content.length && content[i].type === 'text') {
-      const text = (content[i] as { type: 'text'; text: string }).text;
-      if (text === lineBreakText()) lines.push('');
-      else lines[lines.length - 1] += text;
+      const { text, revision } = content[i] as { type: 'text'; text: string; revision?: RevisionInfo };
+      if (text === lineBreakText()) lineRuns.push([]);
+      else lineRuns[lineRuns.length - 1].push({ text, revision });
       i++;
     }
+    const lines = lineRuns.map(titleLineMarkdown);
     // Not those its line breaks give with nothing in them, at its start or
     // end or between two, nor the spaces beside a break, which a title line
     // doesn't keep
