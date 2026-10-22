@@ -116,6 +116,17 @@ describe('exporting a cross-reference', () => {
     expect(body).toContain('<w:delText>Table 1</w:delText>');
   });
 
+  it('records a quote\'s start, with a reference to a label nothing has, as the text Word shows', async () => {
+    const identities = async (md: string) => {
+      const { docx } = await convertMdToDocx(md, { sourceDir: dir });
+      const custom = await (await JSZip.loadAsync(docx)).file('docProps/custom.xml')!.async('string');
+      return custom.match(/MANUSCRIPT_BLOCKQUOTE_IDENTITIES_1"><vt:lpwstr>([^<]*)/)?.[1];
+    };
+    const recorded = await identities('> [!NOTE]\n> @tbl-none here\n\nText.\n\n> [!NOTE]\n> @fig-none\n>\n> Second.\n');
+    expect(recorded).toBeDefined();
+    expect(recorded).toBe(await identities('> [!NOTE]\n> \\@tbl-none here\n\nText.\n\n> [!NOTE]\n> \\@fig-none\n>\n> Second.\n'));
+  });
+
   it('goes to the first of two figures labeled alike, and warns', async () => {
     const { body, warnings } = await exported('@fig-map\n\n![One](map.png){#fig-map}\n\n![Two](map.png){#fig-map}\n');
     expect(body).toContain(refField('fig_map', 'Figure 1'));

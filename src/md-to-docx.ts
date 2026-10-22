@@ -2313,7 +2313,15 @@ type BlockquotePlace = [listLevel: number, level: number];
  *  paragraphs. Once its first paragraph is written. With its kind, the
  *  alert's type, or '' for a quote that's no alert, which tells it from a
  *  group of another kind with the same text (see blockquoteIdentityProps) */
-interface QuoteGroupIdentity { start?: string; paragraphs: number; kind: string }
+interface QuoteGroupIdentity {
+  start?: string;
+  paragraphs: number;
+  kind: string;
+  // Its paragraphs before its start, each with a cross-reference whose
+  // field shows text once its caption is known, and the alert's label it
+  // starts with, any of which may be its start then (see settleQuoteStarts)
+  startsPending?: Array<{ xml: string; label: string }>;
+}
 
 /** The start of a paragraph with no text, which a later paragraph of its
  *  group replaces as the group's start */
@@ -8931,6 +8939,32 @@ function withCrossRefs(xml: string, state: DocxGenState): string {
   });
 }
 
+/** The fingerprint of a quote's paragraph `xml`, past the alert's label
+ *  `label` it starts with, if any (see QuoteGroupIdentity) */
+function quoteStart(xml: string, label: string): string {
+  const text = wordText(xml);
+  return paragraphStartFingerprint(label && text.startsWith(label) ? text.slice(label.length) : text);
+}
+
+/** Each quote's start where a paragraph before the one it was taken from
+ *  has a cross-reference, whose field `final` writes: the first of them
+ *  with text then, as one with no caption shows its Markdown, or else the
+ *  one it was taken from. A paragraph with text before stays so. */
+function settleQuoteStarts(state: DocxGenState, final: (xml: string) => string): void {
+  for (const identity of state.blockquoteIdentities.values()) {
+    for (const { xml, label } of identity.startsPending ?? []) {
+      const start = quoteStart(final(xml), label);
+      if (start === blankParagraphStart) {
+        identity.start ??= start;
+        continue;
+      }
+      identity.start = start;
+      break;
+    }
+    delete identity.startsPending;
+  }
+}
+
 /** The warnings of the cross-references written: one for each label no
  *  caption has, and one for each that more than one has */
 function crossRefWarnings(state: DocxGenState): void {
@@ -12069,8 +12103,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         if (!identity) state.blockquoteIdentities.set(group, identity = { paragraphs: 0, kind: token.alertType ?? '' });
         if (identity.start === undefined || identity.start === blankParagraphStart) {
           const label = token.alertType && token.alertLead && options?.calloutLabels !== false ? ALERT_GLYPH_BY_TYPE[token.alertType] + ' ' + gfmAlertTitle(token.alertType) : '';
-          const text = wordText(paragraphXml);
-          identity.start = paragraphStartFingerprint(label && text.startsWith(label) ? text.slice(label.length) : text);
+          if (paragraphXml.includes(CROSS_REF_MARK)) (identity.startsPending ??= []).push({ xml: paragraphXml, label });
+          else identity.start = quoteStart(paragraphXml, label);
         }
         // The quote's paragraph, in its style, which an alert's hidden
         // label alone doesn't get, and not the spacers around it, which
@@ -13051,6 +13085,7 @@ export async function convertMdToDocx(
   const documentXmlWithRefs = withCrossRefs(documentXml, state);
   for (const entry of state.footnoteEntries) entry.bodyXml = withCrossRefs(entry.bodyXml, state);
   settleTableIdentities(state, xml => withCrossRefs(xml, state));
+  settleQuoteStarts(state, xml => withCrossRefs(xml, state));
   crossRefWarnings(state);
 
   // Warn for orphaned references (use footnoteLabelToId, not the pre-body-processing
