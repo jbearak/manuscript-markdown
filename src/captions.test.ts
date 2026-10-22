@@ -90,6 +90,9 @@ describe('caption separators', () => {
     expect(captionSeparatorAt(' – Rates')).toBe(' – ');
     expect(captionSeparatorAt('\tRates')).toBe('\t');
     expect(captionSeparatorAt('Rates')).toBe('');
+    // A space after that is the text's
+    expect(captionSeparatorAt(':  Rates')).toBe(': ');
+    expect(captionSeparatorAt('.\t Rates')).toBe('.\t');
   });
 });
 

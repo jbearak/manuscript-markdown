@@ -251,6 +251,15 @@ export async function relatedPartPath(zip: JSZip, source: string, type: string):
   return (await relsOf(zip, source))?.relationships.find(r => r.path !== undefined && r.type.endsWith('/relationships/' + type))?.path;
 }
 
+/** The paths of the parts a part's relationships of the types given name,
+ *  as `header` and `footer` for the headers and footers a document's
+ *  sections show, whatever their names */
+export async function relatedPartPaths(zip: JSZip, source: string, types: readonly string[]): Promise<string[]> {
+  const suffixes = types.map(type => '/relationships/' + type);
+  return ((await relsOf(zip, source))?.relationships ?? [])
+    .filter(r => r.path !== undefined && suffixes.some(suffix => r.type.endsWith(suffix))).map(r => r.path!);
+}
+
 /**
  * New IDs for a part's relationships, rId1 up in the order of their
  * numbers, if they aren't rId1 to rIdN already. A part from a tool other

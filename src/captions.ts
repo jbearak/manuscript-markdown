@@ -230,9 +230,10 @@ export function delimiterOfSeparator(separator: string): string | undefined {
 
 /** The separator between a Word caption's number and its text, at the
  *  start of `rest`: whitespace, a mark of punctuation Word captions use,
- *  and whitespace, as `. `, `: ` or ` – ` */
+ *  and a space or a tab, as `. `, `: ` or ` – `. Whitespace after that is
+ *  the text's, as a caption's that starts with a space. */
 export function captionSeparatorAt(rest: string): string {
-  return /^[ \t]*[.:;,|\u2013\u2014-]?[ \t]*/.exec(rest)![0];
+  return /^[ \t]*[.:;,|\u2013\u2014-]?[ \t]?/.exec(rest)![0];
 }
 
 /** The SEQ field identifier of a caption whose title is `title`, as Word's

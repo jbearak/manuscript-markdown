@@ -30,7 +30,7 @@ import { styleFence } from './style-fence';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
 import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, labelOfBookmark, quotedAttributeValue, type CaptionLocation, type CaptionParagraph } from './captions';
-import { asUtf8, decodeXml, parsePart, relatedPartPath } from './template-sections';
+import { asUtf8, decodeXml, parsePart, relatedPartPath, relatedPartPaths } from './template-sections';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -4369,12 +4369,15 @@ async function extractFigureCaptionLocation(zip: JSZip): Promise<CaptionLocation
 
 /** The SEQ fields of each identifier in the parts of the document Word
  *  numbers them in: its body, its notes, its headers and its footers (see
- *  countSeqFields) */
+ *  countSeqFields), those the body's relationships name, whatever their
+ *  names, as a template's `header-cover.xml`, and those of Word's names */
 async function seqFieldCountsOf(zip: JSZip): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
-  for (const path of Object.keys(zip.files)) {
-    if (!/^word\/(?:document|footnotes|endnotes|header\d*|footer\d*)\.xml$/.test(path)) continue;
-    countSeqFields(asUtf8(decodeXml(await zip.file(path)!.async('uint8array'))), counts);
+  const paths = new Set(Object.keys(zip.files).filter(path => /^word\/(?:document|footnotes|endnotes|header\d*|footer\d*)\.xml$/.test(path)));
+  for (const path of await relatedPartPaths(zip, 'word/document.xml', ['header', 'footer', 'footnotes', 'endnotes'])) paths.add(path);
+  for (const path of paths) {
+    const part = zip.file(path);
+    if (part) countSeqFields(asUtf8(decodeXml(await part.async('uint8array'))), counts);
   }
   return counts;
 }
@@ -19734,10 +19737,13 @@ export async function convertDocx(
   const { content: docContent, zoteroBiblData, leadingBlankParagraphs, captionParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, contentOptions);
   // The figures' captions, which go with their pictures, before anything
   // counts the body's paragraphs (see readFigureCaptions)
+  const exportedCaptionLocation = captionParagraphs ? await extractFigureCaptionLocation(zip) : undefined;
   const figureCaptions = captionParagraphs
     ? readFigureCaptions(docContent, captionParagraphs, await seqFieldCountsOf(zip), await extractCaptionLabels(zip), imageFormatMapping, {
-      location: await extractFigureCaptionLocation(zip) ?? storedSettings?.figCapLocation,
-      delim: storedSettings?.crossref?.titleDelim,
+      location: exportedCaptionLocation ?? storedSettings?.figCapLocation,
+      // The default where export wrote the figures, as their place says, and
+      // the frontmatter set none
+      delim: storedSettings?.crossref?.titleDelim ?? (exportedCaptionLocation ? DEFAULT_CAPTION_OPTIONS.titleDelim : undefined),
     })
     : undefined;
   // The notes the document references, in its order, which are the ones it

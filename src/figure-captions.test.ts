@@ -80,15 +80,16 @@ function stylesXml(captionStyle: string | undefined): string {
 const wordCaptionStyle = (id = 'Caption', color = '44546A') => '<w:style w:type="paragraph" w:styleId="' + id + '"><w:name w:val="caption"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="35"/><w:unhideWhenUsed/><w:qFormat/><w:pPr><w:spacing w:after="200" w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:i/><w:iCs/><w:color w:val="' + color + '"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr></w:style>';
 
 /** A .docx as Word writes one, with the body given */
-async function wordDocx(body: string, opts: { captionStyle?: string | null; footnotes?: string } = {}): Promise<Uint8Array> {
+async function wordDocx(body: string, opts: { captionStyle?: string | null; footnotes?: string; parts?: Record<string, string>; relationships?: string } = {}): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
   zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.file('word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/><Relationship Id="rId20" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/a" TargetMode="External"/></Relationships>');
+  zip.file('word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/><Relationship Id="rId20" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/a" TargetMode="External"/>' + (opts.relationships ?? '') + '</Relationships>');
   zip.file('word/styles.xml', stylesXml(opts.captionStyle === null ? undefined : opts.captionStyle ?? wordCaptionStyle()));
   zip.file('word/media/image1.png', PNG);
   zip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ' + NS + '><w:body>' + body + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>');
   if (opts.footnotes) zip.file('word/footnotes.xml', opts.footnotes);
+  for (const [path, xml] of Object.entries(opts.parts ?? {})) zip.file(path, xml);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -229,7 +230,11 @@ describe('importing Word\'s captions', () => {
   // A caption export can't write as Word has it stays as it is, as text, and
   // so do the others of its numbers' series, which otherwise would number
   // from 1 again, and show a number twice
-  const unread: [string, string, { footnotes?: string }][] = [
+  const header = (name: string) => ({
+    parts: { ['word/' + name]: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p>' + seqField(2) + '</w:p></w:hdr>' },
+    relationships: '<Relationship Id="rId21" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="' + name + '"/>',
+  });
+  const unread: [string, string, { footnotes?: string; parts?: Record<string, string>; relationships?: string }][] = [
     ['a tracked change', picture() + captionOf('<w:ins w:id="5" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:t>New</w:t></w:r></w:ins>'), {}],
     ['a comment', picture() + captionOf('<w:commentRangeStart w:id="1"/><w:r><w:t>Commented</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>'), {}],
     ['a line break', picture() + captionOf('<w:r><w:t>A</w:t><w:br/><w:t>B</w:t></w:r>'), {}],
@@ -242,6 +247,8 @@ describe('importing Word\'s captions', () => {
     ['a paragraph between it and the picture below it', caption(1, 'Gap') + '<w:p/>' + picture() + para('After.'), {}],
     ['text by the image', '<w:p><w:r><w:t>x</w:t></w:r>' + picture().slice('<w:p>'.length) + caption(1, 'Mixed'), {}],
     ['a caption in a table', picture() + caption(1, 'Body') + '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' + caption(2, 'In a cell') + '</w:tc></w:tr></w:tbl>', {}],
+    ['a caption in a header named as Word names one', picture() + caption(1, 'Body'), header('header1.xml')],
+    ['a caption in a header of another name', picture() + caption(1, 'Body'), header('header-cover.xml')],
     ['a caption in a note', picture() + caption(1, 'Body'), { footnotes: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p>' + seqField(2) + '</w:p></w:footnote></w:footnotes>' }],
   ];
   it.each(unread)('leaves a caption with %s as text', async (_name, body, opts) => {
@@ -255,6 +262,11 @@ describe('importing Word\'s captions', () => {
     const md = await imported(await wordDocx(picture() + caption(1, 'A') + picture() + caption(2, 'B') + picture()));
     expect(md).not.toContain('{#fig-');
     expect(md).toContain('Figure 1: A');
+  });
+
+  it('reads a caption whose text starts with a space, its separator as the others\'', async () => {
+    expect(await imported(await wordDocx(picture() + caption(1, 'A') + picture() + caption(2, ' B'))))
+      .toBe('![A](media/image1.png){#fig-a width=100 height=100}\n\n![&#32;B](media/image1.png){#fig-b width=100 height=100}\n');
   });
 
   it('reads the series with the most captions, and leaves the others as text', async () => {
@@ -282,6 +294,9 @@ describe('figures\' round trips', () => {
       ['![](map.png){#fig-a_b}\n\n![Rates [2010] \\*](map.png){#fig-rates fig-alt="A \\"map\\""}\n', '![](media/map.png){#fig-a_b width=1 height=1}\n\n![Rates \\[2010\\] \\*](media/map.png){#fig-rates width=1 height=1 fig-alt="A \\"map\\""}\n'],
       // A bracket with no other, which import escapes, as the image's label would end at a ] or not at a [
       ['![95% CI \\[0, 1)](map.png){#fig-ci}\n\n![a \\] b $[0, 1)$](map.png){#fig-b}\n', '![95% CI \\[0, 1)](media/map.png){#fig-ci width=1 height=1}\n\n![a \\] b $[0, 1)$](media/map.png){#fig-b width=1 height=1}\n'],
+      // A caption that starts with a space, whose separator is the delimiter export wrote
+      ['![A](map.png){#fig-a}\n\n![ B](map.png){#fig-b}\n', '![A](media/map.png){#fig-a width=1 height=1}\n\n![&#32;B](media/map.png){#fig-b width=1 height=1}\n'],
+      ['---\ncrossref:\n  title-delim: "."\n---\n\n![A](map.png){#fig-a}\n\n![  B](map.png){#fig-b}\n', '---\ncrossref:\n  title-delim: "."\n---\n\n![A](media/map.png){#fig-a width=1 height=1}\n\n![&#32;&#32;B](media/map.png){#fig-b width=1 height=1}\n'],
       // A delimiter of any characters, which import reads as export stored it
       ['---\ncrossref:\n  title-delim: ")"\n---\n\n![A](map.png){#fig-a}\n', '---\ncrossref:\n  title-delim: ")"\n---\n\n![A](media/map.png){#fig-a width=1 height=1}\n'],
       ['---\ncrossref:\n  title-delim: "::"\n---\n\n![A](map.png){#fig-a}\n\n![](map.png){#fig-e}\n', '---\ncrossref:\n  title-delim: "::"\n---\n\n![A](media/map.png){#fig-a width=1 height=1}\n\n![](media/map.png){#fig-e width=1 height=1}\n'],
