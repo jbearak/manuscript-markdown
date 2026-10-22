@@ -1,15 +1,18 @@
 // Cross-references to figures and tables, as `@fig-map` or `[@tbl-rates]`,
 // as the LSP reads them (see crossRefAt in citation-syntax.ts, which export
 // and the preview read them by): the labels the document gives its figures
-// and tables, as `{#fig-map}`, the references to them, completion of a
-// label after `@fig-` or `@tbl-`, and the diagnostics of a label no
-// figure or table has, a label more than one has, and a citation's
-// brackets with a cross-reference in them, which Word gets as text. Each
-// scan reads the text once, outside code and the frontmatter.
+// and tables, as `{#fig-map}`, where export captions one, as the preview
+// does, the references to them, completion of a label after `@fig-` or
+// `@tbl-`, and the diagnostics of a label no figure or table has, a label
+// more than one has, and a citation's brackets with a cross-reference in
+// them, which Word gets as text. Each scan reads the text once, outside
+// code and the frontmatter.
 
+import MarkdownIt from 'markdown-it';
 import { computeCodeRegions, isInsideCodeRegion } from '../code-regions';
 import { maskFrontmatter } from '../frontmatter';
-import { CROSS_REF_AFTER_RE, crossRefLabel, isCitationKeyChar, isCrossRefKey } from '../citation-syntax';
+import { CROSS_REF_AFTER_RE, crossRefLabel, isCitationKeyChar, isCrossRefLabelKey } from '../citation-syntax';
+import { manuscriptMarkdownPlugin } from '../preview/manuscript-markdown-plugin';
 
 /** A figure's or a table's label, as `fig-map` in `{#fig-map}`, from
  *  `start` to `end`, the label's own characters */
@@ -55,11 +58,56 @@ const BRACKETS_RE = /\[[^[\]\r\n]*\]/g;
 // A cross-reference's key where a citation reads a key (see holdsCrossRefKey)
 const MARK_RE = /(?<![^\s;[])-?@(?:[Ff]ig|[Tt]bl)-[^\s,;\]]/;
 
+/** The preview's parser, which captions the figures and tables export
+ *  does, and no others (see captionsRule there) */
+let captionParser: MarkdownIt | undefined;
+
+/** The lines of each paragraph that's a figure or a table's caption, as
+ *  the preview and export read them, from its first to past its last, by
+ *  its label */
+function captionLines(text: string): Map<string, Array<[number, number]>> {
+	captionParser ??= new MarkdownIt({ html: true }).use(manuscriptMarkdownPlugin);
+	const lines = new Map<string, Array<[number, number]>>();
+	for (const token of captionParser.parse(maskFrontmatter(text), {})) {
+		const label = token.type === 'paragraph_open' ? token.attrGet('id') : null;
+		if (!label || !token.map || !/^(?:fig|tbl)-/.test(label)) continue;
+		if (!lines.has(label)) lines.set(label, []);
+		lines.get(label)!.push([token.map[0], token.map[1]]);
+	}
+	return lines;
+}
+
 /** The labels the document gives its figures and tables, in order, each
- *  time one is given */
+ *  time one is given: a figure's, after an image alone in its paragraph,
+ *  or a table's caption's, at the end of a paragraph after the table,
+ *  where export captions one, not one that labels nothing, as in a
+ *  sentence. Of a caption's paragraph, its last, as a figure's alt text
+ *  or a caption's text comes before its label. */
 export function scanCrossRefLabels(text: string): CrossRefLabelDefinition[] {
+	const captions = captionLines(text);
+	if (captions.size === 0) return [];
 	const scan = scannable(text);
-	return [...scan.matchAll(LABEL_RE)].map(match => ({ label: match[1], start: match.index + 2, end: match.index + 2 + match[1].length }));
+	const labels: CrossRefLabelDefinition[] = [];
+	// The caption each of them is of
+	const of: Array<[number, number]> = [];
+	// The line each match is on, counted on from the last
+	let line = 0;
+	let counted = 0;
+	for (const match of scan.matchAll(LABEL_RE)) {
+		for (let newline = scan.indexOf('\n', counted); newline !== -1 && newline < match.index; newline = scan.indexOf('\n', counted)) {
+			line++;
+			counted = newline + 1;
+		}
+		const caption = captions.get(match[1])?.find(([first, end]) => line >= first && line < end);
+		if (!caption) continue;
+		if (of[of.length - 1] === caption) {
+			labels.pop();
+			of.pop();
+		}
+		labels.push({ label: match[1], start: match.index + 2, end: match.index + 2 + match[1].length });
+		of.push(caption);
+	}
+	return labels;
 }
 
 /** The document's cross-references, in order, as export reads them: a
@@ -76,7 +124,7 @@ export function scanCrossRefs(text: string): CrossRefUsage[] {
 		const start = match.index;
 		const end = start + match[0].length;
 		const inner = match[0].slice(1, -1);
-		if (inner.startsWith('@') && [...inner.slice(1)].every(isCitationKeyChar) && isCrossRefKey(inner.slice(1))) {
+		if (inner.startsWith('@') && [...inner.slice(1)].every(isCitationKeyChar) && isCrossRefLabelKey(inner.slice(1))) {
 			usages.push({ key: inner.slice(1), label: crossRefLabel(inner.slice(1)), start: start + 1, end: end - 1, form: 'bracket' });
 			skipped.push([start, end]);
 		} else if (scan[end] === '(' || scan[end] === '[') {
@@ -94,7 +142,8 @@ export function scanCrossRefs(text: string): CrossRefUsage[] {
 		const before = at > 0 ? scan.slice(Math.max(0, at - 2), at) : '';
 		// The character before, whole where it's a surrogate pair's
 		const charBefore = before.length === 2 && /[\uDC00-\uDFFF]/.test(before[1]) ? before : before.slice(-1);
-		if (CROSS_REF_AFTER_RE.test(charBefore)) continue;
+		// Nor one whose key no label can be, which is text
+		if (CROSS_REF_AFTER_RE.test(charBefore) || !isCrossRefLabelKey(match[1])) continue;
 		usages.push({ key: match[1], label: crossRefLabel(match[1]), start: at, end: at + 1 + match[1].length, form: 'bare' });
 	}
 	return usages.sort((a, b) => a.start - b.start);

@@ -16,7 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt, isEscapedAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { CROSS_REF_AFTER_RE, crossRefLabel, isCitationKeyChar, readCitationItems } from './citation-syntax';
+import { CROSS_REF_AFTER_RE, crossRefLabel, isCitationKeyChar, isCrossRefKey, readCitationItems } from './citation-syntax';
 import { citationLocatorText } from './citation-locator';
 import { bibtexNameParts, buildItemData, citeprocFieldText } from './md-to-docx-citations';
 import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments, type MdRun } from './md-to-docx';
@@ -323,6 +323,8 @@ let knownCrossRefLabels: ReadonlySet<string> = new Set();
 // An @ and a cross-reference's key after it, as export reads one after a
 // bare @, and how far a citation's brackets would read it
 const CROSS_REF_TEXT_RE = /@((?:[Ff]ig|[Tt]bl)-[\p{L}\p{N}_](?:[\p{L}\p{N}_]|[:.#$%&\-+?<>~/](?=[\p{L}\p{N}_]))*)/gu;
+// The key a bare @ starts in text that ends where an escape does
+const CROSS_REF_KEY_START_RE = /^[\p{L}\p{N}_](?:[\p{L}\p{N}_]|[:.#$%&\-+?<>~/](?=[\p{L}\p{N}_]))*/u;
 
 const MISSING_CITATION_NOTE_RE = /^Citation data for @(.+) was not found in the bibliography file\.$/;
 
@@ -1265,9 +1267,10 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
       // line end (see RAW_LINE_END), which is a line end where the text
       // isn't raw, as a block's that reads as no block, where the backslash
       // before it would make it a line break, or a reference in an escaped
-      // block (see markedFormatting), which it would escape. In a tag or a
-      // block Markdown keeps raw, it stays the HTML's, unescaped (below).
-      if (next !== '\n' && (next === undefined || next === RAW_LINE_END || ASCII_PUNCTUATION_RE.test(next))) escaped.add(i);
+      // block (see markedFormatting), which it would escape, or a
+      // cross-reference's [ (see crossRefPlaceholder). In a tag or a block
+      // Markdown keeps raw, it stays the HTML's, unescaped (below).
+      if (next !== '\n' && (next === undefined || next === RAW_LINE_END || next === CROSS_REF_OPEN || ASCII_PUNCTUATION_RE.test(next))) escaped.add(i);
     } else if (c === '*' || c === '`') {
       escaped.add(i);
     } else if (c === '_') {
@@ -1314,24 +1317,6 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
         const tag = HTML_LIKE_TAG_AT.exec(text);
         if (!tag || !MARKDOWN_HTML_SENSITIVE_TAGS.has(tag[1].toLowerCase())) escaped.add(i);
       }
-    }
-  }
-  // An @ of Word's text before the label of a caption the document has,
-  // which export would read as a cross-reference to it, but in a link's
-  // text, where export reads none: after no letter,
-  // digit or other character CROSS_REF_AFTER_RE matches, as `@fig-map`,
-  // or alone in brackets with it, as `[@fig-map]` (see crossRefAt)
-  if (knownCrossRefLabels.size > 0 && !after?.link && text.includes('@')) {
-    for (const ref of text.matchAll(CROSS_REF_TEXT_RE)) {
-      const at = ref.index;
-      let bracketed = '';
-      if (text[at - 1] === '[') {
-        let end = at + 1;
-        while (end < text.length && text[end] !== '[' && isCitationKeyChar(text[end])) end++;
-        if (text[end] === ']') bracketed = text.slice(at + 1, end);
-      }
-      if ((at === 0 || !CROSS_REF_AFTER_RE.test(text[at - 1])) && knownCrossRefLabels.has(crossRefLabel(ref[1]))
-        || bracketed && knownCrossRefLabels.has(crossRefLabel(bracketed))) escaped.add(at);
     }
   }
   // A URL or email address, which linkify would make a link of, as export's
@@ -1585,6 +1570,31 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
       }
     }
     if (!escaped.has(i)) nearest = i;
+  }
+  // An @ of Word's text before the label of a caption the document has,
+  // which export would read as a cross-reference to it, but in a link's
+  // text, where export reads none: after no letter, digit or other
+  // character CROSS_REF_AFTER_RE matches, as `@fig-map`, or alone in
+  // brackets with it, as `[@fig-map]` (see crossRefAt). Last, as export
+  // reads the key in the Markdown written, with its escapes, which end a
+  // bare one, as the \ of `@fig-map\_`, and are in a bracketed one, which
+  // no label has.
+  if (knownCrossRefLabels.size > 0 && !after?.link && text.includes('@')) {
+    for (const ref of text.matchAll(CROSS_REF_TEXT_RE)) {
+      const at = ref.index;
+      if (escaped.has(at)) continue;
+      let end = at + 1;
+      while (end < at + 1 + ref[1].length && !escaped.has(end)) end++;
+      const key = CROSS_REF_KEY_START_RE.exec(text.slice(at + 1, end))?.[0];
+      let bracketed = '';
+      if (text[at - 1] === '[') {
+        let close = at + 1;
+        while (close < text.length && text[close] !== '[' && isCitationKeyChar(text[close]) && !escaped.has(close)) close++;
+        if (text[close] === ']' && !escaped.has(close)) bracketed = text.slice(at + 1, close);
+      }
+      if ((at === 0 || !CROSS_REF_AFTER_RE.test(text[at - 1])) && key && isCrossRefKey(key) && knownCrossRefLabels.has(crossRefLabel(key))
+        || bracketed && knownCrossRefLabels.has(crossRefLabel(bracketed))) escaped.add(at);
+    }
   }
   let result = '';
   for (let i = 0; i < text.length; i++) {
@@ -8844,7 +8854,7 @@ function readCaptions(
   stored: { figureLocation?: CaptionLocation; tableLocation?: CaptionLocation; delim?: string },
   titles: { figure: string; table: string },
   tablesInStyleBlocks?: (removed: ReadonlySet<ContentItem>) => ReadonlySet<ContentItem>,
-): { figure?: CaptionsRead; table?: CaptionsRead; targets?: Map<string, CrossRefTarget> } {
+): { figure?: CaptionsRead; table?: CaptionsRead; targets?: Map<string, CrossRefTarget>; labels?: Set<string> } {
   if (!captionParagraphs || captionParagraphs.size === 0) return {};
   const storedSeparator = stored.delim !== undefined ? captionSeparator(stored.delim, true) : undefined;
   type Kind = 'figure' | 'table';
@@ -9053,7 +9063,11 @@ function readCaptions(
   // The captions a cross-reference goes to, by their bookmarks' names, in
   // lower case, as Word compares them, export's and Word's own, as _Ref1
   const targets = new Map<string, CrossRefTarget>();
+  // And the labels of all, with a bookmark or none, which Word's text as
+  // @fig-map would refer to once written (see knownCrossRefLabels)
+  const labels = new Set<string>();
   const target = (candidate: Candidate, label: string) => {
+    labels.add(label);
     for (const name of candidate.paragraph.bookmarks) targets.set(name.toLowerCase(), { label, shown: candidate.paragraph.before + candidate.paragraph.result });
   };
   figures.forEach(({ candidate, image, caption, readAlt }, n) => {
@@ -9074,7 +9088,7 @@ function readCaptions(
     if (!seriesRead) return undefined;
     return { title: seriesRead.candidates[0].title, ...(seriesRead.delim !== undefined ? { titleDelim: seriesRead.delim } : {}), location: seriesRead.location };
   };
-  return { figure: readOf('figure'), table: readOf('table'), targets };
+  return { figure: readOf('figure'), table: readOf('table'), targets, labels };
 }
 
 /** A REF field, as walk reads one (see refFieldOf): the bookmark it goes
@@ -9123,17 +9137,30 @@ const KEY_PUNCTUATION_RE = /[:.#$%&\-+?<>~/]/;
 /** A cross-reference's text in Markdown, of which the characters between
  *  the first and the last stand in for themselves (see crossRefPlaceholder) */
 const CROSS_REF_PLACEHOLDER_BASE = 0xE100;
-const CROSS_REF_PLACEHOLDER_RE = /[\uE120-\uE17E]+/g;
+// The brackets of `[@fig-map]` until restoreCrossRefs writes them back:
+// punctuation, as a bracket is, beside a delimiter of emphasis, but none
+// that escapeMarkdownChars escapes, or pairs with another bracket of
+// Word's text, as export reads the cross-reference's brackets as its own
+const CROSS_REF_OPEN = '⁅';
+const CROSS_REF_CLOSE = '⁆';
+const CROSS_REF_PLACEHOLDER_RE = /⁅[-]+⁆|[-]+/g;
 
 /** The Markdown of a cross-reference, `markdown`, as `@fig-map` or
  *  `[@fig-map]`, with the characters between its first and its last
  *  each a private-use character that stands for it, which nothing escapes
  *  and the rest of the Markdown reads as a letter, until
- *  restoreCrossRefs writes them back. Its first and last are its own, so
- *  what goes next to them reads them as they are. */
+ *  restoreCrossRefs writes them back. A bare one's first and last are its
+ *  own, so what goes next to them reads them as they are; a bracketed
+ *  one's brackets are CROSS_REF_OPEN and CROSS_REF_CLOSE. */
 function crossRefPlaceholder(markdown: string): string {
   const inner = [...markdown.slice(1, -1)].map(c => String.fromCharCode(CROSS_REF_PLACEHOLDER_BASE + c.charCodeAt(0))).join('');
-  return markdown.charAt(0) + inner + markdown.slice(-1);
+  return markdown.startsWith('[') ? CROSS_REF_OPEN + inner + CROSS_REF_CLOSE : markdown.charAt(0) + inner + markdown.slice(-1);
+}
+
+/** The characters of a placeholder crossRefPlaceholder wrote that stand
+ *  in for others, which restoreCrossRefs writes back */
+function crossRefPlaceholderPart(placeholder: string): string {
+  return placeholder.startsWith(CROSS_REF_OPEN) ? placeholder : placeholder.slice(1, -1);
 }
 
 /** Markdown with each cross-reference crossRefPlaceholder wrote, whose
@@ -9141,7 +9168,14 @@ function crossRefPlaceholder(markdown: string): string {
 function restoreCrossRefs(markdown: string, placeholders: ReadonlySet<string>): string {
   if (placeholders.size === 0) return markdown;
   return markdown.replace(CROSS_REF_PLACEHOLDER_RE, run => placeholders.has(run)
-    ? [...run].map(c => String.fromCharCode(c.charCodeAt(0) - CROSS_REF_PLACEHOLDER_BASE)).join('') : run);
+    ? [...run].map(c => c === CROSS_REF_OPEN ? '[' : c === CROSS_REF_CLOSE ? ']' : String.fromCharCode(c.charCodeAt(0) - CROSS_REF_PLACEHOLDER_BASE)).join('') : run);
+}
+
+/** Whether formatting `a` has any `b` hasn't, whose delimiter Markdown
+ *  writes before text of `a`, which may be a tag, as `<u>` */
+function formattingAdds(a: RunFormatting, b: RunFormatting): boolean {
+  return (a.bold && !b.bold) || (a.italic && !b.italic) || (a.underline && !b.underline) || (a.strikethrough && !b.strikethrough)
+    || (a.highlight && !b.highlight) || (a.superscript && !b.superscript) || (a.subscript && !b.subscript) || (a.code && !b.code);
 }
 
 /**
@@ -9150,44 +9184,64 @@ function restoreCrossRefs(markdown: string, placeholders: ReadonlySet<string>): 
  * undefined at its edge, to the caption `target`: `@label`, or `[@label]`
  * where the label isn't a key as Pandoc reads one after an @, ending in a
  * letter or a digit, or the text before it would take its @ for its own,
- * or a letter, a digit or `_` after it would go on with its key (see
- * crossRefAt), the label `Fig-` or `Tbl-` for one that capitalizes its
- * first letter. Undefined where its text isn't the caption's title and
- * number, as a REF field of "Only label and number" shows, or the items'
- * formatting, links, comments or revisions differ, or it's code or in a
- * link, which export writes none in, or what's beside it would read with
- * it otherwise: an image's ! before its [, a link's ( after its ], or
- * text beside it of other formatting, comments or revision, whose
- * Markdown starts there, after its ].
+ * or what's after it would go on with its key (see crossRefAt): a letter,
+ * a digit or `_` of the text, or a tag or an equation of what's after it
+ * with more formatting or none; or where it's in brackets of Word's text
+ * the paragraph opened before it (`bracketed`), which export would read as
+ * a citation's with a bare one in them, and so as text. `Fig-` or `Tbl-`
+ * for one that capitalizes its first letter. Undefined where its text
+ * isn't the caption's title and number, as a REF field of "Only label and
+ * number" shows, or the items' formatting, links, comments or revisions
+ * differ, or it's code or in a link, which export writes none in, or what's
+ * beside it would read with it otherwise: an image's ! before its [, or a
+ * definition's colon after its ] at the paragraph's start.
  *
- * Its first and last characters are its own in the Markdown written
- * before restoreCrossRefs, so what goes next to them, as an emphasis's
- * delimiters, is written as next to those (see crossRefPlaceholder).
+ * Its first and last characters, or its brackets, are punctuation, a
+ * letter or a digit in the Markdown written before restoreCrossRefs, as
+ * they will be, so what goes next to them, as an emphasis's delimiters, is
+ * written as next to those (see crossRefPlaceholder).
  */
-function crossRefMarkdown(group: TextItem[], before: ContentItem | undefined, after: ContentItem | undefined, target: CrossRefTarget, firstCap: boolean): string | undefined {
+function crossRefMarkdown(group: TextItem[], before: ContentItem | undefined, after: ContentItem | undefined, target: CrossRefTarget, firstCap: boolean, bracketed: boolean): string | undefined {
   const [first] = group;
   const same = (item: TextItem) => formattingEquals(item.formatting, first.formatting) && item.href === first.href && item.link === first.link
     && commentSetsEqual(item.commentIds, first.commentIds) && revisionsEqual(item.revision, first.revision);
   const shown = firstCap ? target.shown.charAt(0).toUpperCase() + target.shown.slice(1) : target.shown;
   if (first.formatting.code || first.href !== undefined || !group.every(same) || group.map(item => item.text).join('') !== shown) return undefined;
   const key = firstCap ? target.label.charAt(0).toUpperCase() + target.label.slice(1) : target.label;
-  // What's beside it, at the paragraph's edge, text, or else none it can go next to
+  // What's beside it: the paragraph's edge, text, or an item of its own,
+  // as a citation or an equation, or a comment's mark, as `{>>c<<}`, an
+  // empty text item of comments it isn't in, but no other text that's
+  // empty, which Markdown writes nothing of, so the text beyond it would
+  // be beside it
   const edge = (item: ContentItem | undefined) => item === undefined || isStructuralBoundaryItem(item);
-  if (!edge(before) && (before!.type !== 'text' || !before!.text) || !edge(after) && (after!.type !== 'text' || !after!.text)) return undefined;
+  const empty = (item: ContentItem | undefined) => !edge(item) && item!.type === 'text' && !item!.text && commentSetsEqual(item!.commentIds, first.commentIds);
+  if (empty(before) || empty(after)) return undefined;
   // The text beside it whose Markdown runs into its own, formatted alike
   // and so on, where the text is
-  const previous = !edge(before) && same(before as TextItem) ? before as TextItem : undefined;
-  const next = !edge(after) && same(after as TextItem) ? after as TextItem : undefined;
-  const charBefore = previous ? [...previous.text].pop()! : '';
-  const nextChars = next ? [...next.text] : [];
+  const previous = !edge(before) && before!.type === 'text' && same(before as TextItem) ? before as TextItem : undefined;
+  const next = !edge(after) && after!.type === 'text' && same(after as TextItem) ? after as TextItem : undefined;
+  // And a link's text beside it, which linkify finds, as an email
+  // address, and which Markdown then writes with no delimiter
+  const linked = (item: ContentItem | undefined) => !edge(item) && item!.type === 'text' && item!.href !== undefined ? item as TextItem : undefined;
+  const charBefore = [...(previous ?? linked(before))?.text ?? ''].pop() ?? '';
+  const nextChars = [...(next ?? linked(after))?.text ?? ''];
   const charAfter = nextChars[0] ?? '';
-  // A key goes on into a letter, a digit or _, or punctuation before one
-  const goesOn = KEY_CHARACTER_RE.test(charAfter) || KEY_PUNCTUATION_RE.test(charAfter) && KEY_CHARACTER_RE.test(nextChars[1] ?? '');
-  if (BARE_CROSS_REF_KEY_RE.test(key) && /[A-Za-z0-9]$/.test(key) && !goesOn && !CROSS_REF_AFTER_RE.test(charBefore)) return '@' + key;
-  // An image's ! before its brackets, a link's destination or label, a
-  // span's attributes or CriticMarkup after them, or a definition's colon
-  // at the start of the line, which would take them for theirs
-  if (charBefore === '!' || !edge(after) && !next || /^[([{]$/.test(charAfter) || edge(before) && charAfter === ':') return undefined;
+  // A key goes on into a letter, a digit or _, or punctuation before one,
+  // and into a tag, as <u>, a delimiter what's after it with more
+  // formatting may start with, or an equation's $. A delimiter it closes
+  // its own with, as </u>, or one of comments, a revision, a link, a
+  // citation or a note's reference, starts with none.
+  const formattingOf = (item: ContentItem) => 'formatting' in item ? item.formatting : undefined;
+  const afterFormatting = edge(after) ? undefined : formattingOf(after!);
+  const goesOn = KEY_CHARACTER_RE.test(charAfter) || KEY_PUNCTUATION_RE.test(charAfter) && KEY_CHARACTER_RE.test(nextChars[1] ?? '')
+    || !edge(after) && !next && (after!.type === 'math' || !!afterFormatting && formattingAdds(afterFormatting, first.formatting));
+  // The code before it, whose closing backtick would take its @
+  const beforeFormatting = edge(before) ? undefined : formattingOf(before!);
+  const afterCode = !previous && !!beforeFormatting?.code && !formattingAdds(first.formatting, beforeFormatting);
+  if (!bracketed && BARE_CROSS_REF_KEY_RE.test(key) && /[A-Za-z0-9]$/.test(key) && !goesOn && !afterCode && !CROSS_REF_AFTER_RE.test(charBefore)) return '@' + key;
+  // An image's ! before its brackets, which would take them for its alt
+  // text before a (, or a definition's colon at the start of the line
+  if (charBefore === '!' || edge(before) && charAfter === ':') return undefined;
   return '[@' + key + ']';
 }
 
@@ -9208,9 +9262,14 @@ function resolveCrossRefs(content: ContentItem[], targets: ReadonlyMap<string, C
   if (targets.size === 0) return placeholders;
   let resolved: ContentItem[] | undefined;
   let paragraph: ContentItem | undefined;
+  // The brackets of Word's text the paragraph opened so far that none
+  // closed, which a bare cross-reference in them would be text in (see
+  // crossRefMarkdown)
+  let open = 0;
   for (let start = 0; start < content.length;) {
     const item = content[start];
     if (item.type === 'para') paragraph = item;
+    if (isStructuralBoundaryItem(item)) open = 0;
     if (item.type === 'table') {
       for (const row of item.rows) for (const cell of row.cells) for (const cellParagraph of cell.paragraphs) resolveCrossRefs(cellParagraph, targets, placeholders);
     }
@@ -9219,15 +9278,19 @@ function resolveCrossRefs(content: ContentItem[], targets: ReadonlyMap<string, C
     if (field) while (end < content.length && content[end].type === 'text' && (content[end] as TextItem).crossRef === field) end++;
     const target = field && !(paragraph?.type === 'para' && (paragraph.isCodeBlock || paragraph.isTitle)) ? targets.get(field.bookmark.toLowerCase()) : undefined;
     const group = content.slice(start, end) as TextItem[];
-    const markdown = target && crossRefMarkdown(group, content[start - 1], content[end], target, field!.firstCap);
+    const markdown = target && crossRefMarkdown(group, content[start - 1], content[end], target, field!.firstCap, open > 0);
     if (markdown !== undefined && !resolved) resolved = content.slice(0, start);
     if (markdown !== undefined) {
       const { commentIds, formatting, revision } = group[0];
       const text = crossRefPlaceholder(markdown);
-      placeholders.add(text.slice(1, -1));
+      placeholders.add(crossRefPlaceholderPart(text));
       resolved!.push({ type: 'text', text, commentIds, formatting, ...(revision ? { revision } : {}), crossRef: field, crossRefResult: group });
-    } else if (resolved) {
-      for (let k = start; k < end; k++) resolved.push(content[k]);
+    } else {
+      for (let k = start; k < end; k++) {
+        const text = content[k];
+        if (text.type === 'text') for (const ch of text.text) open = ch === '[' ? open + 1 : ch === ']' ? Math.max(0, open - 1) : open;
+      }
+      if (resolved) for (let k = start; k < end; k++) resolved.push(content[k]);
     }
     start = end;
   }
@@ -20588,7 +20651,7 @@ export async function convertDocx(
   // to it, and the captions' labels, which Word's text that reads as one
   // is escaped for
   const crossRefPlaceholders = captionsRead.targets ? resolveCrossRefs(docContent, captionsRead.targets) : new Set<string>();
-  const crossRefLabels = new Set([...captionsRead.targets?.values() ?? []].map(target => target.label));
+  const crossRefLabels = captionsRead.labels ?? new Set<string>();
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);

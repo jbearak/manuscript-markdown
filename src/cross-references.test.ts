@@ -48,6 +48,26 @@ async function trip(md: string): Promise<string> {
   return back.slice(0, back.indexOf('![A map]')).trimEnd();
 }
 
+/** The Markdown `md` comes back as after each of two round trips, with
+ *  the figures and the table it refers to, and the text Word shows of it
+ *  each time, as its first paragraph's runs, the result of a REF field as
+ *  `<REF bookmark: result>` */
+async function twoTrips(md: string): Promise<Array<{ md: string; word: string }>> {
+  const trips: Array<{ md: string; word: string }> = [];
+  let source = md + FIGURES;
+  for (let k = 0; k < 2; k++) {
+    const { docx } = await convertMdToDocx(source, { sourceDir: dir });
+    const document = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const paragraph = /<w:p[ >][\s\S]*?<\/w:p>/.exec(document.slice(document.indexOf('<w:body>')))![0];
+    const word = paragraph.replace(/<w:instrText[^>]*> REF (\S+)[^<]*<\/w:instrText>/g, '\u0002REF $1: ').replace(/<w:fldChar w:fldCharType="end"\/>/g, '\u0003')
+      .replace(/<[^>]+>/g, '').replace(/\u0002/g, '<').replace(/\u0003/g, '>');
+    source = await imported(docx);
+    trips.push({ md: source.slice(0, source.indexOf('![A map]')).trimEnd(), word: decodeXml(word) });
+  }
+  return trips;
+}
+const decodeXml = (xml: string) => xml.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+
 /** A REF field to `bookmark`, showing `shown` */
 function refField(bookmark: string, shown: string, switches = ' \\h', rPr = ''): string {
   return '<w:r>' + rPr + '<w:fldChar w:fldCharType="begin"/></w:r><w:r>' + rPr + '<w:instrText xml:space="preserve"> REF ' + bookmark + switches + ' </w:instrText></w:r><w:r>' + rPr + '<w:fldChar w:fldCharType="separate"/></w:r><w:r>' + rPr + '<w:t>' + shown + '</w:t></w:r><w:r>' + rPr + '<w:fldChar w:fldCharType="end"/></w:r>';
@@ -107,6 +127,19 @@ describe('exporting a cross-reference', () => {
     const { body } = await exported('(@fig-map). "@fig-map" @fig-map\'s, @fig-map: and @tbl-x.' + FIGURES);
     expect(body.match(/REF fig_map \\h/g)).toHaveLength(4);
     expect(body).toContain('REF tbl_x \\h');
+  });
+
+  it('reads a key no label can be as text, as Markdown reads it, and the rest of its line so', async () => {
+    const md = '@fig-a.b and @fig-map<sup>2</sup> and @fig-caf\u00e9 and [@fig-a.b] and [@fig-a\\_b] and @fig-map.';
+    const { body, warnings } = await exported(md + FIGURES);
+    expect(body.match(/REF fig_map \\h/g)).toHaveLength(1);
+    expect(body).toContain('<w:vertAlign w:val="superscript"/></w:rPr><w:t>2</w:t>');
+    expect(warnings.filter(warning => warning.startsWith('Cross-reference '))).toEqual([]);
+    expect(warnings).toContain('The citation [@fig-a.b] has a cross-reference in it, which Word gets as text: a cross-reference is @fig-label or [@fig-label] alone, of a figure, or @tbl-label of a table.');
+    // Its escapes read, as in other text
+    expect(body).toContain('[@fig-a_b]');
+    expect(scanCrossRefs(md).map(usage => usage.form + ' ' + md.slice(usage.start, usage.end))).toEqual(['literal [@fig-a.b]', 'literal [@fig-a\\_b]', 'bare @fig-map']);
+    expect(renderWithPlugin(md + FIGURES).match(/manuscript-markdown-cross-reference/g)).toHaveLength(1);
   });
 
   it('writes a tracked one\'s field in the change, its instruction deleted in a deletion', async () => {
@@ -185,6 +218,64 @@ describe('importing a cross-reference', () => {
     ['an unknown label and a citation\'s brackets with one', '@fig-none and [-@fig-map].'],
   ])('round trips %s', async (_name, md) => {
     expect(await trip(md)).toBe(md);
+  });
+
+  it('keeps a reference in brackets of Word\'s text bracketed, which export would read in a citation\'s otherwise', async () => {
+    for (const md of ['[a [@tbl-x] b]', '[see [@fig-map] more]', '[[@fig-map]]']) {
+      const trips = await twoTrips(md);
+      expect(trips.map(trip => trip.md)).toEqual([md, md]);
+      expect(trips[1].word).toBe(trips[0].word);
+      expect(trips[0].word).toContain('<REF ');
+    }
+  });
+
+  it('keeps references side by side bracketed, as export reads them, with no bracket of their own escaped', async () => {
+    for (const md of ['[@tbl-x][@tbl-x]', 'See [@fig-map][@tbl-x].']) {
+      const trips = await twoTrips(md);
+      expect(trips.map(trip => trip.md)).toEqual([md, md]);
+      expect(trips[0].word.match(/<REF /g)?.length).toBe(2);
+      expect(trips[1].word).toBe(trips[0].word);
+    }
+  });
+
+  it('brackets a reference whose key the Markdown after it would go on with, or whose @ the code before it would take', async () => {
+    for (const md of ['[@fig-map]<u>u</u>', '[@fig-map]<sup>2</sup> x', '`c`[@fig-map]', 'a\\\\[@fig-map]', '*a*[@fig-map]*b*']) {
+      const trips = await twoTrips(md);
+      expect(trips.map(trip => trip.md)).toEqual([md, md]);
+      expect(trips[0].word).toContain('<REF fig_map: Figure 1>');
+    }
+  });
+
+  it('keeps a reference beside a comment that marks a point, whose mark ends any text before it', async () => {
+    for (const md of ['me{>>c<<}@tbl-x', '@tbl-x{>>c<<}abc', '- a{>>c<<}@fig-map and `c`{>>d<<}@tbl-x']) {
+      const trips = await twoTrips(md);
+      expect(trips.map(trip => trip.md)).toEqual([md, md]);
+      expect(trips[1].word).toBe(trips[0].word);
+      expect(trips[0].word).toContain('<REF ');
+    }
+  });
+
+  it('escapes the @ of text whose key, once its escapes are written, is a label the document has', async () => {
+    for (const [md, back] of [['@tbl-x_ and @tbl-x.y', '\\@tbl-x\\_ and @tbl-x.y'], ['[@tbl-x_]', '[\\@tbl-x\\_]']]) {
+      const trips = await twoTrips(md);
+      expect(trips.map(trip => trip.md)).toEqual([back, back]);
+      expect(trips.map(trip => trip.word)).toEqual([md, md]);
+    }
+  });
+
+  it('escapes the @ of text with the label of a caption Word has no bookmark in', async () => {
+    const { docx } = await convertMdToDocx('See \\@tbl-rates.\n\n| a |\n|---|\n| 1 |\n\n: Rates {#tbl-x}\n', { sourceDir: dir });
+    const zip = await JSZip.loadAsync(docx);
+    const document = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', document.replace(/<w:bookmark(?:Start|End) [^>]*\/>/g, ''));
+    const custom = await zip.file('docProps/custom.xml')?.async('string');
+    if (custom) zip.file('docProps/custom.xml', custom.replace(/<property [^>]*name="MANUSCRIPT_CAPTION_LABELS[^"]*">[\s\S]*?<\/property>/g, ''));
+    const back = await imported(await zip.generateAsync({ type: 'uint8array' }));
+    expect(back).toContain(': Rates {#tbl-rates}');
+    expect(back.slice(0, back.indexOf('\n'))).toBe('See \\@tbl-rates.');
+    const again = await exported(back);
+    expect(again.body).not.toContain('REF ');
+    expect(again.body).toContain('See @tbl-rates.');
   });
 
   it('reads [@fig-map] back as @fig-map, and brackets one whose text would take its @', async () => {
@@ -294,7 +385,8 @@ describe('the LSP and cross-references', () => {
 
   it('completes a label after an @ that can start a reference, capitalized after @Fig-', () => {
     const at = (text: string) => getCrossRefCompletionContext(text, text.length);
-    const labels = (text: string) => { const context = at(doc + text); return context ? crossRefCompletions(doc + text, context) : undefined; };
+    // In a paragraph of its own, after the table's caption
+    const labels = (text: string) => { const context = at(doc + '\n' + text); return context ? crossRefCompletions(doc + '\n' + text, context) : undefined; };
     expect(labels('See @')).toEqual(['fig-map', 'tbl-x']);
     expect(labels('See @fig-')).toEqual(['fig-map']);
     expect(labels('See [@t')).toEqual(['tbl-x']);
@@ -302,6 +394,16 @@ describe('the LSP and cross-references', () => {
     expect(labels('{++@fig')).toEqual(['fig-map']);
     expect(labels('me@fig-')).toBeUndefined();
     expect(labels('See @smith')).toBeUndefined();
+  });
+
+  it('reads a label only where export captions a figure or a table with it', () => {
+    const md = 'See @fig-x, @fig-l, @tbl-q and @fig-ok.\n\nText {#fig-x}\n\n- ![In a list](map.png){#fig-l}\n\n> | a |\n> |---|\n> | 1 |\n>\n> : In a quote {#tbl-q}\n\n![Alt {#fig-ok}](map.png){#fig-ok}\n';
+    expect(scanCrossRefLabels(md).map(label => [label.label, md.slice(label.start - 2, label.end + 1)])).toEqual([['fig-ok', '{#fig-ok}']]);
+    expect(scanCrossRefLabels(md)[0].start).toBe(md.lastIndexOf('{#fig-ok}') + 2);
+    expect(findCrossRefProblems(md).map(problem => md.slice(problem.start, problem.end))).toEqual(['@fig-x', '@fig-l', '@tbl-q']);
+    const context = getCrossRefCompletionContext(md + '\n@', md.length + 2)!;
+    expect(crossRefCompletions(md + '\n@', context)).toEqual(['fig-ok']);
+    expect(findCrossRefDefinition(md, md.indexOf('@fig-x') + 2)).toBeUndefined();
   });
 
   it('finds a reference\'s figure', () => {
@@ -378,9 +480,12 @@ describe('the grammar and cross-references', () => {
         const line = pieces.join('');
         // A link's or a reference's brackets, which export reads by the
         // document's definitions and destinations, which the grammar can't,
+        // an HTML link's text, after an <a> tag, or an email address's in
+        // an autolink, as <me@fig-map>, which export reads none in either,
         // and a citation, whose text the grammar is injected into too, as
         // into all text, which it can't tell from its own
-        if (/\][([]/.test(line) || /^\s*\[[^\]]*\]:/.test(line) || parseMd(line).some(token => token.runs?.some(run => run.type === 'citation'))) return true;
+        if (/\][([]/.test(line) || /^\s*\[[^\]]*\]:/.test(line) || /<a[\s>]/i.test(line) || /<[^<>\s]*@[^<>\s]*>/.test(line)
+          || parseMd(line).some(token => token.runs?.some(run => run.type === 'citation'))) return true;
         const colored = coloredKeys(line);
         const read = readKeys(line);
         if (JSON.stringify(colored) !== JSON.stringify(read)) throw new Error(JSON.stringify(line) + ' colored ' + JSON.stringify(colored) + ', not ' + JSON.stringify(read));

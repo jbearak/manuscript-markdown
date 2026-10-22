@@ -90,6 +90,16 @@ export function isCrossRefKey(key: string): boolean {
   return key.length > 4 && /^(?:[Ff]ig|[Tt]bl)-/.test(key);
 }
 
+/** Whether `key`, a cross-reference's, is one a label can be, which a
+ *  figure or a table can have: `fig-` or `tbl-`, or `Fig-` or `Tbl-`, and
+ *  the characters of a comment's ID, `[A-Za-z0-9_-]`. One with another
+ *  character, as Pandoc reads `@fig-a.b`, refers to none, and is text, as
+ *  is a citation's brackets with it, so what Markdown reads in it, as a
+ *  tag in `@fig-a<sup>2</sup>`, is read as it is in other text. */
+export function isCrossRefLabelKey(key: string): boolean {
+  return /^(?:[Ff]ig|[Tt]bl)-[A-Za-z0-9_-]+$/.test(key);
+}
+
 /** The label of the figure or table a cross-reference's key `key` refers
  *  to, as `fig-map` for `Fig-map` */
 export function crossRefLabel(key: string): string {
@@ -127,7 +137,8 @@ export interface CrossRefSource {
 /**
  * The cross-reference at `start` in `state`'s text, as Quarto writes one,
  * as export and the preview read it: a bare `@` with a key after it, as
- * Pandoc reads one, of a figure's or a table's (see isCrossRefKey), at
+ * Pandoc reads one, that a figure's or a table's label can be (see
+ * isCrossRefLabelKey), at
  * the start or after a character CROSS_REF_AFTER_RE doesn't match, so
  * that an email address stays text, or a citation's brackets with that
  * key alone in them, as `[@fig-map]`, which reads as `@fig-map`; none in a
@@ -146,7 +157,7 @@ export function crossRefAt(state: Pick<StateInline, 'src' | 'md' | 'env'> & { po
     if (CROSS_REF_AFTER_RE.test(charBefore(src, start))) return undefined;
     BARE_KEY_RE.lastIndex = start + 1;
     const key = BARE_KEY_RE.exec(src)?.[0];
-    if (!key || !isCrossRefKey(key) || start + 1 + key.length > max) return undefined;
+    if (!key || !isCrossRefLabelKey(key) || start + 1 + key.length > max) return undefined;
     return { end: start + 1 + key.length, key, form: 'bare' };
   }
   if (ch !== '[') return undefined;
@@ -156,7 +167,7 @@ export function crossRefAt(state: Pick<StateInline, 'src' | 'md' | 'env'> & { po
     let at = start + 2;
     while (at < max && src.charAt(at) !== '[' && isCitationKeyChar(src.charAt(at))) at++;
     const key = src.slice(start + 2, at);
-    if (at < max && src.charAt(at) === ']' && isCrossRefKey(key)) return { end: at + 1, key, form: 'bracket' };
+    if (at < max && src.charAt(at) === ']' && isCrossRefLabelKey(key)) return { end: at + 1, key, form: 'bracket' };
   }
   const end = bracketEnd(state, start);
   return end !== -1 && end < max && holdsCrossRefKey(state, start, end) ? { end: end + 1, key: '', form: 'literal' } : undefined;

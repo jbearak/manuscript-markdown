@@ -148,8 +148,8 @@
 			"name": "constant.character.escape.manuscript-markdown"
 		},
 		"cross_reference": {
-			"comment": "A cross-reference to a figure or a table, as export reads one (see crossRefAt in src/citation-syntax.ts): its key alone in a citation's brackets, as [@fig-map], not after a backslash, which escapes the [",
-			"match": "(?<!\\\\)(\\[)(@)((?:[Ff]ig|[Tt]bl)-[^\\s,;\\]@`\\[]+)(\\])",
+			"comment": "A cross-reference to a figure or a table, as export reads one (see crossRefAt in src/citation-syntax.ts): its key, a label's characters, alone in a citation's brackets, as [@fig-map], not after a backslash, which escapes the [",
+			"match": "(?<!\\\\)(\\[)(@)((?:[Ff]ig|[Tt]bl)-[A-Za-z0-9_-]+)(\\])",
 			"name": "meta.cross-reference.manuscript-markdown",
 			"captures": {
 				"1": {"name": "punctuation.definition.brackets.begin.manuscript-markdown"},
@@ -164,8 +164,8 @@
 			"name": "meta.cross-reference.text.manuscript-markdown"
 		},
 		"cross_reference_bare": {
-			"comment": "A bare @ and a cross-reference's key, as Pandoc reads one, after none of a letter, a digit, _ . - / @ a backtick or a backslash, and not in a link's text",
-			"match": "(?<![\\p{L}\\p{N}_.\\-/@`\\\\])(@)((?:[Ff]ig|[Tt]bl)-[\\p{L}\\p{N}_](?:[\\p{L}\\p{N}_]|[:.#$%&\\-+?<>~/](?=[\\p{L}\\p{N}_]))*)(?![^\\[\\]]*\\][(\\[])",
+			"comment": "A bare @ and a cross-reference's key, as Pandoc reads one, after none of a letter, a digit, _ . - / @ a backtick or a backslash, and not in a link's text, whose characters are a label's, [A-Za-z0-9_-], as export reads one (see isCrossRefLabelKey in src/citation-syntax.ts)",
+			"match": "(?<![\\p{L}\\p{N}_.\\-/@`\\\\])(@)((?:[Ff]ig|[Tt]bl)-[A-Za-z0-9_](?:[A-Za-z0-9_]|-(?=[A-Za-z0-9_]))*)(?![\\p{L}\\p{N}_]|[:.#$%&\\-+?<>~/][\\p{L}\\p{N}_])(?![^\\[\\]]*\\][(\\[])",
 			"name": "meta.cross-reference.manuscript-markdown",
 			"captures": {
 				"1": {"name": "support.function.cross-reference.manuscript-markdown"},

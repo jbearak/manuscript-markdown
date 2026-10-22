@@ -1201,9 +1201,10 @@ function crossRefRule(state: StateInline, silent: boolean): boolean {
   if (!silent) {
     const token = pushManuscriptToken(state, 'cross_reference', '', 0);
     const source = restoreCriticLineBreaks(state.src.slice(start, ref.end));
-    // The brackets' text as Word shows it, its escapes read and its line
-    // ends as spaces, as a softbreak's
-    token.content = ref.form === 'literal' ? state.md.utils.unescapeAll(source).replace(/\r\n?|\n/g, ' ') : source;
+    // The text as Word shows it where it's text, as a reference to a label
+    // no caption has: its escapes read, as in [@fig-a\_b], and a literal
+    // one's line ends as spaces, as a softbreak's
+    token.content = ref.form === 'literal' ? state.md.utils.unescapeAll(source).replace(/\r\n?|\n/g, ' ') : state.md.utils.unescapeAll(source);
     token.crossRef = ref;
   }
   state.pos = ref.end;
