@@ -503,6 +503,26 @@ export function findMatchingClose(src: string, startPos: number): number {
   return -1;
 }
 
+/** A comment's text as the preview's tooltip shows it. Where it holds its
+ *  replies, as {>>note {>>reply<<}<<}, which export reads as Word's replies
+ *  (extractReplies in md-to-docx.ts), that's its own text and then each
+ *  reply's on a line of its own, as the tooltip shows a comment and the
+ *  replies after it, {>>note<<}{>>reply<<} */
+export function commentTooltipText(content: string): string {
+  const first = content.indexOf('{>>');
+  if (first === -1) return content;
+  const lines = [content.slice(0, first).trimEnd()];
+  for (let pos = first; ;) {
+    const open = content.indexOf('{>>', pos);
+    if (open === -1) break;
+    const close = findMatchingClose(content, open + 3);
+    if (close === -1) break;
+    lines.push(commentTooltipText(content.slice(open + 3, close)));
+    pos = close + 3;
+  }
+  return lines.join('\n');
+}
+
 function findNextCommentOpenerBefore(
   src: string,
   pos: number,

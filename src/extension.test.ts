@@ -384,8 +384,9 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
    *  order: at each step the earliest match of its patterns or of the end
    *  of the span it's in, a pattern before the end where they tie, as
    *  vscode-textmate scans with an L: injection inside a span of its own,
-   *  markdown's patterns aside */
-  const opened = (line: string): string[] => {
+   *  markdown's patterns aside, and how many of their spans are still open
+   *  at its end */
+  const scan = (line: string): { names: string[]; open: number } => {
     const names: string[] = [];
     const ends: RegExp[] = [];
     for (let at = 0; at < line.length;) {
@@ -417,8 +418,9 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
       }
       at = Math.max(best.index + best[0].length, at + 1);
     }
-    return names;
+    return { names, open: ends.length };
   };
+  const opened = (line: string): string[] => scan(line).names;
 
   it.each<[string, string, string[]]>([
     ['an escaped deletion in an insertion', '{++a \\{--x--} b++}', ['addition', 'escaped_brace']],
@@ -443,12 +445,25 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
     ['a critic highlight and its comment after an == in text', 'a == b {==x==}{>>c<<} d', ['highlight', 'comment']],
     ['a critic highlight after an opener', 'a ==b {==x==} c', ['highlight']],
     ['a comment\'s range and body', 'a {#1}x{/1}{#1>>c<<} b', ['comment_range_start', 'comment_range_end', 'comment_with_id']],
+    // A comment can hold its replies, as export pairs its <<}: the injection
+    // reads a reply's opener inside it, so its first <<} ends the reply
+    ['a comment with a reply in it', '{>>a {>>b<<} c<<} d', ['comment', 'comment']],
+    ['a comment body with an ID with a reply in it', '{#1>>a {>>b<<} c<<} d', ['comment_with_id', 'comment']],
+    ['a comment with replies one after another', '{>>a<<}{>>b<<} d', ['comment', 'comment']],
     // A caption's label is no range's start (see captions.ts), but an ID
     // that's fig- alone is one
     ['a figure\'s label', '![Map](map.png){#fig-map} {#tbl-est} {#fig-}x{/fig-}', ['comment_range_start', 'comment_range_end']],
     ['a comment with a figure label\'s ID', 'a {#fig-1>>c<<} b', ['comment_with_id']],
   ])('reads %s as export does', (_name, line, expected) => {
     expect(opened(line)).toEqual(expected);
+  });
+
+  it.each<[string, string, number]>([
+    ['a comment with a reply in it', '{>>a {>>b<<} c<<} d', 0],
+    ['a comment body with an ID with a reply in it', '{#1>>a {>>b<<} c<<} d', 0],
+    ['a comment whose own <<} is on a later line', '{>>a {>>b<<} c', 1],
+  ])('ends %s at the <<} export pairs with its opener', (_name, line, open) => {
+    expect(scan(line).open).toBe(open);
   });
 });
 

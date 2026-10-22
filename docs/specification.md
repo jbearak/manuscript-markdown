@@ -1053,6 +1053,20 @@ Comments can include author name and timestamp:
 
 A blank line in a comment's text separates two of the Word comment's paragraphs, and a single line's end is a line break. In a quote, each of the comment's lines after the first starts with the quote's `>`. On DOCX import, a comment in a table cell whose text has more than one line takes [ID syntax](#overlapping-comments), with its body below the table, because a pipe table's cell can't hold a line's end. So does a comment on an HTML comment outside a table, `{#1}<!-- a -->{/1}`, because `{==...==}` would show the HTML comment as text, and a line that starts with the comment and its body is an HTML block. Its range covers all of the HTML comment where Word started or ended it inside the comment's hidden text. In ID syntax the HTML comment is a paragraph, which a blank line keeps apart from text on the lines before and after it, even where its block had none. An HTML comment a paragraph can't hold, one with a blank line, a line of `***` or `---`, or a line that starts with `<!--`, stays an HTML block, with the Word comment after it, `{>>...<<}`, which the block shows as text. A Word comment whose text or a reply's has a line break goes in a paragraph of its own after the block instead, a `{>>...<<}` on no text, with a blank line before and after it, in a quote or a list item too, where the item's indent goes on its first line alone, as the indent of a line in a CriticMarkup span is its text's: on the block's last line, its first line end would end the block, which would show the rest of that line as text and leave the rest of the comment a paragraph of its own. There it stays a Word comment, and the HTML comment stays hidden. So does one in a paragraph that starts with another HTML comment out of the range, or that holds one a paragraph can't, as `<!-- b --->`, and so do the other HTML comments in that Word comment's range. It stays on the block's line, as before, where a line break and text follow the block in its paragraph, whose `\` would end the block's line, or where a comment in the block starts as a directive does, which the block, alone in its paragraph, would be read as. A range whose comment the file has no body for, which Word shows nothing of, imports as its text alone, as `{==text==}` with no comment after it would be a highlight. A comment whose text, or a reply's, has a line after its first that reads as a table's delimiter row, as `--- | ---`, takes ID syntax too, but for one on no text at the start of a paragraph, whose opener already starts its line, and one on an HTML comment, as above. Written after its anchor, its lines would make a table with the opener in a cell, which reads it as text. In ID syntax, the body's opener starts the table's first line, before the table. Replies written one after another, as `{>>note<<}{>>reply<<}`, go in the body instead, each on a line of its own, where one of them has such a line, as its opener after the one before would be in the table's cell.
 
+#### Replies
+
+A reply to a comment can go inside the comment, before its `<<}`, or right after it:
+
+```markdown
+{==Background and significance==}{>>@alice (2024-01-15 14:30) | Shorten this?
+  {>>@bob (2024-01-15 15:02) | Done<<}
+<<}
+
+{==Background and significance==}{>>@alice (2024-01-15 14:30) | Shorten this?<<}{>>@bob (2024-01-15 15:02) | Done<<}
+```
+
+Both export to Word as the same comment and reply, and a comment can hold more than one reply, or have more than one after it. Inside the comment, its own text is what comes before its first reply, and the replies can go on lines of their own. A comment body with an ID takes replies the same ways, `{#1>>note {>>reply<<}<<}` or `{#1>>note<<}{>>reply<<}`. DOCX import writes a comment's replies inside it, each on a line of its own, but keeps them after it for a comment that export wrote with its replies after it. The preview's tooltip shows a comment's replies on lines after its text either way, and Next Change selects a comment with the replies inside it.
+
 #### Configuration
 
 | Setting | Default | Description |

@@ -1836,6 +1836,17 @@ describe('Comment association in preview', () => {
       expect(output).toContain('data-comment="first\nsecond"');
       expect(output).not.toContain('manuscript-markdown-comment-indicator');
     });
+
+    // A comment can hold its replies, as import writes them, which export
+    // reads as the replies written after it, so its tooltip shows them alike
+    it.each<[string, string, string]>([
+      ['after a critic highlight', '{==text==}{>>first\n  {>>second<<}\n<<}', 'data-comment="first\nsecond"'],
+      ['in a heading', '## {==text==}{>>@a (2026-10-22 10:36) | first\n  {>>@b | second<<}\n<<}', 'data-comment="@a (2026-10-22 10:36) | first\n@b | second"'],
+      ['on no text', 'a {>>first {>>second<<} {>>third<<}<<} b', 'data-comment="first\nsecond\nthird"'],
+      ['with a reply to a reply', '{==text==}{>>first {>>second {>>third<<}<<}<<}', 'data-comment="first\nsecond\nthird"'],
+    ])('shows the replies in a comment %s on lines of their own', (_name, input, expected) => {
+      expect(renderWithPlugin(input)).toContain(expected);
+    });
   });
 
   describe('ID-based comment ranges', () => {
@@ -1844,6 +1855,12 @@ describe('Comment association in preview', () => {
       expect(output).toContain('manuscript-markdown-comment-range');
       expect(output).toContain('data-comment="comment"');
       expect(output).toContain('>text</span>');
+    });
+
+    it('shows the replies in a comment body with an ID on lines of their own', () => {
+      const output = renderLikePreview('{#1}text{/1}\n\n{#1>>first\n  {>>second<<}\n<<}');
+      expect(output).toContain('manuscript-markdown-comment-range');
+      expect(output).toContain('data-comment="first\nsecond"');
     });
 
     it('should leave range markers without matching comment as empty renders', () => {

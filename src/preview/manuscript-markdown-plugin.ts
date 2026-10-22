@@ -14,6 +14,7 @@ import {
   criticBreaksInRawHtml,
   criticBreaksLeftOver,
   criticCloserSearchOf,
+  commentTooltipText,
   hasCriticBreak,
   iterateCriticBreaks,
   matchCriticBreakAt,
@@ -1201,7 +1202,7 @@ function pushCriticMathParts(state: StateInline, parts: CriticMathPart[]): void 
     if (part.type === 'comment') {
       const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
       tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-      tokenOpen.meta = { commentText: part.content };
+      tokenOpen.meta = { commentText: commentTooltipText(part.content) };
       addInlineContent(state, part.content);
       state.push('manuscript_markdown_comment_close', 'span', -1);
       continue;
@@ -1761,7 +1762,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
             tokenOpen.attrSet('class', 'manuscript-markdown-comment');
             tokenOpen.meta = {
               id,
-              commentText: restoreCriticLineBreaks(content),
+              commentText: commentTooltipText(restoreCriticLineBreaks(content)),
             };
             addInlineContent(state, content, inlineSourceOffset(state, idEnd + 2));
             state.push('manuscript_markdown_comment_close', 'span', -1);
@@ -1810,7 +1811,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
         tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-        tokenOpen.meta = { commentText: restoreCriticLineBreaks(content) };
+        tokenOpen.meta = { commentText: commentTooltipText(restoreCriticLineBreaks(content)) };
 
         // Add parsed inline content to allow nested Markdown processing
         addInlineContent(state, content, inlineSourceOffset(state, start + 3));

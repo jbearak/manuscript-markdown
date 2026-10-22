@@ -45,6 +45,16 @@ With attribution:
 
 The `@` prefix and `|` separator make attribution unambiguous — comments like `{>>Note: this is important<<}` are never misparsed as having an author, since they don't start with `@`.
 
+A reply goes inside the comment it replies to, or right after it. Both are Word replies to the comment (see [Replies](specification.md#replies)):
+
+```markdown
+{>>@alice | Consider rephrasing
+  {>>@bob | Done<<}
+<<}
+
+{>>@alice | Consider rephrasing<<}{>>@bob | Done<<}
+```
+
 ### Highlight `{==text==}`
 
 Highlights text for attention.
