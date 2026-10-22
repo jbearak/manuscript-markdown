@@ -74,6 +74,34 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `crossref` | The words of captions, as Quarto's keys indented under it: `fig-title`, the word before a figure's number (default `Figure`), `tbl-title`, a table's (default `Table`), and `title-delim`, what goes between the number and the caption's text (default `:`). Export reads no other key of Quarto's there. See [Figures](#figures). |
 | `fig-cap-location` | Where a figure's caption goes: `bottom` (default) or `top`. See [Figures](#figures). |
 
+### Keys for Other Tools
+
+Frontmatter can hold keys that Manuscript Markdown doesn't read, such as Pandoc's `date`, `subtitle`, `abstract`, `keywords` and `lang`, or Quarto's `format` and `execute`, and a `crossref` with none of the keys export reads (see [Figures](#figures)). Export doesn't show them in the Word document. It keeps them in the document's custom properties (`MANUSCRIPT_FRONTMATTER_UNUSED_KEYS_*`, see [converter](converter.md#yaml-frontmatter)), and import writes them back as you wrote them, with their quotes, literal and folded values, mappings, lists and comments:
+
+```yaml
+---
+title: A Study of Things
+date: 2024-05-01
+# Quarto
+format:
+  docx:
+    toc: true # a table of contents
+abstract: |
+  First paragraph.
+
+  Second paragraph.
+author: Jane Smith
+---
+```
+
+After a trip through Word, `title` and `author` come from the document, so an edit made in Word wins, and the other keys come back as written, in their places among them. If a co-author deletes the title in Word, `date` becomes the first key and the others keep their order. A key the Word document adds, such as a title typed in Word where the Markdown had none, goes after the others, as it does without them. A comment goes with the key after it, and a blank line with the kept key next to it. Comments before the keys import writes, and blank lines between two of them, are dropped, as before.
+
+A Word document without those properties, such as one created in Word or exported by an earlier version, imports as before, without those keys.
+
+Export reads a line under another key that names one of its own settings, such as `font: Arial` in a mapping under `format`, as that setting, and writes it to Word. A key with such a line isn't kept: import writes the setting it read in its place, as before. Nor is a key in quotes that names a setting, such as `"title"`.
+
+Kept keys come back with their lines exactly as written, including spaces at line ends and the blank lines a `|+` or `>+` value keeps at the end of the frontmatter. Nothing is kept, and import writes the frontmatter as before, where the frontmatter isn't a plain block mapping with each key at the start of its line: a flow mapping in `{` and `}`, frontmatter indented as a whole, a `?` key, a `...` line, or a plain value that goes on at the start of the next line. Nothing is kept either where a value in quotes, or a flow list or mapping in `[` and `]` or `{` and `}`, goes on past its line, as `abstract: "First line` with the rest on the next lines, or where a key in quotes holds an escape, as `"\x74itle"` or `'it''s'`. A literal or folded value (`|` or `>`) can run over as many lines as it needs. Nothing is kept either where a key that isn't kept defines an anchor, such as `title: &t Title`, since a kept key could refer to it.
+
 ### Heading and Title Font Configuration
 
 The `header-font`, `header-font-size`, and `header-font-style` fields control heading typography independently of body text. Each field accepts a single value (applied to all heading levels) or a comma-separated list of up to six values (one per heading level H1–H6).
@@ -708,6 +736,8 @@ Each entry contains standard BibTeX fields:
 
 - `author`, `title`, `journal`/`booktitle`, `year`, `volume`, `number`, `pages`
 - `doi`, `url`, `publisher`, `edition`, `abstract`
+
+An entry's `pubstate`, BibLaTeX's publication state, is the source's status in the style, as pandoc reads it, so `pubstate = {forthcoming}` shows a forthcoming article in chicago-author-date as `American Economic Journal: Applied Economics, Forthcoming.`, where the style would otherwise show `ahead of print`. Each of biblatex's keys, `inpreparation`, `submitted`, `forthcoming`, `inpress` and `prepublished`, written in lowercase as a word of its own, reads as the state it names, `in preparation`, `submitted`, `forthcoming`, `in press` and `pre-published`, in the case the style gives a status, as chicago-author-date's `In press`. Other text reads as written, as `under review`, which chicago-author-date shows as `Under review`. So does a key that isn't a word of its own as the `.bib` file writes it, outside every group and math, as pandoc reads it: one with punctuation, as `inpress,`, one in a group, as in `{inpress} now`, or in the group around the whole value, as `pubstate = {{inpress}}`, a command's argument, as `\url{inpress}`, and a word right after a command's name, which TeX joins to it, as in `\emph inpress`. An empty group is nothing, so `inpress{}` reads as `in press`. The states are biblatex's English ones, in any locale, where pandoc gives some languages their own, as French's `Sous presse`. An entry with no `pubstate` takes a `status` field's text as written, which pandoc doesn't read. DOCX import writes a citation's status back as `pubstate`, where it writes the `.bib` file from the citations' data, in a group around the whole value where it holds a key as a word of its own, so a status of `inpress` is written as `pubstate = {{inpress}}`, which export reads back as `inpress`, not `in press`.
 
 A field's name is what BibTeX reads as one: everything up to a space, `=`, a comma, a brace, a parenthesis, `"`, `#`, `%` or `'`, so `:doi` and `x:doi` are names of their own, not `doi`, and `été` and `a+b` are names too. A name that starts with a digit is none, as BibTeX reads none, so `1doi = {…}` is no field, and nothing in its value is either. A bare value is a number, its digits, as `year = 2020`, or a macro's name, read as a name is, as `month = jan` or `month = x-y`; after a number, the rest of its run, as `.1/a` in `10.1/a`, is no field's. A space other than ASCII's, as a no-break space, reads as a space, where BibTeX reads it in a name.
 

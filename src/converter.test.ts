@@ -35,6 +35,7 @@ import {
   extractBibData,
   extractBibliographyPath,
   extractCalloutLabels,
+  trackedFormatChanges,
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
 import { buildItemData } from './md-to-docx-citations';
@@ -20237,6 +20238,153 @@ describe('A template whose section properties have a tracked change', () => {
     expect(strip(markdown[0])).toBe(md);
     expect(markdown[1]).toBe(markdown[0]);
   });
+});
+
+describe('Tracked formatting changes', () => {
+  const DATE = '2024-01-01T00:00:00Z';
+  /** A tracked change's record of what properties were, `old`, by `author`,
+   *  or by none, as a table's grid's */
+  const record = (tag: string, author: string | undefined, old = '') =>
+    '<w:' + tag + ' w:id="9"' + (author === undefined ? '' : ' w:author="' + author + '" w:date="' + DATE + '"') + '>' + old + '</w:' + tag + '>';
+  const run = (rPr: string, text: string) => '<w:r><w:rPr>' + rPr + '</w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  /** A document with a change of each kind, made with `change`, which
+   *  writes a record or, as accepting it leaves the properties, nothing: a
+   *  run's, a deleted and an inserted run's, a paragraph's mark's and
+   *  properties, its numbering's, a section break's, a table's and its
+   *  grid's, a row's exceptions' and properties and a cell's, a note's, a
+   *  comment's and the last section's */
+  const docx = (change: (tag: string, old?: string) => string) => buildSyntheticDocx(wrapDocumentXml(
+    '<w:p>' + run('<w:b/>' + change('rPrChange', '<w:rPr/>'), 'Bold') + run('', ' text ')
+    + '<w:del w:id="1" w:author="Bob" w:date="' + DATE + '"><w:r><w:rPr><w:i/>' + change('rPrChange', '<w:rPr/>') + '</w:rPr><w:delText>gone</w:delText></w:r></w:del>'
+    + '<w:ins w:id="2" w:author="Bob" w:date="' + DATE + '">' + run('<w:i/>' + change('rPrChange', '<w:rPr/>'), 'new') + '</w:ins>'
+    + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+    + '<w:p><w:pPr><w:jc w:val="center"/><w:rPr><w:i/>' + change('rPrChange', '<w:rPr/>') + '</w:rPr>' + change('pPrChange', '<w:pPr/>') + '</w:pPr>'
+    + '<w:commentRangeStart w:id="0"/>' + run('', 'Centered') + '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>'
+    + '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/>' + change('numberingChange') + '</w:numPr></w:pPr>' + run('', 'Item') + '</w:p>'
+    + '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' + change('sectPrChange', '<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/></w:sectPr>')
+    + '</w:sectPr></w:pPr>' + run('', 'Section') + '</w:p>'
+    + '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>' + change('tblPrChange', '<w:tblPr/>') + '</w:tblPr>'
+    + '<w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/>' + change('tblGridChange', '<w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="5000"/></w:tblGrid>') + '</w:tblGrid>'
+    + '<w:tr><w:tblPrEx><w:jc w:val="center"/>' + change('tblPrExChange', '<w:tblPrEx/>') + '</w:tblPrEx><w:trPr><w:cantSplit/>' + change('trPrChange', '<w:trPr/>') + '</w:trPr>'
+    + '<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>' + change('tcPrChange', '<w:tcPr/>') + '</w:tcPr><w:p>' + run('', 'a') + '</w:p></w:tc>'
+    + '<w:tc><w:p>' + run('', 'b') + '</w:p></w:tc></w:tr></w:tbl>'
+    + '<w:p>' + run('', 'End.') + '</w:p>'
+    + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' + change('sectPrChange', '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>') + '</w:sectPr>'),
+  {
+    'word/footnotes.xml': wrapNotesXml('footnotes', '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>' + run('<w:u w:val="single"/>' + change('rPrChange', '<w:rPr/>'), ' Note') + '</w:p></w:footnote>'),
+    'word/comments.xml': '<?xml version="1.0"?><w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + '<w:comment w:id="0" w:author="Carol" w:date="' + DATE + '"><w:p>' + run('<w:b/>' + change('rPrChange', '<w:rPr/>'), 'Comment') + '</w:p></w:comment></w:comments>',
+  });
+
+  test('warns with the count of those import accepts, and writes the Markdown it writes with them accepted', async () => {
+    const withChanges = await convertDocx(await docx((tag, old) => record(tag, tag === 'tblGridChange' ? undefined : 'Alice', old)));
+    const accepted = await convertDocx(await docx(() => ''));
+    // Twelve in the body, but not the last section's, one in the note and
+    // one in the comment
+    expect(withChanges.warnings).toEqual(['Accepted 14 tracked formatting changes by Alice; Markdown has no syntax for them, so the text shows their new formatting.']);
+    expect(withChanges.markdown).toBe(accepted.markdown);
+    expect(withChanges.markdown).toContain('**Bold** text');
+    expect(accepted.warnings).toEqual([]);
+  });
+
+  test.each<[string, Array<string | undefined>, string]>([
+    ['one', ['Alice'], 'Accepted 1 tracked formatting change by Alice; Markdown has no syntax for it, so the text shows its new formatting.'],
+    ['two', ['Alice', 'Bob', 'Alice'], 'Accepted 3 tracked formatting changes by Alice and Bob; Markdown has no syntax for them, so the text shows their new formatting.'],
+    ['three', ['Alice', 'Bob', 'Carol'], 'Accepted 3 tracked formatting changes by Alice, Bob and Carol; Markdown has no syntax for them, so the text shows their new formatting.'],
+    ['four', ['A', 'B', 'C', 'D'], 'Accepted 4 tracked formatting changes; Markdown has no syntax for them, so the text shows their new formatting.'],
+    ['none', [undefined, ''], 'Accepted 2 tracked formatting changes; Markdown has no syntax for them, so the text shows their new formatting.'],
+    ['one, and some none', [undefined, 'Alice'], 'Accepted 2 tracked formatting changes by Alice; Markdown has no syntax for them, so the text shows their new formatting.'],
+  ])('names the authors where %s name one', async (_, authors, warning) => {
+    const body = authors.map(author => '<w:p>' + run('<w:b/>' + record('rPrChange', author, '<w:rPr/>'), 'x') + '</w:p>').join('');
+    expect((await convertDocx(await buildSyntheticDocx(wrapDocumentXml(body)))).warnings).toEqual([warning]);
+  });
+
+  test('counts a change in a deleted or inserted run, or a moved one, once', async () => {
+    const change = record('rPrChange', 'Alice', '<w:rPr/>');
+    const body = '<w:p><w:del w:id="1" w:author="Bob" w:date="' + DATE + '"><w:r><w:rPr><w:b/>' + change + '</w:rPr><w:delText>a</w:delText></w:r></w:del>'
+      + '<w:ins w:id="2" w:author="Bob" w:date="' + DATE + '"><w:del w:id="3" w:author="Bob" w:date="' + DATE + '"><w:r><w:rPr><w:b/>' + change + '</w:rPr><w:delText>b</w:delText></w:r></w:del></w:ins>'
+      + '<w:moveTo w:id="4" w:author="Bob" w:date="' + DATE + '">' + run('<w:b/>' + change, 'c') + '</w:moveTo></w:p>';
+    expect(trackedFormatChanges(wrapDocumentXml(body))).toEqual(['Alice', 'Alice', 'Alice']);
+    expect((await convertDocx(await buildSyntheticDocx(wrapDocumentXml(body)))).warnings).toEqual(['Accepted 3 tracked formatting changes by Alice; Markdown has no syntax for them, so the text shows their new formatting.']);
+  });
+
+  test('doesn\'t warn for a document with none, as one with insertions and deletions alone', async () => {
+    const body = '<w:p>' + run('<w:b/>', 'a') + '<w:ins w:id="1" w:author="Bob" w:date="' + DATE + '">' + run('', 'b') + '</w:ins>'
+      + '<w:del w:id="2" w:author="Bob" w:date="' + DATE + '"><w:r><w:delText>c</w:delText></w:r></w:del></w:p>'
+      + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>';
+    expect((await convertDocx(await buildSyntheticDocx(wrapDocumentXml(body)))).warnings).toEqual([]);
+  });
+
+  test.each([
+    ['a comment', '<!-- <w:rPrChange w:author="A"> -->'],
+    ['a CDATA section', '<![CDATA[<w:rPrChange w:author="A">]]>'],
+    ['a processing instruction', '<?pi <w:rPrChange w:author="A"> ?>'],
+  ])('doesn\'t count what looks like one in %s', (_, text) => {
+    expect(trackedFormatChanges(wrapDocumentXml('<w:p>' + text + run('<w:b/>', 'a') + '</w:p>'))).toEqual([]);
+  });
+
+  test('doesn\'t count one in a text box, which import doesn\'t read and Word writes twice', () => {
+    const inBox = '<w:p>' + run('<w:b/>' + record('rPrChange', 'Box', '<w:rPr/>'), 'boxed') + '</w:p>';
+    const textBox = '<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wps:txbx><w:txbxContent>' + inBox + '</w:txbxContent></wps:txbx></w:drawing></mc:Choice>'
+      + '<mc:Fallback><w:pict><v:textbox><w:txbxContent>' + inBox + '</w:txbxContent></v:textbox></w:pict></mc:Fallback></mc:AlternateContent></w:r>';
+    const xml = wrapDocumentXml('<w:p>' + textBox + run('<w:b/>' + record('rPrChange', 'Alice', '<w:rPr/>'), 'a') + '</w:p><w:p><w:r><w:txbxContent/></w:r>' + run('<w:b/>' + record('rPrChange', 'Bob', '<w:rPr/>'), 'b') + '</w:p>');
+    expect(trackedFormatChanges(xml)).toEqual(['Alice', 'Bob']);
+  });
+
+  test('counts a section break\'s, but not the last section\'s, which export keeps from a template', () => {
+    const xml = wrapDocumentXml('<w:p><w:pPr><w:sectPr>' + record('sectPrChange', 'Alice', '<w:sectPr/>') + '</w:sectPr></w:pPr></w:p>'
+      + '<w:p/><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:sectPr>' + record('sectPrChange', 'Bob', '<w:sectPr/>') + '</w:sectPr>');
+    expect(trackedFormatChanges(xml)).toEqual(['Alice']);
+  });
+
+  test('doesn\'t warn for export\'s document, with a template whose styles and last section have changes export keeps', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Intro.\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n\nEnd.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const sectionChange = record('sectPrChange', 'Alice', '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>');
+    const at = xml.lastIndexOf('</w:sectPr>');
+    // A body run's change, and a section break's, which import accepts, and
+    // the last section's, which it doesn't count
+    const edited = xml.slice(0, at).replace('<w:t>Intro.', '<w:rPr><w:b/>' + record('rPrChange', 'Alice', '<w:rPr/>') + '</w:rPr><w:t>Intro.')
+      .replace('</w:sectPr></w:pPr>', record('sectPrChange', 'Alice', '<w:sectPr/>') + '</w:sectPr></w:pPr>') + sectionChange + xml.slice(at);
+    expect(edited.match(/<w:\w+Change\b/g)).toHaveLength(3);
+    zip.file('word/document.xml', edited);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const styleChange = record('rPrChange', 'Alice', '<w:rPr/>');
+    const editedStyles = styles.replace(/(<w:style\b[^>]*w:styleId="Normal"[^>]*>[\s\S]*?<w:rPr>[\s\S]*?)(<\/w:rPr>)/, (_m, before: string, end: string) => before + styleChange + end);
+    expect(editedStyles).toContain(styleChange);
+    zip.file('word/styles.xml', editedStyles);
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const imported = await convertDocx(templateDocx);
+    expect(imported.warnings).toEqual(['Accepted 2 tracked formatting changes by Alice; Markdown has no syntax for them, so the text shows their new formatting.']);
+    const plain = (await convertMdToDocx(imported.markdown)).docx;
+    expect((await convertDocx(plain)).warnings).toEqual([]);
+    // With this template, and again with that export as the template
+    let template = templateDocx;
+    for (let trip = 0; trip < 2; trip++) {
+      const { docx: exported } = await convertMdToDocx(imported.markdown, { templateDocx: template });
+      const parts = await JSZip.loadAsync(exported);
+      expect(await parts.file('word/document.xml')!.async('string')).toContain(sectionChange + '</w:sectPr>');
+      expect(await parts.file('word/styles.xml')!.async('string')).toContain(styleChange);
+      expect((await convertDocx(exported)).warnings).toEqual([]);
+      template = exported;
+    }
+  });
+
+  // Records with a run each, and a section break's in a paragraph each, at
+  // 16,000 and at 64,000, and as many in text boxes, or after the last
+  // paragraph's properties: linear work takes 4 times as long at 64,000
+  test.each([
+    ['runs', (n: number) => ('<w:p>' + run('<w:b/>' + record('rPrChange', 'A', '<w:rPr/>'), 'a') + '</w:p>').repeat(n)],
+    ['section breaks', (n: number) => ('<w:p><w:pPr><w:sectPr>' + record('sectPrChange', 'A', '<w:sectPr/>') + '</w:sectPr></w:pPr></w:p>').repeat(n)],
+    ['text boxes', (n: number) => ('<w:p><w:r><w:txbxContent><w:p>' + run('<w:b/>' + record('rPrChange', 'A', '<w:rPr/>'), 'a') + '</w:p></w:txbxContent></w:r></w:p>').repeat(n)],
+    ['the last section', (n: number) => '<w:sectPr>' + record('sectPrChange', 'A', '<w:sectPr/>').repeat(n) + '</w:sectPr>'],
+    ['an unclosed comment', (n: number) => '<!-- ' + '<w:rPrChange>'.repeat(n)],
+  ])('counts many in %s in linear time', (_, body) => {
+    const [small, large] = [16000, 64000].map(n => wrapDocumentXml(body(n)));
+    const [smallTime, largeTime] = [fastestRun(() => trackedFormatChanges(small)), fastestRun(() => trackedFormatChanges(large))];
+    expect(largeTime).toBeLessThan(2000);
+    expect(largeTime).toBeLessThan(8 * smallTime + 100);
+  }, 60000);
 });
 
 describe('A section at the start of the document', () => {

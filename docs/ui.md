@@ -242,6 +242,8 @@ Once complete, the Markdown file opens in the editor. If a `.bib` file was gener
 
 **Success** — `"Exported to Markdown successfully"`
 
+**Success with warnings** — `Exported to Markdown with warnings: <warnings>`, as when import accepts the document's tracked formatting changes, which Markdown has no syntax for.
+
 **Error** — `"DOCX conversion failed: <error>"`
 
 ---

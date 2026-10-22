@@ -3,6 +3,7 @@
 // - TeX decoding reads standard text accents, the letters and symbols of text commands (\ss, \textregistered), ties, empty groups, dashes and quotes, and \url's argument, outside math, but only the accents in names (author, editor); unknown commands remain literal.
 // - Escaping writes an empty group between the hyphens and quotes TeX would join, as -{}-, but not in names, so a value reads back as it was.
 // - A decoded field but a name's is kept as TeX too (BibtexEntry.texFields), with \{ \} \\ \$ escaped, which the language server reads (bibtexFieldAsPlainText); `fields` holds its text (bibtexTexAsText).
+// - Each field's value is kept as the .bib file writes it too (BibtexEntry.writtenFields), in its braces or quotes, for a reader that needs the TeX the parser reads away, as export's pubstate does.
 // - Non-command braces remain intact; braces owned by recognized accent expressions and text symbols are consumed.
 // - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly.
 // - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string).
@@ -19,6 +20,11 @@ export interface BibtexEntry {
    *  name's, which reads as text, nor a field read as written
    *  (VERBATIM_BIBTEX_FIELDS). */
   texFields?: Map<string, string>;
+  /** Each field's value as the .bib file writes it, in its braces or quotes,
+   *  the first part of a concatenation, which the parser reads: the TeX
+   *  around its text that the parser reads away, as the group that holds
+   *  the whole of {{inpress}}, or the \url of \url{inpress} */
+  writtenFields?: Map<string, string>;
   zoteroKey?: string;
   zoteroUri?: string;
 }
@@ -1621,9 +1627,10 @@ function scanBibtex(input: string): ScannedBibtex {
       const fieldsStr = input.slice(startPos, endPos);
       const fields = new Map<string, string>();
       const texFields = new Map<string, string>();
+      const writtenFields = new Map<string, string>();
       const repeated = new Set<string>();
 
-      for (const field of readBibtexFields(fieldsStr)) {
+      for (const field of readBibtexFieldRanges(fieldsStr)) {
         const lowerField = field.name.toLowerCase();
         // The last value of a field given more than once is the one read (see
         // BibtexSourceRange.repeatedFields)
@@ -1632,6 +1639,7 @@ function scanBibtex(input: string): ScannedBibtex {
         fields.set(lowerField, text);
         if (tex === undefined) texFields.delete(lowerField);
         else texFields.set(lowerField, tex);
+        writtenFields.set(lowerField, field.parts[0]);
       }
       if (repeated.size > 0) range.repeatedFields = Array.from(repeated);
 
@@ -1640,6 +1648,7 @@ function scanBibtex(input: string): ScannedBibtex {
         key,
         fields,
         texFields,
+        writtenFields,
         zoteroKey: fields.get('zotero-key'),
         zoteroUri: fields.get('zotero-uri'),
       });

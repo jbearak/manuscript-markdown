@@ -1,12 +1,12 @@
 import JSZip from 'jszip';
 import { apartFromCurrency, asXmlNodes, endsInLatexComment, ommlToLatex, symbolFontCharacter, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
-import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CrossrefOptions, type CustomStyleDef } from './frontmatter';
+import { FRONTMATTER_OPENING_RE, Frontmatter, type FrontmatterLayout, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CrossrefOptions, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { styleFinder } from './style-element';
-import { replaceXmlElements, universalMeasure, xmlAttribute, xmlElement, xmlInteger, xmlNumber, xmlOn, xmlStartTag, xmlTwips } from './xml-elements';
+import { replaceXmlElements, universalMeasure, XML_TAG_ATTRIBUTES, xmlAttribute, xmlElement, xmlInteger, xmlMatches, xmlNumber, xmlOn, xmlStartTag, xmlTwips } from './xml-elements';
 import { xmlBuilder, xmlParser } from './xml-parser';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
@@ -18,7 +18,7 @@ import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type Tabl
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { readCitationItems } from './citation-syntax';
 import { citationLocatorText } from './citation-locator';
-import { bibtexNameParts, citeprocFieldText } from './md-to-docx-citations';
+import { bibtexNameParts, buildItemData, citeprocFieldText } from './md-to-docx-citations';
 import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, endsParagraph, exportReads, holdsDirective, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments, type MdRun } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -2163,6 +2163,9 @@ export interface ConvertResult {
   zoteroPrefs?: ZoteroDocPrefs;
   zoteroBiblData?: ZoteroBiblData;
   images?: Map<string, Uint8Array>;
+  /** What the Markdown can't keep of the document, for the user, as the
+   *  tracked formatting changes import accepts (see formatChangesWarning) */
+  warnings: string[];
 }
 
 // XML helpers
@@ -4835,6 +4838,26 @@ export async function extractFrontmatterFieldOrder(data: Uint8Array | JSZip): Pr
     const arr = JSON.parse(json);
     if (!Array.isArray(arr)) return null;
     return arr.filter((s: unknown): s is string => typeof s === 'string');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The frontmatter's keys export read nothing from, as written, among the
+ * names of those it reads (see frontmatterLayout and frontmatterLayoutProps
+ * in md-to-docx.ts). An entry with a line that would close the frontmatter
+ * isn't one export wrote, and goes.
+ */
+export async function extractFrontmatterLayout(data: Uint8Array | JSZip): Promise<FrontmatterLayout | null> {
+  const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_FRONTMATTER_UNUSED_KEYS_');
+  if (!json) return null;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((item: unknown): item is string | { text: string } => typeof item === 'string'
+      || (typeof item === 'object' && item !== null && typeof (item as { text?: unknown }).text === 'string'
+        && !/^---[ \t]*\r?$/m.test((item as { text: string }).text)));
   } catch {
     return null;
   }
@@ -18425,6 +18448,17 @@ function escapeBibtexField(s: string, field: string, wrap = false): string {
   return [groups, '{' + groups + '}'].find(value => asRead !== undefined && read(value) === asRead) ?? asWritten;
 }
 
+/** A citation's status, escaped, as a pubstate export reads back as that
+ *  status: as it is, or, where export would read a word of it as one of
+ *  biblatex's keys, as inpress, which it reads as in press, in a group
+ *  around the whole value, which the parser reads as the field's braces
+ *  and export as a group, so pubstate = {{inpress}} is inpress. */
+function pubstateAsWritten(written: string): string {
+  const entry = parseBibtex('@misc{k,\n  pubstate = {' + written + '}\n}').get('k');
+  const text = entry && citeprocFieldText(entry, 'pubstate');
+  return !entry || !text || buildItemData(entry).status === text ? written : '{' + written + '}';
+}
+
 /** Map CSL type back to the most appropriate BibTeX entry type. */
 export function mapCSLTypeToBibtex(cslType: string, genre?: string): string {
   switch (cslType) {
@@ -18513,6 +18547,8 @@ const CSL_TO_BIBTEX: Record<string, string> = {
   'abstract': 'abstract',
   'note': 'note',
   'collection-title': 'series',
+  // As BibLaTeX's publication state, which export gives citeproc as status
+  'status': 'pubstate',
 };
 
 export function generateBibTeX(
@@ -18586,7 +18622,8 @@ export function generateBibTeX(
       const val = meta.fullItemData?.[cslField];
       if (val != null && (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean')) {
         const strVal = String(val);
-        fields.push(`  ${bibtexField} = {${VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtexField(strVal, bibtexField)}}`);
+        const written = VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtexField(strVal, bibtexField);
+        fields.push(`  ${bibtexField} = {${cslField === 'status' ? pubstateAsWritten(written) : written}}`);
         alreadyEmitted.add(cslField);
       }
     }
@@ -19439,6 +19476,74 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptio
   return result;
 }
 
+// The records of Word's tracked formatting changes (ECMA-376 Part 1,
+// 17.13.5): what a run's, a paragraph's, a section's, a table's, a row's
+// exceptions to its table's, a row's or a cell's properties, a table's grid
+// or a paragraph's numbering were before a reviewer changed them with Track
+// Changes on. Word shows each record as one change. CriticMarkup has no
+// syntax for one, so import reads the properties as they are now, which
+// accepts the change.
+const FORMAT_CHANGES = ['rPrChange', 'pPrChange', 'sectPrChange', 'tblPrChange', 'tblPrExChange', 'trPrChange', 'tcPrChange', 'tblGridChange', 'numberingChange'];
+
+// A record's start tag or a text box's, with its attributes as XML may
+// spell them, or the end tag of a paragraph's properties or a text box
+const FORMAT_CHANGE_TAGS = new RegExp('<(w:(?:' + FORMAT_CHANGES.join('|') + '|txbxContent))' + XML_TAG_ATTRIBUTES + '(/?)>|</(w:(?:pPr|txbxContent))\\s*>');
+
+/**
+ * The tracked formatting changes in a part's XML (see FORMAT_CHANGES), in
+ * order, each as the author it names, or undefined for none: one for each
+ * record, as Word shows them, in a deleted or inserted run as in any other,
+ * each read as an XML parser reads it, not in a comment, a CDATA section
+ * or a processing instruction (see xmlMatches). Not one in a text box,
+ * which import doesn't read, and whose text Word writes twice, for readers
+ * that know its drawing and for those that don't. Nor one in the
+ * properties of the document's last section, which come after every
+ * paragraph's properties, as a section break's are in its paragraph's:
+ * export keeps a template's (see template-sections.ts), so a round trip
+ * with the document as its template keeps the change.
+ */
+export function trackedFormatChanges(xml: string): Array<string | undefined> {
+  const authors: Array<string | undefined> = [];
+  // Those in a section's properties since the last paragraph's properties
+  // ended, which are a section break's where another paragraph's end after
+  // them
+  let section: Array<string | undefined> = [];
+  let textBoxes = 0;
+  for (const [tag, name, empty, end] of xmlMatches(xml, FORMAT_CHANGE_TAGS)) {
+    if (end === 'w:pPr') {
+      pushAll(authors, section);
+      section = [];
+    } else if (end === 'w:txbxContent') {
+      textBoxes = Math.max(0, textBoxes - 1);
+    } else if (name === 'w:txbxContent') {
+      if (!empty) textBoxes++;
+    } else if (textBoxes === 0) {
+      (name === 'w:sectPrChange' ? section : authors).push(xmlAttribute(tag, 'w:author'));
+    }
+  }
+  return authors;
+}
+
+/** The warning for the tracked formatting changes in the parts of `zip`
+ *  whose text import writes as Markdown, the body, the notes and the
+ *  comments (see trackedFormatChanges), which import accepts, or undefined
+ *  for none, with the authors they name where they're three or fewer, as a
+ *  table's grid's names none. Not those in the styles, whose definitions
+ *  import writes none of, nor in a header or footer, which it doesn't
+ *  read: export keeps a template's, records and all. */
+async function formatChangesWarning(zip: JSZip): Promise<string | undefined> {
+  const parts = await Promise.all(['word/document.xml', 'word/footnotes.xml', 'word/endnotes.xml', 'word/comments.xml'].map(path => readZipText(zip, path)));
+  const authors: Array<string | undefined> = [];
+  for (const xml of parts) if (xml !== undefined) pushAll(authors, trackedFormatChanges(xml));
+  if (authors.length === 0) return undefined;
+  const names = [...new Set(authors.filter(author => author?.trim()))];
+  const by = names.length > 0 && names.length <= 3
+    ? ' by ' + (names.length === 1 ? names[0] : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]) : '';
+  const one = authors.length === 1;
+  return 'Accepted ' + authors.length + ' tracked formatting change' + (one ? '' : 's') + by + '; Markdown has no syntax for '
+    + (one ? 'it' : 'them') + ', so the text shows ' + (one ? 'its' : 'their') + ' new formatting.';
+}
+
 /** The style most of the body's quote paragraphs are in, the first's on a
  *  tie, which export writes them all in, so the fewest change, however
  *  they group in quotes; GitHub, its default, needs no setting. */
@@ -19500,6 +19605,7 @@ export async function convertDocx(
     portraitTableMapping,
     explicitTableFontSize,
     storedFieldOrder,
+    storedFrontmatterLayout,
     htmlCommentAfterGapMapping,
     sentinelGapMapping,
     styleBlockEdges,
@@ -19519,6 +19625,7 @@ export async function convertDocx(
     defaultTableDigits,
     defaultTableDecimalMark,
     defaultTableDigitGrouping,
+    formatChanges,
   } = await allNamed({
     inputs: documentContentInputs(zip, format, options?.imageFolder),
     zoteroPrefs: extractZoteroPrefs(zip),
@@ -19560,6 +19667,7 @@ export async function convertDocx(
     portraitTableMapping: extractPortraitTableMapping(zip),
     explicitTableFontSize: extractExplicitTableFontSize(zip),
     storedFieldOrder: extractFrontmatterFieldOrder(zip),
+    storedFrontmatterLayout: extractFrontmatterLayout(zip),
     htmlCommentAfterGapMapping: extractHtmlCommentAfterGapMapping(zip),
     sentinelGapMapping: extractSentinelGapMapping(zip),
     styleBlockEdges: extractStyleBlockEdges(zip),
@@ -19579,6 +19687,7 @@ export async function convertDocx(
     defaultTableDigits: extractDefaultTableDigits(zip),
     defaultTableDecimalMark: extractDefaultTableDecimalMark(zip),
     defaultTableDigitGrouping: extractDefaultTableDigitGrouping(zip),
+    formatChanges: formatChangesWarning(zip),
   });
 
   // Resolve pipeTableMaxLineWidth: explicit override > stored DOCX value > caller default > 120
@@ -20314,7 +20423,8 @@ export async function convertDocx(
   // Without a stored setting, as in a document from Word, the style its
   // quotes are in, which export would otherwise write as GitHub's
   fm.blockquoteStyle ??= inferredBlockquoteStyle(docContent);
-  const frontmatterStr = serializeFrontmatter(fm, storedFieldOrder ?? undefined);
+  // With the keys export read nothing from, as written, where they were
+  const frontmatterStr = serializeFrontmatter(fm, storedFieldOrder ?? undefined, storedFrontmatterLayout ?? undefined);
   if (frontmatterStr) {
     // Restore the original number of blank lines after frontmatter.
     // Default to 1 blank line (conventional) when no stored value exists.
@@ -20381,5 +20491,5 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images };
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: formatChanges === undefined ? [] : [formatChanges] };
 }

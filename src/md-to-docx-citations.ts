@@ -1,4 +1,4 @@
-import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText } from './bibtex-parser';
+import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText, parseBibtex } from './bibtex-parser';
 import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, withEquationEscapes, withWordBackslashes, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
@@ -42,6 +42,7 @@ export interface CiteprocItemData {
   abstract?: string;
   note?: string;
   'collection-title'?: string;
+  status?: string;
   'citation-key'?: string;
   'x-institution'?: string;
 }
@@ -768,6 +769,85 @@ const CITEPROC_NOTE_FIELD = /\{:(?:[-_a-z]+|[A-Z]+):[^}]+\}/;
 // The fields citeproc reads as numbers
 const NUMBER_FIELDS: ReadonlySet<string> = new Set(['volume', 'pages', 'number', 'edition']);
 
+// BibLaTeX's publication states, the keys its pubstate field takes, as
+// biblatex's English strings (english.lbx) give them, as pandoc does
+const PUBSTATE_STRINGS: ReadonlyMap<string, string> = new Map([
+  ['inpreparation', 'in preparation'],
+  ['submitted', 'submitted'],
+  ['forthcoming', 'forthcoming'],
+  ['inpress', 'in press'],
+  ['prepublished', 'pre-published'],
+]);
+
+// A command's name, after its backslash
+const COMMAND_NAME_AT = /[A-Za-z]+/y;
+
+/** A pubstate as the .bib file writes it, between its braces or quotes,
+ *  with each word that pandoc reads as one of biblatex's keys as the state
+ *  it names, so inpress is in press: a key in its case, as a word of its
+ *  own, outside every group and math, in which an empty group is nothing,
+ *  as in inpress{}. Not one in a group, as {inpress}, or the group around
+ *  the whole value, as {{inpress}}, nor a command's argument, as
+ *  \url{inpress}, nor a word after a command's name, which TeX joins to
+ *  it, as in \emph inpress. A word ends at white space, so inpress, with
+ *  its comma is none. */
+function withPubstateStates(written: string): string {
+  let depth = 0;
+  // Whether a word is in math, as the parser reads it (see readUrlsAndMath):
+  // display math between two dollar signs together, which a dollar sign
+  // alone doesn't end, and inline math between two alone
+  let math = false;
+  let display = false;
+  let afterCommand = false;
+  return written.replace(/[^ \t\n\r\f]+/g, word => {
+    const state = depth === 0 && !math && !afterCommand ? PUBSTATE_STRINGS.get(word.replace(/\{\}/g, '')) : undefined;
+    afterCommand = false;
+    for (let i = 0; i < word.length; i++) {
+      afterCommand = false;
+      if (word[i] === '\\') {
+        COMMAND_NAME_AT.lastIndex = i + 1;
+        const name = COMMAND_NAME_AT.exec(word);
+        i += name ? name[0].length : 1;
+        afterCommand = name !== null && i === word.length - 1;
+      } else if (word[i] === '{') depth++;
+      else if (word[i] === '}') depth = Math.max(0, depth - 1);
+      else if (word[i] === '$') {
+        const two = word[i + 1] === '$';
+        if (!math) {
+          math = true;
+          display = two;
+          if (two) i++;
+        } else if (!display || two) {
+          math = false;
+          if (display) i++;
+        }
+      }
+    }
+    return state ?? word;
+  });
+}
+
+/** An entry's pubstate as CSL's status, as pandoc reads it (see
+ *  withPubstateStates), from the value as the .bib file writes it, since
+ *  its text has lost the groups and commands around a word, as the group
+ *  around the whole of {{inpress}} or the \url of \url{inpress}. Its text,
+ *  `pubstate`, as it is where the entry has no value as written, or one
+ *  whose text has changed since it was read. */
+function pubstateAsStatus(entry: BibtexEntry, pubstate: string): string {
+  const written = entry.writtenFields?.get('pubstate');
+  if (written === undefined) return pubstate;
+  const quoted = written.startsWith('"');
+  const inside = quoted || written.startsWith('{') ? written.slice(1, -1) : written;
+  const states = withPubstateStates(inside);
+  if (states === inside) return pubstate;
+  // As the parser reads it, a bare value as a group
+  const read = (value: string) => {
+    const field = parseBibtex('@misc{k,\n  pubstate = ' + (quoted ? '"' + value + '"' : '{' + value + '}') + '\n}').get('k');
+    return field && citeprocFieldText(field, 'pubstate');
+  };
+  return read(inside) === pubstate ? read(states) ?? pubstate : pubstate;
+}
+
 /** A BibTeX field's text as citeproc's data holds it, with its groups'
  *  braces off, which keep its case in BibTeX, as citeproc's nocase, which a
  *  style that changes the case, as a title's or a publisher's first letter,
@@ -881,6 +961,15 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
 
   const series = text('series');
   if (series) itemData['collection-title'] = series;
+
+  // BibLaTeX's pubstate as CSL's status, as pandoc reads it, or, without
+  // one, a status field's text as written, which pandoc doesn't read. So
+  // chicago-author-date shows a forthcoming article as Forthcoming, not as
+  // "ahead of print", its term for an article with no volume, issue, pages
+  // or status.
+  const pubstate = text('pubstate');
+  const status = pubstate ? pubstateAsStatus(entry, pubstate) : text('status');
+  if (status) itemData.status = status;
 
   return itemData;
 }

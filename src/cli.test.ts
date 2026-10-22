@@ -3,7 +3,9 @@ import * as fc from 'fast-check';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import JSZip from 'jszip';
 import {
+  main,
   parseArgs,
   detectDirection,
   deriveDocxToMdPaths,
@@ -314,4 +316,31 @@ test('--colors rejects invalid values', () => {
 test('colors defaults to guttmacher', () => {
   const opts = parseArgs(['node', 'cli.js', 'file.md']);
   expect(opts.colors).toBe('guttmacher');
+});
+
+test('DOCX→MD writes each warning of the conversion to stderr, as for a tracked formatting change it accepts', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-test-'));
+  const { argv } = process;
+  const { log, error } = console;
+  const errors: unknown[] = [];
+  try {
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
+    zip.file('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+      + '<w:p><w:r><w:rPr><w:b/><w:rPrChange w:id="1" w:author="Alice" w:date="2024-01-01T00:00:00Z"><w:rPr/></w:rPrChange></w:rPr><w:t>Bold</w:t></w:r></w:p>'
+      + '</w:body></w:document>');
+    const inputPath = path.join(tempDir, 'paper.docx');
+    fs.writeFileSync(inputPath, await zip.generateAsync({ type: 'uint8array' }));
+    process.argv = ['node', 'cli.js', inputPath];
+    console.log = () => {};
+    console.error = (message: unknown) => { errors.push(message); };
+    await main();
+    expect(fs.readFileSync(path.join(tempDir, 'paper.md'), 'utf8')).toContain('**Bold**');
+    expect(errors).toEqual(['Warning: Accepted 1 tracked formatting change by Alice; Markdown has no syntax for it, so the text shows its new formatting.']);
+  } finally {
+    process.argv = argv;
+    console.log = log;
+    console.error = error;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

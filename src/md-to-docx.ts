@@ -9,7 +9,7 @@ import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
-import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
+import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, frontmatterLayout, Frontmatter, type FrontmatterLayout, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import { paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
@@ -8118,6 +8118,14 @@ function frontmatterFieldOrderProps(order: string[]): CustomPropEntry[] {
   return chunkCustomProps('MANUSCRIPT_FRONTMATTER_FIELD_ORDER_', JSON.stringify(order));
 }
 
+/** The frontmatter's keys export reads nothing from, as written, among the
+ *  names of those it reads (see frontmatterLayout), for import to put back.
+ *  JSON, whose text is a line, holds the YAML's line ends as \n, so none
+ *  goes to Word. */
+function frontmatterLayoutProps(layout: FrontmatterLayout | undefined): CustomPropEntry[] {
+  return layout ? chunkCustomProps('MANUSCRIPT_FRONTMATTER_UNUSED_KEYS_', JSON.stringify(layout)) : [];
+}
+
 function bibKeyOrderProps(bibEntries: Map<string, BibtexEntry> | undefined): CustomPropEntry[] {
   if (!bibEntries || bibEntries.size === 0) return [];
   return chunkCustomProps('MANUSCRIPT_BIB_KEY_ORDER_', [...bibEntries.keys()].join(','));
@@ -12084,6 +12092,9 @@ export async function convertMdToDocx(
   const markdown = closing ? written.slice(0, closing.end) + closing.fence : written;
   // Parse frontmatter for CSL style and other metadata
   const { metadata: frontmatter, body, fieldOrder, warnings: frontmatterWarnings } = parseFrontmatter(markdown);
+  // Where the frontmatter has keys export reads nothing from, as Pandoc's
+  // or Quarto's, where they are among those it reads, for import
+  const unusedFrontmatter = frontmatterLayout(markdown);
   // Count blank lines between frontmatter closing --- and body content.
   // parseFrontmatter strips the closing line's end; the line ends left at
   // the body's start are the blank lines
@@ -13091,6 +13102,7 @@ export async function convertMdToDocx(
     pushAll(customProps, frontmatterBlankLineProps(frontmatterBlankLines));
     pushAll(customProps, frontmatterSettingsProps(frontmatter));
     pushAll(customProps, frontmatterFieldOrderProps(fieldOrder));
+    pushAll(customProps, frontmatterLayoutProps(unusedFrontmatter));
     pushAll(customProps, bibKeyOrderProps(bibEntries));
     pushAll(customProps, bibDataProps(options?.bibtex));
     pushAll(customProps, bibliographyPathProps(frontmatter));
