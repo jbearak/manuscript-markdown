@@ -6,10 +6,12 @@ import { fastestRunAsync } from './test-timing';
 
 // Which row of a Word table import reads as its header: with Header Row
 // on (tblLook's firstRow), the first row, but not where the table's style
-// sets nothing for it and the row isn't all bold, as in a table Word
-// inserts, whose Table Grid shows the row as the rest
+// sets nothing for it and the row is plain, nothing in it bold or of a
+// boldness import can't tell, as in a table Word inserts, whose Table Grid
+// shows the row as the rest
 
 const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+const M_NS = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"';
 
 /** The tblLook Word writes for a table it inserts: its first row's and
  *  first column's parts on, and banded rows */
@@ -24,7 +26,7 @@ const tableStyle = (id: string, basedOn: string, part?: string, own = '') => '<w
   + '<w:name w:val="' + id + '"/><w:basedOn w:val="' + basedOn + '"/>' + own
   + (part === undefined ? '' : '<w:tblStylePr w:type="firstRow">' + part + '</w:tblStylePr>') + '</w:style>';
 
-/** Word's own styles.xml, in part: Normal, Strong, a bold paragraph
+/** Word's own styles.xml, in part: Normal, Strong, Emphasis, a bold paragraph
  *  style, Table Normal, Table Grid, and Grid Table 4 Accent 1, whose first
  *  row's part is bold and white on blue, with a style based on it */
 const STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles ' + W_NS + '>'
@@ -32,6 +34,7 @@ const STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles
   + '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
   + '<w:style w:type="paragraph" w:styleId="BoldPara"><w:name w:val="Bold Para"/><w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style>'
   + '<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/><w:bCs/></w:rPr></w:style>'
+  + '<w:style w:type="character" w:styleId="Emphasis"><w:name w:val="Emphasis"/><w:rPr><w:i/><w:iCs/></w:rPr></w:style>'
   + '<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/>'
   + '<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style>'
   + '<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:basedOn w:val="TableNormal"/>'
@@ -84,7 +87,7 @@ async function wordDocx(body: string, footnotes?: string, styles = STYLES): Prom
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
   zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>');
-  zip.file('word/document.xml', '<?xml version="1.0"?><w:document ' + W_NS + '><w:body>' + body + '</w:body></w:document>');
+  zip.file('word/document.xml', '<?xml version="1.0"?><w:document ' + W_NS + ' ' + M_NS + '><w:body>' + body + '</w:body></w:document>');
   zip.file('word/styles.xml', styles);
   if (footnotes) {
     zip.file('word/footnotes.xml', '<?xml version="1.0"?><w:footnotes ' + W_NS + '>'
@@ -161,9 +164,34 @@ describe('the header row of a Word table', () => {
     expect(await imported(table([header, body]))).toBe('| Na me | | Age |\n| --- | --- | --- |\n| Ann | | 30 |');
   });
 
-  test('a first row only partly in bold has no header row, and keeps its bold', async () => {
-    const md = await imported(table([row([cell(run('Name', '<w:b/>')), cell(run('Age'))]), BODY]));
-    expect(md).toBe('+----------+-----+\n| **Name** | Age |\n+----------+-----+\n| Ann      | 30  |\n+----------+-----+');
+  test('a first row partly in bold is a header, as before', async () => {
+    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell(run('Age'))]), BODY]))).toBe(PIPE);
+  });
+
+  test('a first row in bold by its paragraph marks, which import gives their runs, is a header', async () => {
+    const markBold = (text: string) => '<w:tc><w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr>' + run(text) + '</w:p></w:tc>';
+    expect(await imported(table([row([markBold('Name'), markBold('Age')]), BODY]))).toBe(PIPE);
+  });
+
+  test('a first row of equations is a header where one is bold, and not where they\'re plain', async () => {
+    const equation = (text: string, style = '') => cell('<m:oMath><m:r>' + (style ? '<m:rPr><m:sty m:val="' + style + '"/></m:rPr>' : '')
+      + '<m:t>' + text + '</m:t></m:r></m:oMath>');
+    expect(await imported(table([row([equation('x', 'b'), equation('y', 'b')]), BODY])))
+      .toBe('| $\\mathbf{x}$ | $\\mathbf{y}$ |\n| --- | --- |\n| Ann | 30 |');
+    // Bold italic, and bold by the run's properties
+    expect(await imported(table([row([equation('x', 'bi'), cell('<m:oMath><m:r><w:rPr><w:b/></w:rPr><m:t>y</m:t></m:r></m:oMath>')]), BODY])))
+      .toContain('| --- | --- |');
+    expect(await imported(table([row([equation('x'), equation('y')]), BODY])))
+      .toBe('+-----+-----+\n| $x$ | $y$ |\n+-----+-----+\n| Ann | 30  |\n+-----+-----+');
+  });
+
+  test('a first row of what import can\'t tell bold or not, as a picture, is a header, as before', async () => {
+    const picture = cell('<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
+      + '<wp:extent cx="100" cy="100"/></wp:inline></w:drawing></w:r>');
+    expect(await imported(table([row([picture, cell('')]), BODY]))).toBe('| | |\n| --- | --- |\n| Ann | 30 |');
+    // Beside plain text, and an equation of no text
+    expect(await imported(table([row([picture, cell(run('Age'))]), BODY]))).toContain('| --- | --- |');
+    expect(await imported(table([row([cell('<m:oMath><m:f><m:num/><m:den/></m:f></m:oMath>'), cell(run('Age'))]), BODY]))).toContain('| --- | --- |');
   });
 
   test('a first row of no text has no header row', async () => {
@@ -186,23 +214,20 @@ describe('the header row of a Word table', () => {
     }
   });
 
-  test('a symbol and a non-breaking hyphen count for a first row in bold', async () => {
-    // A symbol's run, or a hyphen's, not in bold, beside bold text, is a
-    // body row, which the next export doesn't make bold
+  test('a symbol and a non-breaking hyphen are text of a first row, bold or plain', async () => {
     const symbol = (char: string, rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:sym w:font="Symbol" w:char="' + char + '"/></w:r>';
-    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell(symbol('F061'))]), BODY])))
-      .toBe('+----------+-----+\n| **Name** | α   |\n+----------+-----+\n| Ann      | 30  |\n+----------+-----+');
-    const hyphenated = (rPr: string) => cell(run('A', '<w:b/>') + '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:noBreakHyphen/></w:r>' + run('B', '<w:b/>'));
-    expect(await imported(table([row([cell(run('Name', '<w:b/>')), hyphenated('')]), BODY])))
-      .toBe('+----------+-------------+\n| **Name** | **A**‑**B** |\n+----------+-------------+\n| Ann      | 30          |\n+----------+-------------+');
-    // A symbol of a font import can't read, which Word shows still
-    expect(await imported(table([row([cell(run('Name', '<w:b/>')), cell('<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r>')]), BODY])))
-      .not.toContain('| --- |');
-    // In bold, they're a header row's, as symbols alone are
-    expect(await imported(table([row([cell(run('Name', '<w:b/>')), hyphenated('<w:b/>')]), BODY])))
-      .toBe('| Name | A‑B |\n| --- | --- |\n| Ann | 30 |');
+    const hyphen = (rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:noBreakHyphen/></w:r>';
+    // In bold, alone, a header row's
     expect(await imported(table([row([cell(symbol('F061', '<w:b/>')), cell(symbol('F062', '<w:b/>'))]), BODY])))
       .toBe('| α | β |\n| --- | --- |\n| Ann | 30 |');
+    expect(await imported(table([row([cell(hyphen('<w:b/>')), cell(run('Age', '<w:b/>'))]), BODY])))
+      .toBe('| \u2011 | Age |\n| --- | --- |\n| Ann | 30 |');
+    // Plain, a body row's, which the next export doesn't make bold, and a
+    // symbol of a font import can't read, which Word shows still
+    expect(await imported(table([row([cell(symbol('F061')), cell(symbol('F062'))]), BODY])))
+      .toBe('+-----+-----+\n| α   | β   |\n+-----+-----+\n| Ann | 30  |\n+-----+-----+');
+    expect(await imported(table([row([cell(hyphen()), cell('<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r>')]), BODY])))
+      .not.toContain('| --- |');
   });
 
   test('a row Word repeats as a header is one', async () => {
@@ -287,9 +312,10 @@ describe('the header row of a table export wrote', () => {
 
 describe('the time to read a Word table\'s header row', () => {
   test('takes time in proportion to its first row\'s runs', async () => {
-    // Each run of the first row is read once, for its text and its bold
+    // Each run of the first row is read once, for its text and its bold:
+    // all of them, as the row is plain till its last
     const time = async (runs: number) => {
-      const first = row([cell(Array.from({ length: runs }, (_, k) => run('w' + k + ' ', '<w:rStyle w:val="Strong"/>')).join('')), cell(run('Age', '<w:b/>'))]);
+      const first = row([cell(Array.from({ length: runs }, (_, k) => run('w' + k + ' ', '<w:rStyle w:val="Emphasis"/>')).join('')), cell(run('Age', '<w:b/>'))]);
       const docx = await wordDocx(table([first, BODY]));
       return fastestRunAsync(async () => convertDocx(docx));
     };

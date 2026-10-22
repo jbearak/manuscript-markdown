@@ -6886,13 +6886,13 @@ function tableHasFirstRowHeader(tblChildren: XmlNode[]): boolean {
  * w:tblHeader, which Word repeats on each page (see rowHasHeaderProp):
  * where tblLook's firstRow, Header Row in Word, is on (see
  * tableHasFirstRowHeader), but not where the table's style has no part for
- * the row that sets anything (see styleFormatsFirstRow) and the row isn't
- * all bold (see firstRowBold). Word turns Header Row on for each table it
+ * the row that sets anything (see styleFormatsFirstRow) and the row is
+ * plain (see firstRowPlain). Word turns Header Row on for each table it
  * inserts, whose Table Grid has no such part, so a first row it shows like
  * the rest isn't one.
  */
 function firstRowHeader(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
-  return tableHasFirstRowHeader(tblChildren) && (styleFormatsFirstRow(tblChildren, layouts) || firstRowBold(tblChildren, layouts, look));
+  return tableHasFirstRowHeader(tblChildren) && (styleFormatsFirstRow(tblChildren, layouts) || !firstRowPlain(tblChildren, layouts, look));
 }
 
 /** Whether a table's style, or a style it's based on, has a part for its
@@ -6906,50 +6906,91 @@ function styleFormatsFirstRow(tblChildren: XmlNode[], layouts: StyleLayouts | un
   return styleChain(layouts.table, style).some(style => style.parts.get('firstRow')?.formats);
 }
 
+/** Whether a math run (m:r) of an equation is bold: in its math style,
+ *  bold or bold italic, or by its run's properties' bold */
+function mathRunBold(children: XmlNode[]): boolean {
+  const mathRPr = children.find(c => c['m:rPr'] !== undefined);
+  const sty = mathRPr && asXmlNodes(mathRPr['m:rPr']).find(c => c['m:sty'] !== undefined);
+  const rPr = children.find(c => c['w:rPr'] !== undefined);
+  const rPrChildren = rPr ? asXmlNodes(rPr['w:rPr']) : [];
+  return ['b', 'bi'].includes(getAttr(sty, 'm:val')) || isToggleOn(rPrChildren, 'w:b') || isToggleOn(rPrChildren, 'w:bCs');
+}
+
+/** The math runs (m:r) of an equation, at any depth */
+function mathRuns(nodes: XmlNode[]): XmlNode[][] {
+  return nodes.flatMap(node => Object.keys(node).filter(key => key !== ':@' && Array.isArray(node[key]))
+    .flatMap(key => key === 'm:r' ? [asXmlNodes(node[key])] : mathRuns(asXmlNodes(node[key]))));
+}
+
 /**
- * Whether all the text of a table's first row may be bold, as a row of
- * headings: each run of text but whitespace alone, which shows no bold,
- * with its symbols and the characters export writes back as them (see
- * withCharactersAsText), and not a hidden run's, in the elements the walk
- * of a table's runs reads (see TABLE_CONTENT), and some text. A run is bold
+ * Whether a table's first row is plain: with nothing in it bold, and
+ * nothing in it this can't tell bold or not, so that only a row that can't
+ * show as a header loses main's. Each run of text but whitespace alone,
+ * which shows no bold, with its symbols and the characters export writes
+ * back as them (see withCharactersAsText), but not a hidden run, in the
+ * elements the walk of a table's runs reads (see TABLE_CONTENT), is bold
  * where bold, or bold for complex scripts, as Arabic's, is on in its own
- * properties or any style it takes, for where its cell is in the table
- * (see styledProperty), though another turns it off, as Word turns off
- * bold that a paragraph style and a character style both turn on, and
- * where a style it takes is unknown, as a character style styles.xml
- * doesn't have, so that a first row is one where it may show as one.
+ * properties, its paragraph mark's, which import gives the paragraph's runs,
+ * or any style it takes, for where its cell is in the table (see
+ * styledProperty), though another turns it off, as Word turns off bold
+ * that a paragraph style and a character style both turn on, and where a
+ * style it takes is unknown, as a character style styles.xml doesn't have.
+ * Each math run with text is bold by its math style or its properties (see
+ * mathRunBold), and an equation without one can't be told. Nor can a
+ * picture, characters import doesn't read, as a note's reference mark, nor
+ * what holds runs this doesn't know, as a table in a cell. A row with
+ * nothing in it is plain.
  */
-function firstRowBold(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
+function firstRowPlain(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
   const rows = tblChildren.filter(c => c['w:tr'] !== undefined);
-  if (rows.length === 0) return false;
+  if (rows.length === 0) return true;
   const tableStyle = tableStyleId(tblChildren, layouts);
   const cols = tableColumnCount(tblChildren);
-  let text = false;
-  // Whether each run of text in `nodes`, at `level` of the table, is bold
-  const bold = (nodes: XmlNode[], level: TableLevel, place: CellPlace, paragraphStyle?: string): boolean => nodes.every(node => Object.keys(node).every(key => {
+  // Whether a run of text is bold, with `paragraphBold` from its paragraph
+  // mark's properties, by the place of its cell and its paragraph's style
+  const runBold = (rPrChildren: XmlNode[], paragraphBold: boolean, place: CellPlace, paragraphStyle?: string) => {
+    if (paragraphBold) return true;
+    const on = styledProperty(layouts, 'rPr', rPrChildren, { style: paragraphStyle, tableStyle, place },
+      rPr => isToggleOn(rPr, 'w:b') || isToggleOn(rPr, 'w:bCs') || undefined);
+    return on === undefined ? layouts !== undefined : on.value === true;
+  };
+  // Whether all in `nodes`, at `level` of the table, is plain
+  const plain = (nodes: XmlNode[], level: TableLevel, place: CellPlace, paragraphStyle?: string, paragraphBold = false): boolean => nodes.every(node => Object.keys(node).every(key => {
     if (key === ':@' || !Array.isArray(node[key]) || TABLE_SHOWS_NOTHING.has(key)) return true;
     const children = asXmlNodes(node[key]);
     const inner = Object.hasOwn(TABLE_CONTENT[level], key) ? TABLE_CONTENT[level][key] : undefined;
     if (key === 'w:p' && inner) {
       const pPr = children.find(c => c['w:pPr'] !== undefined);
-      const pStyle = pPr && asXmlNodes(pPr['w:pPr']).find(c => c['w:pStyle'] !== undefined);
-      return bold(children, inner, place, pStyle ? documentStyleId(pStyle) : undefined);
+      const pPrChildren = pPr ? asXmlNodes(pPr['w:pPr']) : [];
+      const pStyle = pPrChildren.find(c => c['w:pStyle'] !== undefined);
+      const markRPr = pPrChildren.find(c => c['w:rPr'] !== undefined);
+      const markRPrChildren = markRPr ? asXmlNodes(markRPr['w:rPr']) : [];
+      return plain(children, inner, place, pStyle ? documentStyleId(pStyle) : undefined,
+        isToggleOn(markRPrChildren, 'w:b') || isToggleOn(markRPrChildren, 'w:bCs'));
     }
-    if (inner) return bold(children, inner, place, paragraphStyle);
-    if (key !== 'w:r' || level !== 'paragraph') return true;
+    if (inner) return plain(children, inner, place, paragraphStyle, paragraphBold);
+    if (level === 'paragraph' && (key === 'm:oMath' || key === 'm:oMathPara')) {
+      const runs = mathRuns(children).filter(run => /[^\s\u00AD]/.test(run.filter(c => c['m:t'] !== undefined).map(c => nodeText(asXmlNodes(c['m:t']))).join('')));
+      return runs.length > 0 && !runs.some(mathRunBold);
+    }
+    if (key !== 'w:r' || level !== 'paragraph') return !holdsRun(children);
     const rPr = children.find(c => c['w:rPr'] !== undefined);
     const rPrChildren = rPr ? asXmlNodes(rPr['w:rPr']) : [];
     if (isToggleOn(rPrChildren, 'w:vanish')) return true;
     // A symbol's character and a non-breaking hyphen's too, which Word
     // shows in the run's bold, and a symbol of a font import can't read
-    const runChildren = withCharactersAsText(children);
-    const shown = runChildren.map(child => child['w:t'] !== undefined ? nodeText(asXmlNodes(child['w:t']))
-      : child['w:delText'] !== undefined ? nodeText(asXmlNodes(child['w:delText'])) : '').join('');
-    if (!/\S/.test(shown) && !runChildren.some(child => child['w:sym'] !== undefined)) return true;
-    text = true;
-    const on = styledProperty(layouts, 'rPr', rPrChildren, { style: paragraphStyle, tableStyle, place },
-      rPr => isToggleOn(rPr, 'w:b') || isToggleOn(rPr, 'w:bCs') || undefined);
-    return on === undefined ? layouts !== undefined : on.value === true;
+    let shows = false;
+    for (const child of withCharactersAsText(children)) {
+      const tag = Object.keys(child).find(name => name !== ':@') ?? '';
+      if (tag === 'w:t' || tag === 'w:delText') shows ||= /[^\s\u00AD]/.test(nodeText(asXmlNodes(child[tag])));
+      else if (tag === 'w:sym') shows = true;
+      else if (tag !== 'w:rPr' && tag !== '#text') {
+        const content = RUN_CONTENT[tag];
+        if (content === undefined || content === null || content === 'object') return false;
+        shows ||= /[^\s\u00AD]/.test(content);
+      }
+    }
+    return !shows || !runBold(rPrChildren, paragraphBold, place, paragraphStyle);
   }));
   let col = 0;
   for (const tc of asXmlNodes(rows[0]['w:tr']).filter(c => c['w:tc'] !== undefined)) {
@@ -6958,10 +6999,10 @@ function firstRowBold(tblChildren: XmlNode[], layouts: StyleLayouts | undefined,
     const gridSpan = tcPr && asXmlNodes(tcPr['w:tcPr']).find(c => c['w:gridSpan'] !== undefined);
     const val = gridSpan ? xmlInteger(getAttr(gridSpan, 'val')) ?? NaN : NaN;
     const span = val > 1 ? val : 1;
-    if (!bold(tcChildren, 'cell', { row: 0, rows: rows.length, col, span, cols, look })) return false;
+    if (!plain(tcChildren, 'cell', { row: 0, rows: rows.length, col, span, cols, look })) return false;
     col += span;
   }
-  return text;
+  return true;
 }
 
 function rowHasHeaderProp(trChildren: XmlNode[]): boolean {
