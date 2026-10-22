@@ -250,6 +250,29 @@ describe('Title tracked changes', () => {
     expect(extractTitleLines(content)).toEqual(['A {++new++} {--old--} {~~x~>y~~} {--p--}{++q++}']);
   });
 
+  it('drops tracked whitespace beside a title\'s line breaks, and a line of it alone', () => {
+    const ann = { author: 'Ann', date: '2026-01-01T00:00:00Z' };
+    const content: ContentItem[] = [
+      { type: 'para', isTitle: true },
+      text('A'),
+      text(' ', { type: 'addition', ...ann }),
+      text('\\\n'),
+      text(' ', { type: 'addition', ...ann }),
+      text('\\\n'),
+      text(' ', { type: 'deletion', ...ann }),
+      text('B'),
+    ];
+    expect(extractTitleLines(content)).toEqual(['A', 'B']);
+  });
+
+  it('MD→DOCX→MD keeps a deleted title line\'s font style', async () => {
+    const md = '---\ntitle: A\ntitle: {--B--}\ntitle-font-style: [bold, italic]\n---\n\nBody.';
+    const { docx } = await convertMdToDocx(md);
+    const { metadata } = parseFrontmatter((await convertDocx(docx)).markdown);
+    expect(metadata.title).toEqual(['A', '{--B--}']);
+    expect(metadata.titleFontStyle).toEqual(['bold', 'italic']);
+  });
+
   it('MD→DOCX→MD preserves tracked changes in the title', async () => {
     const md = '---\ntitle: My {++new ++}title {--draft--}\ntitle: {~~Old~>New~~} subtitle\n---\n\nBody paragraph.';
     const { docx } = await convertMdToDocx(md);
