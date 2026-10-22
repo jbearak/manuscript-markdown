@@ -1,6 +1,6 @@
 {
   "comment": "The <<} of a comment that opened on an earlier line. Markdown's paragraph rule starts again at each line, which ends the comment's span from manuscript-markdown.json there, so its <<} is in no comment's span. Here it's scoped as the comment's closer, so it shows as one, and its } is a comment's, which no bracket pairs with. Inside a comment's span this injects nothing, so the comment's own end pattern pairs its <<}, and a reply's, as {>>note {>>reply<<}<<}, on one line.",
-  "injectionSelector": "L:text.html.markdown -meta.comment -string -meta.embedded -markup.inline.raw -markup.fenced_code",
+  "injectionSelector": "L:text.html.markdown -meta.comment -string -meta.embedded -markup.inline.raw -markup.fenced_code -markup.raw.block",
   "scopeName": "manuscript-markdown.comment-closer.injection",
   "patterns": [
     {

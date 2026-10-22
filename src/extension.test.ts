@@ -379,8 +379,10 @@ describe('Syntax grammar comment closer', () => {
     expect(entry).toEqual({ path: './syntaxes/manuscript-markdown-comment-closer.json', scopeName: closer.scopeName, injectTo: ['text.html.markdown'] });
   });
 
-  it('applies where the main grammar does, but in a comment\'s span', () => {
-    expect(closer.injectionSelector).toBe(main.injectionSelector.replace('L:text.html.markdown', 'L:text.html.markdown -meta.comment'));
+  // and in an indented code block, which the main grammar's selector leaves
+  // in as it did before, as a <<} there is the code's
+  it('applies where the main grammar does, but in a comment\'s span or code', () => {
+    expect(closer.injectionSelector).toBe(main.injectionSelector.replace('L:text.html.markdown', 'L:text.html.markdown -meta.comment') + ' -markup.raw.block');
     // Each comment's span has a meta.comment scope there
     expect(main.repository.comment.name).toMatch(/^meta\.comment/);
     expect(main.repository.comment_with_id.contentName).toMatch(/^meta\.comment/);
