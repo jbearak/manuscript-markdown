@@ -29,7 +29,7 @@ import { extractZoteroKey } from './zotero-link';
 import { styleFence } from './style-fence';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
-import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, isCaptionText, labelOfBookmark, quotedAttributeValue, seqIdentifier, TABLE_LABEL_RE, type CaptionLocation, type CaptionParagraph } from './captions';
+import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, isCaptionText, labelOfBookmark, quotedAttributeValue, TABLE_LABEL_RE, type CaptionLocation, type CaptionParagraph } from './captions';
 import { asUtf8, decodeXml, parsePart, relatedPartPath, relatedPartPaths } from './template-sections';
 
 // --- Implementation notes ---
@@ -8755,8 +8755,7 @@ interface CaptionsRead {
  * Of each kind, only one series converts, the one of the most captions, as
  * the frontmatter gives each kind one title (see captionOptions), and
  * figures and tables share their delimiter, so where those of the two
- * differ, or their titles make one SEQ identifier, which would number them
- * together, the tables' stay text, or the figures' where they're fewer. A
+ * differ, the tables' stay text, or the figures' where they're fewer. A
  * number Word didn't update goes as export numbers it.
  *
  * Where every caption of a series has a picture or a table before it and
@@ -8771,7 +8770,9 @@ interface CaptionsRead {
  * punctuation Word's captions use (see captionSeparatorAt). A table an
  * embed gave (`embedTables`, by their order), whose directive import
  * writes in its place, takes none, nor does one in a style block, as
- * export gives one there none.
+ * export gives one there none: where one of a series' tables would be in
+ * one, as `tablesInStyleBlocks` tells of the body with their captions'
+ * items out, as import writes the blocks only later, the series stays text.
  *
  * Each label is that its caption's bookmark gives, by its name (see
  * labelOfBookmark), or by `labelsByBookmark`, the custom property export
@@ -8793,6 +8794,7 @@ function readCaptions(
   embedTables: ReadonlySet<number>,
   stored: { figureLocation?: CaptionLocation; tableLocation?: CaptionLocation; delim?: string },
   titles: { figure: string; table: string },
+  tablesInStyleBlocks?: (removed: ReadonlySet<ContentItem>) => ReadonlySet<ContentItem>,
 ): { figure?: CaptionsRead; table?: CaptionsRead } {
   if (!captionParagraphs || captionParagraphs.size === 0) return {};
   const storedSeparator = stored.delim !== undefined ? captionSeparator(stored.delim, true) : undefined;
@@ -8808,16 +8810,11 @@ function readCaptions(
     figure: { bottom?: number; top?: number };
     table: { bottom?: number; top?: number };
   }
-  // The tables that take no caption: those an embed gave, and those in a
-  // style block, where export gives a table none
+  // The tables that take no caption: those an embed gave, whose directive
+  // import writes in their place
   const captionless = new Set<ContentItem>();
   let tables = 0;
-  let styled = false;
-  for (const item of content) {
-    if (item.type === 'custom_style_open') styled = true;
-    else if (item.type === 'custom_style_close') styled = false;
-    else if (item.type === 'table' && (embedTables.has(tables++) || styled)) captionless.add(item);
-  }
+  for (const item of content) if (item.type === 'table' && embedTables.has(tables++)) captionless.add(item);
   const series = new Map<string, Candidate[]>();
   const failed = new Set<string>();
   for (let start = 0; start < content.length; start++) {
@@ -8913,6 +8910,21 @@ function readCaptions(
     chosen[kind] = { candidates, location: places[kind]!, delim: [...delims][0] };
   }
 
+  /** Where the items of a caption that converts start, and how many, which
+   *  go out of `content`. A figure's caption with no para item of its own,
+   *  as one that starts the document, a section or the text after a code
+   *  block's spacer, takes the picture's para item after it, as the picture
+   *  then starts there. A table's has nothing after it but the table, so
+   *  one that starts a section takes the para item the section's start left
+   *  before it, as the table then starts the section, as it would with none */
+  function removal({ start, end }: Candidate): [number, number] {
+    const own = content[start].type === 'para';
+    const atSection = !own && content[end]?.type === 'table' && content[start - 1]?.type === 'para'
+      && (content[start - 2]?.type === 'landscape_open' || content[start - 2]?.type === 'portrait_open');
+    const takesNext = !own && content[end]?.type !== 'table';
+    return [atSection ? start - 1 : start, end - start + (takesNext || atSection ? 1 : 0)];
+  }
+
   // Each caption's text's Markdown, which export reads back as Word has it,
   // or undefined for a kind one of whose captions doesn't
   const read = (candidate: Candidate) => candidate.caption.map(item => item.type === 'math' ? { latex: item.latex } : item.type !== 'text' ? undefined : {
@@ -8951,12 +8963,23 @@ function readCaptions(
     }
     tablesRead.push({ candidate, table: content[candidate.table[chosen.table!.location]!] as TableItem, caption });
   }
-  // One delimiter, title-delim, for both, and a SEQ identifier for each,
-  // which export makes of its title, so titles that make one, as `Fig.` and
-  // `Fig`, would number the figures and the tables together in Word
+  // None in a style block, as the body will be with their captions out (see
+  // removal), which export would give no caption
+  if (tablesRead.length > 0 && tablesInStyleBlocks) {
+    const removed = new Set<ContentItem>();
+    for (const { candidate } of tablesRead) {
+      const [from, count] = removal(candidate);
+      for (let k = from; k < from + count; k++) removed.add(content[k]);
+    }
+    const styled = tablesInStyleBlocks(removed);
+    if (tablesRead.some(({ table: item }) => styled.has(item))) {
+      tablesRead.length = 0;
+      delete chosen.table;
+    }
+  }
+  // One delimiter, title-delim, for both
   const { figure, table } = chosen;
-  if (figure && table && (figure.delim !== undefined && table.delim !== undefined && figure.delim !== table.delim
-    || seqIdentifier(figure.candidates[0].title, 'Figure') === seqIdentifier(table.candidates[0].title, 'Table'))) {
+  if (figure?.delim !== undefined && table?.delim !== undefined && figure.delim !== table.delim) {
     if (table.candidates.length > figure.candidates.length) {
       figures.length = 0;
       delete chosen.figure;
@@ -8985,18 +9008,9 @@ function readCaptions(
     item.caption = { label: labelOf(candidate, n, 'tbl'), caption };
   });
   const removed = [...figures, ...tablesRead].map(({ candidate }) => candidate).sort((a, b) => b.start - a.start);
-  for (const { start, end } of removed) {
-    // A figure's caption with no para item of its own, as one that starts
-    // the document, a section or the text after a code block's spacer,
-    // takes the picture's para item after it, as the picture then starts
-    // there. A table's has nothing after it but the table, so one that
-    // starts a section takes the para item the section's start left before
-    // it, as the table then starts the section, as it would with none.
-    const own = content[start].type === 'para';
-    const atSection = !own && content[end]?.type === 'table' && content[start - 1]?.type === 'para'
-      && (content[start - 2]?.type === 'landscape_open' || content[start - 2]?.type === 'portrait_open');
-    const takesNext = !own && content[end]?.type !== 'table';
-    content.splice(atSection ? start - 1 : start, end - start + (takesNext || atSection ? 1 : 0));
+  for (const candidate of removed) {
+    const [from, count] = removal(candidate);
+    content.splice(from, count);
   }
   const readOf = (kind: Kind): CaptionsRead | undefined => {
     const seriesRead = chosen[kind];
@@ -19837,6 +19851,297 @@ function inferredBlockquoteStyle(content: ContentItem[]): BlockquoteStyle | unde
   for (const [style, count] of counts) if (most === undefined || count > counts.get(most)!) most = style;
   return most === 'GitHub' ? undefined : most;
 }
+/**
+ * The body's items, `docContent`, with the sentinels of its style blocks
+ * around each run of paragraphs that share a custom style, and the runs of
+ * blocks Word can't give one in them as export recorded (`edges`, see
+ * extractStyleBlockEdges). It changes no item of `docContent`: where an
+ * item changes, a copy goes in its place. convertDocx writes the blocks so,
+ * and readCaptions asks which tables they hold, as export gives one in a
+ * block no caption
+ */
+function styleBlockSentinels(docContent: ContentItem[], edges: Record<string, number>): ContentItem[] {
+  let activeStyle: string | undefined;
+  // The paragraphs of a list item a style block in it is open for, which
+  // ends at anything else
+  let inItem: ListContinuation | undefined;
+  // The items with the sentinels, which go back in docContent at the end,
+  // as a splice for each sentinel took time for each item after it
+  const out: ContentItem[] = [];
+  // The index of the paragraph after the empty ones after a quote in a
+  // list item, in a block they don't end, and those (see below)
+  let separatorsInBlock = -1;
+  const keptSeparators = new Set<ContentItem>();
+  // A tracked mark on `para`, which a style block in a list item starts
+  // or ends at, is the break that ends the paragraph before it, which
+  // stays before the block's fence, on an empty paragraph, as at the top
+  // level (below), in the item (`listContinuation`), where the paragraph
+  // before it is. The paragraph after it
+  const markBeforeFence = (para: ContentItem, listContinuation: ListContinuation): ContentItem => {
+    if (para.type !== 'para' || !para.breakRevision) return para;
+    const { breakRevision, ...rest } = para;
+    out.push({ type: 'para', breakRevision, listContinuation });
+    return rest;
+  };
+  // Whether the item at `at` is an empty paragraph, with no text of its
+  // own, which an empty one before a paragraph that isn't in a block has
+  // (see the empty paragraphs' count)
+  const separator = (at: number): boolean => {
+    const entry = docContent[at];
+    return entry.type === 'para' && isPlainEmptyParagraph(entry) && !paragraphHasContent(docContent, at);
+  };
+  // The level of a list item, as buildMarkdown writes one
+  const itemLevel = (entry: ContentItem): number | undefined => entry.type === 'para' && entry.listMeta && !entry.headingLevel && !entry.isCodeBlock && !entry.isTitle ? entry.listMeta.level : undefined;
+  // The paragraph a block opened in a list item before a sublist at
+  // `across` goes on to, past the sublist (see below)
+  let across: ContentItem | undefined;
+  /** Where the item at `at`, with no custom style, is in a sublist of an
+   *  item in the block open at the top level, which a closing fence there
+   *  would end: the item a block that closes it goes in, the one before
+   *  it at its level, or else the one its sublist is in, and with the
+   *  latter, that item's paragraph in a custom style right after the
+   *  sublist, if one is. Export closes a block at the top level with no
+   *  fence where a block opens in an item (see applyCustomStyleSentinels
+   *  in md-to-docx.ts), and the sublist of an item in a block that opens
+   *  in it keeps no style (see extractListItems), so this is where one
+   *  opened in the item before the sublist, or at the end of the item
+   *  before, which keeps the sublist one list. The items before it are
+   *  in `out`, with their sentinels */
+  const sublistInBlock = (at: number): { host: ParaItem; styled?: ParaItem } | undefined => {
+    const depth = itemLevel(docContent[at]);
+    if (!depth) return undefined;
+    let host: ParaItem | undefined;
+    for (let k = out.length - 1; k >= 0 && !host; k--) {
+      const before = out[k];
+      const beforeLevel = itemLevel(before);
+      if (beforeLevel !== undefined) {
+        if (beforeLevel <= depth) host = before as ParaItem;
+      } else if (before.type === 'para' ? !before.listContinuation && !keptSeparators.has(before) : isStructuralBoundaryItem(before)) {
+        return undefined;
+      }
+    }
+    if (!host?.itemContinuation || host.customStyleName !== activeStyle) return undefined;
+    const level = host.listMeta!.level;
+    if (level === depth) return { host };
+    for (let k = at; k < docContent.length; k++) {
+      const next = docContent[k];
+      if (next.type !== 'para') {
+        if (isStructuralBoundaryItem(next)) return { host };
+        continue;
+      }
+      if (!next.customStyleName && (itemLevel(next) ?? next.listContinuation?.level ?? -1) > level) continue;
+      const styled = next.customStyleName && !next.listMeta && !next.blockquoteLevel && next.listContinuation?.level === level ? next : undefined;
+      return { host, ...(styled ? { styled } : {}) };
+    }
+    return { host };
+  };
+  // A block Word can't give a style block's style, as a heading, a quote,
+  // code, a table or a thematic break, which keeps its own, and so ends
+  // the run of paragraphs in the block's style. Export recorded, for each
+  // block's place among those at the top level Word has a paragraph of,
+  // which this opens one for each of (see styleBlock in
+  // generateDocumentXml in md-to-docx.ts), whether a run of such blocks,
+  // with the empty paragraphs export writes around them, between two
+  // paragraphs of the block's style is in the block. Elsewhere, it
+  // recorded how many the block before the run ends with, and how many the
+  // block after it starts with, and the rest are in no block. Where it
+  // recorded none, the run ends the block, and is in none, as before
+  const unstyled = (entry: ContentItem): boolean => entry.type === 'table' || entry.type === 'para' && !entry.customStyleName
+    && !entry.listMeta && !entry.listContinuation && !!(entry.isCodeBlock || entry.blockquoteLevel || entry.headingLevel || entry.horizontalRule);
+  /** The run of such blocks and empty paragraphs from `at`: where each
+   *  block starts, and the next item after it, as a code block's lines are
+   *  one block, and the index past the run */
+  const unstyledRun = (at: number): { units: Array<{ start: number; end: number }>; end: number } => {
+    const units: Array<{ start: number; end: number }> = [];
+    let open: { start: number; end: number } | undefined;
+    let last: ContentItem | undefined;
+    let k = at;
+    for (; k < docContent.length; k++) {
+      const entry = docContent[k];
+      if (!isStructuralBoundaryItem(entry)) continue;
+      const goesOn = open && entry.type === 'para' && entry.isCodeBlock && last?.type === 'para' && last.isCodeBlock && entry.blockquoteLevel === last.blockquoteLevel;
+      last = entry;
+      if (goesOn) continue;
+      if (open) open.end = k;
+      open = undefined;
+      if (unstyled(entry)) units.push(open = { start: k, end: -1 });
+      else if (!separator(k)) break;
+    }
+    if (open) open.end = k;
+    return { units, end: k };
+  };
+  // The blocks opened at the top level so far, the index past the run of
+  // them planned last, and past the last run of empty paragraphs alone,
+  // which no item in needs reading again, and the fences planned, in
+  // order, each before the item at `at`: a block's opening one, of
+  // `style`, or else a closing one
+  let opened = 0;
+  let planned = -1;
+  let read = -1;
+  const fences: Array<{ at: number; style?: string }> = [];
+  let fenced = 0;
+  /** The fences of the run of such blocks from `at`, if it holds one, as
+   *  export recorded them */
+  const planRun = (at: number): void => {
+    const { units, end } = unstyledRun(at);
+    read = end;
+    if (units.length === 0) return;
+    planned = end;
+    const next = docContent[end];
+    const nextStyle = next?.type === 'para' && !next.listContinuation ? next.customStyleName : undefined;
+    const block = opened - 1;
+    if (activeStyle && nextStyle === activeStyle && edges['csi' + block]) return;
+    // Before the unit at `unit`, past the empty paragraphs after the one
+    // before it, which a fence goes before, as after a paragraph
+    const fence = (unit: number, style?: string) => fences.push({ at: unit === 0 ? at : units[unit - 1].end, ...(style ? { style } : {}) });
+    // Those the block open ends with
+    let taken = 0;
+    if (activeStyle) {
+      taken = Math.min(edges['cst' + block] ?? 0, units.length);
+      fence(taken);
+    }
+    const lead = nextStyle ? Math.min(edges['csl' + (block + 1)] ?? 0, units.length - taken) : 0;
+    if (lead > 0) fence(units.length - lead, nextStyle);
+  };
+  /** The item at `i`, after the sentinels and marks that go before it,
+   *  which this puts in `out` */
+  const place = (i: number): ContentItem => {
+    let item = docContent[i];
+    // Only structural items (para, table, landscape/portrait sentinels,
+    // bibliography_marker) should trigger style transitions. Inline items
+    // (text, image, math, hardbreak, etc.) live inside a para and don't
+    // carry customStyleName — skip them to avoid premature style close.
+    const isStructural = item.type === 'para' || item.type === 'table'
+      || item.type === 'landscape_open' || item.type === 'landscape_close'
+      || item.type === 'portrait_open' || item.type === 'portrait_close'
+      || item.type === 'bibliography_marker';
+    if (!isStructural) return item;
+    const styleName = (item.type === 'para' && item.customStyleName) ? item.customStyleName : undefined;
+    if (inItem) {
+      // The sublist the block opened before, up to its paragraph
+      if (across && item !== across) return item;
+      across = undefined;
+      if (item.type === 'para' && !item.blockquoteLevel && item.listContinuation?.level === inItem.level && styleName === activeStyle) return item;
+      item = markBeforeFence(item, inItem);
+      out.push({ type: 'custom_style_close', inItem });
+      activeStyle = inItem = undefined;
+    }
+    // A paragraph in a list item in a custom style is in a block in the
+    // item, as export gives no other paragraph in an item one, but the
+    // continuation's, in a block its item is in too (see
+    // listContinuationStyleId in md-to-docx.ts). A block open at the top
+    // level, as one the item is in, closes here with no fence of its own,
+    // which would end the item before the paragraph, as export closes one
+    // where a block opens in an item (see applyCustomStyleSentinels)
+    if (styleName && item.type === 'para' && item.listContinuation && !item.blockquoteLevel) {
+      const continuation = item.listContinuation;
+      item = markBeforeFence(item, continuation);
+      inItem = continuation;
+      out.push({ type: 'custom_style_open', styleName, inItem });
+      activeStyle = styleName;
+      return item;
+    }
+    // A paragraph or quote in a list item with no custom style, which
+    // takes the list's style and not the block's, is in the block the item
+    // is in, or in none with it. The items of a list in a block take its
+    // style (see generateParagraph in md-to-docx.ts)
+    if (!styleName && item.type === 'para' && item.listContinuation) return item;
+    // An item with no custom style in a sublist of an item in a block open
+    // at the top level, which a fence there would end. The block in the
+    // item that closes it opens before the sublist, and goes on past it
+    // to its paragraph after it, or else is empty, of the block's own
+    // style, in that item or the one before at the sublist's level
+    const sublist = activeStyle && !inItem && !styleName ? sublistInBlock(i) : undefined;
+    if (sublist) {
+      const continuation = sublist.host.itemContinuation!;
+      item = markBeforeFence(item, continuation);
+      const style = sublist.styled?.customStyleName ?? activeStyle!;
+      out.push({ type: 'custom_style_open', styleName: style, inItem: continuation });
+      if (sublist.styled) {
+        inItem = continuation;
+        activeStyle = style;
+        across = sublist.styled;
+      } else {
+        out.push({ type: 'custom_style_close', inItem: continuation });
+        activeStyle = undefined;
+      }
+      return item;
+    }
+    // The empty paragraphs export writes after a quote in a list item, at
+    // which a list block ends, before an item that starts another list or
+    // a paragraph after the list (see generateDocumentXml in
+    // md-to-docx.ts), in a block that goes on after them, which they
+    // don't end, as the quote didn't. Nor before another list item, where
+    // the block ends, if it does, as a block in an item (see
+    // sublistInBlock), or at the item, which keeps the list it starts
+    // apart from the one before, as a fence before it does
+    if (!styleName && activeStyle && i < separatorsInBlock) {
+      keptSeparators.add(item);
+      return item;
+    }
+    if (!styleName && activeStyle && separator(i)) {
+      let before = out.length - 1;
+      while (before >= 0 && !isStructuralBoundaryItem(out[before])) before--;
+      const quote = out[before];
+      let next = i + 1;
+      while (next < docContent.length && (!isStructuralBoundaryItem(docContent[next]) || separator(next))) next++;
+      const after = docContent[next];
+      if (quote?.type === 'para' && quote.blockquoteLevel && quote.listContinuation
+          && after?.type === 'para' && (after.customStyleName === activeStyle || itemLevel(after) !== undefined)) {
+        separatorsInBlock = next;
+        keptSeparators.add(item);
+        return item;
+      }
+    }
+    // A run of blocks Word can't give a style block's style, with the
+    // fences planned in it, and at the item after it
+    if (i >= read && !inItem && (unstyled(item) || separator(i))) planRun(i);
+    // A tracked mark before a paragraph a style block starts or ends at is
+    // the break that ends the paragraph before it, which the block keeps
+    // from joining the text after (see joinTrackedParagraphBreaks): it
+    // stays before the sentinels, on an empty paragraph, or on the one it
+    // is on where that holds nothing else, which then doesn't end the
+    // style. A block starts or ends at a fence planned here, or past a run
+    // planned, where the paragraph's style isn't the block's
+    const fenceHere = fenced < fences.length && fences[fenced].at <= i;
+    if (item.type === 'para' && item.breakRevision && (fenceHere || i >= planned && (styleName ? styleName !== activeStyle : activeStyle))) {
+      const { breakRevision, ...para } = item;
+      if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) return item;
+      out.push({ type: 'para', breakRevision });
+      item = para;
+    }
+    for (; fenced < fences.length && fences[fenced].at <= i; fenced++) {
+      const { style } = fences[fenced];
+      if (activeStyle) out.push({ type: 'custom_style_close' });
+      activeStyle = style;
+      if (style) {
+        out.push({ type: 'custom_style_open', styleName: style });
+        opened++;
+      }
+    }
+    if (i < planned) return item;
+    if (styleName && styleName !== activeStyle) {
+      // Close previous style if open
+      if (activeStyle) out.push({ type: 'custom_style_close' });
+      // Open new style
+      out.push({ type: 'custom_style_open', styleName });
+      opened++;
+      activeStyle = styleName;
+    } else if (!styleName && activeStyle) {
+      // Style run ended
+      out.push({ type: 'custom_style_close' });
+      activeStyle = undefined;
+    }
+    return item;
+  };
+  for (let i = 0; i < docContent.length; i++) out.push(place(i));
+  // Close any still-open style at end of document
+  if (activeStyle) {
+    out.push({ type: 'custom_style_close', ...(inItem ? { inItem } : {}) });
+  }
+  return out;
+}
+
 
 export async function convertDocx(
   data: Uint8Array,
@@ -20027,7 +20332,24 @@ export async function convertDocx(
       }, {
         figure: storedSettings?.crossref?.figTitle ?? DEFAULT_CAPTION_OPTIONS.figTitle,
         table: storedSettings?.crossref?.tblTitle ?? DEFAULT_CAPTION_OPTIONS.tblTitle,
-      })
+      }, docContent.some(item => item.type === 'para' && item.customStyleName) ? removed => {
+        // The tables in a style block at the top level, as the blocks will be
+        // written, after the body's structure is read, with `removed` out,
+        // of copies of the items, which those steps change
+        const kept = docContent.filter(item => !removed.has(item));
+        const copies = structuredClone(kept);
+        const originals = new Map<ContentItem, ContentItem>(copies.map((copy, k) => [copy, kept[k]]));
+        structureBody(copies, blockquotePlaces);
+        const styled = new Set<ContentItem>();
+        let open = false;
+        for (const item of styleBlockSentinels(copies, styleBlockEdges ?? {})) {
+          // A block opened in a list item ends the one open at the top level
+          if (item.type === 'custom_style_open') open = !item.inItem;
+          else if (item.type === 'custom_style_close' && !item.inItem) open = false;
+          else if (item.type === 'table' && open) styled.add(originals.get(item)!);
+        }
+        return styled;
+      } : undefined)
     : {};
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
@@ -20135,285 +20457,7 @@ export async function convertDocx(
   // Post-process: inject custom_style_open/custom_style_close sentinels around
   // runs of paragraphs that share a customStyleName.
   {
-    let activeStyle: string | undefined;
-    // The paragraphs of a list item a style block in it is open for, which
-    // ends at anything else
-    let inItem: ListContinuation | undefined;
-    // The items with the sentinels, which go back in docContent at the end,
-    // as a splice for each sentinel took time for each item after it
-    const out: ContentItem[] = [];
-    // The index of the paragraph after the empty ones after a quote in a
-    // list item, in a block they don't end, and those (see below)
-    let separatorsInBlock = -1;
-    const keptSeparators = new Set<ContentItem>();
-    // A tracked mark on `para`, which a style block in a list item starts
-    // or ends at, is the break that ends the paragraph before it, which
-    // stays before the block's fence, on an empty paragraph, as at the top
-    // level (below), in the item (`listContinuation`), where the paragraph
-    // before it is. The paragraph after it
-    const markBeforeFence = (para: ContentItem, listContinuation: ListContinuation): ContentItem => {
-      if (para.type !== 'para' || !para.breakRevision) return para;
-      const { breakRevision, ...rest } = para;
-      out.push({ type: 'para', breakRevision, listContinuation });
-      return rest;
-    };
-    // Whether the item at `at` is an empty paragraph, with no text of its
-    // own, which an empty one before a paragraph that isn't in a block has
-    // (see the empty paragraphs' count)
-    const separator = (at: number): boolean => {
-      const entry = docContent[at];
-      return entry.type === 'para' && isPlainEmptyParagraph(entry) && !paragraphHasContent(docContent, at);
-    };
-    // The level of a list item, as buildMarkdown writes one
-    const itemLevel = (entry: ContentItem): number | undefined => entry.type === 'para' && entry.listMeta && !entry.headingLevel && !entry.isCodeBlock && !entry.isTitle ? entry.listMeta.level : undefined;
-    // The paragraph a block opened in a list item before a sublist at
-    // `across` goes on to, past the sublist (see below)
-    let across: ContentItem | undefined;
-    /** Where the item at `at`, with no custom style, is in a sublist of an
-     *  item in the block open at the top level, which a closing fence there
-     *  would end: the item a block that closes it goes in, the one before
-     *  it at its level, or else the one its sublist is in, and with the
-     *  latter, that item's paragraph in a custom style right after the
-     *  sublist, if one is. Export closes a block at the top level with no
-     *  fence where a block opens in an item (see applyCustomStyleSentinels
-     *  in md-to-docx.ts), and the sublist of an item in a block that opens
-     *  in it keeps no style (see extractListItems), so this is where one
-     *  opened in the item before the sublist, or at the end of the item
-     *  before, which keeps the sublist one list. The items before it are
-     *  in `out`, with their sentinels */
-    const sublistInBlock = (at: number): { host: ParaItem; styled?: ParaItem } | undefined => {
-      const depth = itemLevel(docContent[at]);
-      if (!depth) return undefined;
-      let host: ParaItem | undefined;
-      for (let k = out.length - 1; k >= 0 && !host; k--) {
-        const before = out[k];
-        const beforeLevel = itemLevel(before);
-        if (beforeLevel !== undefined) {
-          if (beforeLevel <= depth) host = before as ParaItem;
-        } else if (before.type === 'para' ? !before.listContinuation && !keptSeparators.has(before) : isStructuralBoundaryItem(before)) {
-          return undefined;
-        }
-      }
-      if (!host?.itemContinuation || host.customStyleName !== activeStyle) return undefined;
-      const level = host.listMeta!.level;
-      if (level === depth) return { host };
-      for (let k = at; k < docContent.length; k++) {
-        const next = docContent[k];
-        if (next.type !== 'para') {
-          if (isStructuralBoundaryItem(next)) return { host };
-          continue;
-        }
-        if (!next.customStyleName && (itemLevel(next) ?? next.listContinuation?.level ?? -1) > level) continue;
-        const styled = next.customStyleName && !next.listMeta && !next.blockquoteLevel && next.listContinuation?.level === level ? next : undefined;
-        return { host, ...(styled ? { styled } : {}) };
-      }
-      return { host };
-    };
-    // A block Word can't give a style block's style, as a heading, a quote,
-    // code, a table or a thematic break, which keeps its own, and so ends
-    // the run of paragraphs in the block's style. Export recorded, for each
-    // block's place among those at the top level Word has a paragraph of,
-    // which this opens one for each of (see styleBlock in
-    // generateDocumentXml in md-to-docx.ts), whether a run of such blocks,
-    // with the empty paragraphs export writes around them, between two
-    // paragraphs of the block's style is in the block. Elsewhere, it
-    // recorded how many the block before the run ends with, and how many the
-    // block after it starts with, and the rest are in no block. Where it
-    // recorded none, the run ends the block, and is in none, as before
-    const edges = styleBlockEdges ?? {};
-    const unstyled = (entry: ContentItem): boolean => entry.type === 'table' || entry.type === 'para' && !entry.customStyleName
-      && !entry.listMeta && !entry.listContinuation && !!(entry.isCodeBlock || entry.blockquoteLevel || entry.headingLevel || entry.horizontalRule);
-    /** The run of such blocks and empty paragraphs from `at`: where each
-     *  block starts, and the next item after it, as a code block's lines are
-     *  one block, and the index past the run */
-    const unstyledRun = (at: number): { units: Array<{ start: number; end: number }>; end: number } => {
-      const units: Array<{ start: number; end: number }> = [];
-      let open: { start: number; end: number } | undefined;
-      let last: ContentItem | undefined;
-      let k = at;
-      for (; k < docContent.length; k++) {
-        const entry = docContent[k];
-        if (!isStructuralBoundaryItem(entry)) continue;
-        const goesOn = open && entry.type === 'para' && entry.isCodeBlock && last?.type === 'para' && last.isCodeBlock && entry.blockquoteLevel === last.blockquoteLevel;
-        last = entry;
-        if (goesOn) continue;
-        if (open) open.end = k;
-        open = undefined;
-        if (unstyled(entry)) units.push(open = { start: k, end: -1 });
-        else if (!separator(k)) break;
-      }
-      if (open) open.end = k;
-      return { units, end: k };
-    };
-    // The blocks opened at the top level so far, the index past the run of
-    // them planned last, and past the last run of empty paragraphs alone,
-    // which no item in needs reading again, and the fences planned, in
-    // order, each before the item at `at`: a block's opening one, of
-    // `style`, or else a closing one
-    let opened = 0;
-    let planned = -1;
-    let read = -1;
-    const fences: Array<{ at: number; style?: string }> = [];
-    let fenced = 0;
-    /** The fences of the run of such blocks from `at`, if it holds one, as
-     *  export recorded them */
-    const planRun = (at: number): void => {
-      const { units, end } = unstyledRun(at);
-      read = end;
-      if (units.length === 0) return;
-      planned = end;
-      const next = docContent[end];
-      const nextStyle = next?.type === 'para' && !next.listContinuation ? next.customStyleName : undefined;
-      const block = opened - 1;
-      if (activeStyle && nextStyle === activeStyle && edges['csi' + block]) return;
-      // Before the unit at `unit`, past the empty paragraphs after the one
-      // before it, which a fence goes before, as after a paragraph
-      const fence = (unit: number, style?: string) => fences.push({ at: unit === 0 ? at : units[unit - 1].end, ...(style ? { style } : {}) });
-      // Those the block open ends with
-      let taken = 0;
-      if (activeStyle) {
-        taken = Math.min(edges['cst' + block] ?? 0, units.length);
-        fence(taken);
-      }
-      const lead = nextStyle ? Math.min(edges['csl' + (block + 1)] ?? 0, units.length - taken) : 0;
-      if (lead > 0) fence(units.length - lead, nextStyle);
-    };
-    /** The item at `i`, after the sentinels and marks that go before it,
-     *  which this puts in `out` */
-    const place = (i: number): ContentItem => {
-      let item = docContent[i];
-      // Only structural items (para, table, landscape/portrait sentinels,
-      // bibliography_marker) should trigger style transitions. Inline items
-      // (text, image, math, hardbreak, etc.) live inside a para and don't
-      // carry customStyleName — skip them to avoid premature style close.
-      const isStructural = item.type === 'para' || item.type === 'table'
-        || item.type === 'landscape_open' || item.type === 'landscape_close'
-        || item.type === 'portrait_open' || item.type === 'portrait_close'
-        || item.type === 'bibliography_marker';
-      if (!isStructural) return item;
-      const styleName = (item.type === 'para' && item.customStyleName) ? item.customStyleName : undefined;
-      if (inItem) {
-        // The sublist the block opened before, up to its paragraph
-        if (across && item !== across) return item;
-        across = undefined;
-        if (item.type === 'para' && !item.blockquoteLevel && item.listContinuation?.level === inItem.level && styleName === activeStyle) return item;
-        item = markBeforeFence(item, inItem);
-        out.push({ type: 'custom_style_close', inItem });
-        activeStyle = inItem = undefined;
-      }
-      // A paragraph in a list item in a custom style is in a block in the
-      // item, as export gives no other paragraph in an item one, but the
-      // continuation's, in a block its item is in too (see
-      // listContinuationStyleId in md-to-docx.ts). A block open at the top
-      // level, as one the item is in, closes here with no fence of its own,
-      // which would end the item before the paragraph, as export closes one
-      // where a block opens in an item (see applyCustomStyleSentinels)
-      if (styleName && item.type === 'para' && item.listContinuation && !item.blockquoteLevel) {
-        const continuation = item.listContinuation;
-        item = markBeforeFence(item, continuation);
-        inItem = continuation;
-        out.push({ type: 'custom_style_open', styleName, inItem });
-        activeStyle = styleName;
-        return item;
-      }
-      // A paragraph or quote in a list item with no custom style, which
-      // takes the list's style and not the block's, is in the block the item
-      // is in, or in none with it. The items of a list in a block take its
-      // style (see generateParagraph in md-to-docx.ts)
-      if (!styleName && item.type === 'para' && item.listContinuation) return item;
-      // An item with no custom style in a sublist of an item in a block open
-      // at the top level, which a fence there would end. The block in the
-      // item that closes it opens before the sublist, and goes on past it
-      // to its paragraph after it, or else is empty, of the block's own
-      // style, in that item or the one before at the sublist's level
-      const sublist = activeStyle && !inItem && !styleName ? sublistInBlock(i) : undefined;
-      if (sublist) {
-        const continuation = sublist.host.itemContinuation!;
-        item = markBeforeFence(item, continuation);
-        const style = sublist.styled?.customStyleName ?? activeStyle!;
-        out.push({ type: 'custom_style_open', styleName: style, inItem: continuation });
-        if (sublist.styled) {
-          inItem = continuation;
-          activeStyle = style;
-          across = sublist.styled;
-        } else {
-          out.push({ type: 'custom_style_close', inItem: continuation });
-          activeStyle = undefined;
-        }
-        return item;
-      }
-      // The empty paragraphs export writes after a quote in a list item, at
-      // which a list block ends, before an item that starts another list or
-      // a paragraph after the list (see generateDocumentXml in
-      // md-to-docx.ts), in a block that goes on after them, which they
-      // don't end, as the quote didn't. Nor before another list item, where
-      // the block ends, if it does, as a block in an item (see
-      // sublistInBlock), or at the item, which keeps the list it starts
-      // apart from the one before, as a fence before it does
-      if (!styleName && activeStyle && i < separatorsInBlock) {
-        keptSeparators.add(item);
-        return item;
-      }
-      if (!styleName && activeStyle && separator(i)) {
-        let before = out.length - 1;
-        while (before >= 0 && !isStructuralBoundaryItem(out[before])) before--;
-        const quote = out[before];
-        let next = i + 1;
-        while (next < docContent.length && (!isStructuralBoundaryItem(docContent[next]) || separator(next))) next++;
-        const after = docContent[next];
-        if (quote?.type === 'para' && quote.blockquoteLevel && quote.listContinuation
-            && after?.type === 'para' && (after.customStyleName === activeStyle || itemLevel(after) !== undefined)) {
-          separatorsInBlock = next;
-          keptSeparators.add(item);
-          return item;
-        }
-      }
-      // A run of blocks Word can't give a style block's style, with the
-      // fences planned in it, and at the item after it
-      if (i >= read && !inItem && (unstyled(item) || separator(i))) planRun(i);
-      // A tracked mark before a paragraph a style block starts or ends at is
-      // the break that ends the paragraph before it, which the block keeps
-      // from joining the text after (see joinTrackedParagraphBreaks): it
-      // stays before the sentinels, on an empty paragraph, or on the one it
-      // is on where that holds nothing else, which then doesn't end the
-      // style. A block starts or ends at a fence planned here, or past a run
-      // planned, where the paragraph's style isn't the block's
-      const fenceHere = fenced < fences.length && fences[fenced].at <= i;
-      if (item.type === 'para' && item.breakRevision && (fenceHere || i >= planned && (styleName ? styleName !== activeStyle : activeStyle))) {
-        const { breakRevision, ...para } = item;
-        if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) return item;
-        out.push({ type: 'para', breakRevision });
-        item = para;
-      }
-      for (; fenced < fences.length && fences[fenced].at <= i; fenced++) {
-        const { style } = fences[fenced];
-        if (activeStyle) out.push({ type: 'custom_style_close' });
-        activeStyle = style;
-        if (style) {
-          out.push({ type: 'custom_style_open', styleName: style });
-          opened++;
-        }
-      }
-      if (i < planned) return item;
-      if (styleName && styleName !== activeStyle) {
-        // Close previous style if open
-        if (activeStyle) out.push({ type: 'custom_style_close' });
-        // Open new style
-        out.push({ type: 'custom_style_open', styleName });
-        opened++;
-        activeStyle = styleName;
-      } else if (!styleName && activeStyle) {
-        // Style run ended
-        out.push({ type: 'custom_style_close' });
-        activeStyle = undefined;
-      }
-      return item;
-    };
-    for (let i = 0; i < docContent.length; i++) out.push(place(i));
-    // Close any still-open style at end of document
-    if (activeStyle) {
-      out.push({ type: 'custom_style_close', ...(inItem ? { inItem } : {}) });
-    }
+    const out = styleBlockSentinels(docContent, styleBlockEdges ?? {});
     docContent.length = out.length;
     out.forEach((item, k) => { docContent[k] = item; });
   }

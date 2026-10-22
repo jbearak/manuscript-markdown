@@ -3,7 +3,7 @@ import * as fc from 'fast-check';
 import {
   attributeValue, captionBookmarkName, captionOptions, captionSeparator, captionSeparatorAt,
   captionSlug, delimiterOfSeparator, figureAttributesAt, isCaptionLabelId, labelOfBookmark, nextIndexFinder, parseAttributeBlock, quotedAttributeValue,
-  seqIdentifier,
+  seqIdentifier, seqIdentifiers,
 } from './captions';
 import { parseFrontmatter, serializeFrontmatter, yamlScalar, yamlScalarText } from './frontmatter';
 
@@ -104,6 +104,14 @@ describe('SEQ identifiers', () => {
     expect(seqIdentifier('Abbildung')).toBe('Abbildung');
     expect(seqIdentifier('123')).toBe('Figure');
     expect(seqIdentifier('')).toBe('Figure');
+  });
+
+  it('keeps the figures\' and the tables\' apart where their titles give one', () => {
+    expect(seqIdentifiers('Figure', 'Table')).toEqual({ figure: 'Figure', table: 'Table' });
+    expect(seqIdentifiers('Exhibit', 'Exhibit')).toEqual({ figure: 'Exhibit', table: 'Table' });
+    expect(seqIdentifiers('Fig.', 'fig')).toEqual({ figure: 'Fig', table: 'Table' });
+    expect(seqIdentifiers('Table', 'Table')).toEqual({ figure: 'Table', table: 'Tbl' });
+    expect(seqIdentifiers('123', 'Figure')).toEqual({ figure: 'Figure', table: 'Table' });
   });
 });
 

@@ -30,7 +30,7 @@ import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
-import { attributeValue, captionBookmarkName, captionOptions, captionSeparator, isCaptionLabelId, isCaptionText, labelOfBookmark, seqIdentifier, tableCaptionSource, type CaptionOptions, type FigureAttributes } from './captions';
+import { attributeValue, captionBookmarkName, captionOptions, captionSeparator, isCaptionLabelId, isCaptionText, labelOfBookmark, seqIdentifiers, tableCaptionSource, type CaptionOptions, type FigureAttributes } from './captions';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
 import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters } from './xml-parser';
 import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
@@ -3399,7 +3399,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, s
   }
 
   applyCustomStyleSentinels(result, warnings, env.references);
-  if (!inNote) attachTableCaptions(result);
+  if (!inNote) attachTableCaptions(result, processedLines);
   annotateBlankAlertLeads(result);
 
   if (env.references) linkDefinitionsOf.set(result, env.references);
@@ -9925,14 +9925,23 @@ function tableCaptionOf(runs: MdRun[], source: { label: string; lead: number }):
 /**
  * Gives each table its caption, as Quarto reads one: the paragraph right
  * after it that is one (see tableCaptionOf), at the top level, as the
- * table is, in no list item, quote or style block. The paragraph goes from
+ * table is, in no list item, quote or style block, with nothing between
+ * them in `lines`, the text markdown-it read, but blank lines, as a
+ * directive the passes before took out, as `<!-- indent -->`, whose
+ * override the paragraph keeps, as the preview does. The paragraph goes from
  * `tokens`, as Word gets its text with the table, in a caption above or
  * below it, which neither side counts among the body's paragraphs (see
  * readCaptions in converter.ts). A table an embed gave, whose directive
  * import writes in its place, takes none. A paragraph no table takes
  * stays one, with its label, which labels nothing, and a warning.
  */
-function attachTableCaptions(tokens: MdToken[]): void {
+function attachTableCaptions(tokens: MdToken[], lines: readonly string[]): void {
+  // Whether only blank lines are between the table's and the paragraph's
+  const adjoins = (table: MdToken, paragraph: MdToken): boolean => {
+    if (!table.sourceRange || !paragraph.sourceRange || paragraph.splitPart) return false;
+    for (let line = table.sourceRange[1]; line < paragraph.sourceRange[0]; line++) if (/\S/.test(lines[line] ?? '')) return false;
+    return true;
+  };
   let styled = false;
   let kept = 0;
   for (const token of tokens) {
@@ -9944,7 +9953,7 @@ function attachTableCaptions(tokens: MdToken[]): void {
     const caption = token.captionOfTable;
     const whole = !!caption && !token.listContinuation && !token.criticParaMark && token.runs[token.runs.length - 1]?.commentId === '#' + caption.label
       && token.runs[0]?.type === 'text' && token.runs[0].text.startsWith(':');
-    if (caption && whole && !styled && table?.type === 'table' && !table.listContinuation && table.embedIdx === undefined && !table.tableCaption) {
+    if (caption && whole && !styled && table?.type === 'table' && !table.listContinuation && table.embedIdx === undefined && !table.tableCaption && adjoins(table, token)) {
       table.tableCaption = caption;
       continue;
     }
@@ -10071,7 +10080,7 @@ function captionXml(kind: 'figure' | 'table', label: string, captionRuns: MdRun[
     + '<w:bookmarkStart w:id="' + id + '" w:name="' + name + '"/>'
     + '<w:r>' + wt(title + ' ') + '</w:r>'
     + '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
-    + '<w:r><w:instrText xml:space="preserve"> SEQ ' + escapeXmlText(seqIdentifier(title, kind === 'figure' ? 'Figure' : 'Table')) + ' \\* ARABIC </w:instrText></w:r>'
+    + '<w:r><w:instrText xml:space="preserve"> SEQ ' + escapeXmlText(seqIdentifiers(state.captions.figTitle, state.captions.tblTitle)[kind]) + ' \\* ARABIC </w:instrText></w:r>'
     + '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
     + '<w:r><w:rPr><w:noProof/></w:rPr><w:t>' + number + '</w:t></w:r>'
     + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'

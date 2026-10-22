@@ -276,6 +276,20 @@ export function seqIdentifier(title: string, fallback = 'Figure'): string {
   return /^\p{L}/u.test(identifier) ? identifier.slice(0, 40) : fallback;
 }
 
+/** The SEQ field identifiers of figures' captions and tables', from their
+ *  titles (see seqIdentifier), each other than the other's, as Word numbers
+ *  the fields of an identifier as one series, so tables don't number on
+ *  from the figures: where the titles give one identifier, as `Exhibit`
+ *  and `Exhibit` or `Fig.` and `Fig`, whatever their case, the tables' is
+ *  `Table`, or `Tbl` where that's the figures'. Import reads a series by
+ *  its identifier and its captions' title, which each still shows */
+export function seqIdentifiers(figTitle: string, tblTitle: string): { figure: string; table: string } {
+  const figure = seqIdentifier(figTitle, 'Figure');
+  const table = seqIdentifier(tblTitle, 'Table');
+  if (figure.toLowerCase() !== table.toLowerCase()) return { figure, table };
+  return { figure, table: figure.toLowerCase() === 'table' ? 'Tbl' : 'Table' };
+}
+
 // Word's bookmark names: a letter, then letters, digits and underscores, 40
 // characters at most, which Word compares whatever their case
 const BOOKMARK_MAX = 40;

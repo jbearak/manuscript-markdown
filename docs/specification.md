@@ -706,11 +706,11 @@ A paragraph right after a table, of any format, that starts with a colon and whi
 : Rates by region, 2010 to 2020 {#tbl-rates}
 ```
 
-A label is `tbl-` and the characters of a comment's ID, `[A-Za-z0-9_-]`, in braces of its own, with whitespace or nothing before it, and nothing after it. The caption's text is what's between the colon's whitespace and the label, formatted as any paragraph's, without the whitespace and line ends before the label. A space written as `&#32;` right after the colon's whitespace is the text's. The table and its caption are at the top level, not in a list, a quote, a note or a style block, and nothing is between them but blank lines.
+A label is `tbl-` and the characters of a comment's ID, `[A-Za-z0-9_-]`, in braces of its own, with whitespace or nothing before it, and nothing after it. The caption's text is what's between the colon's whitespace and the label, formatted as any paragraph's, without the whitespace and line ends before the label. A space written as `&#32;` right after the colon's whitespace is the text's. The table and its caption are at the top level, not in a list, a quote, a note or a style block, and nothing is between them but blank lines, not even a directive, as `<!-- no-indent -->`, which then goes with the paragraph. In an HTML block of more than one table, the caption is the last table's, which it goes above, after the others.
 
 The preview shows the caption above the table, numbered in document order, apart from the figures, as `Table 1: Rates by region, 2010 to 2020`. Export writes Word the caption above the table, kept with it, as Word's Insert Caption writes one: a paragraph in the Caption style, with `Table `, a `SEQ Table` field for the number, then `: ` and the caption's text. The title and number are in a bookmark named for the label, as `tbl_rates`, as a figure's are (see [Figures](#figures)).
 
-`crossref:`'s `tbl-title` changes the title, and its `title-delim` the delimiter, which figures and tables share. `tbl-cap-location: bottom` puts each caption below its table, in the preview and in Word, though the Markdown keeps it after the table either way.
+`crossref:`'s `tbl-title` changes the title, and its `title-delim` the delimiter, which figures and tables share. Word numbers the fields of a `SEQ` identifier as one series, so where the figures' title and the tables' give one identifier, as `Exhibit` and `Exhibit`, the tables' fields are `SEQ Table`, or `SEQ Tbl` where the figures' are `SEQ Table`, and each shows its title still. `tbl-cap-location: bottom` puts each caption below its table, in the preview and in Word, though the Markdown keeps it after the table either way.
 
 ```yaml
 ---

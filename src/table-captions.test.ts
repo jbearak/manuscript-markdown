@@ -108,6 +108,13 @@ describe('exporting a table\'s caption', () => {
     expect(custom).not.toContain('MANUSCRIPT_CAPTION_LABELS_');
   });
 
+  it('numbers figures and tables apart where their titles are one, as Word would number one SEQ identifier\'s fields together', async () => {
+    const { body } = await exported('---\ncrossref:\n  fig-title: Exhibit\n  tbl-title: Exhibit\n---\n\n![A map](map.png){#fig-map}\n\n| a |\n|---|\n| 1 |\n\n: A table {#tbl-a}\n');
+    expect(body).toContain(' SEQ Exhibit \\* ARABIC ');
+    expect(body).toContain(' SEQ Table \\* ARABIC ');
+    expect(blocks(body).map(shown)).toEqual(['', 'Exhibit 1: A map', 'Exhibit 1: A table', '']);
+  });
+
   it('writes the title and delimiter crossref: gives, and the caption below where tbl-cap-location: bottom', async () => {
     const { body, custom } = await exported('---\ncrossref:\n  tbl-title: Exhibit\n  title-delim: "."\ntbl-cap-location: bottom\n---\n\n| a |\n|---|\n| 1 |\n\n: A table {#tbl-a}\n\n| b |\n|---|\n| 2 |\n\n: {#tbl-e}\n');
     expect(blocks(body)).toEqual([
@@ -146,6 +153,19 @@ describe('exporting a table\'s caption', () => {
     expect(styles).not.toContain('w:styleId="Caption"');
     for (const label of ['tbl-a', 'tbl-b', 'tbl-c', 'tbl-d', 'tbl-e']) {
       expect(warnings).toContain('The label {#' + label + '} labels no table: a label ends a paragraph right after a table at the top level that starts with a colon, as : Caption {#' + label + '}. Word gets no label there.');
+    }
+  });
+
+  it('gives no caption to a paragraph a directive goes before, which keeps its override, as the preview shows', async () => {
+    for (const md of [
+      '| a |\n|---|\n| 1 |\n\n<!-- no-indent -->\n\n: Cap {#tbl-x}\n',
+      '| a |\n|---|\n| 1 |\n<!-- no-indent -->\n: Cap {#tbl-x}\n',
+    ]) {
+      const { body, custom, warnings } = await exported(md);
+      expect(blocks(body).map(shown)).toEqual(['', ': Cap']);
+      expect(custom).toContain('MANUSCRIPT_INDENT_OVERRIDES');
+      expect(warnings).toHaveLength(1);
+      expect(renderWithPlugin(md)).toContain('<p>: Cap </p>');
     }
   });
 });
@@ -200,14 +220,13 @@ describe('importing Word\'s table captions', () => {
     expect(md).toBe('![A map](media/image1.png){#fig-a-map width=100 height=100}\n\nText.\n\nTable 1. A table\n\n' + pipe('a'));
   });
 
-  it('leaves the tables\' captions as text where their title makes the figures\' SEQ identifier, which would number them together', async () => {
+  it('reads figures\' and tables\' captions of one title, which export numbers apart', async () => {
     const md = await imported(await wordDocx(picture() + caption(1, 'A map', { title: 'Fig.', id: 'Figure' }) + para('Text.') + caption(1, 'A table', { title: 'Fig' }) + table('a')));
-    expect(md).toBe('---\ncrossref:\n  fig-title: Fig.\n---\n\n![A map](media/image1.png){#fig-a-map width=100 height=100}\n\nText.\n\nFig 1: A table\n\n' + pipe('a'));
-    // Where the tables are more, the figures' stay text
-    const more = await imported(await wordDocx(picture() + caption(1, 'A map', { id: 'Figure', title: 'Figure' }) + para('Text.') + caption(1, 'A', { title: 'Figure' }) + table('a') + caption(2, 'B', { title: 'Figure' }) + table('b')));
-    expect(more).toContain('Figure 1: A map');
-    expect(more).toContain(': A {#tbl-a}');
-    expect(more).toContain('tbl-title: Figure');
+    expect(md).toBe('---\ncrossref:\n  fig-title: Fig.\n  tbl-title: Fig\n---\n\n![A map](media/image1.png){#fig-a-map width=100 height=100}\n\nText.\n\n' + pipe('a') + '\n: A table {#tbl-a-table}\n');
+    const { body } = await exported(md.replace('media/image1.png', 'map.png'));
+    expect(body).toContain(' SEQ Fig \\* ARABIC ');
+    expect(body).toContain(' SEQ Table \\* ARABIC ');
+    expect(await trip(md.replace('media/image1.png', 'map.png'))).toBe(md.replace('media/image1.png', 'media/map.png'));
   });
 
   // A caption export can't write as Word has it stays as it is, as text, and
@@ -225,6 +244,36 @@ describe('importing Word\'s table captions', () => {
     expect(md).not.toContain('{#tbl-');
     expect(md).toMatch(/Table \d/);
     expect(md).not.toContain('tbl-cap-location');
+  });
+
+  it('leaves as text a caption Word added to a table that import writes in a style block, where export gives it none', async () => {
+    /** The Word document export writes of `md`, with a caption Word's Insert Caption added above its table or below */
+    const withCaption = async (md: string, above: boolean) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { sourceDir: dir })).docx);
+      const document = await zip.file('word/document.xml')!.async('string');
+      const at = above ? document.indexOf('<w:tbl>') : document.indexOf('</w:tbl>') + '</w:tbl>'.length;
+      zip.file('word/document.xml', document.slice(0, at) + caption(1, 'Rates') + document.slice(at));
+      return zip.generateAsync({ type: 'uint8array' });
+    };
+    const styles = '---\nstyles:\n  wide:\n    font: Arial\n---\n\n';
+    const table = '| a |\n|---|\n| 1 |\n\n';
+    for (const body of [
+      '<!-- style: wide -->\n\nA.\n\n' + table + 'B.\n\n<!-- /style -->\n',
+      '<!-- style: wide -->\n\nA.\n\n' + table + '<!-- /style -->\n\nAfter.\n',
+      'Before.\n\n<!-- style: wide -->\n\n' + table + 'B.\n\n<!-- /style -->\n',
+    ]) {
+      for (const above of [true, false]) {
+        const md = await imported(await withCaption(styles + body, above));
+        expect(md).not.toContain('{#tbl-');
+        expect(md).toContain('Table 1: Rates');
+        expect((await convertMdToDocx(md, { sourceDir: dir })).warnings).toEqual([]);
+      }
+    }
+    // Between two blocks, it's the table's
+    for (const above of [true, false]) {
+      expect(await imported(await withCaption(styles + '<!-- style: wide -->\n\nA.\n\n<!-- /style -->\n\n' + table + '<!-- style: wide -->\n\nB.\n\n<!-- /style -->\n', above)))
+        .toContain('| 1 |\n\n: Rates {#tbl-rates}\n\n<!-- style: wide -->');
+    }
   });
 });
 
@@ -276,6 +325,27 @@ describe('previewing a table\'s caption', () => {
     expect(html).toContain('</table>\n<p id="tbl-g" class="manuscript-markdown-table-caption">Exhibit 1. Grid</p>');
     expect(html).toContain('<p>: After text </p>');
     expect(html).toContain('<p>: Styled </p>');
+  });
+
+  it('numbers no caption export gives none, after an embed\'s table or a comment that holds a table', async () => {
+    for (const [md, text] of [
+      ['<table data-embed-idx="0"><tr><td>e</td></tr></table>\n\n: Embedded {#tbl-e}\n\n| a |\n|---|\n| 1 |\n\n: Real {#tbl-r}\n', ': Embedded'],
+      ['<!-- <table><tr><td>x</td></tr></table> -->\n\n: In a comment {#tbl-c}\n\n| a |\n|---|\n| 1 |\n\n: Real {#tbl-r}\n', ': In a comment'],
+    ]) {
+      const html = renderWithPlugin(md);
+      expect(html).toContain('<p>' + text + ' </p>');
+      expect(html).toContain('<p id="tbl-r" class="manuscript-markdown-table-caption">Table 1: Real</p>');
+      expect(blocks((await exported(md)).body).map(shown)).toContain('Table 1: Real');
+    }
+  });
+
+  it('shows the caption of the last of an HTML block\'s tables above it, after the others, as Word has it', async () => {
+    const md = '<div>\n<table><tr><td>x</td></tr></table>\n<table><tr><td>y</td></tr></table>\n</div>\n\n: Second {#tbl-s}\n';
+    const html = renderWithPlugin(md);
+    expect(html).toContain('<table><tr><td>x</td></tr></table>\n</div>\n<p id="tbl-s" class="manuscript-markdown-table-caption">Table 1: Second</p>\n<div data-line="2"><table><tr><td>y</td></tr></table>');
+    expect(blocks((await exported(md)).body).map(block => block === '<TABLE/>' ? block : shown(block))).toEqual(['<TABLE/>', 'Table 1: Second', '<TABLE/>']);
+    // Below, it stays after the block
+    expect(renderWithPlugin('---\ntbl-cap-location: bottom\n---\n\n' + md)).toContain('</div>\n</div>\n<p id="tbl-s" class="manuscript-markdown-table-caption">Table 1: Second</p>');
   });
 });
 

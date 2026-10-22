@@ -30,6 +30,8 @@ import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { parseFrontmatter, type ColorScheme } from '../frontmatter';
 import { styleFence } from '../style-fence';
+import { htmlBlockKind } from '../html-blocks';
+import { extractHtmlTables } from '../html-table-parser';
 import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
@@ -2293,7 +2295,11 @@ function tableCaptionTokens(content: string, children: Token[]): { label: string
  * caption is the paragraph right after the table, as `: A map {#tbl-map}`,
  * which shows `Table 1: A map`, with the label as its ID, numbered in
  * order apart from the figures, and goes above the table or stays below
- * it, as the frontmatter says.
+ * it, as the frontmatter says. An HTML block's table is one where export
+ * reads the block as tables, and the last, which the caption goes with,
+ * isn't an embed's, which export gives none. The caption goes above that
+ * table, which starts a block of its own where HTML is before it, as
+ * another table.
  */
 function captionsRule(state: StateCore): void {
   const options = getPreviewEnvironment(state).captions ?? DEFAULT_CAPTION_OPTIONS;
@@ -2302,17 +2308,29 @@ function captionsRule(state: StateCore): void {
   let number = 0;
   let tableNumber = 0;
   // Where the last table at the top level starts, in no style block, while
-  // nothing has come after it
+  // nothing has come after it, and in an HTML block, where the line of its
+  // last table starts, where HTML is before it
   let tableStart: number | undefined;
+  let tableLine: number | undefined;
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     const afterTable = tableStart;
-    tableStart = undefined;
+    const lastTableLine = tableLine;
+    tableStart = tableLine = undefined;
     if (token.type === 'html_block' && token.level === 0) {
-      const fence = styleFence(token.content || '');
+      const content = token.content || '';
+      const fence = styleFence(content);
       if (fence?.kind === 'open') styleDepth++;
       else if (fence?.kind === 'close') styleDepth = Math.max(0, styleDepth - 1);
-      else if (styleDepth === 0 && /<table[\s>]/i.test(token.content)) tableStart = i;
+      else if (styleDepth === 0 && /<table[\s>]/i.test(content) && htmlBlockKind(content) === 'tables') {
+        const shown = extractHtmlTables(content).filter(meta => meta.rows.length > 0);
+        const last = shown[shown.length - 1];
+        if (last.embedIdx === undefined) {
+          tableStart = i;
+          const line = content.lastIndexOf('\n', (last.start ?? 0) - 1) + 1;
+          if (/\S/.test(content.slice(0, line))) tableLine = line;
+        }
+      }
       continue;
     }
     if (token.type === 'table_open' && token.level === 0 && styleDepth === 0) {
@@ -2335,7 +2353,23 @@ function captionsRule(state: StateCore): void {
       inline.children = [label, ...table.children];
       if (options.tblCapLocation === 'top') {
         const paragraph = tokens.splice(i, 3);
-        spliceAll(tokens, afterTable!, 0, paragraph);
+        if (lastTableLine === undefined) {
+          spliceAll(tokens, afterTable!, 0, paragraph);
+        } else {
+          // The block's HTML before the table, then the caption, then the
+          // table, each a block of its own, from the lines they were on
+          const block = tokens[afterTable!];
+          const content = block.content;
+          const before = Object.assign(new state.Token('html_block', '', 0), block, { content: content.slice(0, lastTableLine) });
+          const rest = Object.assign(new state.Token('html_block', '', 0), block, { content: content.slice(lastTableLine) });
+          if (block.map) {
+            const split = block.map[0] + (before.content.match(/\n/g) ?? []).length;
+            before.map = [block.map[0], split];
+            rest.map = [split, block.map[1]];
+          }
+          spliceAll(tokens, afterTable!, 1, [before, ...paragraph, rest]);
+          i++;
+        }
       }
       i += 2;
       continue;
