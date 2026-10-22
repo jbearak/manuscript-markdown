@@ -73,7 +73,7 @@ export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
   'table-font', 'table-font-size', 'pipe-table-max-line-width', 'grid-table-max-line-width',
   'table-borders', 'table-digits', 'table-decimal-mark', 'table-digit-grouping',
   'blockquote-style', 'callout-labels', 'colors', 'breaks', 'line-spacing', 'paragraph-indent',
-  'bibliography-hanging-indent', 'fig-cap-location',
+  'bibliography-hanging-indent', 'fig-cap-location', 'tbl-cap-location',
 ]);
 
 /** The keys parseFrontmatter reads, each of which import writes from what the Word document has */
@@ -457,6 +457,8 @@ export interface Frontmatter {
   crossref?: CrossrefOptions;
   /** Quarto's fig-cap-location: whether a figure's caption goes above or below it */
   figCapLocation?: 'top' | 'bottom';
+  /** Quarto's tbl-cap-location: whether a table's caption goes above or below it */
+  tblCapLocation?: 'top' | 'bottom';
 }
 
 /** The keys of Quarto's `crossref` mapping export reads */
@@ -888,6 +890,9 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
       case 'fig-cap-location':
         if (value === 'top' || value === 'bottom') metadata.figCapLocation = value;
         break;
+      case 'tbl-cap-location':
+        if (value === 'top' || value === 'bottom') metadata.tblCapLocation = value;
+        break;
     }
   }
   return { metadata, fieldOrder };
@@ -1178,6 +1183,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
       pushAll(lines, keys);
     },
     'fig-cap-location': () => { if (metadata.figCapLocation) lines.push('fig-cap-location: ' + metadata.figCapLocation); },
+    'tbl-cap-location': () => { if (metadata.tblCapLocation) lines.push('tbl-cap-location: ' + metadata.tblCapLocation); },
   };
 
   // Default emission order (backward compatible)
@@ -1192,7 +1198,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'pipe-table-max-line-width', 'grid-table-max-line-width',
     'blockquote-style', 'callout-labels', 'colors', 'styles', 'breaks',
     'line-spacing', 'paragraph-indent', 'bibliography-hanging-indent',
-    'crossref', 'fig-cap-location',
+    'crossref', 'fig-cap-location', 'tbl-cap-location',
   ];
 
   const aliasToCanonical: Record<string, string> = {

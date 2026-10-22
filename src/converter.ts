@@ -29,7 +29,7 @@ import { extractZoteroKey } from './zotero-link';
 import { styleFence } from './style-fence';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
-import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, isCaptionText, labelOfBookmark, quotedAttributeValue, type CaptionLocation, type CaptionParagraph } from './captions';
+import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, isCaptionText, labelOfBookmark, quotedAttributeValue, seqIdentifier, TABLE_LABEL_RE, type CaptionLocation, type CaptionParagraph } from './captions';
 import { asUtf8, decodeXml, parsePart, relatedPartPath, relatedPartPaths } from './template-sections';
 
 // --- Implementation notes ---
@@ -1585,8 +1585,15 @@ interface StructuralListContext {
 }
 
 /** A table, and the size and font Word shows its text in (see
- *  tableTextSize and tableTextFont) */
-type TableItem = { type: 'table'; rows: TableRow[]; textSize?: TableTextSize; textFont?: TableTextFont };
+ *  tableTextSize and tableTextFont), and its caption, as readCaptions read
+ *  it, which buildMarkdown writes after it as Quarto's, `: Caption {#tbl-x}` */
+type TableItem = { type: 'table'; rows: TableRow[]; textSize?: TableTextSize; textFont?: TableTextFont; caption?: TableCaption };
+/** A table's caption, as import writes it (see readCaptions) */
+interface TableCaption {
+  label: string;
+  /** Its text's Markdown, which goes after the colon */
+  caption: string;
+}
 
 export type ContentItem =
   | {
@@ -1645,7 +1652,7 @@ export type ContentItem =
   | { type: 'html_comment'; text: string; commentIds: Set<string>; otherLineEnds?: true }
   // href and link: as text's, of a w:hyperlink around the picture or its
   // docPr's a:hlinkClick
-  // figure: the caption of the figure it is, as readFigureCaptions read
+  // figure: the caption of the figure it is, as readCaptions read
   // it, which pictureMarkdown writes as Quarto's, ![Caption](map.png){#fig-map}
   | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string; href?: string; link?: number; figure?: FigureCaption }
   | { type: 'landscape_open' }
@@ -1656,7 +1663,7 @@ export type ContentItem =
   // In a list item (`inItem`), as a block of its paragraphs in the style
   | { type: 'custom_style_open'; styleName: string; inItem?: ListContinuation }
   | { type: 'custom_style_close'; inItem?: ListContinuation };
-/** A figure's caption, as import writes it (see readFigureCaptions) */
+/** A figure's caption, as import writes it (see readCaptions) */
 interface FigureCaption {
   label: string;
   /** Its text's Markdown, which goes in the image's brackets */
@@ -4345,8 +4352,8 @@ export async function extractZoteroPrefs(data: Uint8Array | JSZip): Promise<Zote
  * Returns null if no matching properties are found.
  */
 /** The label of each caption whose bookmark's name doesn't give it, by
- *  the name, which export keeps in a custom property (see figureCaptionXml
- *  in md-to-docx.ts) */
+ *  the name, which export keeps in a custom property (see captionXml in
+ *  md-to-docx.ts) */
 async function extractCaptionLabels(zip: JSZip): Promise<Map<string, string> | undefined> {
   const json = await extractChunkedCustomProp(zip, 'MANUSCRIPT_CAPTION_LABELS_');
   if (!json) return undefined;
@@ -4359,11 +4366,11 @@ async function extractCaptionLabels(zip: JSZip): Promise<Map<string, string> | u
   }
 }
 
-/** Where export put the captions of its figures, which it keeps in a
- *  custom property for a document with figures (see figureCaptionXml in
- *  md-to-docx.ts) */
-async function extractFigureCaptionLocation(zip: JSZip): Promise<CaptionLocation | undefined> {
-  const value = await extractStringCustomProp(zip, 'MANUSCRIPT_FIG_CAP_LOCATION');
+/** Where export put the captions of its figures, or its tables, which it
+ *  keeps in a custom property, `name`, for a document with them (see
+ *  captionXml in md-to-docx.ts) */
+async function extractCaptionLocation(zip: JSZip, name: 'MANUSCRIPT_FIG_CAP_LOCATION' | 'MANUSCRIPT_TBL_CAP_LOCATION'): Promise<CaptionLocation | undefined> {
+  const value = await extractStringCustomProp(zip, name);
   return value === 'top' || value === 'bottom' ? value : undefined;
 }
 
@@ -6907,7 +6914,7 @@ function drawingImages(
 export interface DocumentContentResult {
   content: ContentItem[];
   /** The paragraphs of the body that are captions as Word writes them, by
-   *  their first items (see captionParagraphOf), which readFigureCaptions
+   *  their first items (see captionParagraphOf), which readCaptions
    *  reads with their pictures */
   captionParagraphs?: Map<ContentItem, CaptionParagraph>;
   /** Paragraphs of spaces and tabs alone before the content, which count
@@ -8319,7 +8326,7 @@ export async function extractDocumentContent(
               leadingBlankParagraphs++;
             }
           }
-          // A caption's paragraph, by its first item, which readFigureCaptions
+          // A caption's paragraph, by its first item, which readCaptions
           // reads with the picture before or after it: a plain paragraph of
           // the body's, with a para item of its own, but for the document's
           // first, and one after a para item another paragraph left, as the
@@ -8567,56 +8574,87 @@ function captionMarkdown(items: ContentItem[]): string | undefined {
   return markdown;
 }
 
+/** A table's caption's line, as Quarto writes one after the table: a
+ *  colon, the caption's Markdown, `caption`, after a space where it has
+ *  any, and the label, as `: Rates by region {#tbl-rates}` */
+function tableCaptionLine(caption: string, label: string): string {
+  return ':' + (caption ? ' ' + caption : '') + ' {#' + label + '}';
+}
+
+/** What readCaptions read of the series of captions of a kind, figures'
+ *  or tables', that converts: their title, their delimiter, where a
+ *  caption has text, and their place */
+interface CaptionsRead {
+  title: string;
+  titleDelim?: string;
+  location: CaptionLocation;
+}
+
 /**
- * Reads the captions of the figures in `content`, the body's items, which
- * Word's Insert Caption wrote, or export as it does, each in a paragraph
- * of its own right after or right before its picture, which is alone in
- * its paragraph: its label and number, as `Figure 1`, the series' SEQ
- * field, then a separator and its text, as `: Rates by region`. A figure
- * whose caption converts is Quarto's, `![Rates by region](map.png){#fig-map}`:
- * the caption's paragraph goes, and its picture's item holds the caption.
+ * Reads the captions of the figures and tables in `content`, the body's
+ * items, which Word's Insert Caption wrote, or export as it does, each in a
+ * paragraph of its own right after or right before its picture, which is
+ * alone in its paragraph, or its table: its label and number, as
+ * `Figure 1`, the series' SEQ field, then a separator and its text, as
+ * `: Rates by region`. A figure whose caption converts is Quarto's,
+ * `![Rates by region](map.png){#fig-map}`: the caption's paragraph goes,
+ * and its picture's item holds the caption. A table's caption goes after
+ * it, as Quarto's `: Rates by region {#tbl-rates}`, which its item holds.
  *
  * The governing rule is that a caption converts only where the next export
- * writes it as Word shows it, its label, number, separator and text, so
- * each of a series of captions, by their SEQ field's identifier, converts,
- * or none does, and its numbers stay as they were, as text: export
- * numbers the figures in order, which Word does too, so a series converts
- * only where every field of it Word numbers, in any part of the document
- * (`seqCounts`), is one of these captions, of one title, separator and
- * place, whose text export writes as Word has it (see captionTextShape),
- * and only one series, the one of the most captions, as the frontmatter
- * gives one title (see captionOptions). A number Word didn't update goes
- * as export numbers it.
+ * writes it as Word shows it, its label, number, separator and text, in
+ * its place, so each of a series of captions, by their SEQ field's
+ * identifier, converts, or none does, and its numbers stay as they were,
+ * as text: export numbers the figures and the tables in order, which Word
+ * does too, so a series converts only where every field of it Word
+ * numbers, in any part of the document (`seqCounts`), is one of these
+ * captions, of one title, separator and place, all of figures or all of
+ * tables, whose text export writes as Word has it (see captionTextShape).
+ * Of each kind, only one series converts, the one of the most captions, as
+ * the frontmatter gives each kind one title (see captionOptions), and
+ * figures and tables share their delimiter, so where those of the two
+ * differ, or their titles make one SEQ identifier, which would number them
+ * together, the tables' stay text, or the figures' where they're fewer. A
+ * number Word didn't update goes as export numbers it.
  *
- * Where every caption of a series has a picture before it and one after
- * it, either place would pair each with a picture, so the series converts
- * only where `stored`, what export recorded, gives the place; else it
- * stays text, which never takes a caption to another figure's picture. A
- * caption's separator is the stored delimiter's where it starts with it,
- * so each export writes reads back, or one of punctuation Word's captions
- * use (see captionSeparatorAt).
+ * Where every caption of a series has a picture or a table before it and
+ * one after it, either place would pair each with one, so the series
+ * converts only where `stored`, what export recorded, gives the place;
+ * else it stays text, which never takes a caption to another's picture or
+ * table. A series whose captions would go with pictures and with tables
+ * alike, as a caption below a picture and above a table, goes with those
+ * its title names, of `titles`, the frontmatter's stored, or Quarto's,
+ * and else stays text too. A caption's separator is the stored delimiter's
+ * where it starts with it, so each export writes reads back, or one of
+ * punctuation Word's captions use (see captionSeparatorAt). A table an
+ * embed gave (`embedTables`, by their order), whose directive import
+ * writes in its place, takes none, nor does one in a style block, as
+ * export gives one there none.
  *
- * Each figure's label is that its caption's bookmark gives, by its name
- * (see labelOfBookmark), or by `labelsByBookmark`, the custom property
- * export keeps the others in, or else one made of the caption's first
- * words (see captionSlug), each other than those before it, as `-2`
- * after it makes it. Its picture's alt text, where it has one export
- * wouldn't write from the caption, goes in fig-alt; a picture with none
- * takes the caption's, as export gives a figure.
+ * Each label is that its caption's bookmark gives, by its name (see
+ * labelOfBookmark), or by `labelsByBookmark`, the custom property export
+ * keeps the others in, or else one made of the caption's first words (see
+ * captionSlug), each other than those before it, as `-2` after it makes
+ * it. A picture's alt text, where it has one export wouldn't write from the
+ * caption, goes in fig-alt; a picture with none takes the caption's, as
+ * export gives a figure.
  *
- * Returns what the captions show of the frontmatter's caption options,
- * where a series converts: the delimiter only where a caption has text.
+ * Returns, of each kind whose series converts, what its captions show of
+ * the frontmatter's caption options.
  */
-function readFigureCaptions(
+function readCaptions(
   content: ContentItem[],
   captionParagraphs: Map<ContentItem, CaptionParagraph> | undefined,
   seqCounts: ReadonlyMap<string, number>,
   labelsByBookmark: ReadonlyMap<string, string> | undefined,
   imageFormatMapping: Map<string, string> | null | undefined,
-  stored: { location?: CaptionLocation; delim?: string },
-): { figTitle: string; titleDelim?: string; figCapLocation: CaptionLocation } | undefined {
-  if (!captionParagraphs || captionParagraphs.size === 0) return undefined;
+  embedTables: ReadonlySet<number>,
+  stored: { figureLocation?: CaptionLocation; tableLocation?: CaptionLocation; delim?: string },
+  titles: { figure: string; table: string },
+): { figure?: CaptionsRead; table?: CaptionsRead } {
+  if (!captionParagraphs || captionParagraphs.size === 0) return {};
   const storedSeparator = stored.delim !== undefined ? captionSeparator(stored.delim, true) : undefined;
+  type Kind = 'figure' | 'table';
   interface Candidate {
     paragraph: CaptionParagraph;
     start: number; // its first item, its para item where it has one
@@ -8624,7 +8662,19 @@ function readFigureCaptions(
     title: string;
     delim?: string; // undefined where it has no text
     caption: ContentItem[]; // its text's items
-    image: { bottom?: number; top?: number }; // the index of the picture's item before it, and after it
+    // The index of the picture's item, or the table's, before it and after it
+    figure: { bottom?: number; top?: number };
+    table: { bottom?: number; top?: number };
+  }
+  // The tables that take no caption: those an embed gave, and those in a
+  // style block, where export gives a table none
+  const captionless = new Set<ContentItem>();
+  let tables = 0;
+  let styled = false;
+  for (const item of content) {
+    if (item.type === 'custom_style_open') styled = true;
+    else if (item.type === 'custom_style_close') styled = false;
+    else if (item.type === 'table' && (embedTables.has(tables++) || styled)) captionless.add(item);
   }
   const series = new Map<string, Candidate[]>();
   const failed = new Set<string>();
@@ -8682,71 +8732,136 @@ function readFigureCaptions(
     if (hasText && delim === undefined) return undefined;
     // The picture right before it, alone in its paragraph, and the one
     // right after it, of a paragraph of its own, with no empty paragraph
-    // between, which goes in the item between them (see emptyParagraphCount)
-    const image: Candidate['image'] = {};
+    // between, which goes in the item between them (see emptyParagraphCount),
+    // and the table right before it or right after it
+    const figure: Candidate['figure'] = {};
+    const table: Candidate['table'] = {};
     const adjoins = (item: ContentItem | undefined) => isPlainParaItem(item) && !(item as { emptyParagraphCount?: number }).emptyParagraphCount;
-    if (own && adjoins(content[start]) && takesCaption(content[start - 1], imageFormatMapping) && (start === 1 || isPlainParaItem(content[start - 2]))) image.bottom = start - 1;
+    const takesTableCaption = (item: ContentItem | undefined) => item?.type === 'table' && !captionless.has(item);
+    if (own && adjoins(content[start]) && takesCaption(content[start - 1], imageFormatMapping) && (start === 1 || isPlainParaItem(content[start - 2]))) figure.bottom = start - 1;
     if (adjoins(content[end]) && takesCaption(content[end + 1], imageFormatMapping)
-      && (end + 2 >= content.length || isStructuralBoundaryItem(content[end + 2]))) image.top = end + 1;
-    return { paragraph, start, end, title, delim, caption: hasText ? caption : [], image };
+      && (end + 2 >= content.length || isStructuralBoundaryItem(content[end + 2]))) figure.top = end + 1;
+    if (own && adjoins(content[start]) && takesTableCaption(content[start - 1])) table.bottom = start - 1;
+    if (takesTableCaption(content[end])) table.top = end;
+    return { paragraph, start, end, title, delim, caption: hasText ? caption : [], figure, table };
   }
 
-  // The series that convert, the one of the most captions first
-  let chosen: { candidates: Candidate[]; location: CaptionLocation; delim?: string } | undefined;
+  // Each series' place by its kind, where all its captions go with pictures,
+  // or all with tables, but not where they'd go with either
+  const chosen: Partial<Record<Kind, { candidates: Candidate[]; location: CaptionLocation; delim?: string }>> = {};
   for (const [identifier, candidates] of series) {
     if (failed.has(identifier) || seqCounts.get(identifier) !== candidates.length) continue;
     const { title } = candidates[0];
     const delims = new Set(candidates.flatMap(candidate => candidate.delim !== undefined ? [candidate.delim] : []));
     if (candidates.some(candidate => candidate.title !== title) || delims.size > 1) continue;
-    const below = candidates.every(candidate => candidate.image.bottom !== undefined);
-    const above = candidates.every(candidate => candidate.image.top !== undefined);
-    const location: CaptionLocation | undefined = below && above ? stored.location : below ? 'bottom' : above ? 'top' : undefined;
-    if (!location || chosen && chosen.candidates.length >= candidates.length) continue;
-    chosen = { candidates, location, delim: [...delims][0] };
+    const place = (kind: Kind): CaptionLocation | undefined => {
+      const below = candidates.every(candidate => candidate[kind].bottom !== undefined);
+      const above = candidates.every(candidate => candidate[kind].top !== undefined);
+      return below && above ? stored[kind === 'figure' ? 'figureLocation' : 'tableLocation'] : below ? 'bottom' : above ? 'top' : undefined;
+    };
+    const places = { figure: place('figure'), table: place('table') };
+    // One that would go with pictures and with tables alike, as a caption
+    // below a picture and above a table, goes with those its title names,
+    // as `Figure` or what else the frontmatter gave figures, but not those
+    // of a title both have
+    const kind: Kind | undefined = places.figure && places.table
+      ? title === titles.figure && title !== titles.table ? 'figure' : title === titles.table && title !== titles.figure ? 'table' : undefined
+      : places.figure ? 'figure' : places.table ? 'table' : undefined;
+    if (!kind || (chosen[kind]?.candidates.length ?? 0) >= candidates.length) continue;
+    chosen[kind] = { candidates, location: places[kind]!, delim: [...delims][0] };
   }
-  if (!chosen) return undefined;
 
-  // Each caption's text's Markdown, which export reads back as Word has it
-  const figures: Array<{ candidate: Candidate; image: ContentItem & { type: 'image' }; caption: string; readAlt: string }> = [];
-  for (const candidate of chosen.candidates) {
-    const caption = captionMarkdown(candidate.caption);
-    if (caption === undefined || caption.includes('\n')) return undefined;
-    const tokens = parseMd('![' + caption + '](x.png){#fig-x}');
-    const run = tokens.length === 1 && tokens[0].type === 'paragraph' && tokens[0].runs.length === 1 ? tokens[0].runs[0] : undefined;
-    if (run?.type !== 'image' || !run.figure) return undefined;
-    const exported = run.figure.captionRuns.map(exportedCaptionPiece);
+  // Each caption's text's Markdown, which export reads back as Word has it,
+  // or undefined for a kind one of whose captions doesn't
+  const read = (candidate: Candidate) => candidate.caption.map(item => item.type === 'math' ? { latex: item.latex } : item.type !== 'text' ? undefined : {
+    text: item.text, href: item.href,
     // A highlight's color by its Markdown name, as export's runs have it
-    const read = candidate.caption.map(item => item.type === 'math' ? { latex: item.latex } : item.type !== 'text' ? undefined : {
-      text: item.text, href: item.href,
-      formatting: item.formatting.highlightColor ? { ...item.formatting, highlightColor: resolveMarkdownColor(item.formatting.highlightColor) ?? item.formatting.highlightColor } : item.formatting,
-    });
-    if (exported.includes(undefined) || read.includes(undefined)) return undefined;
-    if (captionTextShape(exported as NonNullable<(typeof exported)[number]>[]) !== captionTextShape(read as NonNullable<(typeof read)[number]>[])) return undefined;
-    const image = content[candidate.image[chosen.location]!] as ContentItem & { type: 'image' };
+    formatting: item.formatting.highlightColor ? { ...item.formatting, highlightColor: resolveMarkdownColor(item.formatting.highlightColor) ?? item.formatting.highlightColor } : item.formatting,
+  });
+  const readsBack = (exportedRuns: MdRun[], candidate: Candidate): boolean => {
+    const exported = exportedRuns.map(exportedCaptionPiece);
+    const words = read(candidate);
+    if (exported.includes(undefined) || words.includes(undefined)) return false;
+    return captionTextShape(exported as NonNullable<(typeof exported)[number]>[]) === captionTextShape(words as NonNullable<(typeof words)[number]>[]);
+  };
+  const figures: Array<{ candidate: Candidate; image: ContentItem & { type: 'image' }; caption: string; readAlt: string }> = [];
+  for (const candidate of chosen.figure?.candidates ?? []) {
+    const caption = captionMarkdown(candidate.caption);
+    const tokens = caption === undefined || caption.includes('\n') ? [] : parseMd('![' + caption + '](x.png){#fig-x}');
+    const run = tokens.length === 1 && tokens[0].type === 'paragraph' && tokens[0].runs.length === 1 ? tokens[0].runs[0] : undefined;
+    if (caption === undefined || run?.type !== 'image' || !run.figure || !readsBack(run.figure.captionRuns, candidate)) {
+      figures.length = 0;
+      delete chosen.figure;
+      break;
+    }
+    const image = content[candidate.figure[chosen.figure!.location]!] as ContentItem & { type: 'image' };
     figures.push({ candidate, image, caption, readAlt: run.imageAlt ?? '' });
+  }
+  const tablesRead: Array<{ candidate: Candidate; table: TableItem; caption: string }> = [];
+  for (const candidate of chosen.table?.candidates ?? []) {
+    const caption = buildMarkdown(candidate.caption, new Map()).replace(/\n+$/, '');
+    const tokens = caption.includes('\n') ? [] : parseMd('|x|\n|-|\n|x|\n\n' + tableCaptionLine(caption, 'tbl-x'));
+    const table = tokens.length === 1 && tokens[0].type === 'table' ? tokens[0] : undefined;
+    if (!table?.tableCaption || !readsBack(table.tableCaption.runs, candidate)) {
+      tablesRead.length = 0;
+      delete chosen.table;
+      break;
+    }
+    tablesRead.push({ candidate, table: content[candidate.table[chosen.table!.location]!] as TableItem, caption });
+  }
+  // One delimiter, title-delim, for both, and a SEQ identifier for each,
+  // which export makes of its title, so titles that make one, as `Fig.` and
+  // `Fig`, would number the figures and the tables together in Word
+  const { figure, table } = chosen;
+  if (figure && table && (figure.delim !== undefined && table.delim !== undefined && figure.delim !== table.delim
+    || seqIdentifier(figure.candidates[0].title, 'Figure') === seqIdentifier(table.candidates[0].title, 'Table'))) {
+    if (table.candidates.length > figure.candidates.length) {
+      figures.length = 0;
+      delete chosen.figure;
+    } else {
+      tablesRead.length = 0;
+      delete chosen.table;
+    }
   }
 
   // Their labels, and the captions' paragraphs out, from the last
   const used = new Set<string>();
-  for (let n = 0; n < figures.length; n++) {
-    const { candidate, image, caption, readAlt } = figures[n];
+  const labelOf = (candidate: Candidate, n: number, prefix: 'fig' | 'tbl'): string => {
+    const pattern = prefix === 'fig' ? FIGURE_LABEL_RE : TABLE_LABEL_RE;
     let label = candidate.paragraph.bookmarks.map(name => labelsByBookmark?.get(name) ?? labelOfBookmark(name))
-      .find((found): found is string => found !== undefined && FIGURE_LABEL_RE.test(found));
-    label ??= captionSlug(candidate.caption.map(item => item.type === 'text' ? item.text : ' ').join(''), n + 1);
+      .find((found): found is string => found !== undefined && pattern.test(found));
+    label ??= captionSlug(candidate.caption.map(item => item.type === 'text' ? item.text : ' ').join(''), n + 1, prefix);
     const base = label;
     for (let k = 2; used.has(label); k++) label = base + '-' + k;
     used.add(label);
-    image.figure = { label, caption, ...(image.alt && isCaptionText(image.alt) && image.alt !== readAlt ? { alt: image.alt } : {}) };
+    return label;
+  };
+  figures.forEach(({ candidate, image, caption, readAlt }, n) => {
+    image.figure = { label: labelOf(candidate, n, 'fig'), caption, ...(image.alt && isCaptionText(image.alt) && image.alt !== readAlt ? { alt: image.alt } : {}) };
+  });
+  tablesRead.forEach(({ candidate, table: item, caption }, n) => {
+    item.caption = { label: labelOf(candidate, n, 'tbl'), caption };
+  });
+  const removed = [...figures, ...tablesRead].map(({ candidate }) => candidate).sort((a, b) => b.start - a.start);
+  for (const { start, end } of removed) {
+    // A figure's caption with no para item of its own, as one that starts
+    // the document, a section or the text after a code block's spacer,
+    // takes the picture's para item after it, as the picture then starts
+    // there. A table's has nothing after it but the table, so one that
+    // starts a section takes the para item the section's start left before
+    // it, as the table then starts the section, as it would with none.
+    const own = content[start].type === 'para';
+    const atSection = !own && content[end]?.type === 'table' && content[start - 1]?.type === 'para'
+      && (content[start - 2]?.type === 'landscape_open' || content[start - 2]?.type === 'portrait_open');
+    const takesNext = !own && content[end]?.type !== 'table';
+    content.splice(atSection ? start - 1 : start, end - start + (takesNext || atSection ? 1 : 0));
   }
-  for (let n = figures.length - 1; n >= 0; n--) {
-    const { start, end } = figures[n].candidate;
-    // A caption with no para item of its own, as one that starts the
-    // document, a section or the text after a code block's spacer, takes
-    // the picture's para item after it, as the picture then starts there
-    content.splice(start, end - start + (content[start].type !== 'para' ? 1 : 0));
-  }
-  const titled = figures[0].candidate.title;
-  return { figTitle: titled, ...(chosen.delim !== undefined ? { titleDelim: chosen.delim } : {}), figCapLocation: chosen.location };
+  const readOf = (kind: Kind): CaptionsRead | undefined => {
+    const seriesRead = chosen[kind];
+    if (!seriesRead) return undefined;
+    return { title: seriesRead.candidates[0].title, ...(seriesRead.delim !== undefined ? { titleDelim: seriesRead.delim } : {}), location: seriesRead.location };
+  };
+  return { figure: readOf('figure'), table: readOf('table') };
 }
 
 // Markdown generation
@@ -17662,7 +17777,9 @@ function buildMarkdownOnce(
         pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body, documentStartCommentGap);
       }
       if (tableResult.after) output.push('\n\n' + tableResult.after);
-      lastTableJoin = tableResult.join;
+      // Its caption, after it, which ends its HTML block, if it has one
+      if (item.caption) output.push('\n\n' + tableCaptionLine(item.caption.caption, item.caption.label));
+      lastTableJoin = item.caption ? undefined : tableResult.join;
       tableIndex++;
       endListContext();
       endQuoteGroup();
@@ -19753,17 +19870,23 @@ export async function convertDocx(
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap };
 
   const { content: docContent, zoteroBiblData, leadingBlankParagraphs, captionParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, contentOptions);
-  // The figures' captions, which go with their pictures, before anything
-  // counts the body's paragraphs (see readFigureCaptions)
-  const exportedCaptionLocation = captionParagraphs ? await extractFigureCaptionLocation(zip) : undefined;
-  const figureCaptions = captionParagraphs
-    ? readFigureCaptions(docContent, captionParagraphs, await seqFieldCountsOf(zip), await extractCaptionLabels(zip), imageFormatMapping, {
-      location: exportedCaptionLocation ?? storedSettings?.figCapLocation,
-      // The default where export wrote the figures, as their place says, and
-      // the frontmatter set none
-      delim: storedSettings?.crossref?.titleDelim ?? (exportedCaptionLocation ? DEFAULT_CAPTION_OPTIONS.titleDelim : undefined),
-    })
-    : undefined;
+  // The figures' and tables' captions, which go with their pictures and
+  // tables, before anything counts the body's paragraphs (see readCaptions)
+  const exportedFigureLocation = captionParagraphs ? await extractCaptionLocation(zip, 'MANUSCRIPT_FIG_CAP_LOCATION') : undefined;
+  const exportedTableLocation = captionParagraphs ? await extractCaptionLocation(zip, 'MANUSCRIPT_TBL_CAP_LOCATION') : undefined;
+  const captionsRead = captionParagraphs
+    ? readCaptions(docContent, captionParagraphs, await seqFieldCountsOf(zip), await extractCaptionLabels(zip), imageFormatMapping,
+      new Set([...embedDirectiveMapping?.keys() ?? []].map(Number)), {
+        figureLocation: exportedFigureLocation ?? storedSettings?.figCapLocation,
+        tableLocation: exportedTableLocation ?? storedSettings?.tblCapLocation,
+        // The default where export wrote the captions, as their place says,
+        // and the frontmatter set none
+        delim: storedSettings?.crossref?.titleDelim ?? (exportedFigureLocation || exportedTableLocation ? DEFAULT_CAPTION_OPTIONS.titleDelim : undefined),
+      }, {
+        figure: storedSettings?.crossref?.figTitle ?? DEFAULT_CAPTION_OPTIONS.figTitle,
+        table: storedSettings?.crossref?.tblTitle ?? DEFAULT_CAPTION_OPTIONS.tblTitle,
+      })
+    : {};
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);
@@ -20437,13 +20560,15 @@ export async function convertDocx(
   const captionOption = <T>(value: T | undefined, stored: T | undefined, fallback: T): T | undefined =>
     value === undefined || value === (stored ?? fallback) ? stored : value === fallback ? undefined : value;
   const crossref: CrossrefOptions = {
-    figTitle: captionOption(figureCaptions?.figTitle, storedSettings?.crossref?.figTitle, DEFAULT_CAPTION_OPTIONS.figTitle),
-    tblTitle: storedSettings?.crossref?.tblTitle,
-    titleDelim: captionOption(figureCaptions?.titleDelim, storedSettings?.crossref?.titleDelim, DEFAULT_CAPTION_OPTIONS.titleDelim),
+    figTitle: captionOption(captionsRead.figure?.title, storedSettings?.crossref?.figTitle, DEFAULT_CAPTION_OPTIONS.figTitle),
+    tblTitle: captionOption(captionsRead.table?.title, storedSettings?.crossref?.tblTitle, DEFAULT_CAPTION_OPTIONS.tblTitle),
+    titleDelim: captionOption(captionsRead.figure?.titleDelim ?? captionsRead.table?.titleDelim, storedSettings?.crossref?.titleDelim, DEFAULT_CAPTION_OPTIONS.titleDelim),
   };
   if (Object.values(crossref).some(value => value !== undefined)) fm.crossref = crossref;
-  const figCapLocation = captionOption(figureCaptions?.figCapLocation, storedSettings?.figCapLocation, DEFAULT_CAPTION_OPTIONS.figCapLocation);
+  const figCapLocation = captionOption(captionsRead.figure?.location, storedSettings?.figCapLocation, DEFAULT_CAPTION_OPTIONS.figCapLocation);
   if (figCapLocation) fm.figCapLocation = figCapLocation;
+  const tblCapLocation = captionOption(captionsRead.table?.location, storedSettings?.tblCapLocation, DEFAULT_CAPTION_OPTIONS.tblCapLocation);
+  if (tblCapLocation) fm.tblCapLocation = tblCapLocation;
   // Without a stored setting, as in a document from Word, the style its
   // quotes are in, which export would otherwise write as GitHub's
   fm.blockquoteStyle ??= inferredBlockquoteStyle(docContent);

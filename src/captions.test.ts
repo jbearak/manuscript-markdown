@@ -139,11 +139,13 @@ describe('captionSlug', () => {
 });
 
 describe('crossref frontmatter', () => {
-  it('reads the crossref keys export reads, as YAML values, and fig-cap-location', () => {
-    const { metadata, fieldOrder } = parseFrontmatter('---\ntitle: T\ncrossref:\n  fig-title: "Fig."\n  title-delim: \'.\'\n  fig-prefix: Figure # not read\n  labels:\n    fig-title: no\nfig-cap-location: top\n---\nBody\n');
+  it('reads the crossref keys export reads, as YAML values, and fig-cap-location and tbl-cap-location', () => {
+    const { metadata, fieldOrder } = parseFrontmatter('---\ntitle: T\ncrossref:\n  fig-title: "Fig."\n  title-delim: \'.\'\n  fig-prefix: Figure # not read\n  labels:\n    fig-title: no\nfig-cap-location: top\ntbl-cap-location: bottom\n---\nBody\n');
     expect(metadata.crossref).toEqual({ figTitle: 'Fig.', titleDelim: '.' });
     expect(metadata.figCapLocation).toBe('top');
-    expect(fieldOrder).toEqual(['title', 'crossref', 'fig-cap-location']);
+    expect(metadata.tblCapLocation).toBe('bottom');
+    expect(fieldOrder).toEqual(['title', 'crossref', 'fig-cap-location', 'tbl-cap-location']);
+    expect(parseFrontmatter('---\ntbl-cap-location: margin\n---\n').metadata).toEqual({});
   });
 
   it('reads the crossref keys past a comment, at any indentation, as YAML does', () => {
@@ -153,8 +155,8 @@ describe('crossref frontmatter', () => {
 
   it('writes them back as it reads them', () => {
     for (const crossref of [{ figTitle: 'Fig.' }, { titleDelim: '.' }, { titleDelim: ' —' }, { figTitle: 'Supplementary Figure', tblTitle: 'Tab', titleDelim: '' }, { titleDelim: ':' }]) {
-      const yaml = serializeFrontmatter({ crossref, figCapLocation: 'top' });
-      expect(parseFrontmatter(yaml + '\n').metadata).toEqual({ crossref, figCapLocation: 'top' });
+      const yaml = serializeFrontmatter({ crossref, figCapLocation: 'top', tblCapLocation: 'bottom' });
+      expect(parseFrontmatter(yaml + '\n').metadata).toEqual({ crossref, figCapLocation: 'top', tblCapLocation: 'bottom' });
     }
     expect(serializeFrontmatter({ crossref: { figTitle: 'Fig.', titleDelim: '.' } })).toBe('---\ncrossref:\n  fig-title: Fig.\n  title-delim: "."\n---\n');
   });
@@ -167,7 +169,7 @@ describe('crossref frontmatter', () => {
   });
 
   it('gives Quarto\'s defaults where the frontmatter sets none', () => {
-    expect(captionOptions(undefined)).toEqual({ figTitle: 'Figure', tblTitle: 'Table', titleDelim: ':', figCapLocation: 'bottom' });
+    expect(captionOptions(undefined)).toEqual({ figTitle: 'Figure', tblTitle: 'Table', titleDelim: ':', figCapLocation: 'bottom', tblCapLocation: 'top' });
     expect(captionOptions(parseFrontmatter('---\ncrossref:\n  title-delim: "."\n---\n').metadata).titleDelim).toBe('.');
   });
 });

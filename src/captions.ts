@@ -1,10 +1,12 @@
-// Figure captions, in Quarto's syntax, which export, import and the
-// preview read alike: an image alone in its paragraph, with a `fig-` label
-// in the attribute block after it, as `![Caption](img.png){#fig-x}`, is a
-// figure, numbered in document order, whose caption Word gets as a Caption
-// paragraph with "Figure " and a SEQ field, in a bookmark a cross-reference
-// can point at (see figureCaptionXml in md-to-docx.ts and readFigureCaptions
-// in converter.ts).
+// Figure and table captions, in Quarto's syntax, which export, import and
+// the preview read alike: an image alone in its paragraph, with a `fig-`
+// label in the attribute block after it, as `![Caption](img.png){#fig-x}`,
+// is a figure, and a paragraph right after a table that starts with `: `
+// and ends with a `tbl-` label, as `: Caption {#tbl-x}`, is the table's
+// caption. Each is numbered in document order, figures and tables apart,
+// and Word gets its caption as a Caption paragraph with "Figure " or
+// "Table " and a SEQ field, in a bookmark a cross-reference can point at
+// (see captionXml in md-to-docx.ts and readCaptions in converter.ts).
 //
 // A `{#fig-…}` or `{#tbl-…}` is a caption's label, never a comment's range
 // start, as Quarto reserves the two prefixes. Export, the preview, the
@@ -23,6 +25,23 @@ export function isCaptionLabelId(id: string): boolean {
 /** A figure's label as Quarto writes one: `fig-` and the characters of a
  *  comment's ID */
 export const FIGURE_LABEL_RE = /^fig-[A-Za-z0-9_-]+$/;
+
+/** A table's label, as a figure's but `tbl-` */
+export const TABLE_LABEL_RE = /^tbl-[A-Za-z0-9_-]+$/;
+
+/** What a table's caption is in a paragraph's text, `content`, as
+ *  markdown-it has it, trimmed: its label, and how many characters it
+ *  starts with that are no text of the caption's, the `:` and the
+ *  whitespace after it, as `: ` in `: Caption {#tbl-x}`, which ends with
+ *  the label. A space written as `&#32;` after them is the caption's.
+ *  Undefined where the text isn't so; the label must still be the
+ *  paragraph's last token (see tableCaptionOf in md-to-docx.ts). */
+export function tableCaptionSource(content: string): { label: string; lead: number } | undefined {
+  const lead = /^:[ \t]+/.exec(content);
+  const at = content.lastIndexOf('{#');
+  const label = at > 0 && content.endsWith('}') ? content.slice(at + 2, -1) : '';
+  return lead && TABLE_LABEL_RE.test(label) ? { label, lead: lead[0].length } : undefined;
+}
 
 /** An attribute block's attributes, as Pandoc writes them after an image:
  *  `#id`, `.class`, `key=value` and `key="value"`, in order */
@@ -174,20 +193,23 @@ export interface CaptionParagraph {
   bookmarks: string[];
 }
 
-/** Where a figure's caption goes, as Quarto's fig-cap-location says */
+/** Where a figure's or a table's caption goes, as Quarto's
+ *  fig-cap-location and tbl-cap-location say */
 export type CaptionLocation = 'top' | 'bottom';
 
 /** The words and separator a caption shows, from the frontmatter's Quarto
  *  keys: `crossref`'s fig-title, tbl-title and title-delim, and
- *  fig-cap-location */
+ *  fig-cap-location and tbl-cap-location. A figure's caption goes below it
+ *  by default, and a table's above it, as in Quarto and Word. */
 export interface CaptionOptions {
   figTitle: string;
   tblTitle: string;
   titleDelim: string;
   figCapLocation: CaptionLocation;
+  tblCapLocation: CaptionLocation;
 }
 
-export const DEFAULT_CAPTION_OPTIONS: Readonly<CaptionOptions> = { figTitle: 'Figure', tblTitle: 'Table', titleDelim: ':', figCapLocation: 'bottom' };
+export const DEFAULT_CAPTION_OPTIONS: Readonly<CaptionOptions> = { figTitle: 'Figure', tblTitle: 'Table', titleDelim: ':', figCapLocation: 'bottom', tblCapLocation: 'top' };
 
 /** The caption options the frontmatter `fm` sets, Quarto's defaults for
  *  the rest */
@@ -197,6 +219,7 @@ export function captionOptions(fm: Frontmatter | undefined): CaptionOptions {
     tblTitle: fm?.crossref?.tblTitle ?? DEFAULT_CAPTION_OPTIONS.tblTitle,
     titleDelim: fm?.crossref?.titleDelim ?? DEFAULT_CAPTION_OPTIONS.titleDelim,
     figCapLocation: fm?.figCapLocation ?? DEFAULT_CAPTION_OPTIONS.figCapLocation,
+    tblCapLocation: fm?.tblCapLocation ?? DEFAULT_CAPTION_OPTIONS.tblCapLocation,
   };
 }
 
@@ -277,22 +300,22 @@ export function captionBookmarkName(label: string, taken: Set<string>): string {
 }
 
 /** The label a bookmark export named (see captionBookmarkName) stands for,
- *  of a figure's, where it's the label as written, but its hyphens: `fig_`
- *  and the rest with each underscore a hyphen. Export keeps the others'
- *  labels in a custom property. */
+ *  of a figure's or a table's, where it's the label as written, but its
+ *  hyphens: `fig_` or `tbl_` and the rest with each underscore a hyphen.
+ *  Export keeps the others' labels in a custom property. */
 export function labelOfBookmark(name: string): string | undefined {
-  return /^fig_[A-Za-z0-9_]+$/.test(name) ? 'fig-' + name.slice(4).replace(/_/g, '-') : undefined;
+  return /^(?:fig|tbl)_[A-Za-z0-9_]+$/.test(name) ? name.slice(0, 3) + '-' + name.slice(4).replace(/_/g, '-') : undefined;
 }
 
 /**
- * A label for a figure whose Word caption has none of export's, from the
- * caption's first words, `text`: `fig-` and the words, without accents, in
- * lower case, their letters and digits joined by hyphens, as many as fit
- * in 30 characters, at least one, and at most five, as
- * `fig-child-penalties-by-region`. With no letter or digit to take, it's
- * `fig-` and the figure's number.
+ * A label for a figure or a table whose Word caption has none of export's,
+ * from the caption's first words, `text`: `prefix`, `fig` or `tbl`, a
+ * hyphen and the words, without accents, in lower case, their letters and
+ * digits joined by hyphens, as many as fit in 30 characters, at least one,
+ * and at most five, as `fig-child-penalties-by-region`. With no letter or
+ * digit to take, it's the prefix, a hyphen and the caption's number.
  */
-export function captionSlug(text: string, number: number): string {
+export function captionSlug(text: string, number: number, prefix: 'fig' | 'tbl' = 'fig'): string {
   const words = text.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   let slug = '';
   for (const word of words.slice(0, 5)) {
@@ -300,7 +323,7 @@ export function captionSlug(text: string, number: number): string {
     if (next.length > 30) break;
     slug = next;
   }
-  return 'fig-' + (slug || String(number));
+  return prefix + '-' + (slug || String(number));
 }
 
 /** An XML instruction's text with its references read */

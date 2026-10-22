@@ -237,6 +237,10 @@
         "title": "Figure Caption Location"
       },
       {
+        "command": "manuscript-markdown.setFrontmatter.tbl-cap-location",
+        "title": "Table Caption Location"
+      },
+      {
         "command": "manuscript-markdown.setFrontmatter.font",
         "title": "Body Font"
       },
@@ -877,6 +881,11 @@
           "command": "manuscript-markdown.setFrontmatter.fig-cap-location",
           "when": "editorLangId == markdown",
           "group": "2_captions@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.tbl-cap-location",
+          "when": "editorLangId == markdown",
+          "group": "2_captions@3"
         }
       ],
       "markdown.frontmatter.typography": [

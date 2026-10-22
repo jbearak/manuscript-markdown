@@ -30,7 +30,7 @@ describe('schema completeness', () => {
 		'pipe-table-max-line-width', 'grid-table-max-line-width',
 		'blockquote-style', 'callout-labels', 'colors', 'styles', 'breaks',
 		'line-spacing', 'paragraph-indent', 'bibliography-hanging-indent',
-		'crossref', 'fig-cap-location',
+		'crossref', 'fig-cap-location', 'tbl-cap-location',
 	];
 
 	test('schema covers all expected frontmatter keys', () => {

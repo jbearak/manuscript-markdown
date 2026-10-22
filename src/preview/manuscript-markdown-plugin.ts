@@ -25,7 +25,7 @@ import { GRID_TABLE_PLACEHOLDER_PREFIX, gridColumnAlign } from '../grid-table-pr
 import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preprocessCriticMarkupWithMap } from './preprocess-with-map';
 import { LineMap } from './line-map';
 import { pushAll, spliceAll } from '../arrays';
-import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionLabelId, isCaptionText, type CaptionOptions, type FigureAttributes } from '../captions';
+import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionLabelId, isCaptionText, tableCaptionSource, type CaptionOptions, type FigureAttributes } from '../captions';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { parseFrontmatter, type ColorScheme } from '../frontmatter';
@@ -2235,31 +2235,111 @@ function getEmbedDocumentPath(md: ManuscriptMarkdownIt, state: StateCore): strin
   return undefined;
 }
 
+/** Whether a caption's inline tokens, `children`, have text to show, which
+ *  takes the delimiter before it (see isCaptionText): an equation or an
+ *  image, which export writes as its Markdown, is some, and a tag, as <b>
+ *  or <br>, which export reads as formatting or a break, is none */
+function captionHasText(children: Token[]): boolean {
+  return children.some(child => child.type.includes('math') || child.type === 'image'
+    || child.type !== 'html_inline' && isCaptionText(child.content));
+}
+
 /**
- * Each figure, as Quarto's, which export gives a caption in Word (see
- * figureImageOf in md-to-docx.ts): a paragraph at the top level, in no
- * style block, whose one inline token is an image with a figure's label
- * after it, as `![A map](map.png){#fig-map}`, which the image took (see
+ * The tokens of a table's caption in a paragraph's inline tokens,
+ * `children`, whose text, `content`, reads as one (see tableCaptionSource),
+ * as `: Caption {#tbl-x}`, and its label: those between the colon, with
+ * the whitespace after it as written, and the label, which is the last
+ * token, without the whitespace and line ends before the label, as export
+ * reads it (see tableCaptionOf in md-to-docx.ts)
+ */
+function tableCaptionTokens(content: string, children: Token[]): { label: string; children: Token[] } | undefined {
+  const source = tableCaptionSource(content);
+  const first = children[0];
+  const last = children[children.length - 1];
+  if (!source || children.length < 2 || last.type !== 'manuscript_markdown_range_marker' || last.meta?.id !== '#' + source.label
+    || first.type !== 'text' || !first.content.startsWith(':') || first.content.length < source.lead) return undefined;
+  const caption = children.slice(0, -1);
+  const rest = first.content.slice(source.lead);
+  if (rest) caption[0] = Object.assign(Object.create(Object.getPrototypeOf(first)), first, { content: rest });
+  else caption.shift();
+  while (caption.length > 0) {
+    const end = caption[caption.length - 1];
+    if (end.type === 'softbreak' || end.type === 'hardbreak') {
+      caption.pop();
+    } else if (end.type === 'text' && /\s$/.test(end.content)) {
+      const text = end.content.trimEnd();
+      if (text) {
+        caption[caption.length - 1] = Object.assign(Object.create(Object.getPrototypeOf(end)), end, { content: text });
+        break;
+      }
+      caption.pop();
+    } else {
+      break;
+    }
+  }
+  return { label: source.label, children: caption };
+}
+
+/**
+ * Each figure and each table's caption, as Quarto's, which export gives a
+ * caption in Word (see figureImageOf and attachTableCaptions in
+ * md-to-docx.ts), at the top level, in no style block. A figure is a
+ * paragraph whose one inline token is an image with a figure's label after
+ * it, as `![A map](map.png){#fig-map}`, which the image took (see
  * imagePathsWithSpaces). The paragraph is a figure, with the label as its
  * ID, and its caption, `Figure 1: A map`, numbered in order, below or above
  * the image, as the frontmatter says. The image's alt text is its fig-alt,
- * where it has one, and its width and height its attributes'.
+ * where it has one, and its width and height its attributes'. A table's
+ * caption is the paragraph right after the table, as `: A map {#tbl-map}`,
+ * which shows `Table 1: A map`, with the label as its ID, numbered in
+ * order apart from the figures, and goes above the table or stays below
+ * it, as the frontmatter says.
  */
-function figuresRule(state: StateCore): void {
+function captionsRule(state: StateCore): void {
   const options = getPreviewEnvironment(state).captions ?? DEFAULT_CAPTION_OPTIONS;
   const tokens = state.tokens;
   let styleDepth = 0;
   let number = 0;
+  let tableNumber = 0;
+  // Where the last table at the top level starts, in no style block, while
+  // nothing has come after it
+  let tableStart: number | undefined;
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
+    const afterTable = tableStart;
+    tableStart = undefined;
     if (token.type === 'html_block' && token.level === 0) {
       const fence = styleFence(token.content || '');
       if (fence?.kind === 'open') styleDepth++;
       else if (fence?.kind === 'close') styleDepth = Math.max(0, styleDepth - 1);
+      else if (styleDepth === 0 && /<table[\s>]/i.test(token.content)) tableStart = i;
+      continue;
+    }
+    if (token.type === 'table_open' && token.level === 0 && styleDepth === 0) {
+      let close = i + 1;
+      while (close < tokens.length && !(tokens[close].type === 'table_close' && tokens[close].level === 0)) close++;
+      if (close < tokens.length) tableStart = i;
+      i = close;
       continue;
     }
     if (token.type !== 'paragraph_open' || token.level !== 0 || token.hidden || styleDepth > 0) continue;
     const inline = tokens[i + 1];
+    const table = afterTable !== undefined && inline?.type === 'inline' && tokens[i + 2]?.type === 'paragraph_close'
+      ? tableCaptionTokens(inline.content, inline.children ?? []) : undefined;
+    if (table) {
+      tableNumber++;
+      token.attrSet('id', table.label);
+      token.attrJoin('class', 'manuscript-markdown-table-caption');
+      const label = new state.Token('text', '', 0);
+      label.content = captionLabelText(options.tblTitle, tableNumber) + captionSeparator(options.titleDelim, captionHasText(table.children));
+      inline.children = [label, ...table.children];
+      if (options.tblCapLocation === 'top') {
+        const paragraph = tokens.splice(i, 3);
+        spliceAll(tokens, afterTable!, 0, paragraph);
+      }
+      i += 2;
+      continue;
+    }
     const image = inline?.type === 'inline' && inline.children?.length === 1 ? inline.children[0] : undefined;
     const figure: FigureAttributes | undefined = image?.type === 'image' ? image.meta?.figure : undefined;
     if (!image || !figure || tokens[i + 2]?.type !== 'paragraph_close') continue;
@@ -2272,13 +2352,8 @@ function figuresRule(state: StateCore): void {
     const caption: Token[] = [];
     const open = new state.Token('manuscript_figcaption_open', 'figcaption', 1);
     const label = new state.Token('text', '', 0);
-    // Its delimiter only where it has text to show (see isCaptionText): an
-    // equation or an image, which export writes as its Markdown, is some,
-    // and a tag, as <b> or <br>, which export reads as formatting or a
-    // break, is none
-    const hasText = children.some(child => child.type.includes('math') || child.type === 'image'
-      || child.type !== 'html_inline' && isCaptionText(child.content));
-    label.content = captionLabelText(options.figTitle, number) + captionSeparator(options.titleDelim, hasText);
+    // Its delimiter only where it has text to show
+    label.content = captionLabelText(options.figTitle, number) + captionSeparator(options.titleDelim, captionHasText(children));
     caption.push(open, label);
     for (const child of children) caption.push(Object.assign(new state.Token(child.type, child.tag, child.nesting), child));
     caption.push(new state.Token('manuscript_figcaption_close', 'figcaption', -1));
@@ -2487,8 +2562,8 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.core.ruler.after('manuscript_markdown_split_critic_blocks', 'manuscript_markdown_task_list', taskListRule);
   md.core.ruler.after('manuscript_markdown_task_list', 'manuscript_markdown_alert_blockquote', alertBlockquoteRule);
 
-  // Figures, before the style blocks' fences are divs
-  md.core.ruler.after('manuscript_markdown_alert_blockquote', 'manuscript_figures', figuresRule);
+  // Figures and tables' captions, before the style blocks' fences are divs
+  md.core.ruler.after('manuscript_markdown_alert_blockquote', 'manuscript_figures', captionsRule);
 
   // Core rule: wrap <!-- style: X -->...<!-- /style --> blocks in <div class="ms-custom-style ms-custom-style-{name}">
   md.core.ruler.after('manuscript_figures', 'manuscript_custom_style_wrap', (state: StateCore) => {

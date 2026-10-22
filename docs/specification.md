@@ -71,8 +71,9 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `paragraph-indent` | First-line paragraph indentation in inches (e.g., `0.5`, `0.3`). Auto-enabled at 0.5 inches when `line-spacing` is non-single. Set to `none` to disable auto-indent while keeping line spacing. |
 | `bibliography-hanging-indent` | When `true` (default), bibliography entries use a hanging indent (0.5 inch) with single-line spacing regardless of document line spacing. Set to `false` to disable. |
 | `styles` | Custom paragraph style definitions. A YAML map of style names to property objects. See [Custom Styles](#custom-styles). |
-| `crossref` | The words of captions, as Quarto's keys indented under it: `fig-title`, the word before a figure's number (default `Figure`), `tbl-title`, a table's (default `Table`), and `title-delim`, what goes between the number and the caption's text (default `:`). Export reads no other key of Quarto's there. See [Figures](#figures). |
+| `crossref` | The words of captions, as Quarto's keys indented under it: `fig-title`, the word before a figure's number (default `Figure`), `tbl-title`, a table's (default `Table`), and `title-delim`, what goes between the number and the caption's text (default `:`). Export reads no other key of Quarto's there. See [Figures](#figures) and [Table Captions](#table-captions). |
 | `fig-cap-location` | Where a figure's caption goes: `bottom` (default) or `top`. See [Figures](#figures). |
+| `tbl-cap-location` | Where a table's caption goes: `top` (default) or `bottom`. See [Table Captions](#table-captions). |
 
 ### Keys for Other Tools
 
@@ -681,6 +682,37 @@ When converting from DOCX to Markdown, the converter selects the simplest format
 
 A table whose cells hold what an HTML cell can't, such as a comment, a tracked change or a highlight, is a grid table of any width where it would otherwise be HTML, even with a line width of 0. That keeps its cells' content, but not a cell's own alignment, which a grid table holds only for a column. It stays HTML if it has merged cells, which only HTML holds, a cell of more than one paragraph, which a grid table's cell holds as lines, a header row after a body row, which a grid table's header can't hold, or a font or column widths with `-->`, which no directive's comment can hold. There, a cell's comment, tracked change, highlight, equation, citation or image exports as literal text, an equation as its Markdown with a line break for each of its line ends. Import writes a comment, a citation or an image there as that text reads back from Word, with its `<`, `>` and `&` as character references, but for the `>` and `<` of CriticMarkup's `{>>`, `<<}` and `~>`, which export reads as text as they are, so the editor still shows a comment and a substitution's sides there: a comment on `b` whose body is `x<b>y` comes in as `{==b==}{>>x&lt;b&gt;y<<}`, whose tag stays text.
 
+### Table Captions
+
+A paragraph right after a table, of any format, that starts with a colon and whitespace and ends with a label is the table's caption, as in Quarto:
+
+```markdown
+| Region | Rate |
+|--------|------|
+| North  | 12   |
+
+: Rates by region, 2010 to 2020 {#tbl-rates}
+```
+
+A label is `tbl-` and the characters of a comment's ID, `[A-Za-z0-9_-]`, in braces of its own, with whitespace or nothing before it, and nothing after it. The caption's text is what's between the colon's whitespace and the label, formatted as any paragraph's, without the whitespace and line ends before the label. A space written as `&#32;` right after the colon's whitespace is the text's. The table and its caption are at the top level, not in a list, a quote, a note or a style block, and nothing is between them but blank lines.
+
+The preview shows the caption above the table, numbered in document order, apart from the figures, as `Table 1: Rates by region, 2010 to 2020`. Export writes Word the caption above the table, kept with it, as Word's Insert Caption writes one: a paragraph in the Caption style, with `Table `, a `SEQ Table` field for the number, then `: ` and the caption's text. The title and number are in a bookmark named for the label, as `tbl_rates`, as a figure's are (see [Figures](#figures)).
+
+`crossref:`'s `tbl-title` changes the title, and its `title-delim` the delimiter, which figures and tables share. `tbl-cap-location: bottom` puts each caption below its table, in the preview and in Word, though the Markdown keeps it after the table either way.
+
+```yaml
+---
+crossref:
+  tbl-title: Exhibit
+  title-delim: "."
+tbl-cap-location: bottom
+---
+```
+
+A table's caption takes what a figure's does: a citation, note, comment, tracked change, line break or image in it, or an equation with CriticMarkup in it, goes to Word as its Markdown, as text, with a warning, and a caption with no text, as `: {#tbl-rates}`, or whitespace alone, takes no delimiter. A table an embed gives takes no caption. A `{#tbl-…}` anywhere else labels nothing, and export warns of it (see [Figures](#figures)).
+
+DOCX import reads Word's table captions back so (see [Figure and Table Captions](converter.md#figure-and-table-captions)).
+
 ### Embedded Tables
 
 Tables can also be embedded from external `.csv`, `.tsv`, `.xlsx`, and `.md` files using the `<!-- embed: -->` directive. Embedded tables support the same formatting directives as inline tables and are expanded into full tables on Word export. See [Embedded Tables](embedded-tables.md) for syntax, parameters, and examples.
@@ -855,9 +887,9 @@ fig-cap-location: top
 
 A caption's citation, note, comment, tracked change, line break or image, or an equation with CriticMarkup in it, which Word's caption can't hold as import would read it back, goes to Word as its Markdown, as text, as `{>>note {>>reply<<}<<}` or `$x{++y++}$`, with a warning.
 
-An image with a label that isn't alone in its paragraph, or is in a list, a quote, a table, a note, a link, a style block or a tracked change, gets no caption, with a warning. A `{#fig-…}` or `{#tbl-…}` that labels nothing, as in a sentence, starts no comment range (see [ID Format](#id-format)): export writes nothing for it, with a warning, and the preview shows nothing. Export doesn't caption tables yet, so `{#tbl-…}` always warns.
+An image with a label that isn't alone in its paragraph, or is in a list, a quote, a table, a note, a link, a style block or a tracked change, gets no caption, with a warning. A `{#fig-…}` or `{#tbl-…}` that labels nothing, as in a sentence, starts no comment range (see [ID Format](#id-format)): export writes nothing for it, with a warning, and the preview shows nothing.
 
-DOCX import reads Word's figure captions back as figures (see [Figure Captions](converter.md#figure-captions)).
+DOCX import reads Word's figure captions back as figures (see [Figure and Table Captions](converter.md#figure-and-table-captions)).
 
 ### HTML Image Syntax
 
@@ -1072,7 +1104,7 @@ Export writes Word a range's markers only with its comment and both its ends, as
 
 #### ID Format
 
-IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. An ID that starts with `fig-` or `tbl-` is a caption's label (see [Figures](#figures)), so `{#fig-map}` starts no range, though `{#fig-map>>…<<}` is still a comment's body and `{/fig-map}` still ends a range. Import gives a comment that was exported with such an ID a number instead. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`. On DOCX import, a comment keeps the ID it was exported with. The others, such as those added in Word, take the numbers no comment kept, in the order they first appear. So an ID stays the same from one round trip to the next, even after a comment written as `{==text==}{>>comment<<}`, whose ID doesn't show.
+IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. An ID that starts with `fig-` or `tbl-` is a caption's label (see [Figures](#figures) and [Table Captions](#table-captions)), so `{#fig-map}` starts no range, though `{#fig-map>>…<<}` is still a comment's body and `{/fig-map}` still ends a range. Import gives a comment that was exported with such an ID a number instead. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`. On DOCX import, a comment keeps the ID it was exported with. The others, such as those added in Word, take the numbers no comment kept, in the order they first appear. So an ID stays the same from one round trip to the next, even after a comment written as `{==text==}{>>comment<<}`, whose ID doesn't show.
 
 #### Backward Compatibility
 

@@ -154,6 +154,11 @@ const FIG_CAP_LOCATION_VALUES: readonly EnumValue[] = [
 	{ value: 'top', description: 'Above the figure' },
 ];
 
+const TBL_CAP_LOCATION_VALUES: readonly EnumValue[] = [
+	{ value: 'top', description: 'Above the table' },
+	{ value: 'bottom', description: 'Below the table' },
+];
+
 const COL_WIDTHS_VALUES: readonly EnumValue[] = [
 	{ value: 'equal', description: 'Equal column widths' },
 	{ value: 'auto', description: 'Automatic column widths' },
@@ -257,6 +262,8 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 		description: 'Quarto\u2019s cross-reference options. Under it, set `fig-title`, the word a figure\u2019s caption starts with (default `Figure`), `tbl-title`, a table\u2019s (default `Table`), and `title-delim`, what follows the number (default `:`).\n\n**Accepted values:** Nested YAML block.' },
 	{ key: 'fig-cap-location', kind: 'enum', enumValues: FIG_CAP_LOCATION_VALUES,
 		description: 'Where a figure\u2019s caption goes. Default: `bottom`.\n\n**Accepted values:** `top`, `bottom`.' },
+	{ key: 'tbl-cap-location', kind: 'enum', enumValues: TBL_CAP_LOCATION_VALUES,
+		description: 'Where a table\u2019s caption goes. Default: `top`.\n\n**Accepted values:** `top`, `bottom`.' },
 ];
 
 /** The keys of `crossref:` export reads, Quarto\u2019s */

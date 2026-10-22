@@ -197,11 +197,11 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
   });
 });
 
-describe('crossref and fig-cap-location, which export reads', () => {
+describe('crossref, fig-cap-location and tbl-cap-location, which export reads', () => {
   it('are no record where export reads a setting from crossref, and keep their places', async () => {
-    expect(await recordValues('---\ncrossref:\n  fig-title: Fig.\nfig-cap-location: top\n---\n\nBody.\n')).toEqual([]);
-    const markdown = '---\ndate: 1\ncrossref:\n  fig-title: Fig.\n  title-delim: "."\nfig-cap-location: top\nlang: en\n---\n\nBody.\n';
-    expect(await recordValues(markdown)).toEqual(['[{"text":"date: 1"},"crossref","fig-cap-location",{"text":"lang: en"}]']);
+    expect(await recordValues('---\ncrossref:\n  fig-title: Fig.\nfig-cap-location: top\ntbl-cap-location: bottom\n---\n\nBody.\n')).toEqual([]);
+    const markdown = '---\ndate: 1\ncrossref:\n  tbl-title: Exhibit\n  title-delim: "."\nfig-cap-location: top\ntbl-cap-location: bottom\nlang: en\n---\n\nBody.\n';
+    expect(await recordValues(markdown)).toEqual(['[{"text":"date: 1"},"crossref","fig-cap-location","tbl-cap-location",{"text":"lang: en"}]']);
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
