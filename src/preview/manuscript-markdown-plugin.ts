@@ -1975,6 +1975,8 @@ function associateCommentsRule(state: StateCore): void {
 
     const children = blockToken.children;
     const newChildren: Token[] = [];
+    // The element the last comment went on, while nothing has come after it
+    let replyTo: Token | undefined;
     let i = 0;
 
     while (i < children.length) {
@@ -1994,6 +1996,14 @@ function associateCommentsRule(state: StateCore): void {
         // and those of the replies right after it, which Pass 1 gave its ID
         if (commentId) {
           i = repliesAfter(children, closeIdx).end + 1;
+          replyTo = undefined;
+          continue;
+        }
+
+        // Right after a comment on an element, a reply to it
+        if (replyTo) {
+          replyTo.attrSet('data-comment', replyTo.attrGet('data-comment') + '\n' + commentText);
+          i = closeIdx + 1;
           continue;
         }
 
@@ -2007,10 +2017,15 @@ function associateCommentsRule(state: StateCore): void {
           const openIdx = findMatchingOpenIdx(newChildren, candidateIdx);
           if (openIdx !== -1) {
             const openToken = newChildren[openIdx];
-            const existing = openToken.attrGet('data-comment');
-            openToken.attrSet('data-comment', existing ? existing + '\n' + commentText : commentText);
-            i = closeIdx + 1;
-            continue;
+            // A comment on an element that has one is a reply to it only
+            // right after it, as export reads it (replyTo): after a space,
+            // it's one of its own
+            if (!openToken.attrGet('data-comment')) {
+              openToken.attrSet('data-comment', commentText);
+              replyTo = openToken;
+              i = closeIdx + 1;
+              continue;
+            }
           }
         }
 
@@ -2023,6 +2038,7 @@ function associateCommentsRule(state: StateCore): void {
       }
 
       newChildren.push(children[i]);
+      replyTo = undefined;
       i++;
     }
 

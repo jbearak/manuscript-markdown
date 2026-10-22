@@ -87,6 +87,7 @@ A change that opens in an equation ends in it, as `$a{++b++}$` does. An opener w
 ## Nesting Rules
 
 - CriticMarkup patterns **cannot be nested** within the same type
+- Comments are the exception: a comment can hold its replies, `{>>note {>>reply<<}<<}`, and its `<<}` is the one after theirs (see [Comment](#comment-text))
 - When patterns appear nested, only the first complete pattern is recognized
 - Different CriticMarkup types can appear adjacent to each other (e.g., highlight followed by comment)
 

@@ -1850,6 +1850,20 @@ describe('Comment association in preview', () => {
       expect(renderWithPlugin(input)).toContain(expected);
     });
 
+    // Export reads a comment after a highlight's comment and a space as one
+    // of its own, not a reply
+    it('shows a comment after a commented highlight and a space as one of its own', () => {
+      const output = renderWithPlugin('{==text==}{>>first<<} {>>second<<}');
+      expect(output).toContain('data-comment="first"');
+      expect(output).toContain('manuscript-markdown-comment-indicator" data-comment="second"');
+    });
+
+    it('still gives a highlight its first comment after a space', () => {
+      const output = renderWithPlugin('{==text==} {>>first<<}{>>second<<}');
+      expect(output).toContain('data-comment="first\nsecond"');
+      expect(output).not.toContain('manuscript-markdown-comment-indicator');
+    });
+
     it('renders a deep nest of replies in linear time', () => {
       const input = '{>>note ' + '{>>reply '.repeat(800) + '<<}'.repeat(800) + '<<}';
       // Pairing each comment's replies again for each comment in it took
