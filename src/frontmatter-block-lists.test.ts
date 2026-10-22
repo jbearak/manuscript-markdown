@@ -77,7 +77,7 @@ describe('a block list in frontmatter', () => {
     ['table-digits', '2'], ['table-decimal-mark', 'comma'], ['table-digit-grouping', 'space'],
     ['blockquote-style', 'Quote'], ['callout-labels', 'false'], ['colors', 'guttmacher'],
     ['breaks', 'true'], ['line-spacing', 'double'], ['paragraph-indent', '0.3'],
-    ['bibliography-hanging-indent', 'false'], ['fig-cap-location', 'top'],
+    ['bibliography-hanging-indent', 'false'], ['fig-cap-location', 'top'], ['tbl-cap-location', 'bottom'],
   ];
 
   it('checks each key that takes one value', () => {

@@ -29,7 +29,7 @@ import { extractZoteroKey } from './zotero-link';
 import { styleFence } from './style-fence';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
-import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, isCaptionText, labelOfBookmark, quotedAttributeValue, type CaptionLocation, type CaptionParagraph } from './captions';
+import { captionSeparator, captionSeparatorAt, captionSlug, countSeqFields, DEFAULT_CAPTION_OPTIONS, delimiterOfSeparator, FIGURE_LABEL_RE, isCaptionLabelId, isCaptionText, labelOfBookmark, quotedAttributeValue, TABLE_LABEL_RE, type CaptionLocation, type CaptionParagraph } from './captions';
 import { asUtf8, decodeXml, parsePart, relatedPartPath, relatedPartPaths } from './template-sections';
 
 // --- Implementation notes ---
@@ -1585,8 +1585,15 @@ interface StructuralListContext {
 }
 
 /** A table, and the size and font Word shows its text in (see
- *  tableTextSize and tableTextFont) */
-type TableItem = { type: 'table'; rows: TableRow[]; textSize?: TableTextSize; textFont?: TableTextFont };
+ *  tableTextSize and tableTextFont), and its caption, as readCaptions read
+ *  it, which buildMarkdown writes after it as Quarto's, `: Caption {#tbl-x}` */
+type TableItem = { type: 'table'; rows: TableRow[]; textSize?: TableTextSize; textFont?: TableTextFont; caption?: TableCaption };
+/** A table's caption, as import writes it (see readCaptions) */
+interface TableCaption {
+  label: string;
+  /** Its text's Markdown, which goes after the colon */
+  caption: string;
+}
 
 export type ContentItem =
   | {
@@ -1645,7 +1652,7 @@ export type ContentItem =
   | { type: 'html_comment'; text: string; commentIds: Set<string>; otherLineEnds?: true }
   // href and link: as text's, of a w:hyperlink around the picture or its
   // docPr's a:hlinkClick
-  // figure: the caption of the figure it is, as readFigureCaptions read
+  // figure: the caption of the figure it is, as readCaptions read
   // it, which pictureMarkdown writes as Quarto's, ![Caption](map.png){#fig-map}
   | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string; href?: string; link?: number; figure?: FigureCaption }
   | { type: 'landscape_open' }
@@ -1656,7 +1663,7 @@ export type ContentItem =
   // In a list item (`inItem`), as a block of its paragraphs in the style
   | { type: 'custom_style_open'; styleName: string; inItem?: ListContinuation }
   | { type: 'custom_style_close'; inItem?: ListContinuation };
-/** A figure's caption, as import writes it (see readFigureCaptions) */
+/** A figure's caption, as import writes it (see readCaptions) */
 interface FigureCaption {
   label: string;
   /** Its text's Markdown, which goes in the image's brackets */
@@ -4348,8 +4355,8 @@ export async function extractZoteroPrefs(data: Uint8Array | JSZip): Promise<Zote
  * Returns null if no matching properties are found.
  */
 /** The label of each caption whose bookmark's name doesn't give it, by
- *  the name, which export keeps in a custom property (see figureCaptionXml
- *  in md-to-docx.ts) */
+ *  the name, which export keeps in a custom property (see captionXml in
+ *  md-to-docx.ts) */
 async function extractCaptionLabels(zip: JSZip): Promise<Map<string, string> | undefined> {
   const json = await extractChunkedCustomProp(zip, 'MANUSCRIPT_CAPTION_LABELS_');
   if (!json) return undefined;
@@ -4362,11 +4369,11 @@ async function extractCaptionLabels(zip: JSZip): Promise<Map<string, string> | u
   }
 }
 
-/** Where export put the captions of its figures, which it keeps in a
- *  custom property for a document with figures (see figureCaptionXml in
- *  md-to-docx.ts) */
-async function extractFigureCaptionLocation(zip: JSZip): Promise<CaptionLocation | undefined> {
-  const value = await extractStringCustomProp(zip, 'MANUSCRIPT_FIG_CAP_LOCATION');
+/** Where export put the captions of its figures, or its tables, which it
+ *  keeps in a custom property, `name`, for a document with them (see
+ *  captionXml in md-to-docx.ts) */
+async function extractCaptionLocation(zip: JSZip, name: 'MANUSCRIPT_FIG_CAP_LOCATION' | 'MANUSCRIPT_TBL_CAP_LOCATION'): Promise<CaptionLocation | undefined> {
+  const value = await extractStringCustomProp(zip, name);
   return value === 'top' || value === 'bottom' ? value : undefined;
 }
 
@@ -6908,7 +6915,7 @@ function drawingImages(
 export interface DocumentContentResult {
   content: ContentItem[];
   /** The paragraphs of the body that are captions as Word writes them, by
-   *  their first items (see captionParagraphOf), which readFigureCaptions
+   *  their first items (see captionParagraphOf), which readCaptions
    *  reads with their pictures */
   captionParagraphs?: Map<ContentItem, CaptionParagraph>;
   /** Paragraphs of spaces and tabs alone before the content, which count
@@ -8461,7 +8468,7 @@ export async function extractDocumentContent(
               leadingBlankParagraphs++;
             }
           }
-          // A caption's paragraph, by its first item, which readFigureCaptions
+          // A caption's paragraph, by its first item, which readCaptions
           // reads with the picture before or after it: a plain paragraph of
           // the body's, with a para item of its own, but for the document's
           // first, and one after a para item another paragraph left, as the
@@ -8709,56 +8716,89 @@ function captionMarkdown(items: ContentItem[]): string | undefined {
   return markdown;
 }
 
+/** A table's caption's line, as Quarto writes one after the table: a
+ *  colon, the caption's Markdown, `caption`, after a space where it has
+ *  any, and the label, as `: Rates by region {#tbl-rates}` */
+function tableCaptionLine(caption: string, label: string): string {
+  return ':' + (caption ? ' ' + caption : '') + ' {#' + label + '}';
+}
+
+/** What readCaptions read of the series of captions of a kind, figures'
+ *  or tables', that converts: their title, their delimiter, where a
+ *  caption has text, and their place */
+interface CaptionsRead {
+  title: string;
+  titleDelim?: string;
+  location: CaptionLocation;
+}
+
 /**
- * Reads the captions of the figures in `content`, the body's items, which
- * Word's Insert Caption wrote, or export as it does, each in a paragraph
- * of its own right after or right before its picture, which is alone in
- * its paragraph: its label and number, as `Figure 1`, the series' SEQ
- * field, then a separator and its text, as `: Rates by region`. A figure
- * whose caption converts is Quarto's, `![Rates by region](map.png){#fig-map}`:
- * the caption's paragraph goes, and its picture's item holds the caption.
+ * Reads the captions of the figures and tables in `content`, the body's
+ * items, which Word's Insert Caption wrote, or export as it does, each in a
+ * paragraph of its own right after or right before its picture, which is
+ * alone in its paragraph, or its table: its label and number, as
+ * `Figure 1`, the series' SEQ field, then a separator and its text, as
+ * `: Rates by region`. A figure whose caption converts is Quarto's,
+ * `![Rates by region](map.png){#fig-map}`: the caption's paragraph goes,
+ * and its picture's item holds the caption. A table's caption goes after
+ * it, as Quarto's `: Rates by region {#tbl-rates}`, which its item holds.
  *
  * The governing rule is that a caption converts only where the next export
- * writes it as Word shows it, its label, number, separator and text, so
- * each of a series of captions, by their SEQ field's identifier, converts,
- * or none does, and its numbers stay as they were, as text: export
- * numbers the figures in order, which Word does too, so a series converts
- * only where every field of it Word numbers, in any part of the document
- * (`seqCounts`), is one of these captions, of one title, separator and
- * place, whose text export writes as Word has it (see captionTextShape),
- * and only one series, the one of the most captions, as the frontmatter
- * gives one title (see captionOptions). A number Word didn't update goes
- * as export numbers it.
+ * writes it as Word shows it, its label, number, separator and text, in
+ * its place, so each of a series of captions, by their SEQ field's
+ * identifier, converts, or none does, and its numbers stay as they were,
+ * as text: export numbers the figures and the tables in order, which Word
+ * does too, so a series converts only where every field of it Word
+ * numbers, in any part of the document (`seqCounts`), is one of these
+ * captions, of one title, separator and place, all of figures or all of
+ * tables, whose text export writes as Word has it (see captionTextShape).
+ * Of each kind, only one series converts, the one of the most captions, as
+ * the frontmatter gives each kind one title (see captionOptions), and
+ * figures and tables share their delimiter, so where those of the two
+ * differ, the tables' stay text, or the figures' where they're fewer. A
+ * number Word didn't update goes as export numbers it.
  *
- * Where every caption of a series has a picture before it and one after
- * it, either place would pair each with a picture, so the series converts
- * only where `stored`, what export recorded, gives the place; else it
- * stays text, which never takes a caption to another figure's picture. A
- * caption's separator is the stored delimiter's where it starts with it,
- * so each export writes reads back, or one of punctuation Word's captions
- * use (see captionSeparatorAt).
+ * Where every caption of a series has a picture or a table before it and
+ * one after it, either place would pair each with one, so the series
+ * converts only where `stored`, what export recorded, gives the place;
+ * else it stays text, which never takes a caption to another's picture or
+ * table. A series whose captions would go with pictures and with tables
+ * alike, as a caption below a picture and above a table, goes with those
+ * its title names, of `titles`, the frontmatter's stored, or Quarto's,
+ * and else stays text too. A caption's separator is the stored delimiter's
+ * where it starts with it, so each export writes reads back, or one of
+ * punctuation Word's captions use (see captionSeparatorAt). A table an
+ * embed gave (`embedTables`, by their order), whose directive import
+ * writes in its place, takes none, nor does one in a style block, as
+ * export gives one there none: where one of a series' tables would be in
+ * one, as `tablesInStyleBlocks` tells of the body with their captions'
+ * items out, as import writes the blocks only later, the series stays text.
  *
- * Each figure's label is that its caption's bookmark gives, by its name
- * (see labelOfBookmark), or by `labelsByBookmark`, the custom property
- * export keeps the others in, or else one made of the caption's first
- * words (see captionSlug), each other than those before it, as `-2`
- * after it makes it. Its picture's alt text, where it has one export
- * wouldn't write from the caption, goes in fig-alt; a picture with none
- * takes the caption's, as export gives a figure.
+ * Each label is that its caption's bookmark gives, by its name (see
+ * labelOfBookmark), or by `labelsByBookmark`, the custom property export
+ * keeps the others in, or else one made of the caption's first words (see
+ * captionSlug), each other than those before it, as `-2` after it makes
+ * it. A picture's alt text, where it has one export wouldn't write from the
+ * caption, goes in fig-alt; a picture with none takes the caption's, as
+ * export gives a figure.
  *
- * Returns what the captions show of the frontmatter's caption options,
- * where a series converts: the delimiter only where a caption has text.
+ * Returns, of each kind whose series converts, what its captions show of
+ * the frontmatter's caption options.
  */
-function readFigureCaptions(
+function readCaptions(
   content: ContentItem[],
   captionParagraphs: Map<ContentItem, CaptionParagraph> | undefined,
   seqCounts: ReadonlyMap<string, number>,
   labelsByBookmark: ReadonlyMap<string, string> | undefined,
   imageFormatMapping: Map<string, string> | null | undefined,
-  stored: { location?: CaptionLocation; delim?: string },
-): { figTitle: string; titleDelim?: string; figCapLocation: CaptionLocation } | undefined {
-  if (!captionParagraphs || captionParagraphs.size === 0) return undefined;
+  embedTables: ReadonlySet<number>,
+  stored: { figureLocation?: CaptionLocation; tableLocation?: CaptionLocation; delim?: string },
+  titles: { figure: string; table: string },
+  tablesInStyleBlocks?: (removed: ReadonlySet<ContentItem>) => ReadonlySet<ContentItem>,
+): { figure?: CaptionsRead; table?: CaptionsRead } {
+  if (!captionParagraphs || captionParagraphs.size === 0) return {};
   const storedSeparator = stored.delim !== undefined ? captionSeparator(stored.delim, true) : undefined;
+  type Kind = 'figure' | 'table';
   interface Candidate {
     paragraph: CaptionParagraph;
     start: number; // its first item, its para item where it has one
@@ -8766,8 +8806,15 @@ function readFigureCaptions(
     title: string;
     delim?: string; // undefined where it has no text
     caption: ContentItem[]; // its text's items
-    image: { bottom?: number; top?: number }; // the index of the picture's item before it, and after it
+    // The index of the picture's item, or the table's, before it and after it
+    figure: { bottom?: number; top?: number };
+    table: { bottom?: number; top?: number };
   }
+  // The tables that take no caption: those an embed gave, whose directive
+  // import writes in their place
+  const captionless = new Set<ContentItem>();
+  let tables = 0;
+  for (const item of content) if (item.type === 'table' && embedTables.has(tables++)) captionless.add(item);
   const series = new Map<string, Candidate[]>();
   const failed = new Set<string>();
   for (let start = 0; start < content.length; start++) {
@@ -8824,71 +8871,153 @@ function readFigureCaptions(
     if (hasText && delim === undefined) return undefined;
     // The picture right before it, alone in its paragraph, and the one
     // right after it, of a paragraph of its own, with no empty paragraph
-    // between, which goes in the item between them (see emptyParagraphCount)
-    const image: Candidate['image'] = {};
+    // between, which goes in the item between them (see emptyParagraphCount),
+    // and the table right before it or right after it
+    const figure: Candidate['figure'] = {};
+    const table: Candidate['table'] = {};
     const adjoins = (item: ContentItem | undefined) => isPlainParaItem(item) && !(item as { emptyParagraphCount?: number }).emptyParagraphCount;
-    if (own && adjoins(content[start]) && takesCaption(content[start - 1], imageFormatMapping) && (start === 1 || isPlainParaItem(content[start - 2]))) image.bottom = start - 1;
+    const takesTableCaption = (item: ContentItem | undefined) => item?.type === 'table' && !captionless.has(item);
+    if (own && adjoins(content[start]) && takesCaption(content[start - 1], imageFormatMapping) && (start === 1 || isPlainParaItem(content[start - 2]))) figure.bottom = start - 1;
     if (adjoins(content[end]) && takesCaption(content[end + 1], imageFormatMapping)
-      && (end + 2 >= content.length || isStructuralBoundaryItem(content[end + 2]))) image.top = end + 1;
-    return { paragraph, start, end, title, delim, caption: hasText ? caption : [], image };
+      && (end + 2 >= content.length || isStructuralBoundaryItem(content[end + 2]))) figure.top = end + 1;
+    if (own && adjoins(content[start]) && takesTableCaption(content[start - 1])) table.bottom = start - 1;
+    if (takesTableCaption(content[end])) table.top = end;
+    return { paragraph, start, end, title, delim, caption: hasText ? caption : [], figure, table };
   }
 
-  // The series that convert, the one of the most captions first
-  let chosen: { candidates: Candidate[]; location: CaptionLocation; delim?: string } | undefined;
+  // Each series' place by its kind, where all its captions go with pictures,
+  // or all with tables, but not where they'd go with either
+  const chosen: Partial<Record<Kind, { candidates: Candidate[]; location: CaptionLocation; delim?: string }>> = {};
   for (const [identifier, candidates] of series) {
     if (failed.has(identifier) || seqCounts.get(identifier) !== candidates.length) continue;
     const { title } = candidates[0];
     const delims = new Set(candidates.flatMap(candidate => candidate.delim !== undefined ? [candidate.delim] : []));
     if (candidates.some(candidate => candidate.title !== title) || delims.size > 1) continue;
-    const below = candidates.every(candidate => candidate.image.bottom !== undefined);
-    const above = candidates.every(candidate => candidate.image.top !== undefined);
-    const location: CaptionLocation | undefined = below && above ? stored.location : below ? 'bottom' : above ? 'top' : undefined;
-    if (!location || chosen && chosen.candidates.length >= candidates.length) continue;
-    chosen = { candidates, location, delim: [...delims][0] };
+    const place = (kind: Kind): CaptionLocation | undefined => {
+      const below = candidates.every(candidate => candidate[kind].bottom !== undefined);
+      const above = candidates.every(candidate => candidate[kind].top !== undefined);
+      return below && above ? stored[kind === 'figure' ? 'figureLocation' : 'tableLocation'] : below ? 'bottom' : above ? 'top' : undefined;
+    };
+    const places = { figure: place('figure'), table: place('table') };
+    // One that would go with pictures and with tables alike, as a caption
+    // below a picture and above a table, goes with those its title names,
+    // as `Figure` or what else the frontmatter gave figures, but not those
+    // of a title both have
+    const kind: Kind | undefined = places.figure && places.table
+      ? title === titles.figure && title !== titles.table ? 'figure' : title === titles.table && title !== titles.figure ? 'table' : undefined
+      : places.figure ? 'figure' : places.table ? 'table' : undefined;
+    if (!kind || (chosen[kind]?.candidates.length ?? 0) >= candidates.length) continue;
+    chosen[kind] = { candidates, location: places[kind]!, delim: [...delims][0] };
   }
-  if (!chosen) return undefined;
 
-  // Each caption's text's Markdown, which export reads back as Word has it
-  const figures: Array<{ candidate: Candidate; image: ContentItem & { type: 'image' }; caption: string; readAlt: string }> = [];
-  for (const candidate of chosen.candidates) {
-    const caption = captionMarkdown(candidate.caption);
-    if (caption === undefined || caption.includes('\n')) return undefined;
-    const tokens = parseMd('![' + caption + '](x.png){#fig-x}');
-    const run = tokens.length === 1 && tokens[0].type === 'paragraph' && tokens[0].runs.length === 1 ? tokens[0].runs[0] : undefined;
-    if (run?.type !== 'image' || !run.figure) return undefined;
-    const exported = run.figure.captionRuns.map(exportedCaptionPiece);
+  /** Where the items of a caption that converts start, and how many, which
+   *  go out of `content`. A figure's caption with no para item of its own,
+   *  as one that starts the document, a section or the text after a code
+   *  block's spacer, takes the picture's para item after it, as the picture
+   *  then starts there. A table's has nothing after it but the table, so
+   *  one that starts a section takes the para item the section's start left
+   *  before it, as the table then starts the section, as it would with none */
+  function removal({ start, end }: Candidate): [number, number] {
+    const own = content[start].type === 'para';
+    const atSection = !own && content[end]?.type === 'table' && content[start - 1]?.type === 'para'
+      && (content[start - 2]?.type === 'landscape_open' || content[start - 2]?.type === 'portrait_open');
+    const takesNext = !own && content[end]?.type !== 'table';
+    return [atSection ? start - 1 : start, end - start + (takesNext || atSection ? 1 : 0)];
+  }
+
+  // Each caption's text's Markdown, which export reads back as Word has it,
+  // or undefined for a kind one of whose captions doesn't
+  const read = (candidate: Candidate) => candidate.caption.map(item => item.type === 'math' ? { latex: item.latex } : item.type !== 'text' ? undefined : {
+    text: item.text, href: item.href,
     // A highlight's color by its Markdown name, as export's runs have it
-    const read = candidate.caption.map(item => item.type === 'math' ? { latex: item.latex } : item.type !== 'text' ? undefined : {
-      text: item.text, href: item.href,
-      formatting: item.formatting.highlightColor ? { ...item.formatting, highlightColor: resolveMarkdownColor(item.formatting.highlightColor) ?? item.formatting.highlightColor } : item.formatting,
-    });
-    if (exported.includes(undefined) || read.includes(undefined)) return undefined;
-    if (captionTextShape(exported as NonNullable<(typeof exported)[number]>[]) !== captionTextShape(read as NonNullable<(typeof read)[number]>[])) return undefined;
-    const image = content[candidate.image[chosen.location]!] as ContentItem & { type: 'image' };
+    formatting: item.formatting.highlightColor ? { ...item.formatting, highlightColor: resolveMarkdownColor(item.formatting.highlightColor) ?? item.formatting.highlightColor } : item.formatting,
+  });
+  const readsBack = (exportedRuns: MdRun[], candidate: Candidate): boolean => {
+    const exported = exportedRuns.map(exportedCaptionPiece);
+    const words = read(candidate);
+    if (exported.includes(undefined) || words.includes(undefined)) return false;
+    return captionTextShape(exported as NonNullable<(typeof exported)[number]>[]) === captionTextShape(words as NonNullable<(typeof words)[number]>[]);
+  };
+  const figures: Array<{ candidate: Candidate; image: ContentItem & { type: 'image' }; caption: string; readAlt: string }> = [];
+  for (const candidate of chosen.figure?.candidates ?? []) {
+    const caption = captionMarkdown(candidate.caption);
+    const tokens = caption === undefined || caption.includes('\n') ? [] : parseMd('![' + caption + '](x.png){#fig-x}');
+    const run = tokens.length === 1 && tokens[0].type === 'paragraph' && tokens[0].runs.length === 1 ? tokens[0].runs[0] : undefined;
+    if (caption === undefined || run?.type !== 'image' || !run.figure || !readsBack(run.figure.captionRuns, candidate)) {
+      figures.length = 0;
+      delete chosen.figure;
+      break;
+    }
+    const image = content[candidate.figure[chosen.figure!.location]!] as ContentItem & { type: 'image' };
     figures.push({ candidate, image, caption, readAlt: run.imageAlt ?? '' });
+  }
+  const tablesRead: Array<{ candidate: Candidate; table: TableItem; caption: string }> = [];
+  for (const candidate of chosen.table?.candidates ?? []) {
+    const caption = buildMarkdown(candidate.caption, new Map()).replace(/\n+$/, '');
+    const tokens = caption.includes('\n') ? [] : parseMd('|x|\n|-|\n|x|\n\n' + tableCaptionLine(caption, 'tbl-x'));
+    const table = tokens.length === 1 && tokens[0].type === 'table' ? tokens[0] : undefined;
+    if (!table?.tableCaption || !readsBack(table.tableCaption.runs, candidate)) {
+      tablesRead.length = 0;
+      delete chosen.table;
+      break;
+    }
+    tablesRead.push({ candidate, table: content[candidate.table[chosen.table!.location]!] as TableItem, caption });
+  }
+  // None in a style block, as the body will be with their captions out (see
+  // removal), which export would give no caption
+  if (tablesRead.length > 0 && tablesInStyleBlocks) {
+    const removed = new Set<ContentItem>();
+    for (const { candidate } of tablesRead) {
+      const [from, count] = removal(candidate);
+      for (let k = from; k < from + count; k++) removed.add(content[k]);
+    }
+    const styled = tablesInStyleBlocks(removed);
+    if (tablesRead.some(({ table: item }) => styled.has(item))) {
+      tablesRead.length = 0;
+      delete chosen.table;
+    }
+  }
+  // One delimiter, title-delim, for both
+  const { figure, table } = chosen;
+  if (figure?.delim !== undefined && table?.delim !== undefined && figure.delim !== table.delim) {
+    if (table.candidates.length > figure.candidates.length) {
+      figures.length = 0;
+      delete chosen.figure;
+    } else {
+      tablesRead.length = 0;
+      delete chosen.table;
+    }
   }
 
   // Their labels, and the captions' paragraphs out, from the last
   const used = new Set<string>();
-  for (let n = 0; n < figures.length; n++) {
-    const { candidate, image, caption, readAlt } = figures[n];
+  const labelOf = (candidate: Candidate, n: number, prefix: 'fig' | 'tbl'): string => {
+    const pattern = prefix === 'fig' ? FIGURE_LABEL_RE : TABLE_LABEL_RE;
     let label = candidate.paragraph.bookmarks.map(name => labelsByBookmark?.get(name) ?? labelOfBookmark(name))
-      .find((found): found is string => found !== undefined && FIGURE_LABEL_RE.test(found));
-    label ??= captionSlug(candidate.caption.map(item => item.type === 'text' ? item.text : ' ').join(''), n + 1);
+      .find((found): found is string => found !== undefined && pattern.test(found));
+    label ??= captionSlug(candidate.caption.map(item => item.type === 'text' ? item.text : ' ').join(''), n + 1, prefix);
     const base = label;
     for (let k = 2; used.has(label); k++) label = base + '-' + k;
     used.add(label);
-    image.figure = { label, caption, ...(image.alt && isCaptionText(image.alt) && image.alt !== readAlt ? { alt: image.alt } : {}) };
+    return label;
+  };
+  figures.forEach(({ candidate, image, caption, readAlt }, n) => {
+    image.figure = { label: labelOf(candidate, n, 'fig'), caption, ...(image.alt && isCaptionText(image.alt) && image.alt !== readAlt ? { alt: image.alt } : {}) };
+  });
+  tablesRead.forEach(({ candidate, table: item, caption }, n) => {
+    item.caption = { label: labelOf(candidate, n, 'tbl'), caption };
+  });
+  const removed = [...figures, ...tablesRead].map(({ candidate }) => candidate).sort((a, b) => b.start - a.start);
+  for (const candidate of removed) {
+    const [from, count] = removal(candidate);
+    content.splice(from, count);
   }
-  for (let n = figures.length - 1; n >= 0; n--) {
-    const { start, end } = figures[n].candidate;
-    // A caption with no para item of its own, as one that starts the
-    // document, a section or the text after a code block's spacer, takes
-    // the picture's para item after it, as the picture then starts there
-    content.splice(start, end - start + (content[start].type !== 'para' ? 1 : 0));
-  }
-  const titled = figures[0].candidate.title;
-  return { figTitle: titled, ...(chosen.delim !== undefined ? { titleDelim: chosen.delim } : {}), figCapLocation: chosen.location };
+  const readOf = (kind: Kind): CaptionsRead | undefined => {
+    const seriesRead = chosen[kind];
+    if (!seriesRead) return undefined;
+    return { title: seriesRead.candidates[0].title, ...(seriesRead.delim !== undefined ? { titleDelim: seriesRead.delim } : {}), location: seriesRead.location };
+  };
+  return { figure: readOf('figure'), table: readOf('table') };
 }
 
 // Markdown generation
@@ -17804,7 +17933,9 @@ function buildMarkdownOnce(
         pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body, documentStartCommentGap);
       }
       if (tableResult.after) output.push('\n\n' + tableResult.after);
-      lastTableJoin = tableResult.join;
+      // Its caption, after it, which ends its HTML block, if it has one
+      if (item.caption) output.push('\n\n' + tableCaptionLine(item.caption.caption, item.caption.label));
+      lastTableJoin = item.caption ? undefined : tableResult.join;
       tableIndex++;
       endListContext();
       endQuoteGroup();
@@ -19720,6 +19851,297 @@ function inferredBlockquoteStyle(content: ContentItem[]): BlockquoteStyle | unde
   for (const [style, count] of counts) if (most === undefined || count > counts.get(most)!) most = style;
   return most === 'GitHub' ? undefined : most;
 }
+/**
+ * The body's items, `docContent`, with the sentinels of its style blocks
+ * around each run of paragraphs that share a custom style, and the runs of
+ * blocks Word can't give one in them as export recorded (`edges`, see
+ * extractStyleBlockEdges). It changes no item of `docContent`: where an
+ * item changes, a copy goes in its place. convertDocx writes the blocks so,
+ * and readCaptions asks which tables they hold, as export gives one in a
+ * block no caption
+ */
+function styleBlockSentinels(docContent: ContentItem[], edges: Record<string, number>): ContentItem[] {
+  let activeStyle: string | undefined;
+  // The paragraphs of a list item a style block in it is open for, which
+  // ends at anything else
+  let inItem: ListContinuation | undefined;
+  // The items with the sentinels, which go back in docContent at the end,
+  // as a splice for each sentinel took time for each item after it
+  const out: ContentItem[] = [];
+  // The index of the paragraph after the empty ones after a quote in a
+  // list item, in a block they don't end, and those (see below)
+  let separatorsInBlock = -1;
+  const keptSeparators = new Set<ContentItem>();
+  // A tracked mark on `para`, which a style block in a list item starts
+  // or ends at, is the break that ends the paragraph before it, which
+  // stays before the block's fence, on an empty paragraph, as at the top
+  // level (below), in the item (`listContinuation`), where the paragraph
+  // before it is. The paragraph after it
+  const markBeforeFence = (para: ContentItem, listContinuation: ListContinuation): ContentItem => {
+    if (para.type !== 'para' || !para.breakRevision) return para;
+    const { breakRevision, ...rest } = para;
+    out.push({ type: 'para', breakRevision, listContinuation });
+    return rest;
+  };
+  // Whether the item at `at` is an empty paragraph, with no text of its
+  // own, which an empty one before a paragraph that isn't in a block has
+  // (see the empty paragraphs' count)
+  const separator = (at: number): boolean => {
+    const entry = docContent[at];
+    return entry.type === 'para' && isPlainEmptyParagraph(entry) && !paragraphHasContent(docContent, at);
+  };
+  // The level of a list item, as buildMarkdown writes one
+  const itemLevel = (entry: ContentItem): number | undefined => entry.type === 'para' && entry.listMeta && !entry.headingLevel && !entry.isCodeBlock && !entry.isTitle ? entry.listMeta.level : undefined;
+  // The paragraph a block opened in a list item before a sublist at
+  // `across` goes on to, past the sublist (see below)
+  let across: ContentItem | undefined;
+  /** Where the item at `at`, with no custom style, is in a sublist of an
+   *  item in the block open at the top level, which a closing fence there
+   *  would end: the item a block that closes it goes in, the one before
+   *  it at its level, or else the one its sublist is in, and with the
+   *  latter, that item's paragraph in a custom style right after the
+   *  sublist, if one is. Export closes a block at the top level with no
+   *  fence where a block opens in an item (see applyCustomStyleSentinels
+   *  in md-to-docx.ts), and the sublist of an item in a block that opens
+   *  in it keeps no style (see extractListItems), so this is where one
+   *  opened in the item before the sublist, or at the end of the item
+   *  before, which keeps the sublist one list. The items before it are
+   *  in `out`, with their sentinels */
+  const sublistInBlock = (at: number): { host: ParaItem; styled?: ParaItem } | undefined => {
+    const depth = itemLevel(docContent[at]);
+    if (!depth) return undefined;
+    let host: ParaItem | undefined;
+    for (let k = out.length - 1; k >= 0 && !host; k--) {
+      const before = out[k];
+      const beforeLevel = itemLevel(before);
+      if (beforeLevel !== undefined) {
+        if (beforeLevel <= depth) host = before as ParaItem;
+      } else if (before.type === 'para' ? !before.listContinuation && !keptSeparators.has(before) : isStructuralBoundaryItem(before)) {
+        return undefined;
+      }
+    }
+    if (!host?.itemContinuation || host.customStyleName !== activeStyle) return undefined;
+    const level = host.listMeta!.level;
+    if (level === depth) return { host };
+    for (let k = at; k < docContent.length; k++) {
+      const next = docContent[k];
+      if (next.type !== 'para') {
+        if (isStructuralBoundaryItem(next)) return { host };
+        continue;
+      }
+      if (!next.customStyleName && (itemLevel(next) ?? next.listContinuation?.level ?? -1) > level) continue;
+      const styled = next.customStyleName && !next.listMeta && !next.blockquoteLevel && next.listContinuation?.level === level ? next : undefined;
+      return { host, ...(styled ? { styled } : {}) };
+    }
+    return { host };
+  };
+  // A block Word can't give a style block's style, as a heading, a quote,
+  // code, a table or a thematic break, which keeps its own, and so ends
+  // the run of paragraphs in the block's style. Export recorded, for each
+  // block's place among those at the top level Word has a paragraph of,
+  // which this opens one for each of (see styleBlock in
+  // generateDocumentXml in md-to-docx.ts), whether a run of such blocks,
+  // with the empty paragraphs export writes around them, between two
+  // paragraphs of the block's style is in the block. Elsewhere, it
+  // recorded how many the block before the run ends with, and how many the
+  // block after it starts with, and the rest are in no block. Where it
+  // recorded none, the run ends the block, and is in none, as before
+  const unstyled = (entry: ContentItem): boolean => entry.type === 'table' || entry.type === 'para' && !entry.customStyleName
+    && !entry.listMeta && !entry.listContinuation && !!(entry.isCodeBlock || entry.blockquoteLevel || entry.headingLevel || entry.horizontalRule);
+  /** The run of such blocks and empty paragraphs from `at`: where each
+   *  block starts, and the next item after it, as a code block's lines are
+   *  one block, and the index past the run */
+  const unstyledRun = (at: number): { units: Array<{ start: number; end: number }>; end: number } => {
+    const units: Array<{ start: number; end: number }> = [];
+    let open: { start: number; end: number } | undefined;
+    let last: ContentItem | undefined;
+    let k = at;
+    for (; k < docContent.length; k++) {
+      const entry = docContent[k];
+      if (!isStructuralBoundaryItem(entry)) continue;
+      const goesOn = open && entry.type === 'para' && entry.isCodeBlock && last?.type === 'para' && last.isCodeBlock && entry.blockquoteLevel === last.blockquoteLevel;
+      last = entry;
+      if (goesOn) continue;
+      if (open) open.end = k;
+      open = undefined;
+      if (unstyled(entry)) units.push(open = { start: k, end: -1 });
+      else if (!separator(k)) break;
+    }
+    if (open) open.end = k;
+    return { units, end: k };
+  };
+  // The blocks opened at the top level so far, the index past the run of
+  // them planned last, and past the last run of empty paragraphs alone,
+  // which no item in needs reading again, and the fences planned, in
+  // order, each before the item at `at`: a block's opening one, of
+  // `style`, or else a closing one
+  let opened = 0;
+  let planned = -1;
+  let read = -1;
+  const fences: Array<{ at: number; style?: string }> = [];
+  let fenced = 0;
+  /** The fences of the run of such blocks from `at`, if it holds one, as
+   *  export recorded them */
+  const planRun = (at: number): void => {
+    const { units, end } = unstyledRun(at);
+    read = end;
+    if (units.length === 0) return;
+    planned = end;
+    const next = docContent[end];
+    const nextStyle = next?.type === 'para' && !next.listContinuation ? next.customStyleName : undefined;
+    const block = opened - 1;
+    if (activeStyle && nextStyle === activeStyle && edges['csi' + block]) return;
+    // Before the unit at `unit`, past the empty paragraphs after the one
+    // before it, which a fence goes before, as after a paragraph
+    const fence = (unit: number, style?: string) => fences.push({ at: unit === 0 ? at : units[unit - 1].end, ...(style ? { style } : {}) });
+    // Those the block open ends with
+    let taken = 0;
+    if (activeStyle) {
+      taken = Math.min(edges['cst' + block] ?? 0, units.length);
+      fence(taken);
+    }
+    const lead = nextStyle ? Math.min(edges['csl' + (block + 1)] ?? 0, units.length - taken) : 0;
+    if (lead > 0) fence(units.length - lead, nextStyle);
+  };
+  /** The item at `i`, after the sentinels and marks that go before it,
+   *  which this puts in `out` */
+  const place = (i: number): ContentItem => {
+    let item = docContent[i];
+    // Only structural items (para, table, landscape/portrait sentinels,
+    // bibliography_marker) should trigger style transitions. Inline items
+    // (text, image, math, hardbreak, etc.) live inside a para and don't
+    // carry customStyleName — skip them to avoid premature style close.
+    const isStructural = item.type === 'para' || item.type === 'table'
+      || item.type === 'landscape_open' || item.type === 'landscape_close'
+      || item.type === 'portrait_open' || item.type === 'portrait_close'
+      || item.type === 'bibliography_marker';
+    if (!isStructural) return item;
+    const styleName = (item.type === 'para' && item.customStyleName) ? item.customStyleName : undefined;
+    if (inItem) {
+      // The sublist the block opened before, up to its paragraph
+      if (across && item !== across) return item;
+      across = undefined;
+      if (item.type === 'para' && !item.blockquoteLevel && item.listContinuation?.level === inItem.level && styleName === activeStyle) return item;
+      item = markBeforeFence(item, inItem);
+      out.push({ type: 'custom_style_close', inItem });
+      activeStyle = inItem = undefined;
+    }
+    // A paragraph in a list item in a custom style is in a block in the
+    // item, as export gives no other paragraph in an item one, but the
+    // continuation's, in a block its item is in too (see
+    // listContinuationStyleId in md-to-docx.ts). A block open at the top
+    // level, as one the item is in, closes here with no fence of its own,
+    // which would end the item before the paragraph, as export closes one
+    // where a block opens in an item (see applyCustomStyleSentinels)
+    if (styleName && item.type === 'para' && item.listContinuation && !item.blockquoteLevel) {
+      const continuation = item.listContinuation;
+      item = markBeforeFence(item, continuation);
+      inItem = continuation;
+      out.push({ type: 'custom_style_open', styleName, inItem });
+      activeStyle = styleName;
+      return item;
+    }
+    // A paragraph or quote in a list item with no custom style, which
+    // takes the list's style and not the block's, is in the block the item
+    // is in, or in none with it. The items of a list in a block take its
+    // style (see generateParagraph in md-to-docx.ts)
+    if (!styleName && item.type === 'para' && item.listContinuation) return item;
+    // An item with no custom style in a sublist of an item in a block open
+    // at the top level, which a fence there would end. The block in the
+    // item that closes it opens before the sublist, and goes on past it
+    // to its paragraph after it, or else is empty, of the block's own
+    // style, in that item or the one before at the sublist's level
+    const sublist = activeStyle && !inItem && !styleName ? sublistInBlock(i) : undefined;
+    if (sublist) {
+      const continuation = sublist.host.itemContinuation!;
+      item = markBeforeFence(item, continuation);
+      const style = sublist.styled?.customStyleName ?? activeStyle!;
+      out.push({ type: 'custom_style_open', styleName: style, inItem: continuation });
+      if (sublist.styled) {
+        inItem = continuation;
+        activeStyle = style;
+        across = sublist.styled;
+      } else {
+        out.push({ type: 'custom_style_close', inItem: continuation });
+        activeStyle = undefined;
+      }
+      return item;
+    }
+    // The empty paragraphs export writes after a quote in a list item, at
+    // which a list block ends, before an item that starts another list or
+    // a paragraph after the list (see generateDocumentXml in
+    // md-to-docx.ts), in a block that goes on after them, which they
+    // don't end, as the quote didn't. Nor before another list item, where
+    // the block ends, if it does, as a block in an item (see
+    // sublistInBlock), or at the item, which keeps the list it starts
+    // apart from the one before, as a fence before it does
+    if (!styleName && activeStyle && i < separatorsInBlock) {
+      keptSeparators.add(item);
+      return item;
+    }
+    if (!styleName && activeStyle && separator(i)) {
+      let before = out.length - 1;
+      while (before >= 0 && !isStructuralBoundaryItem(out[before])) before--;
+      const quote = out[before];
+      let next = i + 1;
+      while (next < docContent.length && (!isStructuralBoundaryItem(docContent[next]) || separator(next))) next++;
+      const after = docContent[next];
+      if (quote?.type === 'para' && quote.blockquoteLevel && quote.listContinuation
+          && after?.type === 'para' && (after.customStyleName === activeStyle || itemLevel(after) !== undefined)) {
+        separatorsInBlock = next;
+        keptSeparators.add(item);
+        return item;
+      }
+    }
+    // A run of blocks Word can't give a style block's style, with the
+    // fences planned in it, and at the item after it
+    if (i >= read && !inItem && (unstyled(item) || separator(i))) planRun(i);
+    // A tracked mark before a paragraph a style block starts or ends at is
+    // the break that ends the paragraph before it, which the block keeps
+    // from joining the text after (see joinTrackedParagraphBreaks): it
+    // stays before the sentinels, on an empty paragraph, or on the one it
+    // is on where that holds nothing else, which then doesn't end the
+    // style. A block starts or ends at a fence planned here, or past a run
+    // planned, where the paragraph's style isn't the block's
+    const fenceHere = fenced < fences.length && fences[fenced].at <= i;
+    if (item.type === 'para' && item.breakRevision && (fenceHere || i >= planned && (styleName ? styleName !== activeStyle : activeStyle))) {
+      const { breakRevision, ...para } = item;
+      if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) return item;
+      out.push({ type: 'para', breakRevision });
+      item = para;
+    }
+    for (; fenced < fences.length && fences[fenced].at <= i; fenced++) {
+      const { style } = fences[fenced];
+      if (activeStyle) out.push({ type: 'custom_style_close' });
+      activeStyle = style;
+      if (style) {
+        out.push({ type: 'custom_style_open', styleName: style });
+        opened++;
+      }
+    }
+    if (i < planned) return item;
+    if (styleName && styleName !== activeStyle) {
+      // Close previous style if open
+      if (activeStyle) out.push({ type: 'custom_style_close' });
+      // Open new style
+      out.push({ type: 'custom_style_open', styleName });
+      opened++;
+      activeStyle = styleName;
+    } else if (!styleName && activeStyle) {
+      // Style run ended
+      out.push({ type: 'custom_style_close' });
+      activeStyle = undefined;
+    }
+    return item;
+  };
+  for (let i = 0; i < docContent.length; i++) out.push(place(i));
+  // Close any still-open style at end of document
+  if (activeStyle) {
+    out.push({ type: 'custom_style_close', ...(inItem ? { inItem } : {}) });
+  }
+  return out;
+}
+
 
 export async function convertDocx(
   data: Uint8Array,
@@ -19895,17 +20317,40 @@ export async function convertDocx(
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap };
 
   const { content: docContent, zoteroBiblData, leadingBlankParagraphs, captionParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, contentOptions);
-  // The figures' captions, which go with their pictures, before anything
-  // counts the body's paragraphs (see readFigureCaptions)
-  const exportedCaptionLocation = captionParagraphs ? await extractFigureCaptionLocation(zip) : undefined;
-  const figureCaptions = captionParagraphs
-    ? readFigureCaptions(docContent, captionParagraphs, await seqFieldCountsOf(zip), await extractCaptionLabels(zip), imageFormatMapping, {
-      location: exportedCaptionLocation ?? storedSettings?.figCapLocation,
-      // The default where export wrote the figures, as their place says, and
-      // the frontmatter set none
-      delim: storedSettings?.crossref?.titleDelim ?? (exportedCaptionLocation ? DEFAULT_CAPTION_OPTIONS.titleDelim : undefined),
-    })
-    : undefined;
+  // The figures' and tables' captions, which go with their pictures and
+  // tables, before anything counts the body's paragraphs (see readCaptions)
+  const exportedFigureLocation = captionParagraphs ? await extractCaptionLocation(zip, 'MANUSCRIPT_FIG_CAP_LOCATION') : undefined;
+  const exportedTableLocation = captionParagraphs ? await extractCaptionLocation(zip, 'MANUSCRIPT_TBL_CAP_LOCATION') : undefined;
+  const captionsRead = captionParagraphs
+    ? readCaptions(docContent, captionParagraphs, await seqFieldCountsOf(zip), await extractCaptionLabels(zip), imageFormatMapping,
+      new Set([...embedDirectiveMapping?.keys() ?? []].map(Number)), {
+        figureLocation: exportedFigureLocation ?? storedSettings?.figCapLocation,
+        tableLocation: exportedTableLocation ?? storedSettings?.tblCapLocation,
+        // The default where export wrote the captions, as their place says,
+        // and the frontmatter set none
+        delim: storedSettings?.crossref?.titleDelim ?? (exportedFigureLocation || exportedTableLocation ? DEFAULT_CAPTION_OPTIONS.titleDelim : undefined),
+      }, {
+        figure: storedSettings?.crossref?.figTitle ?? DEFAULT_CAPTION_OPTIONS.figTitle,
+        table: storedSettings?.crossref?.tblTitle ?? DEFAULT_CAPTION_OPTIONS.tblTitle,
+      }, docContent.some(item => item.type === 'para' && item.customStyleName) ? removed => {
+        // The tables in a style block at the top level, as the blocks will be
+        // written, after the body's structure is read, with `removed` out,
+        // of copies of the items, which those steps change
+        const kept = docContent.filter(item => !removed.has(item));
+        const copies = structuredClone(kept);
+        const originals = new Map<ContentItem, ContentItem>(copies.map((copy, k) => [copy, kept[k]]));
+        structureBody(copies, blockquotePlaces);
+        const styled = new Set<ContentItem>();
+        let open = false;
+        for (const item of styleBlockSentinels(copies, styleBlockEdges ?? {})) {
+          // A block opened in a list item ends the one open at the top level
+          if (item.type === 'custom_style_open') open = !item.inItem;
+          else if (item.type === 'custom_style_close' && !item.inItem) open = false;
+          else if (item.type === 'table' && open) styled.add(originals.get(item)!);
+        }
+        return styled;
+      } : undefined)
+    : {};
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);
@@ -20012,285 +20457,7 @@ export async function convertDocx(
   // Post-process: inject custom_style_open/custom_style_close sentinels around
   // runs of paragraphs that share a customStyleName.
   {
-    let activeStyle: string | undefined;
-    // The paragraphs of a list item a style block in it is open for, which
-    // ends at anything else
-    let inItem: ListContinuation | undefined;
-    // The items with the sentinels, which go back in docContent at the end,
-    // as a splice for each sentinel took time for each item after it
-    const out: ContentItem[] = [];
-    // The index of the paragraph after the empty ones after a quote in a
-    // list item, in a block they don't end, and those (see below)
-    let separatorsInBlock = -1;
-    const keptSeparators = new Set<ContentItem>();
-    // A tracked mark on `para`, which a style block in a list item starts
-    // or ends at, is the break that ends the paragraph before it, which
-    // stays before the block's fence, on an empty paragraph, as at the top
-    // level (below), in the item (`listContinuation`), where the paragraph
-    // before it is. The paragraph after it
-    const markBeforeFence = (para: ContentItem, listContinuation: ListContinuation): ContentItem => {
-      if (para.type !== 'para' || !para.breakRevision) return para;
-      const { breakRevision, ...rest } = para;
-      out.push({ type: 'para', breakRevision, listContinuation });
-      return rest;
-    };
-    // Whether the item at `at` is an empty paragraph, with no text of its
-    // own, which an empty one before a paragraph that isn't in a block has
-    // (see the empty paragraphs' count)
-    const separator = (at: number): boolean => {
-      const entry = docContent[at];
-      return entry.type === 'para' && isPlainEmptyParagraph(entry) && !paragraphHasContent(docContent, at);
-    };
-    // The level of a list item, as buildMarkdown writes one
-    const itemLevel = (entry: ContentItem): number | undefined => entry.type === 'para' && entry.listMeta && !entry.headingLevel && !entry.isCodeBlock && !entry.isTitle ? entry.listMeta.level : undefined;
-    // The paragraph a block opened in a list item before a sublist at
-    // `across` goes on to, past the sublist (see below)
-    let across: ContentItem | undefined;
-    /** Where the item at `at`, with no custom style, is in a sublist of an
-     *  item in the block open at the top level, which a closing fence there
-     *  would end: the item a block that closes it goes in, the one before
-     *  it at its level, or else the one its sublist is in, and with the
-     *  latter, that item's paragraph in a custom style right after the
-     *  sublist, if one is. Export closes a block at the top level with no
-     *  fence where a block opens in an item (see applyCustomStyleSentinels
-     *  in md-to-docx.ts), and the sublist of an item in a block that opens
-     *  in it keeps no style (see extractListItems), so this is where one
-     *  opened in the item before the sublist, or at the end of the item
-     *  before, which keeps the sublist one list. The items before it are
-     *  in `out`, with their sentinels */
-    const sublistInBlock = (at: number): { host: ParaItem; styled?: ParaItem } | undefined => {
-      const depth = itemLevel(docContent[at]);
-      if (!depth) return undefined;
-      let host: ParaItem | undefined;
-      for (let k = out.length - 1; k >= 0 && !host; k--) {
-        const before = out[k];
-        const beforeLevel = itemLevel(before);
-        if (beforeLevel !== undefined) {
-          if (beforeLevel <= depth) host = before as ParaItem;
-        } else if (before.type === 'para' ? !before.listContinuation && !keptSeparators.has(before) : isStructuralBoundaryItem(before)) {
-          return undefined;
-        }
-      }
-      if (!host?.itemContinuation || host.customStyleName !== activeStyle) return undefined;
-      const level = host.listMeta!.level;
-      if (level === depth) return { host };
-      for (let k = at; k < docContent.length; k++) {
-        const next = docContent[k];
-        if (next.type !== 'para') {
-          if (isStructuralBoundaryItem(next)) return { host };
-          continue;
-        }
-        if (!next.customStyleName && (itemLevel(next) ?? next.listContinuation?.level ?? -1) > level) continue;
-        const styled = next.customStyleName && !next.listMeta && !next.blockquoteLevel && next.listContinuation?.level === level ? next : undefined;
-        return { host, ...(styled ? { styled } : {}) };
-      }
-      return { host };
-    };
-    // A block Word can't give a style block's style, as a heading, a quote,
-    // code, a table or a thematic break, which keeps its own, and so ends
-    // the run of paragraphs in the block's style. Export recorded, for each
-    // block's place among those at the top level Word has a paragraph of,
-    // which this opens one for each of (see styleBlock in
-    // generateDocumentXml in md-to-docx.ts), whether a run of such blocks,
-    // with the empty paragraphs export writes around them, between two
-    // paragraphs of the block's style is in the block. Elsewhere, it
-    // recorded how many the block before the run ends with, and how many the
-    // block after it starts with, and the rest are in no block. Where it
-    // recorded none, the run ends the block, and is in none, as before
-    const edges = styleBlockEdges ?? {};
-    const unstyled = (entry: ContentItem): boolean => entry.type === 'table' || entry.type === 'para' && !entry.customStyleName
-      && !entry.listMeta && !entry.listContinuation && !!(entry.isCodeBlock || entry.blockquoteLevel || entry.headingLevel || entry.horizontalRule);
-    /** The run of such blocks and empty paragraphs from `at`: where each
-     *  block starts, and the next item after it, as a code block's lines are
-     *  one block, and the index past the run */
-    const unstyledRun = (at: number): { units: Array<{ start: number; end: number }>; end: number } => {
-      const units: Array<{ start: number; end: number }> = [];
-      let open: { start: number; end: number } | undefined;
-      let last: ContentItem | undefined;
-      let k = at;
-      for (; k < docContent.length; k++) {
-        const entry = docContent[k];
-        if (!isStructuralBoundaryItem(entry)) continue;
-        const goesOn = open && entry.type === 'para' && entry.isCodeBlock && last?.type === 'para' && last.isCodeBlock && entry.blockquoteLevel === last.blockquoteLevel;
-        last = entry;
-        if (goesOn) continue;
-        if (open) open.end = k;
-        open = undefined;
-        if (unstyled(entry)) units.push(open = { start: k, end: -1 });
-        else if (!separator(k)) break;
-      }
-      if (open) open.end = k;
-      return { units, end: k };
-    };
-    // The blocks opened at the top level so far, the index past the run of
-    // them planned last, and past the last run of empty paragraphs alone,
-    // which no item in needs reading again, and the fences planned, in
-    // order, each before the item at `at`: a block's opening one, of
-    // `style`, or else a closing one
-    let opened = 0;
-    let planned = -1;
-    let read = -1;
-    const fences: Array<{ at: number; style?: string }> = [];
-    let fenced = 0;
-    /** The fences of the run of such blocks from `at`, if it holds one, as
-     *  export recorded them */
-    const planRun = (at: number): void => {
-      const { units, end } = unstyledRun(at);
-      read = end;
-      if (units.length === 0) return;
-      planned = end;
-      const next = docContent[end];
-      const nextStyle = next?.type === 'para' && !next.listContinuation ? next.customStyleName : undefined;
-      const block = opened - 1;
-      if (activeStyle && nextStyle === activeStyle && edges['csi' + block]) return;
-      // Before the unit at `unit`, past the empty paragraphs after the one
-      // before it, which a fence goes before, as after a paragraph
-      const fence = (unit: number, style?: string) => fences.push({ at: unit === 0 ? at : units[unit - 1].end, ...(style ? { style } : {}) });
-      // Those the block open ends with
-      let taken = 0;
-      if (activeStyle) {
-        taken = Math.min(edges['cst' + block] ?? 0, units.length);
-        fence(taken);
-      }
-      const lead = nextStyle ? Math.min(edges['csl' + (block + 1)] ?? 0, units.length - taken) : 0;
-      if (lead > 0) fence(units.length - lead, nextStyle);
-    };
-    /** The item at `i`, after the sentinels and marks that go before it,
-     *  which this puts in `out` */
-    const place = (i: number): ContentItem => {
-      let item = docContent[i];
-      // Only structural items (para, table, landscape/portrait sentinels,
-      // bibliography_marker) should trigger style transitions. Inline items
-      // (text, image, math, hardbreak, etc.) live inside a para and don't
-      // carry customStyleName — skip them to avoid premature style close.
-      const isStructural = item.type === 'para' || item.type === 'table'
-        || item.type === 'landscape_open' || item.type === 'landscape_close'
-        || item.type === 'portrait_open' || item.type === 'portrait_close'
-        || item.type === 'bibliography_marker';
-      if (!isStructural) return item;
-      const styleName = (item.type === 'para' && item.customStyleName) ? item.customStyleName : undefined;
-      if (inItem) {
-        // The sublist the block opened before, up to its paragraph
-        if (across && item !== across) return item;
-        across = undefined;
-        if (item.type === 'para' && !item.blockquoteLevel && item.listContinuation?.level === inItem.level && styleName === activeStyle) return item;
-        item = markBeforeFence(item, inItem);
-        out.push({ type: 'custom_style_close', inItem });
-        activeStyle = inItem = undefined;
-      }
-      // A paragraph in a list item in a custom style is in a block in the
-      // item, as export gives no other paragraph in an item one, but the
-      // continuation's, in a block its item is in too (see
-      // listContinuationStyleId in md-to-docx.ts). A block open at the top
-      // level, as one the item is in, closes here with no fence of its own,
-      // which would end the item before the paragraph, as export closes one
-      // where a block opens in an item (see applyCustomStyleSentinels)
-      if (styleName && item.type === 'para' && item.listContinuation && !item.blockquoteLevel) {
-        const continuation = item.listContinuation;
-        item = markBeforeFence(item, continuation);
-        inItem = continuation;
-        out.push({ type: 'custom_style_open', styleName, inItem });
-        activeStyle = styleName;
-        return item;
-      }
-      // A paragraph or quote in a list item with no custom style, which
-      // takes the list's style and not the block's, is in the block the item
-      // is in, or in none with it. The items of a list in a block take its
-      // style (see generateParagraph in md-to-docx.ts)
-      if (!styleName && item.type === 'para' && item.listContinuation) return item;
-      // An item with no custom style in a sublist of an item in a block open
-      // at the top level, which a fence there would end. The block in the
-      // item that closes it opens before the sublist, and goes on past it
-      // to its paragraph after it, or else is empty, of the block's own
-      // style, in that item or the one before at the sublist's level
-      const sublist = activeStyle && !inItem && !styleName ? sublistInBlock(i) : undefined;
-      if (sublist) {
-        const continuation = sublist.host.itemContinuation!;
-        item = markBeforeFence(item, continuation);
-        const style = sublist.styled?.customStyleName ?? activeStyle!;
-        out.push({ type: 'custom_style_open', styleName: style, inItem: continuation });
-        if (sublist.styled) {
-          inItem = continuation;
-          activeStyle = style;
-          across = sublist.styled;
-        } else {
-          out.push({ type: 'custom_style_close', inItem: continuation });
-          activeStyle = undefined;
-        }
-        return item;
-      }
-      // The empty paragraphs export writes after a quote in a list item, at
-      // which a list block ends, before an item that starts another list or
-      // a paragraph after the list (see generateDocumentXml in
-      // md-to-docx.ts), in a block that goes on after them, which they
-      // don't end, as the quote didn't. Nor before another list item, where
-      // the block ends, if it does, as a block in an item (see
-      // sublistInBlock), or at the item, which keeps the list it starts
-      // apart from the one before, as a fence before it does
-      if (!styleName && activeStyle && i < separatorsInBlock) {
-        keptSeparators.add(item);
-        return item;
-      }
-      if (!styleName && activeStyle && separator(i)) {
-        let before = out.length - 1;
-        while (before >= 0 && !isStructuralBoundaryItem(out[before])) before--;
-        const quote = out[before];
-        let next = i + 1;
-        while (next < docContent.length && (!isStructuralBoundaryItem(docContent[next]) || separator(next))) next++;
-        const after = docContent[next];
-        if (quote?.type === 'para' && quote.blockquoteLevel && quote.listContinuation
-            && after?.type === 'para' && (after.customStyleName === activeStyle || itemLevel(after) !== undefined)) {
-          separatorsInBlock = next;
-          keptSeparators.add(item);
-          return item;
-        }
-      }
-      // A run of blocks Word can't give a style block's style, with the
-      // fences planned in it, and at the item after it
-      if (i >= read && !inItem && (unstyled(item) || separator(i))) planRun(i);
-      // A tracked mark before a paragraph a style block starts or ends at is
-      // the break that ends the paragraph before it, which the block keeps
-      // from joining the text after (see joinTrackedParagraphBreaks): it
-      // stays before the sentinels, on an empty paragraph, or on the one it
-      // is on where that holds nothing else, which then doesn't end the
-      // style. A block starts or ends at a fence planned here, or past a run
-      // planned, where the paragraph's style isn't the block's
-      const fenceHere = fenced < fences.length && fences[fenced].at <= i;
-      if (item.type === 'para' && item.breakRevision && (fenceHere || i >= planned && (styleName ? styleName !== activeStyle : activeStyle))) {
-        const { breakRevision, ...para } = item;
-        if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) return item;
-        out.push({ type: 'para', breakRevision });
-        item = para;
-      }
-      for (; fenced < fences.length && fences[fenced].at <= i; fenced++) {
-        const { style } = fences[fenced];
-        if (activeStyle) out.push({ type: 'custom_style_close' });
-        activeStyle = style;
-        if (style) {
-          out.push({ type: 'custom_style_open', styleName: style });
-          opened++;
-        }
-      }
-      if (i < planned) return item;
-      if (styleName && styleName !== activeStyle) {
-        // Close previous style if open
-        if (activeStyle) out.push({ type: 'custom_style_close' });
-        // Open new style
-        out.push({ type: 'custom_style_open', styleName });
-        opened++;
-        activeStyle = styleName;
-      } else if (!styleName && activeStyle) {
-        // Style run ended
-        out.push({ type: 'custom_style_close' });
-        activeStyle = undefined;
-      }
-      return item;
-    };
-    for (let i = 0; i < docContent.length; i++) out.push(place(i));
-    // Close any still-open style at end of document
-    if (activeStyle) {
-      out.push({ type: 'custom_style_close', ...(inItem ? { inItem } : {}) });
-    }
+    const out = styleBlockSentinels(docContent, styleBlockEdges ?? {});
     docContent.length = out.length;
     out.forEach((item, k) => { docContent[k] = item; });
   }
@@ -20579,13 +20746,15 @@ export async function convertDocx(
   const captionOption = <T>(value: T | undefined, stored: T | undefined, fallback: T): T | undefined =>
     value === undefined || value === (stored ?? fallback) ? stored : value === fallback ? undefined : value;
   const crossref: CrossrefOptions = {
-    figTitle: captionOption(figureCaptions?.figTitle, storedSettings?.crossref?.figTitle, DEFAULT_CAPTION_OPTIONS.figTitle),
-    tblTitle: storedSettings?.crossref?.tblTitle,
-    titleDelim: captionOption(figureCaptions?.titleDelim, storedSettings?.crossref?.titleDelim, DEFAULT_CAPTION_OPTIONS.titleDelim),
+    figTitle: captionOption(captionsRead.figure?.title, storedSettings?.crossref?.figTitle, DEFAULT_CAPTION_OPTIONS.figTitle),
+    tblTitle: captionOption(captionsRead.table?.title, storedSettings?.crossref?.tblTitle, DEFAULT_CAPTION_OPTIONS.tblTitle),
+    titleDelim: captionOption(captionsRead.figure?.titleDelim ?? captionsRead.table?.titleDelim, storedSettings?.crossref?.titleDelim, DEFAULT_CAPTION_OPTIONS.titleDelim),
   };
   if (Object.values(crossref).some(value => value !== undefined)) fm.crossref = crossref;
-  const figCapLocation = captionOption(figureCaptions?.figCapLocation, storedSettings?.figCapLocation, DEFAULT_CAPTION_OPTIONS.figCapLocation);
+  const figCapLocation = captionOption(captionsRead.figure?.location, storedSettings?.figCapLocation, DEFAULT_CAPTION_OPTIONS.figCapLocation);
   if (figCapLocation) fm.figCapLocation = figCapLocation;
+  const tblCapLocation = captionOption(captionsRead.table?.location, storedSettings?.tblCapLocation, DEFAULT_CAPTION_OPTIONS.tblCapLocation);
+  if (tblCapLocation) fm.tblCapLocation = tblCapLocation;
   // Without a stored setting, as in a document from Word, the style its
   // quotes are in, which export would otherwise write as GitHub's
   fm.blockquoteStyle ??= inferredBlockquoteStyle(docContent);

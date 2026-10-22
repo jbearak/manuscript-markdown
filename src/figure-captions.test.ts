@@ -157,7 +157,7 @@ describe('exporting a figure', () => {
     expect(paragraphs(body).map(p => p.replace(/<[^>]+>/g, ''))).toEqual(['Text and here.']);
     expect(warnings).toEqual([
       'The label {#fig-x} labels no figure: a label goes right after an image alone in its paragraph, as ![Caption](map.png){#fig-x}. Word gets no label there.',
-      'The label {#tbl-y} labels no table: export doesn\'t write a table\'s caption yet. Word gets no label there.',
+      'The label {#tbl-y} labels no table: a label ends a paragraph right after a table at the top level that starts with a colon, as : Caption {#tbl-y}. Word gets no label there.',
     ]);
   });
 
