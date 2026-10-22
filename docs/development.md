@@ -65,7 +65,7 @@ Artifacts are written to `scripts/word-roundtrip-output/dirty-flag/`. The harnes
   - `formatting.ts` - Text transformation and formatting
   - `author.ts` - Author name and timestamp handling
   - `preview/` - Markdown preview rendering
-- `syntaxes/` - TextMate grammar (syntax highlighting)
+- `syntaxes/` - TextMate grammars (syntax highlighting): `manuscript-markdown.json`, and `manuscript-markdown-comment-closer.json` for a comment's `<<}` on a later line than its opener, which Markdown's paragraph rule, starting again at each line, leaves out of the comment's span
 - `media/` - CSS styles for preview
 - `package.json` - Extension metadata, UI configuration, scripts
 - `test/` - Test files

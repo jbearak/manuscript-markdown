@@ -364,6 +364,41 @@ describe('Syntax grammar invariants', () => {
   });
 });
 
+// Markdown's paragraph rule starts again at each line, which ends a span
+// the injection opened, so a comment's <<} on a later line than its opener,
+// as of a comment that holds its replies on lines of their own, is in no
+// span. A grammar of its own scopes it as a comment's closer, outside a
+// comment's span alone, so it doesn't take the <<} of the span it's in
+describe('Syntax grammar comment closer', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+  const main = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json'), 'utf-8'));
+  const closer = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown-comment-closer.json'), 'utf-8'));
+
+  it('is injected into markdown', () => {
+    const entry = packageJson.contributes.grammars.find((g: { path: string }) => g.path === './syntaxes/manuscript-markdown-comment-closer.json');
+    expect(entry).toEqual({ path: './syntaxes/manuscript-markdown-comment-closer.json', scopeName: closer.scopeName, injectTo: ['text.html.markdown'] });
+  });
+
+  // and in an indented code block or an HTML comment, which the main
+  // grammar's selector leaves in as it did before, as a <<} there is theirs
+  it('applies where the main grammar does, but in a comment\'s span, code or an HTML comment', () => {
+    expect(closer.injectionSelector).toBe(main.injectionSelector.replace('L:text.html.markdown', 'L:text.html.markdown -meta.comment') + ' -markup.raw.block -comment.block.html');
+    // Each comment's span has a meta.comment scope there
+    expect(main.repository.comment.name).toMatch(/^meta\.comment/);
+    expect(main.repository.comment_with_id.contentName).toMatch(/^meta\.comment/);
+  });
+
+  it('scopes the <<} as a comment\'s closer, whose } no bracket pairs with', () => {
+    const [rule] = closer.patterns;
+    expect(closer.patterns).toHaveLength(1);
+    expect(rule.match).toBe('(<<)(\\})');
+    // VS Code pairs no bracket in a token of a comment's scope
+    expect(rule.name).toBe('meta.comment.manuscript-markdown');
+    expect(rule.captures['1'].name).toBe(main.repository.comment.endCaptures['1'].name);
+    expect(rule.captures['2'].name).toBe(main.repository.comment.endCaptures['2'].name);
+  });
+});
+
 // A { after an odd run of backslashes opens no CriticMarkup, as export and
 // the preview read it: the last backslash escapes it. Markdown's own escape
 // pattern takes \{ in a paragraph, before the grammar's openers; in a
@@ -374,24 +409,33 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
   // Its patterns, in order, as JS regexes: Oniguruma's possessive
   // quantifiers as greedy ones, which match the same here
   const asRegExp = (source: string) => new RegExp(source.replace(/([+*?])\+/g, '$1'), 'g');
-  const rules = (grammar.patterns as Array<{ include: string }>).map(({ include }) => {
+  const rules: Array<{ name: string; start: RegExp; end?: RegExp; outsideComments?: true }> = (grammar.patterns as Array<{ include: string }>).map(({ include }) => {
     const name = include.slice(1);
     const rule = grammar.repository[name] as Rule;
     return { name, start: asRegExp((rule.match ?? rule.begin)!), end: rule.end === undefined ? undefined : asRegExp(rule.end) };
   });
+  // The comment closer's grammar, an injection of its own, whose selector
+  // takes it out of a comment's span (see manuscript-markdown-comment-closer.json)
+  const closerGrammar = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown-comment-closer.json'), 'utf-8'));
+  rules.push({ name: 'comment_closer', start: asRegExp(closerGrammar.patterns[0].match), outsideComments: true });
 
   /** The rules whose match or begin pattern the grammar reads in `line`, in
    *  order: at each step the earliest match of its patterns or of the end
    *  of the span it's in, a pattern before the end where they tie, as
    *  vscode-textmate scans with an L: injection inside a span of its own,
-   *  markdown's patterns aside */
-  const opened = (line: string): string[] => {
+   *  markdown's patterns aside, and how many of their spans are still open
+   *  at its end */
+  const scan = (line: string): { names: string[]; open: number } => {
     const names: string[] = [];
     const ends: RegExp[] = [];
+    // The names of the rules whose spans are open, as ends' are
+    const spans: string[] = [];
     for (let at = 0; at < line.length;) {
       let best: RegExpExecArray | null = null;
       let bestRule: (typeof rules)[number] | undefined;
+      const inComment = spans.some(name => name === 'comment' || name === 'comment_with_id');
       for (const rule of rules) {
+        if (rule.outsideComments && inComment) continue;
         rule.start.lastIndex = at;
         const match = rule.start.exec(line);
         if (match && (!best || match.index < best.index)) {
@@ -411,20 +455,24 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
       if (!best) break;
       if (bestRule) {
         names.push(bestRule.name);
-        if (bestRule.end) ends.push(new RegExp(bestRule.end.source, 'g'));
+        if (bestRule.end) {
+          ends.push(new RegExp(bestRule.end.source, 'g'));
+          spans.push(bestRule.name);
+        }
       } else {
         ends.pop();
+        spans.pop();
       }
       at = Math.max(best.index + best[0].length, at + 1);
     }
-    return names;
+    return { names, open: ends.length };
   };
+  const opened = (line: string): string[] => scan(line).names;
 
   it.each<[string, string, string[]]>([
     ['an escaped deletion in an insertion', '{++a \\{--x--} b++}', ['addition', 'escaped_brace']],
     ['an escaped insertion in a comment', '{>>a \\{++x++} b<<}', ['comment', 'escaped_brace']],
     ['an escaped substitution in a deletion', '{--a \\{~~x~>y~~} b--}', ['deletion', 'escaped_brace']],
-    ['an escaped comment in a critic highlight', '{==a \\{>>c<<} b==}', ['highlight', 'escaped_brace']],
     ['an escaped range start in an insertion', '{++a \\{#1}x{/1} b++}', ['addition', 'escaped_brace', 'comment_range_end']],
     ['an escaped critic highlight in an insertion', '{++a {/1}\\{==x==} b++}', ['addition', 'comment_range_end', 'escaped_brace']],
     // An == right after an escaped { opens a format highlight, whose pattern
@@ -432,7 +480,6 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
     ['a format highlight after an escaped {', 'a \\{==x==\\} b', ['format_highlight']],
     ['a format highlight after an escaped { in an insertion', '{++a \\{==x==\\} b++}', ['addition', 'format_highlight']],
     ['a critic highlight after an escaped backslash', 'a \\\\{==x==} b', ['highlight']],
-    ['an escaped comment with an ID in an insertion', '{++a \\{#1>>c<<} b++}', ['addition', 'escaped_brace']],
     ['an escaped insertion', 'a \\{++x++} b', ['escaped_brace']],
     ['an insertion after three backslashes', 'a \\\\\\{++x++} b', ['escaped_brace']],
     ['a deletion in an insertion', '{++a {--x--} b++}', ['addition', 'deletion']],
@@ -443,12 +490,45 @@ describe('Syntax grammar escaped CriticMarkup openers', () => {
     ['a critic highlight and its comment after an == in text', 'a == b {==x==}{>>c<<} d', ['highlight', 'comment']],
     ['a critic highlight after an opener', 'a ==b {==x==} c', ['highlight']],
     ['a comment\'s range and body', 'a {#1}x{/1}{#1>>c<<} b', ['comment_range_start', 'comment_range_end', 'comment_with_id']],
+    // A comment can hold its replies, as export pairs its <<}: the injection
+    // reads a reply's opener inside it, so its first <<} ends the reply
+    ['a comment with a reply in it', '{>>a {>>b<<} c<<} d', ['comment', 'comment']],
+    ['a comment body with an ID with a reply in it', '{#1>>a {>>b<<} c<<} d', ['comment_with_id', 'comment']],
+    ['a comment with replies one after another', '{>>a<<}{>>b<<} d', ['comment', 'comment']],
     // A caption's label is no range's start (see captions.ts), but an ID
     // that's fig- alone is one
     ['a figure\'s label', '![Map](map.png){#fig-map} {#tbl-est} {#fig-}x{/fig-}', ['comment_range_start', 'comment_range_end']],
     ['a comment with a figure label\'s ID', 'a {#fig-1>>c<<} b', ['comment_with_id']],
   ])('reads %s as export does', (_name, line, expected) => {
     expect(opened(line)).toEqual(expected);
+  });
+
+  // A comment's <<} on a later line than its opener, which markdown's
+  // paragraph rule leaves in no comment's span, is the closer injection's
+  it.each<[string, string, string[]]>([
+    ['a comment\'s <<} on a line of its own', '<<} b', ['comment_closer']],
+    ['a comment\'s <<} after its text', 'a<<} b {>>c<<}', ['comment_closer', 'comment']],
+    ['a comment with a reply in it on one line', '{>>a {>>b<<} c<<} d', ['comment', 'comment']],
+    ['a comment body with an ID', '{#1>>a<<} d', ['comment_with_id']],
+  ])('reads %s', (_name, line, expected) => {
+    expect(opened(line)).toEqual(expected);
+  });
+
+  // A limit: the closer injection can't see that a backslash on its line
+  // escaped the comment's {, so it reads that comment's <<} as a closer
+  it.each<[string, string, string[]]>([
+    ['an escaped comment in a critic highlight', '{==a \\{>>c<<} b==}', ['highlight', 'escaped_brace', 'comment_closer']],
+    ['an escaped comment with an ID in an insertion', '{++a \\{#1>>c<<} b++}', ['addition', 'escaped_brace', 'comment_closer']],
+  ])('reads the <<} of %s as a closer', (_name, line, expected) => {
+    expect(opened(line)).toEqual(expected);
+  });
+
+  it.each<[string, string, number]>([
+    ['a comment with a reply in it', '{>>a {>>b<<} c<<} d', 0],
+    ['a comment body with an ID with a reply in it', '{#1>>a {>>b<<} c<<} d', 0],
+    ['a comment whose own <<} is on a later line', '{>>a {>>b<<} c', 1],
+  ])('ends %s at the <<} export pairs with its opener', (_name, line, open) => {
+    expect(scan(line).open).toBe(open);
   });
 });
 

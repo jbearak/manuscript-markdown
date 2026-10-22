@@ -1174,6 +1174,13 @@
         "injectTo": [
           "text.html.markdown"
         ]
+      },
+      {
+        "path": "./syntaxes/manuscript-markdown-comment-closer.json",
+        "scopeName": "manuscript-markdown.comment-closer.injection",
+        "injectTo": [
+          "text.html.markdown"
+        ]
       }
     ],
     "markdown.previewStyles": [

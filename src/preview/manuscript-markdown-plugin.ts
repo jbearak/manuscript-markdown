@@ -14,6 +14,7 @@ import {
   criticBreaksInRawHtml,
   criticBreaksLeftOver,
   criticCloserSearchOf,
+  commentTooltipText,
   hasCriticBreak,
   iterateCriticBreaks,
   matchCriticBreakAt,
@@ -1201,7 +1202,7 @@ function pushCriticMathParts(state: StateInline, parts: CriticMathPart[]): void 
     if (part.type === 'comment') {
       const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
       tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-      tokenOpen.meta = { commentText: part.content };
+      tokenOpen.meta = { commentText: commentTooltipText(part.content) };
       addInlineContent(state, part.content);
       state.push('manuscript_markdown_comment_close', 'span', -1);
       continue;
@@ -1761,7 +1762,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
             tokenOpen.attrSet('class', 'manuscript-markdown-comment');
             tokenOpen.meta = {
               id,
-              commentText: restoreCriticLineBreaks(content),
+              commentText: commentTooltipText(restoreCriticLineBreaks(content)),
             };
             addInlineContent(state, content, inlineSourceOffset(state, idEnd + 2));
             state.push('manuscript_markdown_comment_close', 'span', -1);
@@ -1810,7 +1811,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
         tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-        tokenOpen.meta = { commentText: restoreCriticLineBreaks(content) };
+        tokenOpen.meta = { commentText: commentTooltipText(restoreCriticLineBreaks(content)) };
 
         // Add parsed inline content to allow nested Markdown processing
         addInlineContent(state, content, inlineSourceOffset(state, start + 3));
@@ -1869,6 +1870,38 @@ function findMatchingOpenIdx(tokens: Token[], closeIdx: number): number {
   return -1;
 }
 
+/** The index of the comment_close of the comment_open at `open` in
+ *  `children`, past those of the comments in it, or the last index where
+ *  it has none */
+function matchingCommentClose(children: Token[], open: number): number {
+  let closeIdx = open + 1;
+  let depth = 1;
+  while (closeIdx < children.length) {
+    if (children[closeIdx].type === 'manuscript_markdown_comment_open') depth++;
+    if (children[closeIdx].type === 'manuscript_markdown_comment_close') {
+      depth--;
+      if (depth === 0) break;
+    }
+    closeIdx++;
+  }
+  return closeIdx;
+}
+
+/** The texts of the comments with no ID right after the comment_close at
+ *  `close`, each right after the one before, as {#1>>note<<}{>>a<<}{>>b<<},
+ *  which export reads as replies to the comment that closes there, and the
+ *  index of the last one's comment_close, or `close` where none is. A space
+ *  between them makes the next a comment of its own, as export reads it */
+function repliesAfter(children: Token[], close: number): { texts: string[]; end: number } {
+  const texts: string[] = [];
+  let end = close;
+  while (children[end + 1]?.type === 'manuscript_markdown_comment_open' && !children[end + 1].meta?.id) {
+    texts.push(children[end + 1].meta?.commentText || '');
+    end = matchingCommentClose(children, end + 1);
+  }
+  return { texts: texts.filter(text => text.length > 0), end };
+}
+
 /**
  * Core rule that associates comment tokens with their annotated elements.
  * Runs after inline parsing to post-process the token stream.
@@ -1878,15 +1911,19 @@ function findMatchingOpenIdx(tokens: Token[], closeIdx: number): number {
  * Pass 3: Process inline comments — associate with preceding CriticMarkup elements or create indicators
  */
 function associateCommentsRule(state: StateCore): void {
-  // Pass 1: Build comment ID → text map from all inline tokens
+  // Pass 1: Build comment ID → text map from all inline tokens, with the
+  // replies written right after an ID's body, which export reads as its
+  // replies, as {#1>>note<<}{>>reply<<} (see repliesAfter)
   const commentIdMap = new Map<string, string>();
   for (const blockToken of state.tokens) {
     if (blockToken.type !== 'inline' || !blockToken.children) continue;
-    for (const child of blockToken.children) {
+    const children = blockToken.children;
+    children.forEach((child, at) => {
       if (child.type === 'manuscript_markdown_comment_open' && child.meta?.id && child.meta?.commentText) {
-        commentIdMap.set(child.meta.id, child.meta.commentText);
+        const { texts } = repliesAfter(children, matchingCommentClose(children, at));
+        commentIdMap.set(child.meta.id, [child.meta.commentText, ...texts].join('\n'));
       }
-    }
+    });
   }
 
   // Pass 2: Pair range markers with matching comments into ranges. An end
@@ -1938,6 +1975,8 @@ function associateCommentsRule(state: StateCore): void {
 
     const children = blockToken.children;
     const newChildren: Token[] = [];
+    // The element the last comment went on, while nothing has come after it
+    let replyTo: Token | undefined;
     let i = 0;
 
     while (i < children.length) {
@@ -1945,17 +1984,7 @@ function associateCommentsRule(state: StateCore): void {
         const commentText: string = children[i].meta?.commentText || '';
         const commentId: string | undefined = children[i].meta?.id;
 
-        // Find matching comment_close (tracking nesting for nested comments)
-        let closeIdx = i + 1;
-        let depth = 1;
-        while (closeIdx < children.length) {
-          if (children[closeIdx].type === 'manuscript_markdown_comment_open') depth++;
-          if (children[closeIdx].type === 'manuscript_markdown_comment_close') {
-            depth--;
-            if (depth === 0) break;
-          }
-          closeIdx++;
-        }
+        const closeIdx = matchingCommentClose(children, i);
 
         // Empty comment — remove silently
         if (commentText.length === 0) {
@@ -1963,8 +1992,17 @@ function associateCommentsRule(state: StateCore): void {
           continue;
         }
 
-        // ID-based comment — already handled by Pass 2, just remove tokens
+        // ID-based comment — already handled by Pass 2, just remove tokens,
+        // and those of the replies right after it, which Pass 1 gave its ID
         if (commentId) {
+          i = repliesAfter(children, closeIdx).end + 1;
+          replyTo = undefined;
+          continue;
+        }
+
+        // Right after a comment on an element, a reply to it
+        if (replyTo) {
+          replyTo.attrSet('data-comment', replyTo.attrGet('data-comment') + '\n' + commentText);
           i = closeIdx + 1;
           continue;
         }
@@ -1979,10 +2017,15 @@ function associateCommentsRule(state: StateCore): void {
           const openIdx = findMatchingOpenIdx(newChildren, candidateIdx);
           if (openIdx !== -1) {
             const openToken = newChildren[openIdx];
-            const existing = openToken.attrGet('data-comment');
-            openToken.attrSet('data-comment', existing ? existing + '\n' + commentText : commentText);
-            i = closeIdx + 1;
-            continue;
+            // A comment on an element that has one is a reply to it only
+            // right after it, as export reads it (replyTo): after a space,
+            // it's one of its own
+            if (!openToken.attrGet('data-comment')) {
+              openToken.attrSet('data-comment', commentText);
+              replyTo = openToken;
+              i = closeIdx + 1;
+              continue;
+            }
           }
         }
 
@@ -1995,6 +2038,7 @@ function associateCommentsRule(state: StateCore): void {
       }
 
       newChildren.push(children[i]);
+      replyTo = undefined;
       i++;
     }
 

@@ -45,6 +45,18 @@ With attribution:
 
 The `@` prefix and `|` separator make attribution unambiguous — comments like `{>>Note: this is important<<}` are never misparsed as having an author, since they don't start with `@`.
 
+A reply goes inside the comment it replies to, or right after a comment on text. Both are Word replies to the comment (see [Replies](specification.md#replies)):
+
+```markdown
+{==this section==}{>>@alice | Consider rephrasing
+  {>>@bob | Done<<}
+<<}
+
+{==this section==}{>>@alice | Consider rephrasing<<}{>>@bob | Done<<}
+```
+
+Comments on no text one after another, as `{>>a<<}{>>b<<}`, are comments of their own, so a reply to one goes inside it: `{>>a {>>b<<}<<}`.
+
 ### Highlight `{==text==}`
 
 Highlights text for attention.
@@ -75,6 +87,7 @@ A change that opens in an equation ends in it, as `$a{++b++}$` does. An opener w
 ## Nesting Rules
 
 - CriticMarkup patterns **cannot be nested** within the same type
+- Comments are the exception: a comment can hold its replies, `{>>note {>>reply<<}<<}`, and its `<<}` is the one after theirs (see [Comment](#comment-text))
 - When patterns appear nested, only the first complete pattern is recognized
 - Different CriticMarkup types can appear adjacent to each other (e.g., highlight followed by comment)
 

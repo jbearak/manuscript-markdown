@@ -3,6 +3,7 @@ import * as fc from 'fast-check';
 import * as fs from 'fs';
 import * as path from 'path';
 import { navigationMatches } from './navigation-matches';
+import { findMatchingClose } from './critic-markup';
 import { fastestRun } from './test-timing';
 
 // We'll test the regex pattern directly since we can't import vscode in tests
@@ -16,12 +17,28 @@ function findAllPatterns(text: string): Array<{ start: number; end: number; matc
   return navigationMatches(combinedPattern, text).map(({ start, end }) => ({ start, end, matched: text.slice(start, end) }));
 }
 
-// The matches a global exec of the pattern finds one after another
+// The matches a global exec of the pattern finds one after another, but
+// that a comment's goes on to the <<} export pairs with its opener, past its
+// replies', as {>>note {>>reply<<}<<}, and one export pairs with none, which
+// it reads no comment, starts none
 function execAll(text: string): Array<{ start: number; end: number }> {
   const matches: Array<{ start: number; end: number }> = [];
   const re = new RegExp(combinedPattern.source, combinedPattern.flags);
   let match;
-  while ((match = re.exec(text)) !== null) matches.push({ start: match.index, end: match.index + match[0].length });
+  while ((match = re.exec(text)) !== null) {
+    let end = match.index + match[0].length;
+    const opener = /^\{(?:#[a-zA-Z0-9_-]+)?>>/.exec(match[0]);
+    if (opener) {
+      const close = findMatchingClose(text, match.index + opener[0].length);
+      if (close === -1) {
+        re.lastIndex = match.index + 1;
+        continue;
+      }
+      end = close + 3;
+      re.lastIndex = end;
+    }
+    matches.push({ start: match.index, end });
+  }
   return matches;
 }
 
@@ -627,6 +644,23 @@ describe('Navigation regex reads no highlight that a {==\'s == would close', () 
   });
 });
 
+// A comment holds its replies, as import writes them, {>>note {>>reply<<}<<},
+// so navigation selects it to the <<} export pairs with its opener, as it
+// selects each of the comments of {>>note<<}{>>reply<<}
+describe('Navigation selects a comment with its replies', () => {
+  it.each<[string, string, string[]]>([
+    ['a comment with a reply in it', '{==a==}{>>note\n  {>>reply<<}\n<<} b', ['{==a==}', '{>>note\n  {>>reply<<}\n<<}']],
+    ['a comment in a heading with a reply in it', '## {==a==}{>>@p (2026-10-22 10:36) | note\n  {>>reply<<}\n<<}', ['{==a==}', '{>>@p (2026-10-22 10:36) | note\n  {>>reply<<}\n<<}']],
+    ['a comment with replies one after another', '{>>note<<}{>>reply<<}', ['{>>note<<}', '{>>reply<<}']],
+    ['a comment with two replies in it', '{>>note {>>r1<<} {>>r2<<}<<} b', ['{>>note {>>r1<<} {>>r2<<}<<}']],
+    ['a comment body with an ID and a reply in it', '{#1}a{/1}\n\n{#1>>note\n  {>>reply<<}\n<<}', ['{#1}', '{/1}', '{#1>>note\n  {>>reply<<}\n<<}']],
+    ['a comment whose own <<} is missing, before its reply', '{>>note {>>reply<<} b', ['{>>reply<<}']],
+  ])('reads %s as export does', (_name, text, expected) => {
+    expect(findAllPatterns(text).map(m => m.matched)).toEqual(expected);
+    expect(navigationMatches(combinedPattern, text)).toEqual(execAll(text));
+  });
+});
+
 // An opener with no closer after it searched the rest of the text for one
 describe('Navigation steps past an opener with no closer after it', () => {
   const fragment = fc.constantFrom('{', '}', '+', '-', '~', '=', '>', '<', '#', '/', '!', '\\', 'a', ' ', '\n',
@@ -660,6 +694,16 @@ describe('Navigation steps past an opener with no closer after it', () => {
     expect(fastestRun(() => { found = navigationMatches(combinedPattern, text); })).toBeLessThan(1000);
     // The ~~ of a {~~ with no ~~} strikes through to the next {~~'s
     expect(found.map(({ start, end }) => text.slice(start, end)).filter(m => !m.startsWith('~~'))).toEqual(['{++a++}', '{#1}']);
+  }, 30000);
+
+  // Export pairs none of these {>> with the one <<}, but for the last, so
+  // each of them is skipped, and the pattern's not tried from each, which
+  // would search on to the <<}
+  it.each(['{>>', '{#c1>>'])('finds the changes in a text of many %s with one <<} at its end in linear time', (opener) => {
+    const text = '{++a++} ' + ('word ' + opener + ' more text here\n').repeat(20_000) + '<<}';
+    let found: Array<{ start: number; end: number }> = [];
+    expect(fastestRun(() => { found = navigationMatches(combinedPattern, text); })).toBeLessThan(1000);
+    expect(found.map(({ start, end }) => text.slice(start, end))).toEqual(['{++a++}', opener + ' more text here\n<<}']);
   }, 30000);
 });
 
