@@ -64,6 +64,8 @@ const STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles
   // properties, and banded rows alone
   + tableStyle('EmptyPart', 'TableGrid', '<w:rPr/><w:tcPr></w:tcPr>')
   + tableStyle('Banded', 'TableGrid', undefined, '<w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>')
+  // A style whose last column is bold, which sets nothing for the first row
+  + tableStyle('LastColBold', 'TableGrid', undefined, '<w:tblStylePr w:type="lastCol"><w:rPr><w:b/><w:bCs/></w:rPr></w:tblStylePr>')
   + '</w:styles>';
 
 /** A run of `text`, with `rPr`'s properties */
@@ -183,6 +185,31 @@ describe('the header row of a Word table', () => {
       .toContain('| --- | --- |');
     expect(await imported(table([row([equation('x'), equation('y')]), BODY])))
       .toBe('+-----+-----+\n| $x$ | $y$ |\n+-----+-----+\n| Ann | 30  |\n+-----+-----+');
+    // A math run holding a symbol, bold or not, which this doesn't judge,
+    // beside a plain one
+    const symbol = (rPr: string) => cell('<m:oMath><m:r>' + rPr + '<w:sym w:font="Symbol" w:char="F061"/></m:r><m:r><m:t>x</m:t></m:r></m:oMath>');
+    expect(await imported(table([row([symbol('<w:rPr><w:b/></w:rPr>'), equation('y')]), BODY]))).toContain('| --- | --- |');
+    expect(await imported(table([row([symbol(''), equation('y')]), BODY]))).toContain('| --- | --- |');
+  });
+
+  test('a first row whose cells\' places in the grid aren\'t certain is a header, as before', async () => {
+    // Three columns, with the last column's part on, in a style whose last
+    // column is bold
+    const lastBold = WORD_LOOK.replace('w:lastColumn="0"', 'w:lastColumn="1"');
+    const wide = (rows: string[], look = lastBold) => table(rows, 'LastColBold', look)
+      .replace('<w:tblGrid>', '<w:tblGrid><w:gridCol w:w="4675"/>');
+    const body = row([cell(run('x')), cell(run('Ann')), cell(run('30'))]);
+    // Its cells filling the grid, the first row is a header where its last
+    // cell is bold by its column, and a body row where it isn't
+    const filling = row([cell(run('Who')), cell(run('Name')), cell(run('Age'))]);
+    expect(await imported(wide([filling, body]))).toContain('| --- | --- | --- |');
+    expect(await imported(wide([filling, body], WORD_LOOK))).not.toContain('| --- |');
+    // A grid column skipped before its cells, which puts Age in the last
+    // column, bold, or after them, or cells that don't fill the grid
+    for (const trPr of ['<w:gridBefore w:val="1"/>', '<w:gridAfter w:val="1"/>', '']) {
+      const md = await imported(wide([row([cell(run('Name')), cell(run('Age'))], trPr), body]));
+      expect(md.includes('| --- |') || md.includes('<th')).toBe(true);
+    }
   });
 
   test('a first row of what import can\'t tell bold or not, as a picture, is a header, as before', async () => {

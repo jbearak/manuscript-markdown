@@ -6916,6 +6916,9 @@ function mathRunBold(children: XmlNode[]): boolean {
   return ['b', 'bi'].includes(getAttr(sty, 'm:val')) || isToggleOn(rPrChildren, 'w:b') || isToggleOn(rPrChildren, 'w:bCs');
 }
 
+/** What a math run (m:r) holds where it's only properties and text */
+const MATH_RUN_PLAIN = new Set([':@', '#text', 'm:rPr', 'w:rPr', 'm:t']);
+
 /** The math runs (m:r) of an equation, at any depth */
 function mathRuns(nodes: XmlNode[]): XmlNode[][] {
   return nodes.flatMap(node => Object.keys(node).filter(key => key !== ':@' && Array.isArray(node[key]))
@@ -6936,10 +6939,12 @@ function mathRuns(nodes: XmlNode[]): XmlNode[][] {
  * that a paragraph style and a character style both turn on, and where a
  * style it takes is unknown, as a character style styles.xml doesn't have.
  * Each math run with text is bold by its math style or its properties (see
- * mathRunBold), and an equation without one can't be told. Nor can a
- * picture, characters import doesn't read, as a note's reference mark, nor
- * what holds runs this doesn't know, as a table in a cell. A row with
- * nothing in it is plain.
+ * mathRunBold), and an equation without one can't be told, nor one with a
+ * math run holding more than text, as a symbol. Nor can a picture,
+ * characters import doesn't read, as a note's reference mark, nor what
+ * holds runs this doesn't know, as a table in a cell, nor a row whose
+ * cells' places in the grid aren't certain. A row with nothing in it is
+ * plain.
  */
 function firstRowPlain(tblChildren: XmlNode[], layouts: StyleLayouts | undefined, look: TableLook): boolean {
   const rows = tblChildren.filter(c => c['w:tr'] !== undefined);
@@ -6970,8 +6975,12 @@ function firstRowPlain(tblChildren: XmlNode[], layouts: StyleLayouts | undefined
     }
     if (inner) return plain(children, inner, place, paragraphStyle, paragraphBold);
     if (level === 'paragraph' && (key === 'm:oMath' || key === 'm:oMathPara')) {
-      const runs = mathRuns(children).filter(run => /[^\s\u00AD]/.test(run.filter(c => c['m:t'] !== undefined).map(c => nodeText(asXmlNodes(c['m:t']))).join('')));
-      return runs.length > 0 && !runs.some(mathRunBold);
+      // A math run holding more than text in m:t, as a symbol, is bold or
+      // one this can't tell, so not plain either way
+      const runs = mathRuns(children);
+      if (runs.some(run => run.some(c => Object.keys(c).some(tag => !MATH_RUN_PLAIN.has(tag))))) return false;
+      const shown = runs.filter(run => /[^\s\u00AD]/.test(run.filter(c => c['m:t'] !== undefined).map(c => nodeText(asXmlNodes(c['m:t']))).join('')));
+      return shown.length > 0 && !shown.some(mathRunBold);
     }
     if (key !== 'w:r' || level !== 'paragraph') return !holdsRun(children);
     const rPr = children.find(c => c['w:rPr'] !== undefined);
@@ -6992,13 +7001,23 @@ function firstRowPlain(tblChildren: XmlNode[], layouts: StyleLayouts | undefined
     }
     return !shows || !runBold(rPrChildren, paragraphBold, place, paragraphStyle);
   }));
-  let col = 0;
-  for (const tc of asXmlNodes(rows[0]['w:tr']).filter(c => c['w:tc'] !== undefined)) {
+  // Where each cell is in the grid, for its style's parts for columns: not
+  // certain where the row skips grid columns before or after its cells, a
+  // cell spans a number of them that isn't one, or the cells don't fill
+  // the grid, so that the row isn't plain
+  const trChildren = asXmlNodes(rows[0]['w:tr']);
+  const trPr = trChildren.find(c => c['w:trPr'] !== undefined);
+  if (trPr && asXmlNodes(trPr['w:trPr']).some(c => (c['w:gridBefore'] !== undefined || c['w:gridAfter'] !== undefined)
+    && xmlInteger(getAttr(c, 'val')) !== 0)) return false;
+  const cells = trChildren.filter(c => c['w:tc'] !== undefined).map(tc => {
     const tcChildren = asXmlNodes(tc['w:tc']);
     const tcPr = tcChildren.find(c => c['w:tcPr'] !== undefined);
     const gridSpan = tcPr && asXmlNodes(tcPr['w:tcPr']).find(c => c['w:gridSpan'] !== undefined);
-    const val = gridSpan ? xmlInteger(getAttr(gridSpan, 'val')) ?? NaN : NaN;
-    const span = val > 1 ? val : 1;
+    return { tcChildren, span: gridSpan ? xmlInteger(getAttr(gridSpan, 'val')) ?? 0 : 1 };
+  });
+  if (cells.some(cell => cell.span < 1) || cells.reduce((n, cell) => n + cell.span, 0) !== cols) return false;
+  let col = 0;
+  for (const { tcChildren, span } of cells) {
     if (!plain(tcChildren, 'cell', { row: 0, rows: rows.length, col, span, cols, look })) return false;
     col += span;
   }
