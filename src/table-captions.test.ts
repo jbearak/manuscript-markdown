@@ -156,6 +156,20 @@ describe('importing Word\'s table captions', () => {
     expect(md).toBe('Intro.\n\n' + pipe('a') + '\n: Rates by region {#tbl-rates-by-region}\n\n' + pipe('b') + '\n: Second {#tbl-second}\n\nAfter.\n');
   });
 
+  it('reads a caption by a table Word inserted, whose plain first row is no header row, and writes it back so', async () => {
+    // Header Row on, as Word turns it on for a table it inserts, but no row it repeats
+    const inserted = table('Name', 'Ann').replace('<w:trPr><w:tblHeader/></w:trPr>', '');
+    const grid = '+------+\n| Name |\n+------+\n| Ann  |\n+------+\n';
+    for (const [body, md] of [
+      [caption(1, 'Plain') + inserted, grid + '\n: Plain {#tbl-plain}\n'],
+      [inserted + caption(1, 'Plain'), '---\ntbl-cap-location: bottom\n---\n\n' + grid + '\n: Plain {#tbl-plain}\n'],
+    ]) {
+      const once = await imported(await wordDocx(body));
+      expect(once).toBe(md);
+      expect(await trip(once)).toBe(once);
+    }
+  });
+
   it('keeps the captions\' place, title and separator in the frontmatter', async () => {
     expect(await imported(await wordDocx(table('a') + caption(1, 'Below', { title: 'Exhibit', id: 'Exhibit', sep: '. ' }) + table('b') + caption(2, 'More', { title: 'Exhibit', id: 'Exhibit', sep: '. ' }))))
       .toBe('---\ncrossref:\n  tbl-title: Exhibit\n  title-delim: "."\ntbl-cap-location: bottom\n---\n\n' + pipe('a') + '\n: Below {#tbl-below}\n\n' + pipe('b') + '\n: More {#tbl-more}\n');
