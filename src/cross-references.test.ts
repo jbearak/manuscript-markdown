@@ -12,7 +12,7 @@ import { convertMdToDocx, createMarkdownIt, parseMd, type MdRun } from './md-to-
 import { renderWithPlugin } from './test-helpers';
 import { fastestRun, fastestRunAsync } from './test-timing';
 import { crossRefCompletions, findCrossRefDefinition, findCrossRefProblems, getCrossRefCompletionContext, scanCrossRefLabels, scanCrossRefs } from './lsp/crossref-language';
-import { getCompletionContextAtOffset, scanCitationUsages } from './lsp/citekey-language';
+import { findCitekeyAtOffset, findUsagesForKey, getCompletionContextAtOffset, scanCitationUsages } from './lsp/citekey-language';
 
 // A cross-reference to a figure or a table, as Quarto writes one: @fig-map
 // or @tbl-rates, @Fig-map for its title capitalized, and [@fig-map], which
@@ -353,6 +353,19 @@ describe('previewing a cross-reference', () => {
     expect(renderWithPlugin('---\ncrossref:\n  fig-title: fig.\n---\n\n@Fig-map and @fig-map\n\n![A](map.png){#fig-map}\n')).toContain('>Fig. 1</a> and <a href="#fig-map" class="manuscript-markdown-cross-reference">fig. 1</a>');
   });
 
+  it('writes one in an image\'s alt text as export does, as written, but links one in a figure\'s caption', async () => {
+    for (const alt of ['See @fig-map', 'See [@fig-map] and @tbl-none', 'See [see @fig-map] x']) {
+      const md = '![' + alt + '](map.png)' + FIGURES;
+      const { docx } = await convertMdToDocx(md, { sourceDir: dir });
+      const document = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(document).toContain('descr="' + alt + '"');
+      expect(renderWithPlugin(md)).toContain('alt="' + alt + '"');
+    }
+    const html = renderWithPlugin('![As @fig-map](map.png){#fig-x}' + FIGURES);
+    expect(html).toContain('alt="As @fig-map"');
+    expect(html).toContain('As <a href="#fig-map" class="manuscript-markdown-cross-reference">Figure 2</a>');
+  });
+
   it('reads them as export does', () => {
     const reads = (runs: MdRun[] | undefined): boolean => !!runs?.some(run => run.crossRef && run.crossRef.form !== 'literal' || reads(run.innerRuns));
     for (const md of ['Mail me@fig-map.org', '`@fig-map`', '[see @fig-map](https://x.org)', '\\@fig-map', 'x.@fig-map', '{++@fig-map++}', '==@fig-map==']) {
@@ -414,9 +427,57 @@ describe('the LSP and cross-references', () => {
     expect(findCrossRefDefinition(doc, doc.indexOf('@fig-none') + 2)).toBeUndefined();
   });
 
-  it('reads no citation key in a cross-reference, nor in brackets with one', () => {
+  it('reads no citation key in a cross-reference, nor in brackets with one, wherever it is in them and over lines', () => {
     expect(scanCitationUsages('[@fig-map] [@smith; @tbl-x] [@jones]').map(usage => usage.key)).toEqual(['jones']);
     expect(getCompletionContextAtOffset('See @', 5)).toBeDefined();
+    // Export reads each as text, as it reads a citation's brackets with a
+    // cross-reference's key where a citation reads a key
+    for (const md of ['[@smith, see @fig-map]', '[@smith; @jones, p. 2 @fig-a]', '[@smith, see [@fig-map]]', '[text [@smith, @fig-a]', '[@smith;\n@fig-a]', '- [@smith;\n  @fig-a]']) {
+      expect(parseMd(md).flatMap(token => token.runs ?? []).some(run => run.type === 'citation')).toBe(false);
+      expect(scanCitationUsages(md)).toEqual([]);
+      expect(findUsagesForKey(md, 'smith')).toEqual([]);
+      expect(findCitekeyAtOffset(md, md.indexOf('smith'))).toBeUndefined();
+    }
+    expect(scanCitationUsages('[@smith] [@jones, see @fig-a]').map(usage => usage.key)).toEqual(['smith']);
+    expect(scanCitationUsages('[@smith;\n\n@fig-a]').map(usage => usage.key)).toEqual(['smith']);
+  });
+
+  it('reads none where export reads none: in HTML, an equation or an image\'s alt text', () => {
+    for (const md of ['<!-- @fig-old -->', 'x <!-- @fig-old --> y', '<table><tr><td>@fig-old</td></tr></table>', '<span title="@fig-old">x</span>',
+      'A $@fig-old$ b', '$$\n@fig-old\n$$', '\\begin{equation}\n@fig-old\n\\end{equation}', '![See @fig-old](map.png)', '<a href="x">@fig-old</a>', 'A {>>see @fig-old<<} b']) {
+      expect(scanCrossRefs(md)).toEqual([]);
+      expect(findCrossRefProblems(md)).toEqual([]);
+    }
+    expect(findCrossRefProblems('<u>@fig-old</u>').map(problem => problem.message)).toEqual(['No figure or table is labeled {#fig-old}, so Word gets @fig-old as text.']);
+  });
+
+  it('reads one in a note\'s definition, as export does, though markdown-it would read a link\'s definition there', () => {
+    const md = 'Text.[^1]\n\n[^1]: @fig-a and [@tbl-b;\n    @tbl-c]\n\n    Then @fig-d.\n\n        code @fig-e\n\nAfter @fig-f\n';
+    expect(scanCrossRefs(md).map(usage => [usage.form, md.slice(usage.start, usage.end)])).toEqual([
+      ['bare', '@fig-a'], ['literal', '[@tbl-b;\n    @tbl-c]'], ['bare', '@fig-d'], ['bare', '@fig-f'],
+    ]);
+  });
+
+  it('reads a citation\'s brackets over lines as export does, and the quote export ends', () => {
+    const literal = (md: string) => scanCrossRefs(md).map(usage => [usage.form, md.slice(usage.start, usage.end)]);
+    expect(literal('See [@tbl-a;\n@tbl-b].')).toEqual([['literal', '[@tbl-a;\n@tbl-b]']]);
+    expect(literal('- See [@tbl-a;\n  @tbl-b].')).toEqual([['literal', '[@tbl-a;\n  @tbl-b]']]);
+    expect(literal('> See [@tbl-a;\r\n> @tbl-b].')).toEqual([['literal', '[@tbl-a;\r\n> @tbl-b]']]);
+    expect(findCrossRefProblems('See [@tbl-a;\n@tbl-b].').map(problem => problem.message)).toEqual(['A cross-reference in a citation\'s brackets with other text, as [-@fig-x], [see @fig-x] or [@fig-a; @fig-b], is text in Word: write @fig-x or [@fig-x] alone.']);
+    // Export ends the quote before the line with no >
+    expect(literal('> See [@tbl-a;\nb @tbl-b]')).toEqual([['bare', '@tbl-a'], ['bare', '@tbl-b']]);
+  });
+
+  it('finds each reference where it is, not where the same text is in code, HTML or another cell', () => {
+    const at = (md: string) => scanCrossRefs(md).map(usage => usage.start);
+    expect(at('`@fig-a` and @fig-a')).toEqual([13]);
+    expect(at('x <!-- @fig-a --> @fig-a')).toEqual([18]);
+    expect(at('![@fig-a](map.png) @fig-a')).toEqual([19]);
+    expect(at('[x @fig-a](y) @fig-a')).toEqual([14]);
+    expect(at('$@fig-a$ @fig-a')).toEqual([9]);
+    expect(at('| a | b |\n|---|---|\n| `@fig-a` | @fig-a |\n| @fig-a | @fig-a |')).toEqual([33, 44, 53]);
+    expect(at('# `@fig-a` @fig-a ##')).toEqual([11]);
+    expect(at('> > @fig-a\r\n> > b @fig-a')).toEqual([4, 18]);
   });
 });
 
@@ -498,8 +559,11 @@ describe('the grammar and cross-references', () => {
 
 describe('cross-references in linear time', () => {
   it('reads many references, and brackets with one, in time linear in their length', () => {
-    for (const unit of ['@fig-a ', '[@fig-a ', '[@a [@fig-a', '[@fig-a', '[see @fig-a ', '@fig-a-']) {
-      const text = (n: number) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n) + ']\n';
+    // A space more or less each time, so the language server's parse of
+    // the last text it read is no help
+    let runs = 0;
+    for (const unit of ['@fig-a ', '[@fig-a ', '[@a [@fig-a', '[@fig-a', '[see @fig-a ', '@fig-a-', '$ @fig-a', '[@fig-a;\n', '> @fig-a\n', '| @fig-a | `@fig-a` @fig-a |\n', '[^a]: @fig-a\n\n    @fig-b\n\n']) {
+      const text = (n: number) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n) + ']\n' + ' '.repeat(runs++ % 2);
       const small = fastestRun(() => parseMd(text(16000)));
       const large = fastestRun(() => parseMd(text(64000)));
       expect(large).toBeLessThan(8 * small + 100);

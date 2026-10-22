@@ -15,7 +15,7 @@ A key no citation can cite, as one with a `;`, a `]` or a backtick, is left out 
 
 The server reads a citation's keys as Word export does: each key is the text after its `@` to the item's comma, so `[@smith.2020]` is the key `smith.2020`. It finds the `[` a citation starts at as export does too, so in `[text [@smith2020]]` the citation is the inner brackets. Brackets over more than one line, which export can read as more than one block, are read as before: each `@` starts a key of letters, digits, `_`, `:` and `-`.
 
-A key that starts with `fig-` or `tbl-` is a cross-reference's, not a citation's, so the server reads no citation in brackets with one (see [Cross-References](#cross-references)).
+A key that starts with `fig-` or `tbl-` is a cross-reference's, not a citation's, so the server reads no citation in brackets with one where a citation reads a key, as in `[@smith, see @fig-map]` or over lines, as export reads them (see [Cross-References](#cross-references)).
 
 ### Diagnostics
 
@@ -33,7 +33,7 @@ From a `[@citekey]` in markdown, navigates to the key's declaration in the `.bib
 
 ### Cross-References
 
-The server reads a document's cross-references to its figures and tables as export does (see [Cross-References](specification.md#cross-references)), outside code and the frontmatter, with no `.bib` file. A label is a figure's or a table's where export captions one with it, as the preview does: after an image alone in its paragraph, or at the end of a table's caption. A `{#fig-…}` that labels nothing, as in a sentence or a list, is none.
+The server reads a document's cross-references to its figures and tables as export does (see [Cross-References](specification.md#cross-references)), with no `.bib` file, by the preview's parse of the document, with export's notes, quotes and equations: none in the frontmatter, code, HTML, as a comment or a table's cell, an equation, a link's text or an image's alt text, and a citation's brackets over lines read as one, as export reads them. A label is a figure's or a table's where export captions one with it, as the preview does: after an image alone in its paragraph, or at the end of a table's caption. A `{#fig-…}` that labels nothing, as in a sentence or a list, is none.
 
 - **Completion**: after an `@` that can start a cross-reference, as one not after a letter or a digit, the labels of the document's figures and tables, as `fig-map` from `{#fig-map}`, that what's typed starts, with the citation keys where a citation can start there too. After `@Fig-` or `@Tbl-`, a label comes as `Fig-map`.
 - **Diagnostics**: a warning on a reference to a label no figure or table has, which Word gets as text, on a label a figure or table has after another, whose references go to the first, and on a citation's brackets with a cross-reference among other text, as `[-@fig-map]` or `[see @fig-map]`, which Word gets as text.

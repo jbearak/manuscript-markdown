@@ -1415,7 +1415,9 @@ function crossRefRule(state: StateInline, silent: boolean): boolean {
     const token = state.push('manuscript_cross_reference', '', 0);
     const source = restoreCriticLineBreaks(state.src.slice(start, ref.end));
     token.content = ref.form === 'literal' ? state.md.utils.unescapeAll(source).replace(/\r\n?|\n/g, ' ') : source;
-    token.meta = { key: ref.key, form: ref.form };
+    // Its source and where it starts in its inline token's text, by which
+    // the language server finds it in the document (see crossref-language.ts)
+    token.meta = { key: ref.key, form: ref.form, source, offset: inlineSourceOffset(state, start) };
     const consumedBreakSourceOffsets = collectProtectedBreaks(state.src.slice(start, ref.end), inlineSourceOffset(state, start))
       .map(sourceBreak => sourceBreak.sourceOffset);
     if (consumedBreakSourceOffsets.length > 0) token.meta.manuscriptCriticConsumedBreakSourceOffsets = consumedBreakSourceOffsets;
@@ -2729,15 +2731,18 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // text tokens, which export runs on none in one, are done: the host's
   // heading IDs and an image's alt text are made of text tokens alone.
   // Whatever the source holds, as a grid table's cells, which preprocessing
-  // writes as a placeholder, have tokens of their own.
+  // writes as a placeholder, have tokens of their own. So is a
+  // cross-reference in an image's alt text, its content as written, which
+  // export writes there too, as of `![See @fig-map](map.png)`, though not
+  // in a figure's caption, which captionsRule copied from it.
   md.core.ruler.push('manuscript_citation_text', (state: StateCore) => {
-    const citationsAsText = (tokens: Token[] | null): void => {
+    const citationsAsText = (tokens: Token[] | null, inImage: boolean): void => {
       for (const token of tokens ?? []) {
-        if (token.type === 'manuscript_citation') token.type = 'text';
-        citationsAsText(token.children);
+        if (token.type === 'manuscript_citation' || inImage && token.type === 'manuscript_cross_reference') token.type = 'text';
+        citationsAsText(token.children, inImage || token.type === 'image');
       }
     };
-    citationsAsText(state.tokens);
+    citationsAsText(state.tokens, false);
   });
   md.use(criticBreaksLeftOver);
 
