@@ -1843,10 +1843,19 @@ describe('Comment association in preview', () => {
       ['after a critic highlight', '{==text==}{>>first\n  {>>second<<}\n<<}', 'data-comment="first\nsecond"'],
       ['in a heading', '## {==text==}{>>@a (2026-10-22 10:36) | first\n  {>>@b | second<<}\n<<}', 'data-comment="@a (2026-10-22 10:36) | first\n@b | second"'],
       ['on no text', 'a {>>first {>>second<<} {>>third<<}<<} b', 'data-comment="first\nsecond\nthird"'],
-      ['with a reply to a reply', '{==text==}{>>first {>>second {>>third<<}<<}<<}', 'data-comment="first\nsecond\nthird"'],
+      // Word has no reply to a reply, so export writes the reply's text with
+      // the {>>...<<} in it
+      ['with a reply to a reply', '{==text==}{>>first {>>second {>>third<<}<<}<<}', 'data-comment="first\nsecond {&gt;&gt;third&lt;&lt;}"'],
     ])('shows the replies in a comment %s on lines of their own', (_name, input, expected) => {
       expect(renderWithPlugin(input)).toContain(expected);
     });
+
+    it('renders a deep nest of replies in linear time', () => {
+      const input = '{>>note ' + '{>>reply '.repeat(800) + '<<}'.repeat(800) + '<<}';
+      // Pairing each comment's replies again for each comment in it took
+      // seconds here
+      expect(fastestRun(() => renderWithPlugin(input))).toBeLessThan(1000);
+    }, 30000);
   });
 
   describe('ID-based comment ranges', () => {
@@ -1857,10 +1866,18 @@ describe('Comment association in preview', () => {
       expect(output).toContain('>text</span>');
     });
 
-    it('shows the replies in a comment body with an ID on lines of their own', () => {
-      const output = renderLikePreview('{#1}text{/1}\n\n{#1>>first\n  {>>second<<}\n<<}');
+    // Export reads the comments right after an ID's body as its replies, as
+    // it reads those inside it, but one after a space as a comment of its own
+    it.each<[string, string, string, number]>([
+      ['inside it', '{#1}text{/1}\n\n{#1>>first\n  {>>second<<}\n<<}', 'data-comment="first\nsecond"', 0],
+      ['after it', '{#1}text{/1}\n\n{#1>>first<<}{>>second<<}{>>third<<}', 'data-comment="first\nsecond\nthird"', 0],
+      ['after it in its paragraph', '{#1}text{/1}{#1>>first<<}{>>second<<} after', 'data-comment="first\nsecond"', 0],
+      ['after it and a space', '{#1}text{/1}\n\n{#1>>first<<} {>>second<<}', 'data-comment="first"', 1],
+    ])('shows the replies of a comment body with an ID %s in its range\'s tooltip', (_name, input, expected, indicators) => {
+      const output = renderLikePreview(input);
       expect(output).toContain('manuscript-markdown-comment-range');
-      expect(output).toContain('data-comment="first\nsecond"');
+      expect(output).toContain(expected);
+      expect(output.split('manuscript-markdown-comment-indicator').length - 1).toBe(indicators);
     });
 
     it('should leave range markers without matching comment as empty renders', () => {

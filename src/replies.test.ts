@@ -694,6 +694,25 @@ describe('A comment on no text with replies written one after another', () => {
   });
 });
 
+// A reply goes inside its comment or right after a comment on text, and a
+// comment after a space, or on no text after another, is one of its own
+describe('Which comments export makes replies', () => {
+  test.each<[string, string, string[], number]>([
+    ['a reply inside a comment', 'A {==x==}{>>a\n  {>>b<<}\n<<} c.', ['a', 'b'], 1],
+    ['a reply right after a comment on text', 'A {==x==}{>>a<<}{>>b<<} c.', ['a', 'b'], 1],
+    ['a comment after a comment on text and a space', 'A {==x==}{>>a<<} {>>b<<} c.', ['a', 'b'], 0],
+    ['a reply inside a comment on no text', 'A {>>a {>>b<<}<<} c.', ['a', 'b'], 1],
+    ['comments on no text one after another', 'A {>>a<<}{>>b<<} c.', ['a', 'b'], 0],
+    ['a reply to a reply, which Word has none of', 'A {==x==}{>>a {>>b {>>c<<}<<}<<} d.', ['a', 'b {>>c<<}'], 1],
+  ])('reads %s', async (_name, md, texts, replies) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const comments = await zip.file('word/comments.xml')!.async('string');
+    const extended = await zip.file('word/commentsExtended.xml')?.async('string') ?? '';
+    expect([...comments.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1].replace(/&gt;/g, '>').replace(/&lt;/g, '<'))).toEqual(texts);
+    expect(extended.match(/paraIdParent=/g)?.length ?? 0).toBe(replies);
+  });
+});
+
 describe('Multi-level reply chain flattening', () => {
   test('deep reply chains are flattened to root parent', () => {
     const comments = new Map<string, Comment>([
