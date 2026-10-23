@@ -271,15 +271,14 @@ describe('Keys indented under another key', () => {
     ]);
   });
 
-  it('reads no list under a key indented, nor a key on a line after an item of text', () => {
+  it('reads no list under a key indented, nor a key on a line after an item of text, which is the item\'s', () => {
     const list = read('meta:\n  title:\n    - A');
     expect(list.metadata).toEqual({});
     expect(list.warnings).toEqual(['Frontmatter `title` is indented under `meta`, which makes it part of `meta`, so export doesn\'t read it. To set `title`, move it to the start of its line.']);
     const after = read('title:\n  - One\n    font: Arial');
     expect(after.metadata).toEqual({ title: ['One'] });
-    expect(after.warnings).toHaveLength(2);
+    expect(after.warnings).toHaveLength(1);
     expect(after.warnings![0]).toContain('goes on past its line');
-    expect(after.warnings![1]).toStartWith('Frontmatter `font` is indented under `title`');
   });
 
   it('reads no key under a list item, past comments and deeper mappings', () => {
@@ -289,6 +288,21 @@ describe('Keys indented under another key', () => {
     expect(warnings?.map(w => w.slice(0, w.indexOf(',')))).toEqual([
       'Frontmatter `title` is indented under `authors`',
       'Frontmatter `font` is indented under `affil`',
+    ]);
+  });
+
+  it('warns of no line of a value that starts on its key\'s line, at any indentation', () => {
+    for (const yaml of ['meta:\n  abstract: |\n    title: This is prose', 'meta:\n  note: >-\n\n    # a\n    font: Arial',
+      'authors:\n  - name: Jane\n    bio: |\n      title: Prof', 'meta:\n  - One\n    title: more of it', 'meta:\n- bio: "a\n    title: b"']) {
+      const { metadata, warnings } = read(yaml);
+      expect(metadata).toEqual({});
+      expect(warnings).toBeUndefined();
+    }
+    // A key after the value, at the key's indentation or a list item's text's
+    const after = read('meta:\n  abstract: |\n    prose\n  title: T\nauthors:\n- name: Jane\n  font: Arial');
+    expect(after.warnings?.map(w => w.slice(0, w.indexOf(',')))).toEqual([
+      'Frontmatter `title` is indented under `meta`',
+      'Frontmatter `font` is indented under `authors`',
     ]);
   });
 

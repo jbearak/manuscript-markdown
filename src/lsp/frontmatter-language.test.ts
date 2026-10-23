@@ -1220,11 +1220,10 @@ describe('block lists', () => {
 		const warning = 'warning: Export reads only this item\'s line, as the item goes on past it or opens a quote that doesn\'t close on it. Write the item on one line, with any quote it opens closed.';
 		expect(await messages('---\nheader-font:\n  - Times\n    New Roman\n---\n')).toEqual([warning + ' @ - Times']);
 		expect(await messages('---\ntitle:\n  - "Results\n    #1 of 3"\n---\n')).toEqual([warning + ' @ - "Results']);
-		// Its line read as a value, and no key on the lines after it, as they're indented
+		// Its line read as a value, and the lines after it as the item's, which export doesn't read
 		expect(await messages('---\nheader-font-size:\n  - big\n    font-size: small\n---\n')).toEqual([
 			warning + ' @ - big',
 			'error: Expected non-negative numbers. @ big',
-			'warning: Frontmatter `font-size` is indented under `header-font-size`, which makes it part of `header-font-size`, so export doesn\'t read it. To set `font-size`, move it to the start of its line. @ font-size',
 		]);
 		expect(await messages('---\ntitle:\n  - "One"\n    # 1 of 2\n---\n')).toEqual([]);
 	});
@@ -1359,6 +1358,16 @@ describe('validateFrontmatter: keys indented under another key', () => {
 	test('warns of no line of a literal value, nor of a list item\'s mapping export doesn\'t read', async () => {
 		const text = '---\nabstract: |\n  font: in the text\nkeywords:\n  - name: Jane\n---\n';
 		expect(await validateFrontmatter(text, stubCallbacks)).toEqual([]);
+	});
+
+	test('warns of no line of a value under a key indented', async () => {
+		expect(await validateFrontmatter('---\nmeta:\n  abstract: |\n    title: This is prose\n---\n', stubCallbacks)).toEqual([]);
+	});
+
+	test('offers a key indented under another, which export doesn\'t read, at a line\'s start', () => {
+		const text = '---\nmeta:\n  font: Arial\nfo\n---\n';
+		const labels = getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('fo\n') + 2), 'darwin').map(item => item.label);
+		expect(labels).toContain('font');
 	});
 
 	test('reads no bibliography indented under another key', async () => {

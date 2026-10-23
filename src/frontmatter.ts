@@ -300,9 +300,10 @@ function readBlockLists(lines: string[], warnings: string[]): string[] {
  * The keys export reads that frontmatter has indented, which export
  * doesn't read, as YAML reads them as part of the value of the key above:
  * each line's index, its key, and that key above, `parent`, as `title`
- * and `author` for `author:` then `  title: Prof`. A line under a key
- * whose value starts on the key's line, as `abstract: |`, is part of that
- * value, not a key, nor is one under `styles:` or `crossref:`, whose keys
+ * and `author` for `author:` then `  title: Prof`. A line more indented
+ * than a key, or a list item, whose value starts on its line, as
+ * `abstract: |` or `- One`, at any indentation, is part of that value, not
+ * a key, nor is one under `styles:` or `crossref:`, whose keys
  * parseFrontmatter reads itself. Where no key at a line's start is above,
  * as in frontmatter indented as a whole, `parent` is undefined.
  */
@@ -312,22 +313,35 @@ export function nestedKeys(lines: readonly string[]): { line: number; key: strin
   // Whether the lines indented under the key above are a mapping's, which
   // they are before any key, as YAML reads them
   let mapping = true;
+  // The column of the last key, or item, whose value starts on its line,
+  // past which a line is part of that value, or -1
+  let value = -1;
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k].replace(/\r$/, '');
     const indent = indentOf(line);
     if (indent === line.length || line[indent] === '#') continue;
-    if (indent === 0) {
-      // An item of a list under the key above
-      if (isListItem(line)) continue;
+    if (value >= 0 && indent > value) continue;
+    value = -1;
+    if (indent === 0 && !isListItem(line)) {
       const colon = line.indexOf(':');
       parent = colon > 0 ? line.slice(0, colon).trim() : undefined;
       mapping = colon > 0 && /^(?:[ \t]*|[ \t]+#.*)$/.test(line.slice(colon + 1));
       continue;
     }
     if (!mapping || parent === 'styles' || parent === 'crossref') continue;
-    const colon = line.indexOf(':');
-    const key = colon > 0 ? line.slice(indent, colon).trim() : '';
-    if (READ_KEYS.has(key)) nested.push({ line: k, key, ...(parent !== undefined ? { parent } : {}) });
+    // The text past a list item's `-`, as `name: Jane` in `- name: Jane`,
+    // and its column
+    let at = indent;
+    while (isListItem(line.slice(at))) at += 1 + indentOf(line.slice(at + 1));
+    const colon = line.indexOf(':', at);
+    if (colon < 0) {
+      // An item's text, or a plain value's next line
+      if (at < line.length) value = indent;
+      continue;
+    }
+    if (!/^(?:[ \t]*|[ \t]+#.*)$/.test(line.slice(colon + 1))) value = at;
+    const key = line.slice(at, colon).trim();
+    if (at === indent && READ_KEYS.has(key)) nested.push({ line: k, key, ...(parent !== undefined ? { parent } : {}) });
   }
   return nested;
 }

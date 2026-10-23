@@ -790,7 +790,9 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	const declaredKeys = new Set<string>();
 	const declaredKeyCounts = new Map<string, number>();
 	for (const line of parsed.lines) {
-		if (!line.listItem && !line.crossrefDepth && (!line.inStylesBlock || line.indent === 0)) {
+		// A key indented, under another, is part of that key's value, which
+		// export doesn't read (see nestedKeys)
+		if (!line.listItem && line.indent === 0) {
 			const canonical = resolveCanonical(line.key);
 			declaredKeys.add(canonical);
 			declaredKeyCounts.set(canonical, (declaredKeyCounts.get(canonical) ?? 0) + 1);
