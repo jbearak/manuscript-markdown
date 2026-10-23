@@ -2498,6 +2498,47 @@ function captionsRule(state: StateCore): void {
  * Main plugin function that registers Manuscript Markdown parsing with markdown-it
  * @param md - The MarkdownIt instance to extend
  */
+/**
+ * The frontmatter's YAML, `content`, with its title as YAML reads it as
+ * export does, for VS Code's preview, which parses the frontmatter as YAML
+ * for its table and shows "Failed to parse frontmatter" where it can't. YAML
+ * holds a key once, so a title of several lines, `title:` repeated, failed,
+ * and it reads a value that starts with a brace, as `{++New++} title`, as a
+ * mapping. So where the title has several lines, or a line that starts with
+ * a brace, it's one key, before the other keys where it was first, holding
+ * each line quoted, in a list where it has several. Otherwise the YAML
+ * stays as it is, which the preview's code block of it shows.
+ */
+export function frontmatterYamlForPreview(content: string): string {
+  const lines = content.split('\n');
+  // Each title entry's lines: its key's, and the indented, blank or list
+  // item lines after it, as a block list's, but not blank lines at its end
+  const entries: Array<{ start: number; end: number }> = [];
+  for (let k = 0; k < lines.length; k++) {
+    if (!/^title\s*:/.test(lines[k])) continue;
+    let end = k + 1;
+    while (end < lines.length && /^(?:\s|-|$)/.test(lines[end])) end++;
+    while (end > k + 1 && lines[end - 1].trim() === '') end--;
+    entries.push({ start: k, end });
+    k = end - 1;
+  }
+  const startsWithBrace = entries.some(({ start, end }) =>
+    /^title\s*:\s*\{/.test(lines[start]) || lines.slice(start + 1, end).some(line => /^\s*-\s*\{/.test(line)));
+  if (entries.length < 2 && !startsWithBrace) return content;
+  const titles = parseFrontmatter('---\n' + content + '\n---\n').metadata.title ?? [];
+  const title = titles.length === 1 ? ['title: ' + JSON.stringify(titles[0])]
+    : ['title:', ...titles.map(line => '  - ' + JSON.stringify(line))];
+  const out: string[] = [];
+  let next = 0;
+  for (const [n, { start, end }] of entries.entries()) {
+    pushAll(out, lines.slice(next, start));
+    if (n === 0) pushAll(out, title);
+    next = end;
+  }
+  pushAll(out, lines.slice(next));
+  return out.join('\n');
+}
+
 export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.use(imagePathsWithSpaces);
   md.use(codeSpansOfSpaces);
@@ -2553,6 +2594,17 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
     const r3 = preprocessCriticMarkupWithMap(r2.output);
     state.src = r3.output;
     env.lineMap = LineMap.chain(LineMap.chain(LineMap.chain(LineMap.chain(r0.map, r1.map), rNumber.map), r2.map), r3.map);
+  });
+
+  // The frontmatter VS Code's preview reads, as YAML it can parse (see
+  // frontmatterYamlForPreview). VS Code adds its rule for frontmatter, and
+  // its renderer, after this plugin, so this rewrites the token its rule
+  // made, which its renderer reads
+  md.core.ruler.push('manuscript_front_matter_yaml', (state: StateCore) => {
+    const token = state.tokens[0];
+    if (token?.type === 'front_matter' && typeof token.meta?.content === 'string') {
+      token.meta.content = frontmatterYamlForPreview(token.meta.content);
+    }
   });
 
   // Inject <style> block for header-font-style and custom styles preview

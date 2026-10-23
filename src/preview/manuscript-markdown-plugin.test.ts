@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
 import MarkdownIt from 'markdown-it';
-import { manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
+import { frontmatterYamlForPreview, manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
 import type { EmbedResolver } from '../embed-preprocess';
 import { VALID_COLOR_IDS, setDefaultHighlightColor, getDefaultHighlightColor } from '../highlight-colors';
 import {
@@ -3113,5 +3113,48 @@ describe('a number and a no-break space at the start of an inline equation', () 
   // As on main
   it('leaves $2 and the space as text', () => {
     expect(render('A $2\u00a0x$ B.')).not.toContain('<katex>');
+  });
+});
+
+describe('frontmatter for VS Code\'s preview table', () => {
+  it('writes a title of several lines as one key holding a list', () => {
+    expect(frontmatterYamlForPreview('title: A {--b--}\ntitle: {++C++}\nfont: X'))
+      .toBe('title:\n  - "A {--b--}"\n  - "{++C++}"\nfont: X');
+  });
+
+  it('quotes a title line that starts with a brace, which YAML reads as a mapping', () => {
+    expect(frontmatterYamlForPreview('csl: apa\ntitle: {++New++} title')).toBe('csl: apa\ntitle: "{++New++} title"');
+    expect(frontmatterYamlForPreview('title:\n  - One\n  - {++Two++}\n\nfont: X'))
+      .toBe('title:\n  - "One"\n  - "{++Two++}"\n\nfont: X');
+  });
+
+  it('keeps the title where it was first, and the other keys as they are', () => {
+    expect(frontmatterYamlForPreview('title: "A: b"\nfont: X\ntitle: C\ncsl: apa'))
+      .toBe('title:\n  - "A: b"\n  - "C"\nfont: X\ncsl: apa');
+  });
+
+  it('leaves frontmatter YAML reads as export does as it is', () => {
+    for (const yaml of ['title: Plain {--old--} title\nfont: X', 'title:\n  - One\n  - Two', 'font: X']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('rewrites the front_matter token VS Code\'s rule makes after the plugin', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    // As VS Code's markdown-language-features adds its rule after extension plugins
+    md.block.ruler.before('fence', 'front_matter', (state, start, _end, silent) => {
+      if (start !== 0 || state.src.slice(state.bMarks[0], state.eMarks[0]) !== '---') return false;
+      const close = state.src.indexOf('\n---', state.eMarks[0]);
+      if (close < 0) return false;
+      if (silent) return true;
+      const token = state.push('front_matter', '', 0);
+      token.block = true;
+      token.meta = { content: state.src.slice(state.eMarks[0] + 1, close) };
+      state.line = state.src.slice(0, close + 4).split('\n').length;
+      return true;
+    });
+    md.renderer.rules.front_matter = (tokens, idx) => '<pre>' + tokens[idx].meta.content + '</pre>';
+    expect(md.render('---\ntitle: A\ntitle: B\n---\n\nBody.')).toContain('<pre>title:\n  - "A"\n  - "B"</pre>');
   });
 });
