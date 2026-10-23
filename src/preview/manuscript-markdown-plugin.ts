@@ -2560,16 +2560,14 @@ export function frontmatterYamlForPreview(content: string): string {
   // value, a list's item or an inline array's
   const holdsBrace = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{')));
   if (entries.length < 2 && !holdsBrace) return content;
-  // Read from its entries alone, as export reads them, as parseFrontmatter
-  // reads no frontmatter at all from some that YAML reads, as with a blank
-  // line first
+  // The title lines its entries give, which must be those export reads from
+  // the whole frontmatter: not where it reads others, as from a `title:`
+  // indented under another key, nor none, as from frontmatter with a blank
+  // line first, which it doesn't read
   const titleYaml = entries.map(({ start, end }) => lines.slice(start, end).join('\n')).join('\n');
   const titles = parseFrontmatter('---\n' + titleYaml + '\n---\n').metadata.title ?? [];
-  if (titles.length === 0) return content;
-  // Nor where export reads other title lines from the whole frontmatter, as
-  // from a `title:` indented under another key, whose lines this can't show
-  const exported = parseFrontmatter('---\n' + content + '\n---\n').metadata.title;
-  if (exported && JSON.stringify(exported) !== JSON.stringify(titles)) return content;
+  const exported = parseFrontmatter('---\n' + content + '\n---\n').metadata.title ?? [];
+  if (titles.length === 0 || JSON.stringify(exported) !== JSON.stringify(titles)) return content;
   const title = titles.length === 1 ? ['title: ' + JSON.stringify(titles[0])]
     : ['title:', ...titles.map(line => '  - ' + JSON.stringify(line))];
   const out: string[] = [];

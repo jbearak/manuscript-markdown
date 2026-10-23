@@ -3157,8 +3157,10 @@ describe('frontmatter for VS Code\'s preview table', () => {
     }
   });
 
-  it('reads the title from its own entries, with a blank line first', () => {
-    expect(frontmatterYamlForPreview('\ntitle: A\ntitle: {++B++}')).toBe('\ntitle:\n  - "A"\n  - "{++B++}"');
+  it('leaves frontmatter export reads no title from, as with a blank line first, as it is', () => {
+    for (const yaml of ['\ntitle: A\ntitle: {++B++}', '\ntitle: Plain {--old--} title\nauthor: Jane Smith']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
   });
 
   it('quotes a title with a brace inside it, which reads the same quoted', () => {
