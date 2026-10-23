@@ -2498,6 +2498,16 @@ function captionsRule(state: StateCore): void {
  * Main plugin function that registers Manuscript Markdown parsing with markdown-it
  * @param md - The MarkdownIt instance to extend
  */
+/** A title's value, or a block list's item, of one line that YAML reads
+ *  as export does but for the quoting, which can go on it: none of YAML's
+ *  own, a block scalar, an anchor, an alias or a tag (`|`, `>`, `&`, `*`,
+ *  `!`), which other keys can refer to, nor an inline array that holds one,
+ *  or that its line doesn't close */
+function quotableTitleValue(value: string): boolean {
+  if (/^[|>&*!]/.test(value)) return false;
+  return !value.startsWith('[') || /\][ \t]*(?:#.*)?$/.test(value) && !/[&*!]/.test(value);
+}
+
 /**
  * The frontmatter's YAML, `content`, with its title as YAML reads it as
  * export does, for VS Code's preview, which parses the frontmatter as YAML
@@ -2506,35 +2516,35 @@ function captionsRule(state: StateCore): void {
  * and it reads a value that starts with a brace, as `{++New++} title`, as a
  * mapping, in a value, a list's item or an inline array's. So where the
  * title has several lines, or a brace in any of them, it's one key, before
- * the other keys where it was first, holding
- * each line quoted, in a list where it has several. Otherwise the YAML
- * stays as it is, which the preview's code block of it shows.
+ * the other keys where it was first, holding each line quoted, in a list
+ * where it has several. Only where each of its entries is as export writes
+ * them, a value of one line, an inline array on it or a block list of such
+ * items (see quotableTitleValue), so the YAML that parsed still does.
+ * Otherwise the YAML stays as it is, which the preview's code block of it
+ * shows.
  */
 export function frontmatterYamlForPreview(content: string): string {
   const lines = content.split('\n');
   // Each title entry's lines: its key's, and its block list's, with the
   // blank lines and comments between its items, as parseFrontmatter reads
-  // it (see blockListAfter), or else the indented lines after its value
+  // it (see blockListAfter)
   const entries: Array<{ start: number; end: number }> = [];
   for (let k = 0; k < lines.length; k++) {
     if (!/^title\s*:/.test(lines[k])) continue;
     const list = blockListAfter(lines, k);
-    let end = list ? list.last + 1 : k + 1;
-    // Blank lines too, before more indented ones, as in a value over lines
-    for (let next = end; !list && next < lines.length && /^(?:[ \t]+\S|[ \t]*$)/.test(lines[next]); next++) {
-      if (lines[next].trim()) end = next + 1;
+    if (list) {
+      if (list.items.some(item => item.more.length > 0 || !quotableTitleValue(item.text))) return content;
+    } else {
+      // Not a value YAML reads over more lines, which an indented line
+      // after it, past blank lines, goes on, as in a block scalar
+      const after = lines.slice(k + 1).find(line => line.trim() !== '');
+      if (after !== undefined && /^[ \t]/.test(after)) return content;
+      if (!quotableTitleValue(lines[k].replace(/^title\s*:/, '').trim())) return content;
     }
+    const end = list ? list.last + 1 : k + 1;
     entries.push({ start: k, end });
     k = end - 1;
   }
-  // A title YAML of its own reads, which export doesn't: a block scalar, an
-  // anchor, an alias or a tag, as `title: |` or `title: &t A`, whose value or
-  // item starts with one, and which other keys can refer to, stays as it is
-  const valueStarts = entries.flatMap(({ start, end }) => {
-    const list = blockListAfter(lines, start);
-    return list ? list.items.map(item => item.text) : [lines.slice(start, end).join('\n').replace(/^title\s*:/, '').trim()];
-  });
-  if (valueStarts.some(value => /^[|>&*!]/.test(value))) return content;
   // A brace anywhere in the title, which YAML can read as a mapping's, in a
   // value, a list's item or an inline array's
   const holdsBrace = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{')));

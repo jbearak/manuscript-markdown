@@ -3142,8 +3142,11 @@ describe('frontmatter for VS Code\'s preview table', () => {
     }
   });
 
-  it('takes a value over lines with blank lines in it', () => {
-    expect(frontmatterYamlForPreview('title: "A {x}\n\n  B"\nauthor: Me')).not.toContain('\n  B');
+  it('leaves a title YAML reads over more lines, or an inline array with an anchor, as it is', () => {
+    for (const yaml of ['title: "A {x}\n\n  B"\nauthor: Me', 'title: [\n  "A {++new++} title",\n  "Subtitle"\n]\nfont: X',
+      'title: ["A {x}", &t Other]\nauthor: *t', 'title:\n  - A {x}\n    more\nfont: X']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
   });
 
   it('quotes a title with a brace inside it, which reads the same quoted', () => {
