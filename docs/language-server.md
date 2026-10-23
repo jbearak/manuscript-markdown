@@ -97,6 +97,7 @@ The path after `bibliography:` (or `bib:` or `bibtex:`) is a link to the file: C
 | Warning | An item past the first in a block list under a key that takes one value (`author:` then `- A` and `- B`), of which export uses only one |
 | Warning | An item of a block list that's a mapping (`- name: Jane`), which export doesn't read |
 | Warning | An item of a block list that goes on past its line, or opens a quote it doesn't close there, of which export reads only the line |
+| Warning | A known key indented under another key (`author:` then `  title: Prof`), which YAML reads as part of that key's value, so export doesn't read it. Lines of a value that starts on its key's line, as `abstract: \|`, and keys under `styles:` and `crossref:` aren't flagged |
 | Warning | CSL style not found locally (the converter will download it automatically) |
 | Warning | Bibliography file not found |
 | Information | Unknown key closely resembling a known one ("Did you mean `font-size`?") |

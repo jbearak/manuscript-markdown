@@ -18,6 +18,8 @@ bibliography: shared/references
 ---
 ```
 
+Export reads only the keys at the start of a line. YAML reads a key indented under another as part of that key's value, so export ignores it, and warns when it's a key export would otherwise read, as the editor does. For example, Pandoc's `author:` with `  name: Jane` and `  title: Prof` under it sets no title. The keys under `styles:` and `crossref:` are read as described below.
+
 Multi-paragraph titles use multiple `title` entries:
 
 ```yaml
