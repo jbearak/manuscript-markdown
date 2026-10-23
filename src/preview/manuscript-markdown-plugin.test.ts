@@ -3144,9 +3144,20 @@ describe('frontmatter for VS Code\'s preview table', () => {
 
   it('leaves a title YAML reads over more lines, or an inline array with an anchor, as it is', () => {
     for (const yaml of ['title: "A {x}\n\n  B"\nauthor: Me', 'title: [\n  "A {++new++} title",\n  "Subtitle"\n]\nfont: X',
-      'title: ["A {x}", &t Other]\nauthor: *t', 'title:\n  - A {x}\n    more\nfont: X']) {
+      'title: ["A {x}", &t Other]\nauthor: *t', 'title:\n  - A {x}\n    more\nfont: X', 'title: {short: &t Study}\nauthor: *t',
+      'title: {short: "Study"\n}\nauthor: Me', 'title:\n  - {a: "b"\n}\nfont: X']) {
       expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
     }
+  });
+
+  it('leaves YAML with an alias, or an anchor an alias refers to, as it is', () => {
+    for (const yaml of ['title: {++A++}{--B--}\nauthor: *t', 'title: A\ntitle: B\nx: &t v\ny: *t', 'title: [A, {x}]\nauthor: [*t]']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('reads the title from its own entries, with a blank line first', () => {
+    expect(frontmatterYamlForPreview('\ntitle: A\ntitle: {++B++}')).toBe('\ntitle:\n  - "A"\n  - "{++B++}"');
   });
 
   it('quotes a title with a brace inside it, which reads the same quoted', () => {

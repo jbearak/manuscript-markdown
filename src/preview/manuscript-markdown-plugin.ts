@@ -2499,13 +2499,14 @@ function captionsRule(state: StateCore): void {
  * @param md - The MarkdownIt instance to extend
  */
 /** A title's value, or a block list's item, of one line that YAML reads
- *  as export does but for the quoting, which can go on it: none of YAML's
- *  own, a block scalar, an anchor, an alias or a tag (`|`, `>`, `&`, `*`,
- *  `!`), which other keys can refer to, nor an inline array that holds one,
- *  or that its line doesn't close */
+ *  as export does but for the quoting, which can go on it: not a block
+ *  scalar, an anchor, an alias or a tag (`|`, `>`, `&`, `*`, `!`), nor one
+ *  that opens more braces or brackets than it closes, which YAML reads on
+ *  into the lines after it, whatever their indent */
 function quotableTitleValue(value: string): boolean {
   if (/^[|>&*!]/.test(value)) return false;
-  return !value.startsWith('[') || /\][ \t]*(?:#.*)?$/.test(value) && !/[&*!]/.test(value);
+  const count = (pattern: RegExp) => value.match(pattern)?.length ?? 0;
+  return count(/\{/g) <= count(/\}/g) && count(/\[/g) <= count(/\]/g);
 }
 
 /**
@@ -2518,12 +2519,21 @@ function quotableTitleValue(value: string): boolean {
  * title has several lines, or a brace in any of them, it's one key, before
  * the other keys where it was first, holding each line quoted, in a list
  * where it has several. Only where each of its entries is as export writes
- * them, a value of one line, an inline array on it or a block list of such
- * items (see quotableTitleValue), so the YAML that parsed still does.
+ * them, a value of one line or a block list of such items (see
+ * quotableTitleValue), in YAML with no anchor an alias refers to, so the
+ * YAML that parsed still does.
  * Otherwise the YAML stays as it is, which the preview's code block of it
  * shows.
  */
 export function frontmatterYamlForPreview(content: string): string {
+  // Not YAML with an alias, as `author: *t`, a value or item that starts
+  // with one, or an anchor one refers to, as `x: &t v`, which quoting the
+  // title could take away, or move after the alias, or show an alias that
+  // a title YAML read on into took in, as after `title: {a}{b}`
+  if (/(?:^|[:,[{-])[ \t]*\*[^\s,[\]{}]/m.test(content)) return content;
+  for (const [, name] of content.matchAll(/&([^\s,[\]{}]+)/g)) {
+    if (content.includes('*' + name)) return content;
+  }
   const lines = content.split('\n');
   // Each title entry's lines: its key's, and its block list's, with the
   // blank lines and comments between its items, as parseFrontmatter reads
@@ -2549,7 +2559,12 @@ export function frontmatterYamlForPreview(content: string): string {
   // value, a list's item or an inline array's
   const holdsBrace = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{')));
   if (entries.length < 2 && !holdsBrace) return content;
-  const titles = parseFrontmatter('---\n' + content + '\n---\n').metadata.title ?? [];
+  // Read from its entries alone, as export reads them, as parseFrontmatter
+  // reads no frontmatter at all from some that YAML reads, as with a blank
+  // line first
+  const titleYaml = entries.map(({ start, end }) => lines.slice(start, end).join('\n')).join('\n');
+  const titles = parseFrontmatter('---\n' + titleYaml + '\n---\n').metadata.title ?? [];
+  if (titles.length === 0) return content;
   const title = titles.length === 1 ? ['title: ' + JSON.stringify(titles[0])]
     : ['title:', ...titles.map(line => '  - ' + JSON.stringify(line))];
   const out: string[] = [];
