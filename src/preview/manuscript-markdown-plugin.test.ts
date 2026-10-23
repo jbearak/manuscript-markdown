@@ -3135,6 +3135,17 @@ describe('frontmatter for VS Code\'s preview table', () => {
       .toBe('title:\n  - "One"\n  - "{++Two++}"');
   });
 
+  it('leaves a title YAML reads of its own, a block scalar, an anchor, an alias or a tag, as it is', () => {
+    for (const yaml of ['title: |\n  A {x}\n\n  B\nauthor: Me', 'title: &t "A {x}"\nauthor: *t', 'title:\n  - &t A {x}\nauthor: *t',
+      'title: !!str {x}', 'title: >\n  A {x}\ntitle: B']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('takes a value over lines with blank lines in it', () => {
+    expect(frontmatterYamlForPreview('title: "A {x}\n\n  B"\nauthor: Me')).not.toContain('\n  B');
+  });
+
   it('quotes a title with a brace inside it, which reads the same quoted', () => {
     expect(frontmatterYamlForPreview('title: Plain {--old--} title\nfont: X')).toBe('title: "Plain {--old--} title"\nfont: X');
   });

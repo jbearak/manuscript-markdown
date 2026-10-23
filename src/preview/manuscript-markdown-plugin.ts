@@ -2520,10 +2520,21 @@ export function frontmatterYamlForPreview(content: string): string {
     if (!/^title\s*:/.test(lines[k])) continue;
     const list = blockListAfter(lines, k);
     let end = list ? list.last + 1 : k + 1;
-    while (!list && end < lines.length && /^[ \t]+\S/.test(lines[end])) end++;
+    // Blank lines too, before more indented ones, as in a value over lines
+    for (let next = end; !list && next < lines.length && /^(?:[ \t]+\S|[ \t]*$)/.test(lines[next]); next++) {
+      if (lines[next].trim()) end = next + 1;
+    }
     entries.push({ start: k, end });
     k = end - 1;
   }
+  // A title YAML of its own reads, which export doesn't: a block scalar, an
+  // anchor, an alias or a tag, as `title: |` or `title: &t A`, whose value or
+  // item starts with one, and which other keys can refer to, stays as it is
+  const valueStarts = entries.flatMap(({ start, end }) => {
+    const list = blockListAfter(lines, start);
+    return list ? list.items.map(item => item.text) : [lines.slice(start, end).join('\n').replace(/^title\s*:/, '').trim()];
+  });
+  if (valueStarts.some(value => /^[|>&*!]/.test(value))) return content;
   // A brace anywhere in the title, which YAML can read as a mapping's, in a
   // value, a list's item or an inline array's
   const holdsBrace = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{')));
