@@ -203,6 +203,24 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
     expect(await recordValues('---\nauthor: Jane\n---\n\nBody.\n')).toEqual([]);
   });
 
+  it('keep a title whose value is the lines under it, which export reads as empty', async () => {
+    expect(await roundTrip('---\ntitle:\n  text: My title\ndate: 1\n---\n\nBody.\n')).toBe('---\ntitle:\n  text: My title\ndate: 1\n---\n\nBody.\n');
+  });
+
+  it('keep the setting another entry gives a key held as written, through an alias or the key repeated', async () => {
+    for (const markdown of ['---\nbib:\n  path: other\nbibliography: refs\n---\n\nBody.\n', '---\nbibliography: refs\nbib:\n  path: other\n---\n\nBody.\n',
+      '---\nauthor:\n  name: Jane\nauthor: Bob\n---\n\nBody.\n']) {
+      expect(await roundTrip(markdown)).toBe(markdown);
+    }
+  });
+
+  it('read a record whose held key isn\'t one export reads as text alone', async () => {
+    for (const key of ['constructor', '__proto__', 'toString', 'date']) {
+      const tamper = editPart('docProps/custom.xml', xml => xml.replace('{"text":"date: 1"}', '{"text":"date: 1","key":"' + key + '"}'));
+      expect(await roundTrip('---\ntitle: T\ndate: 1\n---\n\nBody.\n', tamper)).toBe('---\ntitle: T\ndate: 1\n---\n\nBody.\n');
+    }
+  });
+
   it('keep as written a key with a key export reads indented under it, which export doesn\'t read', async () => {
     for (const markdown of ['---\nkeywords:\n  - name: x\n    font: Arial\n---\n\nBody.\n', '---\nmeta:\n  title:\n    - A\n---\n\nBody.\n']) {
       expect(await roundTrip(markdown)).toBe(markdown);

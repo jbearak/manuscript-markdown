@@ -79,6 +79,26 @@ export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
 /** The keys parseFrontmatter reads, each of which import writes from what the Word document has */
 const READ_KEYS: ReadonlySet<string> = new Set([...SINGLE_VALUE_KEYS, ...ARRAY_KEYS, 'title', 'styles', 'crossref']);
 
+/** The keys parseFrontmatter reads as another, by their names, as `bib` for `bibliography` */
+const KEY_ALIASES: Readonly<Record<string, string>> = {
+  'note-type': 'zotero-notes',
+  'bib': 'bibliography',
+  'bibtex': 'bibliography',
+  'code-background': 'code-background-color',
+  'code-color': 'code-font-color',
+};
+
+/** The name of the key parseFrontmatter reads a key as, past its aliases */
+function canonicalKey(key: string): string {
+  return Object.hasOwn(KEY_ALIASES, key) ? KEY_ALIASES[key] : key;
+}
+
+/** Whether settings read from an entry give one, which an empty title, as of `title:` alone, doesn't */
+function givesSetting(metadata: Frontmatter): boolean {
+  const keys = Object.keys(metadata);
+  return keys.length > 1 || keys.length === 1 && !(metadata.title?.length === 1 && metadata.title[0] === '');
+}
+
 /** Quarto's mappings, of whose keys export reads some: `crossref`'s
  *  fig-title, tbl-title and title-delim. One with none of those, as
  *  `crossref: {fig-prefix: Fig.}`, gives no setting import could write
@@ -1155,6 +1175,12 @@ export function frontmatterLayout(markdown: string): FrontmatterLayout | undefin
   const layout: FrontmatterLayout = [];
   const named = new Set<string>();
   let unused = false;
+  // The keys that entries give settings for, past their aliases
+  const setKeys = new Set<string>();
+  for (const entry of entries) {
+    const { metadata, fieldOrder } = readFrontmatterLines(lines.slice(entry.start, entry.end), []);
+    if (givesSetting(metadata)) for (const key of fieldOrder) setKeys.add(canonicalKey(key));
+  }
   for (const entry of entries) {
     const entryLines = lines.slice(entry.start, entry.end);
     // As parseFrontmatter reads its lines among the others', as no block
@@ -1162,10 +1188,15 @@ export function frontmatterLayout(markdown: string): FrontmatterLayout | undefin
     const { metadata, fieldOrder } = readFrontmatterLines(entryLines, []);
     const last = layout[layout.length - 1];
     // A key export reads, but not from the lines under it, its value
-    const nestedValue = Object.keys(metadata).length === 0 && READ_KEYS.has(entry.key) && !PARTLY_READ_KEYS.has(entry.key)
+    const nestedValue = !givesSetting(metadata) && READ_KEYS.has(entry.key) && !PARTLY_READ_KEYS.has(entry.key)
       && entry.key !== 'styles' && entryLines.some(line => /^[ \t]+[^ \t\r#]/.test(line));
     if (nestedValue) {
-      layout.push({ text: entryLines.join('\n'), key: entry.key });
+      // In place of the key's value from Word, but where another entry
+      // gives it one, as `bibliography: refs` after `bib:` and a mapping,
+      // which goes as before, as import writes it
+      const held: { text: string; key?: string } = { text: entryLines.join('\n') };
+      if (!setKeys.has(canonicalKey(entry.key))) held.key = entry.key;
+      layout.push(held);
       unused = true;
       continue;
     }
@@ -1294,14 +1325,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'crossref', 'fig-cap-location', 'tbl-cap-location',
   ];
 
-  const aliasToCanonical: Record<string, string> = {
-    'note-type': 'zotero-notes',
-    'bib': 'bibliography',
-    'bibtex': 'bibliography',
-    'code-background': 'code-background-color',
-    'code-color': 'code-font-color',
-  };
-
+  const aliasToCanonical = KEY_ALIASES;
   const canonicalToAliases: Record<string, string[]> = {};
   for (const [alias, canonical] of Object.entries(aliasToCanonical)) {
     if (!canonicalToAliases[canonical]) canonicalToAliases[canonical] = [];
@@ -1320,13 +1344,13 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
   // A key, with its aliases, as written, which goes no more
   function markEmitted(key: string): void {
     emitted.add(key);
-    const canonical = aliasToCanonical[key];
+    const canonical = Object.hasOwn(aliasToCanonical, key) ? aliasToCanonical[key] : undefined;
     if (canonical) {
       emitted.add(canonical);
       const siblingAliases = canonicalToAliases[canonical];
       if (siblingAliases) for (const a of siblingAliases) emitted.add(a);
     }
-    const aliases = canonicalToAliases[key];
+    const aliases = Object.hasOwn(canonicalToAliases, key) ? canonicalToAliases[key] : undefined;
     if (aliases) for (const a of aliases) emitted.add(a);
   }
   // The keys export read nothing from, as written, each after the keys
@@ -1339,7 +1363,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
       continue;
     }
     // A key held as written, which import writes in place of its value
-    if (typeof item.key === 'string') markEmitted(item.key);
+    if (typeof item.key === 'string' && READ_KEYS.has(item.key)) markEmitted(item.key);
     const held = item.text.split('\n');
     let start = 0;
     if (lines.length === 0) while (start < held.length && isBlankLine(held[start])) start++;
