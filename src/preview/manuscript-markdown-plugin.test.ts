@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
 import MarkdownIt from 'markdown-it';
-import { manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
+import { frontmatterYamlForPreview, manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
 import type { EmbedResolver } from '../embed-preprocess';
 import { VALID_COLOR_IDS, setDefaultHighlightColor, getDefaultHighlightColor } from '../highlight-colors';
 import {
@@ -3113,5 +3113,91 @@ describe('a number and a no-break space at the start of an inline equation', () 
   // As on main
   it('leaves $2 and the space as text', () => {
     expect(render('A $2\u00a0x$ B.')).not.toContain('<katex>');
+  });
+});
+
+describe('frontmatter for VS Code\'s preview table', () => {
+  it('writes a title of several lines as one key holding a list', () => {
+    expect(frontmatterYamlForPreview('title: A {--b--}\ntitle: {++C++}\nfont: X'))
+      .toBe('title:\n  - "A {--b--}"\n  - "{++C++}"\nfont: X');
+  });
+
+  it('quotes a title line that starts with a brace, which YAML reads as a mapping', () => {
+    expect(frontmatterYamlForPreview('csl: apa\ntitle: {++New++} title')).toBe('csl: apa\ntitle: "{++New++} title"');
+    expect(frontmatterYamlForPreview('title:\n  - One\n  - {++Two++}\n\nfont: X'))
+      .toBe('title:\n  - "One"\n  - "{++Two++}"\n\nfont: X');
+  });
+
+  it('takes a block list\'s items after a comment between them, as export reads them', () => {
+    expect(frontmatterYamlForPreview('title:\n  - One\n# c\n  - {++Two++}\ntitle: Three\nfont: X'))
+      .toBe('title:\n  - "One"\n  - "{++Two++}"\n  - "Three"\nfont: X');
+    expect(frontmatterYamlForPreview('title:\n  - One\n# c\n  - {++Two++}'))
+      .toBe('title:\n  - "One"\n  - "{++Two++}"');
+  });
+
+  it('leaves a title YAML reads of its own, a block scalar, an anchor, an alias or a tag, as it is', () => {
+    for (const yaml of ['title: |\n  A {x}\n\n  B\nauthor: Me', 'title: &t "A {x}"\nauthor: *t', 'title:\n  - &t A {x}\nauthor: *t',
+      'title: !!str {x}', 'title: >\n  A {x}\ntitle: B']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('leaves a title YAML reads over more lines, or an inline array with an anchor, as it is', () => {
+    for (const yaml of ['title: "A {x}\n\n  B"\nauthor: Me', 'title: [\n  "A {++new++} title",\n  "Subtitle"\n]\nfont: X',
+      'title: ["A {x}", &t Other]\nauthor: *t', 'title:\n  - A {x}\n    more\nfont: X', 'title: {short: &t Study}\nauthor: *t',
+      'title: {short: "Study"\n}\nauthor: Me', 'title:\n  - {a: "b"\n}\nfont: X', 'title: ["{++Estimates++} on (0, 1]"\n]\nauthor: Me',
+      'title: ["a]",\nb: c]\nfont: X', 'author:\n  name: Jane Smith\n  title: Research fellow\ntitle: A\ntitle: {++New++} study']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('leaves YAML with an alias, or an anchor an alias refers to, as it is', () => {
+    for (const yaml of ['title: {++A++}{--B--}\nauthor: *t', 'title: A\ntitle: B\nx: &t v\ny: *t', 'title: [A, {x}]\nauthor: [*t]']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('leaves frontmatter export reads no title from, as with a blank line first, as it is', () => {
+    for (const yaml of ['\ntitle: A\ntitle: {++B++}', '\ntitle: Plain {--old--} title\nauthor: Jane Smith']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('quotes a title with a brace inside it, which reads the same quoted', () => {
+    expect(frontmatterYamlForPreview('title: Plain {--old--} title\nfont: X')).toBe('title: "Plain {--old--} title"\nfont: X');
+  });
+
+  it('quotes an inline array\'s titles that hold a brace', () => {
+    expect(frontmatterYamlForPreview('title: [{++New++} title, Other]')).toBe('title:\n  - "{++New++} title"\n  - "Other"');
+  });
+
+  it('keeps the title where it was first, and the other keys as they are', () => {
+    expect(frontmatterYamlForPreview('title: "A: b"\nfont: X\ntitle: C\ncsl: apa'))
+      .toBe('title:\n  - "A: b"\n  - "C"\nfont: X\ncsl: apa');
+  });
+
+  it('leaves frontmatter YAML reads as export does as it is', () => {
+    for (const yaml of ['title: Plain title\nfont: X', 'title:\n  - One\n  - Two', 'title: [A, B]', 'title-font-style: bold', 'font: X']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('rewrites the front_matter token VS Code\'s rule makes after the plugin', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    // As VS Code's markdown-language-features adds its rule after extension plugins
+    md.block.ruler.before('fence', 'front_matter', (state, start, _end, silent) => {
+      if (start !== 0 || state.src.slice(state.bMarks[0], state.eMarks[0]) !== '---') return false;
+      const close = state.src.indexOf('\n---', state.eMarks[0]);
+      if (close < 0) return false;
+      if (silent) return true;
+      const token = state.push('front_matter', '', 0);
+      token.block = true;
+      token.meta = { content: state.src.slice(state.eMarks[0] + 1, close) };
+      state.line = state.src.slice(0, close + 4).split('\n').length;
+      return true;
+    });
+    md.renderer.rules.front_matter = (tokens, idx) => '<pre>' + tokens[idx].meta.content + '</pre>';
+    expect(md.render('---\ntitle: A\ntitle: B\n---\n\nBody.')).toContain('<pre>title:\n  - "A"\n  - "B"</pre>');
   });
 });

@@ -29,7 +29,7 @@ import { pushAll, spliceAll } from '../arrays';
 import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionLabelId, isCaptionText, tableCaptionSource, type CaptionOptions, type FigureAttributes } from '../captions';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
-import { parseFrontmatter, type ColorScheme } from '../frontmatter';
+import { blockListAfter, parseFrontmatter, type ColorScheme } from '../frontmatter';
 import { styleFence } from '../style-fence';
 import { htmlBlockKind } from '../html-blocks';
 import { extractHtmlTables } from '../html-table-parser';
@@ -2498,6 +2498,89 @@ function captionsRule(state: StateCore): void {
  * Main plugin function that registers Manuscript Markdown parsing with markdown-it
  * @param md - The MarkdownIt instance to extend
  */
+/** A title's value, or a block list's item, of one line that YAML reads
+ *  as export does but for the quoting, which can go on it: not a block
+ *  scalar, an anchor, an alias or a tag (`|`, `>`, `&`, `*`, `!`), nor one
+ *  that opens more braces or brackets than it closes, which YAML reads on
+ *  into the lines after it, whatever their indent */
+function quotableTitleValue(value: string): boolean {
+  if (/^[|>&*!]/.test(value)) return false;
+  // Not those in quotes, as in `["on (0, 1]"`, which close nothing
+  const unquoted = value.replace(/"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'/g, '');
+  const count = (pattern: RegExp) => unquoted.match(pattern)?.length ?? 0;
+  return count(/\{/g) <= count(/\}/g) && count(/\[/g) <= count(/\]/g);
+}
+
+/**
+ * The frontmatter's YAML, `content`, with its title as YAML reads it as
+ * export does, for VS Code's preview, which parses the frontmatter as YAML
+ * for its table and shows "Failed to parse frontmatter" where it can't. YAML
+ * holds a key once, so a title of several lines, `title:` repeated, failed,
+ * and it reads a value that starts with a brace, as `{++New++} title`, as a
+ * mapping, in a value, a list's item or an inline array's. So where the
+ * title has several lines, or a brace in any of them, it's one key, before
+ * the other keys where it was first, holding each line quoted, in a list
+ * where it has several. Only where each of its entries is as export writes
+ * them, a value of one line or a block list of such items (see
+ * quotableTitleValue), in YAML with no anchor an alias refers to, so the
+ * YAML that parsed still does.
+ * Otherwise the YAML stays as it is, which the preview's code block of it
+ * shows.
+ */
+export function frontmatterYamlForPreview(content: string): string {
+  // Not YAML with an alias, as `author: *t`, a value or item that starts
+  // with one, or an anchor one refers to, as `x: &t v`, which quoting the
+  // title could take away, or move after the alias, or show an alias that
+  // a title YAML read on into took in, as after `title: {a}{b}`
+  if (/(?:^|[:,[{-])[ \t]*\*[^\s,[\]{}]/m.test(content)) return content;
+  for (const [, name] of content.matchAll(/&([^\s,[\]{}]+)/g)) {
+    if (content.includes('*' + name)) return content;
+  }
+  const lines = content.split('\n');
+  // Each title entry's lines: its key's, and its block list's, with the
+  // blank lines and comments between its items, as parseFrontmatter reads
+  // it (see blockListAfter)
+  const entries: Array<{ start: number; end: number }> = [];
+  for (let k = 0; k < lines.length; k++) {
+    if (!/^title\s*:/.test(lines[k])) continue;
+    const list = blockListAfter(lines, k);
+    if (list) {
+      if (list.items.some(item => item.more.length > 0 || !quotableTitleValue(item.text))) return content;
+    } else if (!quotableTitleValue(lines[k].replace(/^title\s*:/, '').trim())) return content;
+    const end = list ? list.last + 1 : k + 1;
+    // Not a value YAML reads over more lines: the line after it, past blank
+    // lines and comments, is another key's, or there's none, not one
+    // indented, as a block scalar's, nor a collection's closer, as `]`
+    const after = lines.slice(end).find(line => line.trim() !== '' && !line.startsWith('#'));
+    if (after !== undefined && !/^[^\s#\-[\]{}?:,][^:]*:(?:[ \t]|$)/.test(after)) return content;
+    entries.push({ start: k, end });
+    k = end - 1;
+  }
+  // A brace anywhere in the title, which YAML can read as a mapping's, in a
+  // value, a list's item or an inline array's
+  const holdsBrace = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{')));
+  if (entries.length < 2 && !holdsBrace) return content;
+  // The title lines its entries give, which must be those export reads from
+  // the whole frontmatter: not where it reads others, as from a `title:`
+  // indented under another key, nor none, as from frontmatter with a blank
+  // line first, which it doesn't read
+  const titleYaml = entries.map(({ start, end }) => lines.slice(start, end).join('\n')).join('\n');
+  const titles = parseFrontmatter('---\n' + titleYaml + '\n---\n').metadata.title ?? [];
+  const exported = parseFrontmatter('---\n' + content + '\n---\n').metadata.title ?? [];
+  if (titles.length === 0 || JSON.stringify(exported) !== JSON.stringify(titles)) return content;
+  const title = titles.length === 1 ? ['title: ' + JSON.stringify(titles[0])]
+    : ['title:', ...titles.map(line => '  - ' + JSON.stringify(line))];
+  const out: string[] = [];
+  let next = 0;
+  for (const [n, { start, end }] of entries.entries()) {
+    pushAll(out, lines.slice(next, start));
+    if (n === 0) pushAll(out, title);
+    next = end;
+  }
+  pushAll(out, lines.slice(next));
+  return out.join('\n');
+}
+
 export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.use(imagePathsWithSpaces);
   md.use(codeSpansOfSpaces);
@@ -2553,6 +2636,17 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
     const r3 = preprocessCriticMarkupWithMap(r2.output);
     state.src = r3.output;
     env.lineMap = LineMap.chain(LineMap.chain(LineMap.chain(LineMap.chain(r0.map, r1.map), rNumber.map), r2.map), r3.map);
+  });
+
+  // The frontmatter VS Code's preview reads, as YAML it can parse (see
+  // frontmatterYamlForPreview). VS Code adds its rule for frontmatter, and
+  // its renderer, after this plugin, so this rewrites the token its rule
+  // made, which its renderer reads
+  md.core.ruler.push('manuscript_front_matter_yaml', (state: StateCore) => {
+    const token = state.tokens[0];
+    if (token?.type === 'front_matter' && typeof token.meta?.content === 'string') {
+      token.meta.content = frontmatterYamlForPreview(token.meta.content);
+    }
   });
 
   // Inject <style> block for header-font-style and custom styles preview
