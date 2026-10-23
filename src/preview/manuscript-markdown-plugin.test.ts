@@ -3146,7 +3146,7 @@ describe('frontmatter for VS Code\'s preview table', () => {
     for (const yaml of ['title: "A {x}\n\n  B"\nauthor: Me', 'title: [\n  "A {++new++} title",\n  "Subtitle"\n]\nfont: X',
       'title: ["A {x}", &t Other]\nauthor: *t', 'title:\n  - A {x}\n    more\nfont: X', 'title: {short: &t Study}\nauthor: *t',
       'title: {short: "Study"\n}\nauthor: Me', 'title:\n  - {a: "b"\n}\nfont: X', 'title: ["{++Estimates++} on (0, 1]"\n]\nauthor: Me',
-      'title: ["a]",\nb: c]\nfont: X']) {
+      'title: ["a]",\nb: c]\nfont: X', 'author:\n  name: Jane Smith\n  title: Research fellow\ntitle: A\ntitle: {++New++} study']) {
       expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
     }
   });

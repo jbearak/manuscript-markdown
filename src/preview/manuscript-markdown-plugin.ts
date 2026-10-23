@@ -2566,6 +2566,10 @@ export function frontmatterYamlForPreview(content: string): string {
   const titleYaml = entries.map(({ start, end }) => lines.slice(start, end).join('\n')).join('\n');
   const titles = parseFrontmatter('---\n' + titleYaml + '\n---\n').metadata.title ?? [];
   if (titles.length === 0) return content;
+  // Nor where export reads other title lines from the whole frontmatter, as
+  // from a `title:` indented under another key, whose lines this can't show
+  const exported = parseFrontmatter('---\n' + content + '\n---\n').metadata.title;
+  if (exported && JSON.stringify(exported) !== JSON.stringify(titles)) return content;
   const title = titles.length === 1 ? ['title: ' + JSON.stringify(titles[0])]
     : ['title:', ...titles.map(line => '  - ' + JSON.stringify(line))];
   const out: string[] = [];
