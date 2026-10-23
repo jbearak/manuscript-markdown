@@ -186,14 +186,15 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
     for (const markdown of [
       '---\ntitle: T\n# A comment\nauthor: A\ncsl: apa\nnotes: sidenotes\n---\n\nBody.\n',
       '---\nauthor:\n  - name: Jane\n    affiliation: Uni\n---\n\nBody.\n',
-      '---\nkeywords:\n  - name: x\n    font: Arial\n---\n\nBody.\n',
-      '---\nmeta:\n  title:\n    - A\n---\n\nBody.\n',
     ]) {
       expect(await recordValues(markdown)).toEqual([]);
     }
-    // Which export reads as before, with a setting of a known key's name
-    // under it, and import writes that setting
-    expect(await roundTrip('---\nkeywords:\n  - name: x\n    font: Arial\n---\n\nBody.\n')).toBe('---\nfont: Arial\n---\n\nBody.\n');
+  });
+
+  it('keep as written a key with a key export reads indented under it, which export doesn\'t read', async () => {
+    for (const markdown of ['---\nkeywords:\n  - name: x\n    font: Arial\n---\n\nBody.\n', '---\nmeta:\n  title:\n    - A\n---\n\nBody.\n']) {
+      expect(await roundTrip(markdown)).toBe(markdown);
+    }
   });
 });
 
@@ -226,8 +227,9 @@ describe('frontmatterLayout', () => {
     expect(frontmatterLayout('---\nbib: a.bib\ntitle: A\ndate: 1\ntitle: B\n---\n')).toEqual(['bib', 'title', { text: 'date: 1' }]);
   });
 
-  it('names the keys it reads in a mapping under a key, which it doesn\'t hold', () => {
-    expect(frontmatterLayout('---\ndate: 1\nmeta:\n  font: Arial\n  title: T\nlang: en\n---\n')).toEqual([{ text: 'date: 1' }, 'font', 'title', { text: 'lang: en' }]);
+  it('holds a key with keys it reads indented under it, which it doesn\'t read', () => {
+    expect(frontmatterLayout('---\ndate: 1\nmeta:\n  font: Arial\n  title: T\nlang: en\n---\n')).toEqual([{ text: 'date: 1\nmeta:\n  font: Arial\n  title: T\nlang: en' }]);
+    expect(frontmatterLayout('---\ndate: 1\nmeta:\n  font: Arial\ntitle: T\n---\n')).toEqual([{ text: 'date: 1\nmeta:\n  font: Arial' }, 'title']);
   });
 
   it('is undefined for frontmatter of keys it reads alone, or none', () => {
