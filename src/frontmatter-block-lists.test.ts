@@ -274,6 +274,8 @@ describe('Keys indented under another key', () => {
   it('reads no value of a key with none on its line and lines indented under it, its value', () => {
     expect(read('title:\n  text: My title\ntitle: T').metadata).toEqual({ title: ['T'] });
     expect(read('csl:\n\n  # a style\n  path: x.csl').metadata).toEqual({});
+    // Past a comment on its line
+    expect(read('author: # note\n  name: Jane').metadata).toEqual({});
     // A key with none, before another key, as before
     expect(read('title:\n# c\nauthor: A').metadata).toEqual({ title: [''], author: 'A' });
   });

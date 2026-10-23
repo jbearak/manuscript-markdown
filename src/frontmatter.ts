@@ -792,10 +792,10 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
       continue;
     }
 
-    // A key with no value on its line, whose value is the lines indented
-    // under it, as `title:` then `  text: My title`, a mapping, gives no
-    // setting, as no line of it does (see nestedKeys)
-    if (value === '') {
+    // A key with no value on its line, past a comment, whose value is the
+    // lines indented under it, as `title:` then `  text: My title`, a
+    // mapping, gives no setting, as no line of it does (see nestedKeys)
+    if (/^(?:[ \t]*|[ \t]+#.*)\r?$/.test(line.slice(colonIdx + 1))) {
       let next = lineIdx + 1;
       while (next < yamlLines.length && /^[ \t]*(?:#.*)?\r?$/.test(yamlLines[next])) next++;
       if (next < yamlLines.length && (yamlLines[next][0] === ' ' || yamlLines[next][0] === '\t')) continue;

@@ -205,7 +205,8 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
 
   it('keep a key whose value is the lines under it, which export reads no setting from, through each trip', async () => {
     for (const markdown of ['---\ntitle:\n  text: My title\ndate: 1\n---\n\nBody.\n', '---\ntitle:\n  text: My title\ntitle: T\n---\n\nBody.\n',
-      '---\ntitle:\n  -\n  -\n  - name: Jane\n---\n\nBody.\n', '---\ncsl:\n  path: custom.csl\n---\n\nBody.\n', '---\nlocale:\n\n  # French\n  language: fr\n---\n\nBody.\n']) {
+      '---\ntitle:\n  -\n  -\n  - name: Jane\n---\n\nBody.\n', '---\ncsl:\n  path: custom.csl\n---\n\nBody.\n', '---\nlocale:\n\n  # French\n  language: fr\n---\n\nBody.\n',
+      '---\nauthor: # note\n  name: Jane\n---\n\nBody.\n']) {
       const once = await roundTrip(markdown);
       expect(once).toBe(markdown);
       expect(await roundTrip(once)).toBe(markdown);
