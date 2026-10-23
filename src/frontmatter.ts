@@ -329,14 +329,25 @@ export function nestedKeys(lines: readonly string[]): { line: number; key: strin
       continue;
     }
     if (!mapping || parent === 'styles' || parent === 'crossref') continue;
+    // A value in quotes or a flow collection that goes on past its line,
+    // whose lines can be at its key's indentation: the lines up to the
+    // next key at a line's start are read as no key's, which only warns less
+    if (yamlLineEnd(line) === 'open') {
+      mapping = false;
+      continue;
+    }
     // The text past a list item's `-`, as `name: Jane` in `- name: Jane`,
-    // and its column
+    // and its column, and that of the innermost item's `-`
     let at = indent;
-    while (isListItem(line.slice(at))) at += 1 + indentOf(line.slice(at + 1));
+    let dash = indent;
+    while (isListItem(line.slice(at))) {
+      dash = at;
+      at += 1 + indentOf(line.slice(at + 1));
+    }
     const colon = line.indexOf(':', at);
     if (colon < 0) {
       // An item's text, or a plain value's next line
-      if (at < line.length) value = indent;
+      if (at < line.length) value = dash;
       continue;
     }
     if (!/^(?:[ \t]*|[ \t]+#.*)$/.test(line.slice(colon + 1))) value = at;

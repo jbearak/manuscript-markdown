@@ -293,16 +293,18 @@ describe('Keys indented under another key', () => {
 
   it('warns of no line of a value that starts on its key\'s line, at any indentation', () => {
     for (const yaml of ['meta:\n  abstract: |\n    title: This is prose', 'meta:\n  note: >-\n\n    # a\n    font: Arial',
-      'authors:\n  - name: Jane\n    bio: |\n      title: Prof', 'meta:\n  - One\n    title: more of it', 'meta:\n- bio: "a\n    title: b"']) {
+      'authors:\n  - name: Jane\n    bio: |\n      title: Prof', 'meta:\n  - One\n    title: more of it', 'meta:\n- bio: "a\n    title: b"',
+      'meta:\n  note: "One\n  title: Prof"', 'meta:\n  names: [\n  title: Prof\n  ]', 'meta:\n  - {a: 1,\n  title: x}']) {
       const { metadata, warnings } = read(yaml);
       expect(metadata).toEqual({});
       expect(warnings).toBeUndefined();
     }
     // A key after the value, at the key's indentation or a list item's text's
-    const after = read('meta:\n  abstract: |\n    prose\n  title: T\nauthors:\n- name: Jane\n  font: Arial');
+    const after = read('meta:\n  abstract: |\n    prose\n  title: T\nauthors:\n- name: Jane\n  font: Arial\nlists:\n  - - x\n    - name: Jane\n      title: Prof');
     expect(after.warnings?.map(w => w.slice(0, w.indexOf(',')))).toEqual([
       'Frontmatter `title` is indented under `meta`',
       'Frontmatter `font` is indented under `authors`',
+      'Frontmatter `title` is indented under `lists`',
     ]);
   });
 
