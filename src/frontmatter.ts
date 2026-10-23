@@ -344,7 +344,10 @@ export function nestedKeys(lines: readonly string[]): { line: number; key: strin
       dash = at;
       at += 1 + indentOf(line.slice(at + 1));
     }
-    const colon = line.indexOf(':', at);
+    // A key's colon, before a space, a tab or the line's end, as YAML reads
+    // one: `title:subtitle` is text
+    const found = line.slice(at).search(/:(?=[ \t]|$)/);
+    const colon = found < 0 ? -1 : at + found;
     if (colon < 0) {
       // An item's text, or a plain value's next line
       if (at < line.length) value = dash;

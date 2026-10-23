@@ -294,7 +294,7 @@ describe('Keys indented under another key', () => {
   it('warns of no line of a value that starts on its key\'s line, at any indentation', () => {
     for (const yaml of ['meta:\n  abstract: |\n    title: This is prose', 'meta:\n  note: >-\n\n    # a\n    font: Arial',
       'authors:\n  - name: Jane\n    bio: |\n      title: Prof', 'meta:\n  - One\n    title: more of it', 'meta:\n- bio: "a\n    title: b"',
-      'meta:\n  note: "One\n  title: Prof"', 'meta:\n  names: [\n  title: Prof\n  ]', 'meta:\n  - {a: 1,\n  title: x}']) {
+      'abstract:\n  title:subtitle', 'meta:\n  note: "One\n  title: Prof"', 'meta:\n  names: [\n  title: Prof\n  ]', 'meta:\n  - {a: 1,\n  title: x}']) {
       const { metadata, warnings } = read(yaml);
       expect(metadata).toEqual({});
       expect(warnings).toBeUndefined();

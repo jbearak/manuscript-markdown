@@ -1362,6 +1362,7 @@ describe('validateFrontmatter: keys indented under another key', () => {
 
 	test('warns of no line of a value under a key indented', async () => {
 		expect(await validateFrontmatter('---\nmeta:\n  abstract: |\n    title: This is prose\n---\n', stubCallbacks)).toEqual([]);
+		expect(await validateFrontmatter('---\nabstract:\n  title:subtitle\n---\n', stubCallbacks)).toEqual([]);
 	});
 
 	test('offers a key indented under another, which export doesn\'t read, at a line\'s start', () => {
