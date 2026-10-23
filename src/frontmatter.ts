@@ -981,7 +981,16 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
  * written each key it reads nothing from, as `date`, `abstract` or
  * Quarto's `format`, which import puts back where it was among them.
  */
-export type FrontmatterLayout = Array<string | { text: string }>;
+export type FrontmatterLayout = Array<string | {
+  text: string;
+  /**
+   * The key export reads that the text is, where the key gives no
+   * setting, as the lines under it are its value, as `author:` then
+   * `  name: Jane`, which import writes in place of the key's value from
+   * the document, which can't hold them.
+   */
+  key?: string;
+}>;
 
 /**
  * The key of a line YAML reads as a key of a block mapping at the line's
@@ -1128,9 +1137,9 @@ function topLevelEntries(lines: readonly string[]): { key: string; yamlKey: stri
  * The layout of the Markdown's frontmatter (see FrontmatterLayout), where
  * it has a key export reads nothing from: one whose name parseFrontmatter
  * doesn't read, as YAML reads it or as parseFrontmatter does, none of whose
- * lines gives a setting. A line of a key it reads, in a mapping or a
- * literal value under the key, gives one, which export writes to Word, and
- * the key goes as before, as import writes the setting. Each key held is
+ * lines gives a setting, or a key it reads whose value is the lines under
+ * it, as `author:` then `  name: Jane`, which give none (see nestedKeys),
+ * and which the key as import writes it from Word would lose. Each key held is
  * its lines as written, quotes, comments, spaces at line ends and all, with
  * the comments and blank lines before it, and those at the frontmatter's
  * end after the last, which a literal value that keeps its line ends, as
@@ -1152,9 +1161,17 @@ export function frontmatterLayout(markdown: string): FrontmatterLayout | undefin
     // list or mapping it reads goes past an entry's
     const { metadata, fieldOrder } = readFrontmatterLines(entryLines, []);
     const last = layout[layout.length - 1];
+    // A key export reads, but not from the lines under it, its value
+    const nestedValue = Object.keys(metadata).length === 0 && READ_KEYS.has(entry.key) && !PARTLY_READ_KEYS.has(entry.key)
+      && entry.key !== 'styles' && entryLines.some(line => /^[ \t]+[^ \t\r#]/.test(line));
+    if (nestedValue) {
+      layout.push({ text: entryLines.join('\n'), key: entry.key });
+      unused = true;
+      continue;
+    }
     if ((PARTLY_READ_KEYS.has(entry.key) || !READ_KEYS.has(entry.key) && !READ_KEYS.has(entry.yamlKey)) && Object.keys(metadata).length === 0) {
       // With those right before it, as nothing goes between them
-      if (typeof last === 'object') last.text += '\n' + entryLines.join('\n');
+      if (typeof last === 'object' && last.key === undefined) last.text += '\n' + entryLines.join('\n');
       else layout.push({ text: entryLines.join('\n') });
       unused = true;
       continue;
@@ -1296,6 +1313,12 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
 
   const emit = (key: string) => {
     if (emitted.has(key)) return;
+    markEmitted(key);
+    const emitter = emitters[key];
+    if (emitter) emitter();
+  };
+  // A key, with its aliases, as written, which goes no more
+  function markEmitted(key: string): void {
     emitted.add(key);
     const canonical = aliasToCanonical[key];
     if (canonical) {
@@ -1305,9 +1328,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     }
     const aliases = canonicalToAliases[key];
     if (aliases) for (const a of aliases) emitted.add(a);
-    const emitter = emitters[key];
-    if (emitter) emitter();
-  };
+  }
   // The keys export read nothing from, as written, each after the keys
   // before it in the Markdown that are written here and before those after
   // it. One that's first goes without the blank lines it starts with,
@@ -1317,6 +1338,8 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
       emit(item);
       continue;
     }
+    // A key held as written, which import writes in place of its value
+    if (typeof item.key === 'string') markEmitted(item.key);
     const held = item.text.split('\n');
     let start = 0;
     if (lines.length === 0) while (start < held.length && isBlankLine(held[start])) start++;

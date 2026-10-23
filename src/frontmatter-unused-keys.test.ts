@@ -185,10 +185,22 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
   it('are no record of frontmatter with only keys export reads, nor of one it reads a setting from', async () => {
     for (const markdown of [
       '---\ntitle: T\n# A comment\nauthor: A\ncsl: apa\nnotes: sidenotes\n---\n\nBody.\n',
-      '---\nauthor:\n  - name: Jane\n    affiliation: Uni\n---\n\nBody.\n',
     ]) {
       expect(await recordValues(markdown)).toEqual([]);
     }
+  });
+
+  it('keep as written a key export reads whose value is the lines under it, which give no setting, in place of its value from Word', async () => {
+    for (const markdown of ['---\nauthor:\n  name: Jane\n  title: Prof\ntitle: T\n---\n\nBody.\n', '---\nauthor:\n  - name: Jane\n    affiliation: Uni\n---\n\nBody.\n']) {
+      expect(await roundTrip(markdown)).toBe(markdown);
+    }
+    // Not twice, where Word gives the document an author
+    const setAuthor = editPart('docProps/core.xml', xml => xml.includes('<dc:creator>')
+      ? xml.replace(/<dc:creator>[^<]*<\/dc:creator>/, '<dc:creator>Bob</dc:creator>')
+      : xml.replace('</cp:coreProperties>', '<dc:creator>Bob</dc:creator></cp:coreProperties>'));
+    expect(await roundTrip('---\nauthor:\n  name: Jane\ndate: 1\n---\n\nBody.\n', setAuthor)).toBe('---\nauthor:\n  name: Jane\ndate: 1\n---\n\nBody.\n');
+    // A key with its value on its line goes as before
+    expect(await recordValues('---\nauthor: Jane\n---\n\nBody.\n')).toEqual([]);
   });
 
   it('keep as written a key with a key export reads indented under it, which export doesn\'t read', async () => {
