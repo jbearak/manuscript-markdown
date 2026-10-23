@@ -79,6 +79,25 @@ export const SINGLE_VALUE_KEYS: ReadonlySet<string> = new Set([
 /** The keys parseFrontmatter reads, each of which import writes from what the Word document has */
 const READ_KEYS: ReadonlySet<string> = new Set([...SINGLE_VALUE_KEYS, ...ARRAY_KEYS, 'title', 'styles', 'crossref']);
 
+/** The keys parseFrontmatter reads as another, by their names, as `bib` for `bibliography` */
+const KEY_ALIASES: Readonly<Record<string, string>> = {
+  'note-type': 'zotero-notes',
+  'bib': 'bibliography',
+  'bibtex': 'bibliography',
+  'code-background': 'code-background-color',
+  'code-color': 'code-font-color',
+};
+
+/** The name of the key parseFrontmatter reads a key as, past its aliases */
+function canonicalKey(key: string): string {
+  return Object.hasOwn(KEY_ALIASES, key) ? KEY_ALIASES[key] : key;
+}
+
+/** Whether settings read from an entry give one, which empty values, as of `title:` alone, don't */
+function givesSetting(metadata: Frontmatter): boolean {
+  return Object.values(metadata).some(value => Array.isArray(value) ? value.some(item => item !== '') : value !== '');
+}
+
 /** Quarto's mappings, of whose keys export reads some: `crossref`'s
  *  fig-title, tbl-title and title-delim. One with none of those, as
  *  `crossref: {fig-prefix: Fig.}`, gives no setting import could write
@@ -294,6 +313,77 @@ function readBlockLists(lines: string[], warnings: string[]): string[] {
     }
   }
   return read;
+}
+
+/**
+ * The keys export reads that frontmatter has indented, which export
+ * doesn't read, as YAML reads them as part of the value of the key above:
+ * each line's index, its key, and that key above, `parent`, as `title`
+ * and `author` for `author:` then `  title: Prof`. A line more indented
+ * than a key, or a list item, whose value starts on its line, as
+ * `abstract: |` or `- One`, at any indentation, is part of that value, not
+ * a key, nor is one under `styles:` or `crossref:`, whose keys
+ * parseFrontmatter reads itself. Where no key at a line's start is above,
+ * as in frontmatter indented as a whole, `parent` is undefined.
+ */
+export function nestedKeys(lines: readonly string[]): { line: number; key: string; parent?: string }[] {
+  const nested: { line: number; key: string; parent?: string }[] = [];
+  let parent: string | undefined;
+  // Whether the lines indented under the key above are a mapping's, which
+  // they are before any key, as YAML reads them
+  let mapping = true;
+  // The column of the last key, or item, whose value starts on its line,
+  // past which a line is part of that value, or -1
+  let value = -1;
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k].replace(/\r$/, '');
+    const indent = indentOf(line);
+    if (indent === line.length || line[indent] === '#') continue;
+    if (value >= 0 && indent > value) continue;
+    value = -1;
+    if (indent === 0 && !isListItem(line)) {
+      const colon = line.indexOf(':');
+      parent = colon > 0 ? line.slice(0, colon).trim() : undefined;
+      mapping = colon > 0 && /^(?:[ \t]*|[ \t]+#.*)$/.test(line.slice(colon + 1));
+      continue;
+    }
+    if (!mapping || parent === 'styles' || parent === 'crossref') continue;
+    // A value in quotes or a flow collection that goes on past its line,
+    // whose lines can be at its key's indentation: the lines up to the
+    // next key at a line's start are read as no key's, which only warns less
+    if (yamlLineEnd(line) === 'open') {
+      mapping = false;
+      continue;
+    }
+    // The text past a list item's `-`, as `name: Jane` in `- name: Jane`,
+    // and its column, and that of the innermost item's `-`
+    let at = indent;
+    let dash = indent;
+    while (isListItem(line.slice(at))) {
+      dash = at;
+      at += 1 + indentOf(line.slice(at + 1));
+    }
+    // A key's colon, before a space, a tab or the line's end, as YAML reads
+    // one: `title:subtitle` is text
+    const found = line.slice(at).search(/:(?=[ \t]|$)/);
+    const colon = found < 0 ? -1 : at + found;
+    if (colon < 0) {
+      // An item's text, or a plain value's next line
+      if (at < line.length) value = dash;
+      continue;
+    }
+    if (!/^(?:[ \t]*|[ \t]+#.*)$/.test(line.slice(colon + 1))) value = at;
+    const key = line.slice(at, colon).trim();
+    if (at === indent && READ_KEYS.has(key)) nested.push({ line: k, key, ...(parent !== undefined ? { parent } : {}) });
+  }
+  return nested;
+}
+
+/** The warning for a key of nestedKeys', which export doesn't read */
+export function nestedKeyMessage(key: string, parent?: string): string {
+  return 'Frontmatter `' + key + '` is indented'
+    + (parent !== undefined ? ' under `' + parent + '`, which makes it part of `' + parent + '`,' : ',')
+    + ' so export doesn\'t read it. To set `' + key + '`, move it to the start of its line.';
 }
 
 /**
@@ -582,8 +672,13 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
   // Each block list as the lines it stands for, as `title:` then `  - One`
   // and `  - Two` as `title: One` and `title: Two`
   const yamlLines = readBlockLists(lines, warnings);
+  for (const { key, parent } of nestedKeys(lines)) warnings.push(nestedKeyMessage(key, parent));
   for (let lineIdx = 0; lineIdx < yamlLines.length; lineIdx++) {
     const line = yamlLines[lineIdx];
+    // A key indented is part of the value of the key above, as YAML reads
+    // it, as `title:` under `author:`, not a setting (see nestedKeys).
+    // `styles:` and `crossref:` read the lines under them themselves.
+    if (line[0] === ' ' || line[0] === '\t') continue;
     const colonIdx = line.indexOf(':');
     if (colonIdx < 0) continue;
     const key = line.slice(0, colonIdx).trim();
@@ -695,6 +790,15 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
       }
       if (Object.keys(crossref).length > 0) metadata.crossref = crossref;
       continue;
+    }
+
+    // A key with no value on its line, past a comment, whose value is the
+    // lines indented under it, as `title:` then `  text: My title`, a
+    // mapping, gives no setting, as no line of it does (see nestedKeys)
+    if (/^(?:[ \t]*|[ \t]+#.*)\r?$/.test(line.slice(colonIdx + 1))) {
+      let next = lineIdx + 1;
+      while (next < yamlLines.length && /^[ \t]*(?:#.*)?\r?$/.test(yamlLines[next])) next++;
+      if (next < yamlLines.length && (yamlLines[next][0] === ' ' || yamlLines[next][0] === '\t')) continue;
     }
 
     switch (key) {
@@ -905,7 +1009,16 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
  * written each key it reads nothing from, as `date`, `abstract` or
  * Quarto's `format`, which import puts back where it was among them.
  */
-export type FrontmatterLayout = Array<string | { text: string }>;
+export type FrontmatterLayout = Array<string | {
+  text: string;
+  /**
+   * The key export reads that the text is, where the key gives no
+   * setting, as the lines under it are its value, as `author:` then
+   * `  name: Jane`, which import writes in place of the key's value from
+   * the document, which can't hold them.
+   */
+  key?: string;
+}>;
 
 /**
  * The key of a line YAML reads as a key of a block mapping at the line's
@@ -1052,9 +1165,9 @@ function topLevelEntries(lines: readonly string[]): { key: string; yamlKey: stri
  * The layout of the Markdown's frontmatter (see FrontmatterLayout), where
  * it has a key export reads nothing from: one whose name parseFrontmatter
  * doesn't read, as YAML reads it or as parseFrontmatter does, none of whose
- * lines gives a setting. A line of a key it reads, in a mapping or a
- * literal value under the key, gives one, which export writes to Word, and
- * the key goes as before, as import writes the setting. Each key held is
+ * lines gives a setting, or a key it reads whose value is the lines under
+ * it, as `author:` then `  name: Jane`, which give none (see nestedKeys),
+ * and which the key as import writes it from Word would lose. Each key held is
  * its lines as written, quotes, comments, spaces at line ends and all, with
  * the comments and blank lines before it, and those at the frontmatter's
  * end after the last, which a literal value that keeps its line ends, as
@@ -1070,15 +1183,34 @@ export function frontmatterLayout(markdown: string): FrontmatterLayout | undefin
   const layout: FrontmatterLayout = [];
   const named = new Set<string>();
   let unused = false;
+  // The keys that entries give settings for, past their aliases
+  const setKeys = new Set<string>();
+  for (const entry of entries) {
+    const { metadata, fieldOrder } = readFrontmatterLines(lines.slice(entry.start, entry.end), []);
+    if (givesSetting(metadata)) for (const key of fieldOrder) setKeys.add(canonicalKey(key));
+  }
   for (const entry of entries) {
     const entryLines = lines.slice(entry.start, entry.end);
     // As parseFrontmatter reads its lines among the others', as no block
     // list or mapping it reads goes past an entry's
     const { metadata, fieldOrder } = readFrontmatterLines(entryLines, []);
     const last = layout[layout.length - 1];
+    // A key export reads, but not from the lines under it, its value
+    const nestedValue = !givesSetting(metadata) && READ_KEYS.has(entry.key) && !PARTLY_READ_KEYS.has(entry.key)
+      && entry.key !== 'styles' && entryLines.some(line => /^[ \t]+[^ \t\r#]/.test(line));
+    if (nestedValue) {
+      // In place of the key's value from Word, but where another entry
+      // gives it one, as `bibliography: refs` after `bib:` and a mapping,
+      // which goes as before, as import writes it
+      const held: { text: string; key?: string } = { text: entryLines.join('\n') };
+      if (!setKeys.has(canonicalKey(entry.key))) held.key = entry.key;
+      layout.push(held);
+      unused = true;
+      continue;
+    }
     if ((PARTLY_READ_KEYS.has(entry.key) || !READ_KEYS.has(entry.key) && !READ_KEYS.has(entry.yamlKey)) && Object.keys(metadata).length === 0) {
       // With those right before it, as nothing goes between them
-      if (typeof last === 'object') last.text += '\n' + entryLines.join('\n');
+      if (typeof last === 'object' && last.key === undefined) last.text += '\n' + entryLines.join('\n');
       else layout.push({ text: entryLines.join('\n') });
       unused = true;
       continue;
@@ -1201,14 +1333,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'crossref', 'fig-cap-location', 'tbl-cap-location',
   ];
 
-  const aliasToCanonical: Record<string, string> = {
-    'note-type': 'zotero-notes',
-    'bib': 'bibliography',
-    'bibtex': 'bibliography',
-    'code-background': 'code-background-color',
-    'code-color': 'code-font-color',
-  };
-
+  const aliasToCanonical = KEY_ALIASES;
   const canonicalToAliases: Record<string, string[]> = {};
   for (const [alias, canonical] of Object.entries(aliasToCanonical)) {
     if (!canonicalToAliases[canonical]) canonicalToAliases[canonical] = [];
@@ -1220,18 +1345,22 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
 
   const emit = (key: string) => {
     if (emitted.has(key)) return;
+    markEmitted(key);
+    const emitter = emitters[key];
+    if (emitter) emitter();
+  };
+  // A key, with its aliases, as written, which goes no more
+  function markEmitted(key: string): void {
     emitted.add(key);
-    const canonical = aliasToCanonical[key];
+    const canonical = Object.hasOwn(aliasToCanonical, key) ? aliasToCanonical[key] : undefined;
     if (canonical) {
       emitted.add(canonical);
       const siblingAliases = canonicalToAliases[canonical];
       if (siblingAliases) for (const a of siblingAliases) emitted.add(a);
     }
-    const aliases = canonicalToAliases[key];
+    const aliases = Object.hasOwn(canonicalToAliases, key) ? canonicalToAliases[key] : undefined;
     if (aliases) for (const a of aliases) emitted.add(a);
-    const emitter = emitters[key];
-    if (emitter) emitter();
-  };
+  }
   // The keys export read nothing from, as written, each after the keys
   // before it in the Markdown that are written here and before those after
   // it. One that's first goes without the blank lines it starts with,
@@ -1241,6 +1370,8 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
       emit(item);
       continue;
     }
+    // A key held as written, which import writes in place of its value
+    if (typeof item.key === 'string' && READ_KEYS.has(item.key)) markEmitted(item.key);
     const held = item.text.split('\n');
     let start = 0;
     if (lines.length === 0) while (start < held.length && isBlankLine(held[start])) start++;

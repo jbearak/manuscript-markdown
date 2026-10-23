@@ -185,15 +185,52 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
   it('are no record of frontmatter with only keys export reads, nor of one it reads a setting from', async () => {
     for (const markdown of [
       '---\ntitle: T\n# A comment\nauthor: A\ncsl: apa\nnotes: sidenotes\n---\n\nBody.\n',
-      '---\nauthor:\n  - name: Jane\n    affiliation: Uni\n---\n\nBody.\n',
-      '---\nkeywords:\n  - name: x\n    font: Arial\n---\n\nBody.\n',
-      '---\nmeta:\n  title:\n    - A\n---\n\nBody.\n',
     ]) {
       expect(await recordValues(markdown)).toEqual([]);
     }
-    // Which export reads as before, with a setting of a known key's name
-    // under it, and import writes that setting
-    expect(await roundTrip('---\nkeywords:\n  - name: x\n    font: Arial\n---\n\nBody.\n')).toBe('---\nfont: Arial\n---\n\nBody.\n');
+  });
+
+  it('keep as written a key export reads whose value is the lines under it, which give no setting, in place of its value from Word', async () => {
+    for (const markdown of ['---\nauthor:\n  name: Jane\n  title: Prof\ntitle: T\n---\n\nBody.\n', '---\nauthor:\n  - name: Jane\n    affiliation: Uni\n---\n\nBody.\n']) {
+      expect(await roundTrip(markdown)).toBe(markdown);
+    }
+    // Not twice, where Word gives the document an author
+    const setAuthor = editPart('docProps/core.xml', xml => xml.includes('<dc:creator>')
+      ? xml.replace(/<dc:creator>[^<]*<\/dc:creator>/, '<dc:creator>Bob</dc:creator>')
+      : xml.replace('</cp:coreProperties>', '<dc:creator>Bob</dc:creator></cp:coreProperties>'));
+    expect(await roundTrip('---\nauthor:\n  name: Jane\ndate: 1\n---\n\nBody.\n', setAuthor)).toBe('---\nauthor:\n  name: Jane\ndate: 1\n---\n\nBody.\n');
+    // A key with its value on its line goes as before
+    expect(await recordValues('---\nauthor: Jane\n---\n\nBody.\n')).toEqual([]);
+  });
+
+  it('keep a key whose value is the lines under it, which export reads no setting from, through each trip', async () => {
+    for (const markdown of ['---\ntitle:\n  text: My title\ndate: 1\n---\n\nBody.\n', '---\ntitle:\n  text: My title\ntitle: T\n---\n\nBody.\n',
+      '---\ntitle:\n  -\n  -\n  - name: Jane\n---\n\nBody.\n', '---\ncsl:\n  path: custom.csl\n---\n\nBody.\n', '---\nlocale:\n\n  # French\n  language: fr\n---\n\nBody.\n',
+      '---\nauthor: # note\n  name: Jane\n---\n\nBody.\n']) {
+      const once = await roundTrip(markdown);
+      expect(once).toBe(markdown);
+      expect(await roundTrip(once)).toBe(markdown);
+    }
+  });
+
+  it('keep the setting another entry gives a key held as written, through an alias or the key repeated', async () => {
+    for (const markdown of ['---\nbib:\n  path: other\nbibliography: refs\n---\n\nBody.\n', '---\nbibliography: refs\nbib:\n  path: other\n---\n\nBody.\n',
+      '---\nauthor:\n  name: Jane\nauthor: Bob\n---\n\nBody.\n']) {
+      expect(await roundTrip(markdown)).toBe(markdown);
+    }
+  });
+
+  it('read a record whose held key isn\'t one export reads as text alone', async () => {
+    for (const key of ['constructor', '__proto__', 'toString', 'date']) {
+      const tamper = editPart('docProps/custom.xml', xml => xml.replace('{"text":"date: 1"}', '{"text":"date: 1","key":"' + key + '"}'));
+      expect(await roundTrip('---\ntitle: T\ndate: 1\n---\n\nBody.\n', tamper)).toBe('---\ntitle: T\ndate: 1\n---\n\nBody.\n');
+    }
+  });
+
+  it('keep as written a key with a key export reads indented under it, which export doesn\'t read', async () => {
+    for (const markdown of ['---\nkeywords:\n  - name: x\n    font: Arial\n---\n\nBody.\n', '---\nmeta:\n  title:\n    - A\n---\n\nBody.\n']) {
+      expect(await roundTrip(markdown)).toBe(markdown);
+    }
   });
 });
 
@@ -226,8 +263,9 @@ describe('frontmatterLayout', () => {
     expect(frontmatterLayout('---\nbib: a.bib\ntitle: A\ndate: 1\ntitle: B\n---\n')).toEqual(['bib', 'title', { text: 'date: 1' }]);
   });
 
-  it('names the keys it reads in a mapping under a key, which it doesn\'t hold', () => {
-    expect(frontmatterLayout('---\ndate: 1\nmeta:\n  font: Arial\n  title: T\nlang: en\n---\n')).toEqual([{ text: 'date: 1' }, 'font', 'title', { text: 'lang: en' }]);
+  it('holds a key with keys it reads indented under it, which it doesn\'t read', () => {
+    expect(frontmatterLayout('---\ndate: 1\nmeta:\n  font: Arial\n  title: T\nlang: en\n---\n')).toEqual([{ text: 'date: 1\nmeta:\n  font: Arial\n  title: T\nlang: en' }]);
+    expect(frontmatterLayout('---\ndate: 1\nmeta:\n  font: Arial\ntitle: T\n---\n')).toEqual([{ text: 'date: 1\nmeta:\n  font: Arial' }, 'title']);
   });
 
   it('is undefined for frontmatter of keys it reads alone, or none', () => {

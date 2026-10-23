@@ -129,7 +129,6 @@ describe('a block list in frontmatter', () => {
     ['a quote its line doesn\'t close', 'title:\n  - \'90s Music', 'title: \'90s Music'],
     ['an item\'s text on the line after its -', 'title:\n  -\n    One', 'title:\n    One'],
     ['an item more indented than the one before', 'title:\n  - One\n    - Two', 'title: One\n    - Two'],
-    ['a line with a colon after an item', 'title:\n  - One\n    font: Arial', 'title: One\n    font: Arial'],
     ['heading fonts over two lines', 'header-font:\n  - Times\n    New Roman\n  - Arial', 'header-font: [Times, Arial]\n    New Roman'],
   ])('reads %s as a value after the key that goes on is read, its line alone, and warns', (_, yaml, written) => {
     const { metadata, warnings } = read(yaml);
@@ -149,11 +148,12 @@ describe('a block list in frontmatter', () => {
     const mixed = read('title:\n  - One\n  - "Two": x\n  - Three');
     expect(mixed.metadata.title).toEqual(['One', 'Three']);
     expect(mixed.warnings).toHaveLength(1);
-    // The key alone, as the key as written is read
-    expect(read('title:\n  -\n    sub: x').metadata).toEqual({ title: [''] });
-    // Its lines as before, each as a key's
-    expect(read('keywords:\n  - name: x\n    font: Arial').metadata).toEqual(read('keywords:\n  - name: x\nfont: Arial').metadata);
-    expect(read('keywords:\n  - name: x\n    font: Arial').metadata).toEqual({ font: 'Arial' });
+    // No value, as the item's is the lines under it
+    expect(read('title:\n  -\n    sub: x').metadata).toEqual({});
+    // Its lines, of which export reads no key, as they're indented
+    const nested = read('keywords:\n  - name: x\n    font: Arial');
+    expect(nested.metadata).toEqual({});
+    expect(nested.warnings).toEqual(['Frontmatter `font` is indented under `keywords`, which makes it part of `keywords`, so export doesn\'t read it. To set `font`, move it to the start of its line.']);
     // Under a key export doesn't read, without a warning
     expect(read('keywords:\n  - name: x').warnings).toBeUndefined();
   });
@@ -168,7 +168,6 @@ describe('a block list in frontmatter', () => {
     ['a styles mapping', 'styles:\n  Note:\n    font: Arial\n    font-size: 9\ntitle: T', { styles: { Note: { font: 'Arial', fontSize: 9 } }, title: ['T'] }],
     ['a styles mapping with a list under it', 'styles:\n  - Note\ntitle: T', { title: ['T'] }],
     ['a key whose value is a mapping', 'format:\n  docx:\n    toc: true\nfont: Georgia', { font: 'Georgia' }],
-    ['a list under an indented key, which is read as the key', 'meta:\n  title:\n    - A', { title: [''] }],
     ['a list under a key export doesn\'t read', 'keywords:\n  - a\n  - b\ntitle: T', { title: ['T'] }],
     ['a - line after a key with a value', 'title: One\n- Two', { title: ['One'] }],
     ['- lines in a literal value', 'abstract: |\n  - x\ntitle: T', { title: ['T'] }],
@@ -256,5 +255,89 @@ describe('a block list in frontmatter in Word', () => {
     expect((await wordParts(again)).document).toBe((await wordParts(markdown)).document);
     expect((await wordParts(again)).styles).toBe((await wordParts(markdown)).styles);
     expect(await importedFrontmatter(again)).toBe(back);
+  });
+});
+
+describe('Keys indented under another key', () => {
+  it('reads no title, or other setting, indented under another key, and warns of each', () => {
+    const { metadata, warnings } = read('title: Real\nauthor:\n  title: Prof\nmeta:\n  bibliography: x.bib\n  font: Arial');
+    expect(metadata.title).toEqual(['Real']);
+    expect(metadata.bibliography).toBeUndefined();
+    expect(metadata.font).toBeUndefined();
+    expect(warnings).toEqual([
+      'Frontmatter `title` is indented under `author`, which makes it part of `author`, so export doesn\'t read it. To set `title`, move it to the start of its line.',
+      'Frontmatter `bibliography` is indented under `meta`, which makes it part of `meta`, so export doesn\'t read it. To set `bibliography`, move it to the start of its line.',
+      'Frontmatter `font` is indented under `meta`, which makes it part of `meta`, so export doesn\'t read it. To set `font`, move it to the start of its line.',
+    ]);
+  });
+
+  it('reads no value of a key with none on its line and lines indented under it, its value', () => {
+    expect(read('title:\n  text: My title\ntitle: T').metadata).toEqual({ title: ['T'] });
+    expect(read('csl:\n\n  # a style\n  path: x.csl').metadata).toEqual({});
+    // Past a comment on its line
+    expect(read('author: # note\n  name: Jane').metadata).toEqual({});
+    // A key with none, before another key, as before
+    expect(read('title:\n# c\nauthor: A').metadata).toEqual({ title: [''], author: 'A' });
+  });
+
+  it('reads no list under a key indented, nor a key on a line after an item of text, which is the item\'s', () => {
+    const list = read('meta:\n  title:\n    - A');
+    expect(list.metadata).toEqual({});
+    expect(list.warnings).toEqual(['Frontmatter `title` is indented under `meta`, which makes it part of `meta`, so export doesn\'t read it. To set `title`, move it to the start of its line.']);
+    const after = read('title:\n  - One\n    font: Arial');
+    expect(after.metadata).toEqual({ title: ['One'] });
+    expect(after.warnings).toHaveLength(1);
+    expect(after.warnings![0]).toContain('goes on past its line');
+  });
+
+  it('reads no key under a list item, past comments and deeper mappings', () => {
+    const { metadata, warnings } = read('authors:\n  - name: Jane\n    # her role\n    title: Prof\naffil:\n  dept:\n    font: Arial');
+    expect(metadata.title).toBeUndefined();
+    expect(metadata.font).toBeUndefined();
+    expect(warnings?.map(w => w.slice(0, w.indexOf(',')))).toEqual([
+      'Frontmatter `title` is indented under `authors`',
+      'Frontmatter `font` is indented under `affil`',
+    ]);
+  });
+
+  it('warns of no line of a value that starts on its key\'s line, at any indentation', () => {
+    for (const yaml of ['meta:\n  abstract: |\n    title: This is prose', 'meta:\n  note: >-\n\n    # a\n    font: Arial',
+      'authors:\n  - name: Jane\n    bio: |\n      title: Prof', 'meta:\n  - One\n    title: more of it', 'meta:\n- bio: "a\n    title: b"',
+      'abstract:\n  title:subtitle', 'meta:\n  note: "One\n  title: Prof"', 'meta:\n  names: [\n  title: Prof\n  ]', 'meta:\n  - {a: 1,\n  title: x}']) {
+      const { metadata, warnings } = read(yaml);
+      expect(metadata).toEqual({});
+      expect(warnings).toBeUndefined();
+    }
+    // A key after the value, at the key's indentation or a list item's text's
+    const after = read('meta:\n  abstract: |\n    prose\n  title: T\nauthors:\n- name: Jane\n  font: Arial\nlists:\n  - - x\n    - name: Jane\n      title: Prof');
+    expect(after.warnings?.map(w => w.slice(0, w.indexOf(',')))).toEqual([
+      'Frontmatter `title` is indented under `meta`',
+      'Frontmatter `font` is indented under `authors`',
+      'Frontmatter `title` is indented under `lists`',
+    ]);
+  });
+
+  it('warns of no line of a value that starts on its key\'s line, nor of styles\' and crossref\'s keys', () => {
+    const { metadata, warnings } = read('abstract: |\n  title: In the text\nstyles:\n  Quote:\n    font: Arial\ncrossref:\n  fig-title: Figure');
+    expect(metadata.title).toBeUndefined();
+    expect(metadata.styles?.Quote.font).toBe('Arial');
+    expect(metadata.crossref?.figTitle).toBe('Figure');
+    expect(warnings).toBeUndefined();
+  });
+
+  it('reads no key in frontmatter indented as a whole, and says to move each to its line\'s start', () => {
+    const { metadata, warnings } = read('  title: T\n  font: Arial');
+    expect(metadata).toEqual({});
+    expect(warnings).toEqual([
+      'Frontmatter `title` is indented, so export doesn\'t read it. To set `title`, move it to the start of its line.',
+      'Frontmatter `font` is indented, so export doesn\'t read it. To set `font`, move it to the start of its line.',
+    ]);
+  });
+
+  it('exports one Title paragraph, with the title at the line\'s start, and the warning', async () => {
+    const markdown = fm('title: Real\nauthor:\n  name: Jane\n  title: Prof');
+    expect(await titles(markdown)).toEqual(['Real']);
+    const { warnings } = await wordParts(markdown);
+    expect(warnings.some(w => w.startsWith('Frontmatter `title` is indented under `author`'))).toBe(true);
   });
 });

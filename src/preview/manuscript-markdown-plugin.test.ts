@@ -3146,9 +3146,14 @@ describe('frontmatter for VS Code\'s preview table', () => {
     for (const yaml of ['title: "A {x}\n\n  B"\nauthor: Me', 'title: [\n  "A {++new++} title",\n  "Subtitle"\n]\nfont: X',
       'title: ["A {x}", &t Other]\nauthor: *t', 'title:\n  - A {x}\n    more\nfont: X', 'title: {short: &t Study}\nauthor: *t',
       'title: {short: "Study"\n}\nauthor: Me', 'title:\n  - {a: "b"\n}\nfont: X', 'title: ["{++Estimates++} on (0, 1]"\n]\nauthor: Me',
-      'title: ["a]",\nb: c]\nfont: X', 'author:\n  name: Jane Smith\n  title: Research fellow\ntitle: A\ntitle: {++New++} study']) {
+      'title: ["a]",\nb: c]\nfont: X']) {
       expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
     }
+  });
+
+  it('reads no title indented under another key, as export reads none', () => {
+    expect(frontmatterYamlForPreview('author:\n  name: Jane Smith\n  title: Research fellow\ntitle: A\ntitle: {++New++} study'))
+      .toBe('author:\n  name: Jane Smith\n  title: Research fellow\ntitle:\n  - "A"\n  - "{++New++} study"');
   });
 
   it('leaves YAML with an alias, or an anchor an alias refers to, as it is', () => {

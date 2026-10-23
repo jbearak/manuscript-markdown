@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
 	damerauLevenshtein,
+	findBibliographyValue,
 	findTypoSuggestions,
 	getFrontmatterLocation,
 	getFrontmatterCompletionItems,
@@ -1171,8 +1172,10 @@ describe('block lists', () => {
 			'warning: Export doesn\'t read a mapping as an item of `author`. Put the item in quotes to read it as text. @ - name: Jane',
 		]);
 		expect(await messages('---\ntitle:\n  - "a: b"\n---\n')).toEqual([]);
-		// Its lines after its first as before, each as a key's, as export reads them
-		expect(await messages('---\nkeywords:\n  - name: Jane\n    font-size: big\n---\n')).toEqual(['error: Expected a non-negative number. @ big']);
+		// Its lines after its first, of which export reads no key, as they're indented
+		expect(await messages('---\nkeywords:\n  - name: Jane\n    font-size: big\n---\n')).toEqual([
+			'warning: Frontmatter `font-size` is indented under `keywords`, which makes it part of `keywords`, so export doesn\'t read it. To set `font-size`, move it to the start of its line. @ font-size',
+		]);
 	});
 
 	test('checks the bibliography and CSL style export reads from a list', async () => {
@@ -1217,11 +1220,10 @@ describe('block lists', () => {
 		const warning = 'warning: Export reads only this item\'s line, as the item goes on past it or opens a quote that doesn\'t close on it. Write the item on one line, with any quote it opens closed.';
 		expect(await messages('---\nheader-font:\n  - Times\n    New Roman\n---\n')).toEqual([warning + ' @ - Times']);
 		expect(await messages('---\ntitle:\n  - "Results\n    #1 of 3"\n---\n')).toEqual([warning + ' @ - "Results']);
-		// Its line read as a value, and the lines after it as before
+		// Its line read as a value, and the lines after it as the item's, which export doesn't read
 		expect(await messages('---\nheader-font-size:\n  - big\n    font-size: small\n---\n')).toEqual([
 			warning + ' @ - big',
 			'error: Expected non-negative numbers. @ big',
-			'error: Expected a non-negative number. @ small',
 		]);
 		expect(await messages('---\ntitle:\n  - "One"\n    # 1 of 2\n---\n')).toEqual([]);
 	});
@@ -1339,5 +1341,39 @@ describe('crossref', () => {
 		const location = '---\nfig-cap-location: \n---\n';
 		expect(getFrontmatterCompletionItems(at(location, location.indexOf(': ') + 2), 'darwin').map(item => item.label))
 			.toEqual(['bottom', 'top']);
+	});
+});
+
+describe('validateFrontmatter: keys indented under another key', () => {
+	test('warns of a key export reads indented under another, at the key, and checks nothing else of it', async () => {
+		const text = '---\nfont: Georgia\nauthor:\n  title: Prof\nmeta:\n  font: Arial\n  breaks: maybe\n  colour: x\n---\n';
+		const diags = await validateFrontmatter(text, stubCallbacks);
+		expect(diags.map(d => [text.slice(d.start, d.end), d.severity, d.message])).toEqual([
+			['title', 'warning', 'Frontmatter `title` is indented under `author`, which makes it part of `author`, so export doesn\'t read it. To set `title`, move it to the start of its line.'],
+			['font', 'warning', 'Frontmatter `font` is indented under `meta`, which makes it part of `meta`, so export doesn\'t read it. To set `font`, move it to the start of its line.'],
+			['breaks', 'warning', 'Frontmatter `breaks` is indented under `meta`, which makes it part of `meta`, so export doesn\'t read it. To set `breaks`, move it to the start of its line.'],
+		]);
+	});
+
+	test('warns of no line of a literal value, nor of a list item\'s mapping export doesn\'t read', async () => {
+		const text = '---\nabstract: |\n  font: in the text\nkeywords:\n  - name: Jane\n---\n';
+		expect(await validateFrontmatter(text, stubCallbacks)).toEqual([]);
+	});
+
+	test('warns of no line of a value under a key indented', async () => {
+		expect(await validateFrontmatter('---\nmeta:\n  abstract: |\n    title: This is prose\n---\n', stubCallbacks)).toEqual([]);
+		expect(await validateFrontmatter('---\nabstract:\n  title:subtitle\n---\n', stubCallbacks)).toEqual([]);
+	});
+
+	test('offers a key indented under another, which export doesn\'t read, at a line\'s start', () => {
+		const text = '---\nmeta:\n  font: Arial\nfo\n---\n';
+		const labels = getFrontmatterCompletionItems(getFrontmatterLocation(text, text.indexOf('fo\n') + 2), 'darwin').map(item => item.label);
+		expect(labels).toContain('font');
+	});
+
+	test('reads no bibliography indented under another key', async () => {
+		const text = '---\nmeta:\n  bibliography: refs.bib\n---\n';
+		expect(findBibliographyValue(text)).toBeUndefined();
+		expect(parseFrontmatter(text).metadata.bibliography).toBeUndefined();
 	});
 });

@@ -6,7 +6,7 @@
  * and typo detection. No LSP types — returns offsets; server converts.
  */
 
-import { SINGLE_VALUE_KEYS, blockListAfter, normalizeFontStyle, parseColWidths, parseFrontmatter } from '../frontmatter';
+import { SINGLE_VALUE_KEYS, blockListAfter, nestedKeyMessage, nestedKeys, normalizeFontStyle, parseColWidths, parseFrontmatter } from '../frontmatter';
 import { MAX_TABLE_DIGITS } from '../table-number-format';
 import { getCslFieldInfo } from './csl-language';
 import { BUNDLED_STYLE_LABELS } from '../csl-loader';
@@ -501,6 +501,9 @@ interface FmLine {
 	continued?: boolean;
 	/** For a key with a block list after it, the list's items */
 	items?: FmLine[];
+	/** For a key export reads, indented under another, which export
+	 *  doesn't read, that other key (see nestedKeys in frontmatter.ts) */
+	nested?: { parent?: string };
 }
 
 interface ParsedFrontmatter {
@@ -548,6 +551,8 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 	};
 	// The items of block lists after the keys before, by their lines' indices
 	const listed = new Map<number, FmLine>();
+	// The keys export reads indented under others, by their lines' indices
+	const nested = new Map(nestedKeys(rawLines).map(n => [n.line, n]));
 
 	for (let lineIdx = 0; lineIdx < rawLines.length; lineIdx++) {
 		const listedLine = listed.get(lineIdx);
@@ -641,6 +646,8 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 				stylesDepth,
 				...(crossrefDepth ? { crossrefDepth } : {}),
 			};
+			const nestedKey = nested.get(lineIdx);
+			if (nestedKey) keyLine.nested = { parent: nestedKey.parent };
 			lines.push(keyLine);
 
 			// A block list after the key, as `title:` then `  - One`, whose
@@ -783,7 +790,9 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	const declaredKeys = new Set<string>();
 	const declaredKeyCounts = new Map<string, number>();
 	for (const line of parsed.lines) {
-		if (!line.listItem && !line.crossrefDepth && (!line.inStylesBlock || line.indent === 0)) {
+		// A key indented, under another, is part of that key's value, which
+		// export doesn't read (see nestedKeys)
+		if (!line.listItem && line.indent === 0) {
 			const canonical = resolveCanonical(line.key);
 			declaredKeys.add(canonical);
 			declaredKeyCounts.set(canonical, (declaredKeyCounts.get(canonical) ?? 0) + 1);
@@ -1433,7 +1442,7 @@ export interface FrontmatterBibliographyValue {
 export function findBibliographyValue(text: string): FrontmatterBibliographyValue | undefined {
 	const parsed = parseFrontmatterLines(text);
 	if (!parsed) return undefined;
-	const line = parsed.lines.find(l => !l.inStylesBlock && !l.crossrefDepth && l.rawValue && resolveCanonical(l.key) === 'bibliography');
+	const line = parsed.lines.find(l => (l.indent === 0 || l.listItem) && l.rawValue && resolveCanonical(l.key) === 'bibliography');
 	if (!line) return undefined;
 	// The value as written, to its line's end, without the spaces there, and
 	// then a quote at each end, as parseFrontmatter reads it
@@ -1526,6 +1535,13 @@ export async function validateFrontmatter(
 					}
 				}
 			}
+			continue;
+		}
+
+		// A key indented, under a key other than styles or crossref, is
+		// part of that key's value, which export doesn't read
+		if (line.indent > 0) {
+			if (line.nested) diagnostics.push({ message: nestedKeyMessage(line.key, line.nested.parent), severity: 'warning', start: line.keyStart, end: line.keyEnd });
 			continue;
 		}
 
@@ -1857,7 +1873,7 @@ async function validateBibPath(
 
 	// Find the bibliography line
 	for (const line of parsed.lines) {
-		if (line.inStylesBlock || line.crossrefDepth) continue;
+		if (line.indent > 0 && !line.listItem) continue;
 		const canonical = resolveCanonical(line.key);
 		if (canonical !== 'bibliography') continue;
 		if (!line.rawValue) continue;
