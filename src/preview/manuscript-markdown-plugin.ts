@@ -2505,7 +2505,9 @@ function captionsRule(state: StateCore): void {
  *  into the lines after it, whatever their indent */
 function quotableTitleValue(value: string): boolean {
   if (/^[|>&*!]/.test(value)) return false;
-  const count = (pattern: RegExp) => value.match(pattern)?.length ?? 0;
+  // Not those in quotes, as in `["on (0, 1]"`, which close nothing
+  const unquoted = value.replace(/"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'/g, '');
+  const count = (pattern: RegExp) => unquoted.match(pattern)?.length ?? 0;
   return count(/\{/g) <= count(/\}/g) && count(/\[/g) <= count(/\]/g);
 }
 
@@ -2544,14 +2546,13 @@ export function frontmatterYamlForPreview(content: string): string {
     const list = blockListAfter(lines, k);
     if (list) {
       if (list.items.some(item => item.more.length > 0 || !quotableTitleValue(item.text))) return content;
-    } else {
-      // Not a value YAML reads over more lines, which an indented line
-      // after it, past blank lines, goes on, as in a block scalar
-      const after = lines.slice(k + 1).find(line => line.trim() !== '');
-      if (after !== undefined && /^[ \t]/.test(after)) return content;
-      if (!quotableTitleValue(lines[k].replace(/^title\s*:/, '').trim())) return content;
-    }
+    } else if (!quotableTitleValue(lines[k].replace(/^title\s*:/, '').trim())) return content;
     const end = list ? list.last + 1 : k + 1;
+    // Not a value YAML reads over more lines: the line after it, past blank
+    // lines and comments, is another key's, or there's none, not one
+    // indented, as a block scalar's, nor a collection's closer, as `]`
+    const after = lines.slice(end).find(line => line.trim() !== '' && !line.startsWith('#'));
+    if (after !== undefined && !/^[^\s#\-[\]{}?:,][^:]*:(?:[ \t]|$)/.test(after)) return content;
     entries.push({ start: k, end });
     k = end - 1;
   }
