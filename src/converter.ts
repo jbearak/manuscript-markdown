@@ -19247,9 +19247,50 @@ export function generateBibTeX(
   return entries.join('\n\n');
 }
 
+/** A run of a title line's text, and the tracked change it's in */
+type TitleRun = { text: string; revision?: RevisionInfo };
+
+/** A title line's runs without the whitespace at their start, with `start`,
+ *  and at their end, with `end`, over as many runs as it takes, and without
+ *  the runs that leaves empty */
+function trimTitleRuns(runs: TitleRun[], start: boolean, end: boolean): TitleRun[] {
+  const trimmed = runs.map(run => ({ ...run }));
+  for (let k = 0; start && k < trimmed.length && !(trimmed[k].text = trimmed[k].text.trimStart()); k++);
+  for (let k = trimmed.length - 1; end && k >= 0 && !(trimmed[k].text = trimmed[k].text.trimEnd()); k--);
+  return trimmed.filter(run => run.text);
+}
+
+/**
+ * A title line's text, with its tracked changes as CriticMarkup, as export
+ * reads them (see titleRunsXml in md-to-docx.ts): the runs of one revision
+ * in one span, and a deletion right before an addition of the same author
+ * and time as a substitution, `{~~old~>new~~}`, as in the body.
+ */
+function titleLineMarkdown(runs: TitleRun[]): string {
+  const spans: TitleRun[] = [];
+  for (const run of runs) {
+    const last = spans[spans.length - 1];
+    if (last && revisionsEqual(last.revision, run.revision)) last.text += run.text;
+    else spans.push({ ...run });
+  }
+  let line = '';
+  for (let k = 0; k < spans.length; k++) {
+    const { text, revision } = spans[k];
+    const next = spans[k + 1];
+    if (revision?.type === 'deletion' && next?.revision?.type === 'addition'
+      && next.revision.author === revision.author && next.revision.date === revision.date) {
+      line += '{~~' + text + '~>' + next.text + '~~}';
+      k++;
+    } else if (revision) line += (revision.type === 'addition' ? '{++' : '{--') + text + (revision.type === 'addition' ? '++}' : '--}');
+    else line += text;
+  }
+  return line;
+}
+
 /**
  * Extract consecutive Title-styled paragraphs from the beginning of the document.
- * Returns the plain text of each title paragraph, a line of the title for
+ * Returns the text of each title paragraph, with its tracked changes as
+ * CriticMarkup (see titleLineMarkdown), a line of the title for
  * each line its line breaks give it, as export writes each line in a Title
  * paragraph of its own, but none for one at its start or end. Removes the
  * extracted items (para markers and their text runs) from the content array
@@ -19273,21 +19314,20 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
     // Collect text runs following this title para marker
     const startIdx = i;
     i++;
-    const lines = [''];
+    const lineRuns: TitleRun[][] = [[]];
     while (i < content.length && content[i].type === 'text') {
-      const text = (content[i] as { type: 'text'; text: string }).text;
-      if (text === lineBreakText()) lines.push('');
-      else lines[lines.length - 1] += text;
+      const { text, revision } = content[i] as { type: 'text'; text: string; revision?: RevisionInfo };
+      if (text === lineBreakText()) lineRuns.push([]);
+      else lineRuns[lineRuns.length - 1].push({ text, revision });
       i++;
     }
     // Not those its line breaks give with nothing in them, at its start or
     // end or between two, nor the spaces beside a break, which a title line
-    // doesn't keep
-    const shown = lines.map((line, k) => {
-      const start = k > 0 ? line.trimStart() : line;
-      return k < lines.length - 1 ? start.trimEnd() : start;
-    }).filter(line => line.trim() !== '');
-    const own = shown.length > 0 ? shown : [lines.join('')];
+    // doesn't keep, tracked or not, so from the runs' text, before their
+    // changes are written around it
+    const shown = lineRuns.map((runs, k) => trimTitleRuns(runs, k > 0, k < lineRuns.length - 1))
+      .filter(runs => runs.some(run => run.text.trim() !== '')).map(titleLineMarkdown);
+    const own = shown.length > 0 ? shown : [titleLineMarkdown(lineRuns.flat())];
     pushAll(titles, own);
     for (let k = 1; k < own.length; k++) paragraphs.push(item.titleXml ?? '');
     // Remove extracted items
@@ -19869,10 +19909,16 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptio
     const pPrContent = xmlElement(live, 'w:pPr')?.content ?? '';
     const markRPr = xmlElement(pPrContent, 'w:rPr');
     const pPr = markRPr ? pPrContent.slice(0, markRPr.start) + pPrContent.slice(markRPr.end) : pPrContent;
-    const runs: string[] = [];
+    // The runs of text Word shows, or, in a line of deletions alone, the
+    // deleted ones, as export writes a title line's deletions in the line's
+    // font style (see titleRunsXml)
+    const shownRuns: string[] = [];
+    const deletedRuns: string[] = [];
     for (let run = xmlElement(live, 'w:r'); run; run = xmlElement(live, 'w:r', run.end)) {
-      if (xmlStartTag(run.content, 'w:t')) runs.push(run.content);
+      if (xmlStartTag(run.content, 'w:t')) shownRuns.push(run.content);
+      else if (xmlStartTag(run.content, 'w:delText')) deletedRuns.push(run.content);
     }
+    const runs = shownRuns.length > 0 ? shownRuns : deletedRuns;
     const rPr = FONT_STYLE_TOGGLES.map(tag => {
       const on = runs.map(run => {
         const found = xmlStartTag(xmlElement(run, 'w:rPr')?.content ?? '', tag)?.tag;

@@ -204,3 +204,105 @@ describe('Title roundtrip', () => {
     expect(body).toContain('Introduction');
   });
 });
+
+describe('Title tracked changes', () => {
+  const fmt = { bold: false, italic: false, underline: false, strikethrough: false, highlight: false, superscript: false, subscript: false, code: false };
+  const text = (t: string, revision?: { type: 'addition' | 'deletion'; author: string; date: string }): ContentItem =>
+    ({ type: 'text', text: t, commentIds: new Set(), formatting: fmt, ...(revision ? { revision } : {}) });
+
+  it('exports additions, deletions and substitutions as Word revisions in the title', async () => {
+    const md = '---\ntitle: A {++new++} {--old--} {~~x~>y~~} title\n---\n\nBody.';
+    const { docx } = await convertMdToDocx(md, { authorName: 'Ann' });
+    const xml = await (await (await import('jszip')).default.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const title = xml.match(/<w:p [^>]*><w:pPr><w:pStyle w:val="Title"\/>[\s\S]*?<\/w:p>/)![0];
+    expect(title).toContain('<w:ins w:id="0" w:author="Ann"><w:r><w:t>new</w:t></w:r></w:ins>');
+    expect(title).toContain('<w:del w:id="1" w:author="Ann"><w:r><w:delText>old</w:delText></w:r></w:del>');
+    expect(title).toContain('<w:del w:id="2" w:author="Ann"><w:r><w:delText>x</w:delText></w:r></w:del>'
+      + '<w:ins w:id="3" w:author="Ann"><w:r><w:t>y</w:t></w:r></w:ins>');
+    expect(title).not.toContain('{++');
+  });
+
+  it('keeps an opener with no closer as text', () => {
+    const state: DocxGenState = {
+      commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false,
+      listStartOverrides: [], hasComments: false, missingKeys: new Set<string>(), activeListStartOverrides: new Map(),
+    };
+    const xml = generateDocumentXml([], state, undefined, undefined, undefined, { title: ['A {++ b'] });
+    expect(xml).toContain('<w:t>A {++ b</w:t>');
+    expect(xml).not.toContain('<w:ins');
+  });
+
+  it('ends a substitution\'s old side at its first closer', () => {
+    const state: DocxGenState = {
+      commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false,
+      listStartOverrides: [], hasComments: false, missingKeys: new Set<string>(), activeListStartOverrides: new Map(),
+    };
+    const xml = generateDocumentXml([], state, undefined, undefined, undefined, { title: ['{~~literal~~} then {~~old~>new~~}'] });
+    expect(xml).toContain('<w:t xml:space="preserve">{~~literal~~} then </w:t>');
+    expect(xml).toContain('<w:delText>old</w:delText>');
+    expect(xml).toContain('<w:t>new</w:t>');
+  });
+
+  it('imports a title run\'s revision as CriticMarkup', () => {
+    const ann = { author: 'Ann', date: '2026-01-01T00:00:00Z' };
+    const content: ContentItem[] = [
+      { type: 'para', isTitle: true },
+      text('A '),
+      text('new', { type: 'addition', ...ann }),
+      text(' '),
+      text('old', { type: 'deletion', ...ann }),
+      text(' '),
+      text('x', { type: 'deletion', ...ann }),
+      text('y', { type: 'addition', ...ann }),
+      text(' '),
+      text('p', { type: 'deletion', ...ann }),
+      text('q', { type: 'addition', author: 'Bob', date: ann.date }),
+    ];
+    expect(extractTitleLines(content)).toEqual(['A {++new++} {--old--} {~~x~>y~~} {--p--}{++q++}']);
+  });
+
+  it('drops tracked whitespace beside a title\'s line breaks, and a line of it alone', () => {
+    const ann = { author: 'Ann', date: '2026-01-01T00:00:00Z' };
+    const content: ContentItem[] = [
+      { type: 'para', isTitle: true },
+      text('A'),
+      text(' ', { type: 'addition', ...ann }),
+      text('\\\n'),
+      text(' ', { type: 'addition', ...ann }),
+      text('\\\n'),
+      text(' ', { type: 'deletion', ...ann }),
+      text('B'),
+    ];
+    expect(extractTitleLines(content)).toEqual(['A', 'B']);
+  });
+
+  it('MD→DOCX→MD keeps a deleted title line\'s font style', async () => {
+    const md = '---\ntitle: A\ntitle: {--B--}\ntitle-font-style: [bold, italic]\n---\n\nBody.';
+    const { docx } = await convertMdToDocx(md);
+    const { metadata } = parseFrontmatter((await convertDocx(docx)).markdown);
+    expect(metadata.title).toEqual(['A', '{--B--}']);
+    expect(metadata.titleFontStyle).toEqual(['bold', 'italic']);
+  });
+
+  it('MD→DOCX→MD reads a title line\'s font style from its shown text over its deletions', async () => {
+    const md = '---\ntitle: A\ntitle: X {--Y--}\ntitle-font-style: [bold, italic]\n---\n\nBody.';
+    const { docx } = await convertMdToDocx(md);
+    const zip = await (await import('jszip')).default.loadAsync(docx);
+    // Word's text of the deletion in another style than the line's
+    const xml = (await zip.file('word/document.xml')!.async('string'))
+      .replace(/(<w:del [^>]*><w:r><w:rPr><w:b w:val="0"\/>)<w:i\/>/, '$1<w:i w:val="0"/>');
+    zip.file('word/document.xml', xml);
+    const edited = await zip.generateAsync({ type: 'uint8array' });
+    const { metadata } = parseFrontmatter((await convertDocx(edited)).markdown);
+    expect(xml).toContain('<w:i w:val="0"/><w:caps w:val="0"/><w:smallCaps w:val="0"/><w:u w:val="none"/></w:rPr><w:delText>Y');
+    expect(metadata.title).toEqual(['A', 'X {--Y--}']);
+    expect(metadata.titleFontStyle).toEqual(['bold', 'italic']);
+  });
+
+  it('MD→DOCX→MD preserves tracked changes in the title', async () => {
+    const md = '---\ntitle: My {++new ++}title {--draft--}\ntitle: {~~Old~>New~~} subtitle\n---\n\nBody paragraph.';
+    const { docx } = await convertMdToDocx(md);
+    const result = await convertDocx(docx);
+    expect(parseFrontmatter(result.markdown).metadata.title).toEqual(['My {++new ++}title {--draft--}', '{~~Old~>New~~} subtitle']);
+  });
+});

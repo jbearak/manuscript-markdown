@@ -10,7 +10,7 @@ Import reads a number in an attribute by its value, as Word does, so one written
 
 The converter supports DOCX → Markdown → DOCX round-tripping. The following features are preserved in both directions:
 
-- **Title**: `title:` frontmatter ↔ Word `Title`-styled paragraphs (multiple entries supported)
+- **Title**: `title:` frontmatter ↔ Word `Title`-styled paragraphs (multiple entries supported). A title line's additions, deletions and substitutions, as `title: A {++new++} {~~draft~>final~~} title`, are Word's tracked changes in its paragraph, and import writes a Title paragraph's tracked changes back so. The title takes no other markup, so its other text, and an opener with no closer, stay text as they are.
 - **Author**: `author:` frontmatter ↔ `dc:creator` in Document Properties (omitted if blank)
 - **Text formatting**: Markdown syntax ↔ Word run formatting (bold, italic, underline, strikethrough, superscript, subscript, inline code)
 - **Headings**: `#`–`######` Markdown headings ↔ Word heading styles (H1 through H6). Import knows a heading style, and the Title, Quote and Intense Quote styles, by the name styles.xml gives it, which Word keeps in English, where its ID is another: Word in another language gives a built-in style an ID from the name it shows, as `berschrift1` for German's Überschrift 1. It finds the Normal, heading and Title styles whose fonts it reads by name too, as Normal is `Standard` in German, and by an ID that differs only in case, as `heading1`, as Word matches style IDs. Only paragraph styles count, as a paragraph takes no other: a character style whose ID is a built-in style's, as `Normal`, is neither that style nor keeps import from finding it by name, and the same holds for the table paragraph and code block styles whose fonts import reads. A custom style's font is read from the style of its ID whatever its type, as a custom style can be a character style. A paragraph's alignment and list numbering still come from its style under the document's own ID, as Word reads them.
@@ -284,7 +284,7 @@ bibliography: shared/references
 
 | Field | Description |
 |-------|-------------|
-| `title` | Document title. Multiple `title:` entries create multi-paragraph titles. |
+| `title` | Document title. Multiple `title:` entries create multi-paragraph titles. Additions, deletions and substitutions (`{++…++}`, `{--…--}`, `{~~…~>…~~}`) become tracked changes. |
 | `author` | Document author. Written as `dc:creator` in Document Properties on export. |
 | `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file. Defaults to `apa`. Non-bundled styles are downloaded automatically by the converter on first use. |
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |

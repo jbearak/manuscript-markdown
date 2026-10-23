@@ -11259,6 +11259,36 @@ function withoutUnwrittenMarkerSpaces(runs: MdRun[], edges: boolean): MdRun[] {
   return out.includes(emptied) ? out.filter(run => run !== emptied) : out;
 }
 
+/** A tracked change in a title line: an addition, a deletion or a
+ *  substitution, whose old side ends at the first ~~} after it, so a
+ *  {~~ with no ~> takes in no substitution after it */
+const TITLE_CHANGE_RE = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{~~((?:(?!~~\})[\s\S])*?)~>([\s\S]*?)~~\}/g;
+
+/**
+ * The runs of a title line, in `rPr`, its additions, deletions and
+ * substitutions, as `{++new++}`, `{--old--}` and `{~~old~>new~~}`, as Word's
+ * tracked changes, attributed as generateRuns attributes the body's. The
+ * rest of the line is text as it is, as the title takes no other Markdown,
+ * and so is an opener with no closer. Import writes them back (see
+ * extractTitleLines).
+ */
+function titleRunsXml(title: string, rPr: string, state: DocxGenState, options?: MdToDocxOptions): string {
+  const author = options?.authorName || 'Unknown';
+  const inserted = (text: string) => text ? insertionXml(generateRun(text, rPr), author, '', state) : '';
+  const deleted = (text: string) => text ? deletionXml('<w:r>' + rPr + delText(text) + '</w:r>', author, '', state) : '';
+  let xml = '';
+  let last = 0;
+  for (const change of title.matchAll(TITLE_CHANGE_RE)) {
+    if (change.index > last) xml += generateRun(title.slice(last, change.index), rPr);
+    if (change[1] !== undefined) xml += inserted(change[1]);
+    else if (change[2] !== undefined) xml += deleted(change[2]);
+    else xml += deleted(change[3]) + inserted(change[4]);
+    last = change.index + change[0].length;
+  }
+  // A line with no text, as `title:` alone, still gets its empty run
+  return last < title.length || !xml ? xml + generateRun(title.slice(last), rPr) : xml;
+}
+
 export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
   tokens = withQuoteCommentBodiesMerged(tokens);
   const omitsCommentBodies = commentBodiesOmitted(tokens);
@@ -11318,7 +11348,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       const titleStyleHasCenter = fo?.titleStyles?.[0]?.includes('center');
       // Explicit left override needed when the shared Title style has centering but this paragraph does not
       const jcEl = wantsCenter ? '<w:jc w:val="center"/>' : (titleStyleHasCenter ? '<w:jc w:val="left"/>' : '');
-      body += '<w:p><w:pPr><w:pStyle w:val="Title"/>' + jcEl + '</w:pPr>' + generateRun(frontmatter.title[i], rPr) + '</w:p>';
+      body += '<w:p><w:pPr><w:pStyle w:val="Title"/>' + jcEl + '</w:pPr>' + titleRunsXml(frontmatter.title[i], rPr, state, options) + '</w:p>';
     }
     // Title acts like heading — suppress first-line indent on next paragraph
     state.afterHeading = true;
