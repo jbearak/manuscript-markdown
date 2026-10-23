@@ -3128,13 +3128,28 @@ describe('frontmatter for VS Code\'s preview table', () => {
       .toBe('title:\n  - "One"\n  - "{++Two++}"\n\nfont: X');
   });
 
+  it('takes a block list\'s items after a comment between them, as export reads them', () => {
+    expect(frontmatterYamlForPreview('title:\n  - One\n# c\n  - {++Two++}\ntitle: Three\nfont: X'))
+      .toBe('title:\n  - "One"\n  - "{++Two++}"\n  - "Three"\nfont: X');
+    expect(frontmatterYamlForPreview('title:\n  - One\n# c\n  - {++Two++}'))
+      .toBe('title:\n  - "One"\n  - "{++Two++}"');
+  });
+
+  it('quotes a title with a brace inside it, which reads the same quoted', () => {
+    expect(frontmatterYamlForPreview('title: Plain {--old--} title\nfont: X')).toBe('title: "Plain {--old--} title"\nfont: X');
+  });
+
+  it('quotes an inline array\'s titles that hold a brace', () => {
+    expect(frontmatterYamlForPreview('title: [{++New++} title, Other]')).toBe('title:\n  - "{++New++} title"\n  - "Other"');
+  });
+
   it('keeps the title where it was first, and the other keys as they are', () => {
     expect(frontmatterYamlForPreview('title: "A: b"\nfont: X\ntitle: C\ncsl: apa'))
       .toBe('title:\n  - "A: b"\n  - "C"\nfont: X\ncsl: apa');
   });
 
   it('leaves frontmatter YAML reads as export does as it is', () => {
-    for (const yaml of ['title: Plain {--old--} title\nfont: X', 'title:\n  - One\n  - Two', 'font: X']) {
+    for (const yaml of ['title: Plain title\nfont: X', 'title:\n  - One\n  - Two', 'title: [A, B]', 'title-font-style: bold', 'font: X']) {
       expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
     }
   });

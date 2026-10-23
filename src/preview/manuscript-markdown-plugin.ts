@@ -29,7 +29,7 @@ import { pushAll, spliceAll } from '../arrays';
 import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionLabelId, isCaptionText, tableCaptionSource, type CaptionOptions, type FigureAttributes } from '../captions';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
-import { parseFrontmatter, type ColorScheme } from '../frontmatter';
+import { blockListAfter, parseFrontmatter, type ColorScheme } from '../frontmatter';
 import { styleFence } from '../style-fence';
 import { htmlBlockKind } from '../html-blocks';
 import { extractHtmlTables } from '../html-table-parser';
@@ -2504,27 +2504,30 @@ function captionsRule(state: StateCore): void {
  * for its table and shows "Failed to parse frontmatter" where it can't. YAML
  * holds a key once, so a title of several lines, `title:` repeated, failed,
  * and it reads a value that starts with a brace, as `{++New++} title`, as a
- * mapping. So where the title has several lines, or a line that starts with
- * a brace, it's one key, before the other keys where it was first, holding
+ * mapping, in a value, a list's item or an inline array's. So where the
+ * title has several lines, or a brace in any of them, it's one key, before
+ * the other keys where it was first, holding
  * each line quoted, in a list where it has several. Otherwise the YAML
  * stays as it is, which the preview's code block of it shows.
  */
 export function frontmatterYamlForPreview(content: string): string {
   const lines = content.split('\n');
-  // Each title entry's lines: its key's, and the indented, blank or list
-  // item lines after it, as a block list's, but not blank lines at its end
+  // Each title entry's lines: its key's, and its block list's, with the
+  // blank lines and comments between its items, as parseFrontmatter reads
+  // it (see blockListAfter), or else the indented lines after its value
   const entries: Array<{ start: number; end: number }> = [];
   for (let k = 0; k < lines.length; k++) {
     if (!/^title\s*:/.test(lines[k])) continue;
-    let end = k + 1;
-    while (end < lines.length && /^(?:\s|-|$)/.test(lines[end])) end++;
-    while (end > k + 1 && lines[end - 1].trim() === '') end--;
+    const list = blockListAfter(lines, k);
+    let end = list ? list.last + 1 : k + 1;
+    while (!list && end < lines.length && /^[ \t]+\S/.test(lines[end])) end++;
     entries.push({ start: k, end });
     k = end - 1;
   }
-  const startsWithBrace = entries.some(({ start, end }) =>
-    /^title\s*:\s*\{/.test(lines[start]) || lines.slice(start + 1, end).some(line => /^\s*-\s*\{/.test(line)));
-  if (entries.length < 2 && !startsWithBrace) return content;
+  // A brace anywhere in the title, which YAML can read as a mapping's, in a
+  // value, a list's item or an inline array's
+  const holdsBrace = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{')));
+  if (entries.length < 2 && !holdsBrace) return content;
   const titles = parseFrontmatter('---\n' + content + '\n---\n').metadata.title ?? [];
   const title = titles.length === 1 ? ['title: ' + JSON.stringify(titles[0])]
     : ['title:', ...titles.map(line => '  - ' + JSON.stringify(line))];
