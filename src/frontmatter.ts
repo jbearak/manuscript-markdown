@@ -93,10 +93,9 @@ function canonicalKey(key: string): string {
   return Object.hasOwn(KEY_ALIASES, key) ? KEY_ALIASES[key] : key;
 }
 
-/** Whether settings read from an entry give one, which an empty title, as of `title:` alone, doesn't */
+/** Whether settings read from an entry give one, which empty values, as of `title:` alone, don't */
 function givesSetting(metadata: Frontmatter): boolean {
-  const keys = Object.keys(metadata);
-  return keys.length > 1 || keys.length === 1 && !(metadata.title?.length === 1 && metadata.title[0] === '');
+  return Object.values(metadata).some(value => Array.isArray(value) ? value.some(item => item !== '') : value !== '');
 }
 
 /** Quarto's mappings, of whose keys export reads some: `crossref`'s
@@ -791,6 +790,15 @@ function readFrontmatterLines(lines: string[], warnings: string[]): { metadata: 
       }
       if (Object.keys(crossref).length > 0) metadata.crossref = crossref;
       continue;
+    }
+
+    // A key with no value on its line, whose value is the lines indented
+    // under it, as `title:` then `  text: My title`, a mapping, gives no
+    // setting, as no line of it does (see nestedKeys)
+    if (value === '') {
+      let next = lineIdx + 1;
+      while (next < yamlLines.length && /^[ \t]*(?:#.*)?\r?$/.test(yamlLines[next])) next++;
+      if (next < yamlLines.length && (yamlLines[next][0] === ' ' || yamlLines[next][0] === '\t')) continue;
     }
 
     switch (key) {

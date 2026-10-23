@@ -148,8 +148,8 @@ describe('a block list in frontmatter', () => {
     const mixed = read('title:\n  - One\n  - "Two": x\n  - Three');
     expect(mixed.metadata.title).toEqual(['One', 'Three']);
     expect(mixed.warnings).toHaveLength(1);
-    // The key alone, as the key as written is read
-    expect(read('title:\n  -\n    sub: x').metadata).toEqual({ title: [''] });
+    // No value, as the item's is the lines under it
+    expect(read('title:\n  -\n    sub: x').metadata).toEqual({});
     // Its lines, of which export reads no key, as they're indented
     const nested = read('keywords:\n  - name: x\n    font: Arial');
     expect(nested.metadata).toEqual({});
@@ -269,6 +269,13 @@ describe('Keys indented under another key', () => {
       'Frontmatter `bibliography` is indented under `meta`, which makes it part of `meta`, so export doesn\'t read it. To set `bibliography`, move it to the start of its line.',
       'Frontmatter `font` is indented under `meta`, which makes it part of `meta`, so export doesn\'t read it. To set `font`, move it to the start of its line.',
     ]);
+  });
+
+  it('reads no value of a key with none on its line and lines indented under it, its value', () => {
+    expect(read('title:\n  text: My title\ntitle: T').metadata).toEqual({ title: ['T'] });
+    expect(read('csl:\n\n  # a style\n  path: x.csl').metadata).toEqual({});
+    // A key with none, before another key, as before
+    expect(read('title:\n# c\nauthor: A').metadata).toEqual({ title: [''], author: 'A' });
   });
 
   it('reads no list under a key indented, nor a key on a line after an item of text, which is the item\'s', () => {

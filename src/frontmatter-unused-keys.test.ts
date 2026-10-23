@@ -203,8 +203,13 @@ describe('frontmatter keys export reads nothing from, through Word', () => {
     expect(await recordValues('---\nauthor: Jane\n---\n\nBody.\n')).toEqual([]);
   });
 
-  it('keep a title whose value is the lines under it, which export reads as empty', async () => {
-    expect(await roundTrip('---\ntitle:\n  text: My title\ndate: 1\n---\n\nBody.\n')).toBe('---\ntitle:\n  text: My title\ndate: 1\n---\n\nBody.\n');
+  it('keep a key whose value is the lines under it, which export reads no setting from, through each trip', async () => {
+    for (const markdown of ['---\ntitle:\n  text: My title\ndate: 1\n---\n\nBody.\n', '---\ntitle:\n  text: My title\ntitle: T\n---\n\nBody.\n',
+      '---\ntitle:\n  -\n  -\n  - name: Jane\n---\n\nBody.\n', '---\ncsl:\n  path: custom.csl\n---\n\nBody.\n', '---\nlocale:\n\n  # French\n  language: fr\n---\n\nBody.\n']) {
+      const once = await roundTrip(markdown);
+      expect(once).toBe(markdown);
+      expect(await roundTrip(once)).toBe(markdown);
+    }
   });
 
   it('keep the setting another entry gives a key held as written, through an alias or the key repeated', async () => {
