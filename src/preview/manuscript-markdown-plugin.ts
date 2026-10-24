@@ -1386,7 +1386,7 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   // silently, and which a token that takes a [ in it ends: a link around a
   // citation stays a link
   const start = state.pos;
-  const end = citationSpanAt(state, start, silent);
+  const end = citationSpanAt(state, start, silent, false);
   if (end === -1) return false;
   // With the line breaks CriticMarkup protected in it, before which a key
   // starts as after a space
