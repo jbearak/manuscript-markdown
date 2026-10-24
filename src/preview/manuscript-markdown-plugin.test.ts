@@ -3267,6 +3267,19 @@ describe('No Markup preview', () => {
       .toContain('<p>a <span class="manuscript-markdown-comment-indicator" data-comment="hl"></span> b</p>');
   });
 
+  it('shows a comment on a highlight of deleted text as an indicator', () => {
+    expect(renderNoMarkup('{=={--gone--}==}{>>note<<}'))
+      .toContain('<p><span class="manuscript-markdown-comment-indicator" data-comment="note"></span><mark class="manuscript-markdown-highlight"></mark></p>');
+  });
+
+  it('drops a block of deleted text in raw HTML formatting', () => {
+    const html = renderNoMarkup('<em>{--gone--}</em>\n\n# <b>{--old--}</b>\n\n- <i>{--x--}</i>\n\nKept <br> here');
+    expect(html).not.toContain('<em>');
+    expect(html).not.toContain('<h1');
+    expect(html).not.toContain('<ul');
+    expect(html).toContain('<p>Kept <br> here</p>');
+  });
+
   it('shows a comment on a substitution with no new text as an indicator', () => {
     expect(renderNoMarkup('{~~gone~>~~}{>>note<<}'))
       .toContain('<p><span class="manuscript-markdown-comment-indicator" data-comment="note"></span></p>');

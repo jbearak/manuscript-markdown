@@ -2286,54 +2286,71 @@ function acceptChanges(children: Token[], state: StateCore): Token[] {
   return withLevels(out);
 }
 
-/** The index of the close of the range's span that opens at `open` */
-function rangeSpanClose(children: Token[], open: number): number {
+/** Whether a token shows anything once every change is accepted: as
+ *  isVisibleInlineToken, but for a raw HTML tag that wraps text, as <em>
+ *  or </em>, which shows nothing of its own */
+function isAcceptedTextVisible(token: Token): boolean {
+  return isVisibleInlineToken(token) && rawHtmlTag(token) === undefined;
+}
+
+/** The index of the close of the element that opens at `open` */
+function elementClose(children: Token[], open: number): number {
   let depth = 0;
   for (let i = open; i < children.length; i++) {
-    if (children[i].type === 'manuscript_markdown_comment_range_open') depth++;
-    else if (children[i].type === 'manuscript_markdown_comment_range_close' && --depth === 0) return i;
+    depth += children[i].nesting;
+    if (depth === 0) return i;
   }
   return children.length;
 }
 
 /**
- * A comment whose range's spans, in every paragraph or piece they're in,
- * hold no text once every change is accepted, as one on a deletion or on
- * text deleted, shows as an indicator where its first span was, once, in
- * place of its spans. A span's key is its comment's ID, or the key of the
- * change the comment is on (see keyElementCommentsRule).
+ * A comment whose elements, in every paragraph or piece they're in, hold no
+ * text once every change is accepted, as one on a deletion, on text
+ * deleted, or on a highlight of deleted text, shows as an indicator where
+ * its first element was, once. A range's span with no text goes in its
+ * place; another element stays, with no comment. An element's key is its
+ * comment's ID, for a range's span, or the key of the element the comment
+ * is on (see keyElementCommentsRule).
  */
 function commentsOnAcceptedText(inlines: Token[], state: StateCore): void {
-  const keyOf = (span: Token): unknown => span.meta?.manuscriptCommentKey ?? span.meta?.id ?? span;
+  const keyOf = (open: Token): unknown => open.meta?.manuscriptCommentKey ?? open.meta?.id ?? open;
+  const carries = (token: Token): boolean => token.nesting === 1 && !!token.attrGet('data-comment');
   const shown = new Set<unknown>();
   for (const inline of inlines) {
     const children = inline.children!;
     children.forEach((child, at) => {
-      if (child.type !== 'manuscript_markdown_comment_range_open') return;
-      const inside = children.slice(at + 1, rangeSpanClose(children, at));
-      if (inside.some(token => isVisibleInlineToken(token))) shown.add(keyOf(child));
+      if (!carries(child)) return;
+      const inside = children.slice(at + 1, elementClose(children, at));
+      if (inside.some(isAcceptedTextVisible)) shown.add(keyOf(child));
     });
   }
   const placed = new Set<unknown>();
   for (const inline of inlines) {
     const out: Token[] = [];
-    // For each span open, whether it stays
+    // For each range's span open, whether it stays
     const kept: boolean[] = [];
     for (const child of inline.children!) {
-      if (child.type === 'manuscript_markdown_comment_range_open') {
-        const key = keyOf(child);
-        const keep = shown.has(key);
-        kept.push(keep);
-        if (keep) out.push(child);
-        else if (!placed.has(key)) {
-          placed.add(key);
-          const indicator = new state.Token('manuscript_markdown_comment_indicator', 'span', 0);
-          indicator.attrSet('data-comment', child.attrGet('data-comment') || '');
-          out.push(indicator);
-        }
-      } else if (child.type === 'manuscript_markdown_comment_range_close') {
+      const isSpan = child.type === 'manuscript_markdown_comment_range_open';
+      if (child.type === 'manuscript_markdown_comment_range_close') {
         if (kept.pop()) out.push(child);
+        continue;
+      }
+      if (!carries(child) || shown.has(keyOf(child))) {
+        if (isSpan) kept.push(true);
+        out.push(child);
+        continue;
+      }
+      const key = keyOf(child);
+      if (!placed.has(key)) {
+        placed.add(key);
+        const indicator = new state.Token('manuscript_markdown_comment_indicator', 'span', 0);
+        indicator.attrSet('data-comment', child.attrGet('data-comment') || '');
+        out.push(indicator);
+      }
+      if (isSpan) {
+        kept.push(false);
       } else {
+        child.attrs = child.attrs?.filter(([name]) => name !== 'data-comment') ?? null;
         out.push(child);
       }
     }
@@ -2355,12 +2372,13 @@ const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list'
 function acceptChangesRule(state: StateCore): void {
   const tokens = state.tokens;
   const inlines = tokens.filter(token => token.type === 'inline' && token.children);
-  const hadContent = new Set(inlines.filter(inline => hasVisibleInlineContent(inline.children!)));
+  const hasText = (inline: Token): boolean => inline.children!.some(isAcceptedTextVisible);
+  const hadContent = new Set(inlines.filter(hasText));
   for (const inline of inlines) inline.children = acceptChanges(inline.children!, state);
   commentsOnAcceptedText(inlines, state);
   for (let i = 0; i < tokens.length; i++) {
     const inline = tokens[i];
-    if (!hadContent.has(inline) || hasVisibleInlineContent(inline.children!)) continue;
+    if (!hadContent.has(inline) || hasText(inline)) continue;
     const open = tokens[i - 1];
     if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
     // The paragraph's open, inline and close, then each container left empty
