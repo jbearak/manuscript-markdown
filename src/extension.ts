@@ -1521,6 +1521,18 @@ async function resolveDocxOutputUri(
 		return { uri: docxUri, unlinkSymlink: false, writeThrough: false };
 	}
 
+	// exportToWordExistingFile skips the dialog below: 'replace' writes a
+	// symlink's target (Replace Target), 'replaceSymlink' unlinks it first;
+	// either overwrites a regular file.
+	const existingFile = vscode.workspace.getConfiguration('manuscriptMarkdown')
+		.get<'ask' | 'replace' | 'replaceSymlink'>('exportToWordExistingFile', 'ask');
+	if (existingFile === 'replace') {
+		return { uri: docxUri, unlinkSymlink: false, writeThrough: docxIsSymlink };
+	}
+	if (existingFile === 'replaceSymlink') {
+		return { uri: docxUri, unlinkSymlink: docxIsSymlink, writeThrough: false };
+	}
+
 	let choice: string | undefined;
 	if (docxIsSymlink) {
 		choice = await vscode.window.showWarningMessage(
