@@ -3321,3 +3321,14 @@ describe('No Markup preview', () => {
     expect(renderWithPlugin('a {--b--}')).toContain('<del class="manuscript-markdown-deletion">b</del>');
   });
 });
+
+describe('text over a blank line that is no CriticMarkup span', () => {
+  it('keeps the text after the closer on its line', () => {
+    // A substitution with no ~> is none, as export reads it: its opener
+    // and closer stay text in paragraphs of their own, and the line's text
+    // after the closer shows
+    const html = renderWithPlugin('{~~a\n\nb~~} tail');
+    expect(html).toContain('<p>{~~a</p>');
+    expect(html).toContain('tail');
+  });
+});

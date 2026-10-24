@@ -6,7 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import fc from 'fast-check';
 import type Token from 'markdown-it/lib/token.mjs';
 import { createMarkdownIt, parseMd, preprocessCriticMarkup } from './md-to-docx';
-import { preprocessBlocks } from './block-preprocess';
+import { deLazifyBlockquotesWithLines, preprocessBlocks } from './block-preprocess';
 import { createMarkdownItWithPlugin } from './test-helpers';
 import { VALID_COLOR_IDS } from './highlight-colors';
 import { formatHighlightAt, criticSpanAt } from './inline-syntax';
@@ -104,14 +104,15 @@ function previewSpans(markdown: string): string[] {
  *  doesn't (see citationSpanAt) */
 const CITATION_IN_LINK = 'citation_in_link';
 
-// Pieces of inline syntax, whole and in part, on one line. Not $, which
+// Pieces of inline syntax, whole and in part, and of the blocks around it.
+// Not $, which
 // export reads as math and the preview leaves to VS Code's math extension,
 // nor a footnote's reference, which the preview doesn't read.
 const PIECES = [
   '{++', '++}', '{--', '--}', '{~~', '~>', '~~}', '{==', '==}', '==', '{>>', '<<}',
   '{#a}', '{/a}', '{#a>>', '{#fig-a}', '{red}', '{yellow}', '{', '}', '\\',
   '[@k]', '[see @k, p. 2]', '[', '](u)', ']', '@fig-a', '[@fig-a]',
-  '*', '`', '<!--', '-->', '<b>', '</b>', 'a', 'b', ' ',
+  '*', '`', '<!--', '-->', '<b>', '</b>', 'a', 'b', ' ', '\n', '\n\n', '> ', '- ', '# ',
 ];
 
 describe('preview and export read the same inline syntax', () => {
@@ -125,15 +126,27 @@ describe('preview and export read the same inline syntax', () => {
     '==a=={red} ==b=={yellow} ==c=={nocolor}',
     // CriticMarkup only within a link's text
     '[a {++b](u) c++}',
+    // A span over a blank line, which preprocessing joins, or which, with no
+    // ~> in it, is none, and the text after it on its line
+    '{++a\n\nb++} c',
+    '{~~b\n\n<b>{~~}@fig-a{',
+    '{~~{red}\n==}~~}@fig-a',
+    // A cross-reference in a highlight in a link is the link's text
+    '[==[@fig-a]==](u)',
+    // In a quote, each of whose lines has its >
+    '> [\n> ](u) {++a\n>\n> b++}',
     // Each kind, whole
     '{++a++} {--b--} {~~c~>d~~} {==e==}{>>f<<} {#x}g{/x}{#x>>h<<} ==i=={red} [@k] [@fig-a]',
   ])('%s', (markdown: string) => {
     expect(previewSpans(markdown)).toEqual(exportSpans(markdown));
   });
 
-  test('in any text on one line', () => {
+  test('in any text', () => {
     fc.assert(fc.property(fc.array(fc.constantFrom(...PIECES), { maxLength: 12 }), pieces => {
-      const markdown = pieces.join('');
+      // With each quote's lines marked, as export ends a quote before a line
+      // without a >, where the preview, as VS Code's, goes on with it: a
+      // difference of blocks, by design (see deLazifyBlockquotesWithLines)
+      const markdown = deLazifyBlockquotesWithLines(pieces.join('')).output;
       const spans = previewSpans(markdown);
       // But for a citation in a link's text (see citationSpanAt)
       fc.pre(!spans.includes(CITATION_IN_LINK));
