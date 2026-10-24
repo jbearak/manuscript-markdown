@@ -946,7 +946,8 @@ export function htmlBlocksIn(text: string): Array<{ start: number; end: number; 
 
 function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  const endPos = citationSpanAt(state, start, silent);
+  // One in a link's label too, which keeps its field (see citationSpanAt)
+  const endPos = citationSpanAt(state, start, silent, true);
   if (endPos === -1) return false;
   // With the line breaks of CriticMarkup in it, as in a comment's body
   const rawContent = restoreCriticLineBreaks(state.src.slice(start + 1, endPos));

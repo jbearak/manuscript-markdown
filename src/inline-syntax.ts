@@ -228,12 +228,18 @@ export function formatHighlightAt(state: InlineState, start: number): FormatHigh
 }
 
 /** Where the citation at `start` ends: the offset of its ], or -1 for
- *  none (see citationEnd), which ends by the state's posMax. None where
- *  markdown-it scans a link's label, which it alone does silently: a
- *  token that took a [ in the label would end it, and lose the link
- *  around the citation, as in [see [@a]](u). */
-export function citationSpanAt(state: StateInline, start: number, silent: boolean): number {
-  if (silent || start + 2 >= state.posMax) return -1;
+ *  none (see citationEnd), which ends by the state's posMax.
+ *
+ *  `inLinkLabel` is whether one is read where markdown-it scans a link's
+ *  label, which it alone does silently. A token that takes a [ in the label
+ *  ends it, so the link around the citation is lost, as in [see [@a]](u).
+ *  The preview doesn't read one there, so the link stays and shows the
+ *  citation as its text. Export does: Word keeps a citation's field, and its
+ *  entry in the bibliography, but not in a link, whose hyperlink import
+ *  would take it out of, so the link's brackets are text. The one place the
+ *  two read differently (see syntax-parity.test.ts). */
+export function citationSpanAt(state: StateInline, start: number, silent: boolean, inLinkLabel: boolean): number {
+  if (silent && !inLinkLabel || start + 2 >= state.posMax) return -1;
   const end = citationEnd(state, start);
   return end !== -1 && end < state.posMax ? end : -1;
 }
