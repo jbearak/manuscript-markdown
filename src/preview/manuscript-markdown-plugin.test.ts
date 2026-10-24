@@ -3260,6 +3260,33 @@ describe('No Markup preview', () => {
       .toContain('<p>x <span class="manuscript-markdown-comment-range" data-comment="cmt">a </span> d</p>');
   });
 
+  it('shows a comment on deleted text as an indicator', () => {
+    expect(renderNoMarkup('Before {--{#1}gone{/1}--} after{#1>>note<<}'))
+      .toContain('<p>Before <span class="manuscript-markdown-comment-indicator" data-comment="note"></span> after</p>');
+    expect(renderNoMarkup('a {--x {==y==}{>>hl<<} z--} b'))
+      .toContain('<p>a <span class="manuscript-markdown-comment-indicator" data-comment="hl"></span> b</p>');
+  });
+
+  it('shows a comment on a substitution with no new text as an indicator', () => {
+    expect(renderNoMarkup('{~~gone~>~~}{>>note<<}'))
+      .toContain('<p><span class="manuscript-markdown-comment-indicator" data-comment="note"></span></p>');
+  });
+
+  it('shows a comment on a deletion a range splits once', () => {
+    const html = renderNoMarkup('x {#1}a {--b{/1} c--}{>>d<<} z{#1>>r<<}');
+    expect(html.split('data-comment="d"').length - 1).toBe(1);
+    expect(html).toContain('<p>x <span class="manuscript-markdown-comment-range" data-comment="r">a <span class="manuscript-markdown-comment-indicator" data-comment="d"></span></span> z</p>');
+  });
+
+  it('shows a comment on a deletion over paragraphs once', () => {
+    const html = renderNoMarkup('{--one\n\ntwo--}{>>d<<}\n\nkept');
+    expect(html.split('data-comment="d"').length - 1).toBe(1);
+  });
+
+  it('accepts changes in an image alt text', () => {
+    expect(renderNoMarkup('![{~~old~>new~~}](missing.png)')).toContain('alt="new"');
+  });
+
   it('leaves standalone comments and highlights as they are', () => {
     const text = 'See {==this==}{>>hm<<} and ==that== here{>>note<<}.';
     const marked = renderWithPlugin(text);

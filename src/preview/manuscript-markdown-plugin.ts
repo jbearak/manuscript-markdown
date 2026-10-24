@@ -2196,9 +2196,49 @@ const ACCEPTED_CHANGE_TYPES = new Set([
   'manuscript_markdown_substitution_new_close',
 ]);
 
+/**
+ * Core rule that, where the preview shows no markup, gives each element
+ * with a comment on it, as a change or a highlight, a key of its own,
+ * before the rules that split one over paragraphs or a range's span copy
+ * its open (see cloneInlineToken), so its comment shows once however many
+ * pieces it's in (see commentsOnAcceptedText). Runs after
+ * associateCommentsRule puts each comment on its element.
+ */
+function keyElementCommentsRule(state: StateCore): void {
+  for (const token of state.tokens) {
+    for (const child of token.type === 'inline' && token.children ? token.children : []) {
+      if (child.nesting === 1 && child.attrGet('data-comment')) {
+        child.meta = { ...(child.meta || {}), manuscriptCommentKey: {} };
+      }
+    }
+  }
+}
+
+/** A range's span for a comment, keyed by the comment it shows (see
+ *  commentsOnAcceptedText) */
+function commentSpanOpen(state: StateCore, comment: string, key: unknown): Token {
+  const span = new state.Token('manuscript_markdown_comment_range_open', 'span', 1);
+  span.attrSet('class', 'manuscript-markdown-comment-range');
+  span.attrSet('data-comment', comment);
+  span.meta = { manuscriptCommentKey: key };
+  return span;
+}
+
+function commentSpanClose(state: StateCore): Token {
+  return new state.Token('manuscript_markdown_comment_range_close', 'span', -1);
+}
+
+/** Whether a token shows a comment, which a deletion keeps (see acceptChanges) */
+function isCommentToken(token: Token): boolean {
+  return isRangeSpan(token) || token.type === 'manuscript_markdown_comment_indicator';
+}
+
 /** An inline token's children as they read with every change accepted. A
- *  comment on a deletion stays, as an indicator where it was, and one on an
- *  addition or substitution, as a comment's range over the text it added */
+ *  comment on a change is a range's span over the text the change leaves,
+ *  none for a deletion, as is a comment on an element or a range's span in
+ *  deleted text, which
+ *  commentsOnAcceptedText shows as an indicator where all its text went.
+ *  An image's alt text reads the same */
 function acceptChanges(children: Token[], state: StateCore): Token[] {
   const out: Token[] = [];
   // For each unwrapped open still open, by its type, the range span it
@@ -2208,42 +2248,97 @@ function acceptChanges(children: Token[], state: StateCore): Token[] {
     const token = children[i];
     if (REJECTED_CHANGE_OPENS.has(token.type)) {
       const comment = token.attrGet('data-comment');
-      if (comment) {
-        const indicator = new state.Token('manuscript_markdown_comment_indicator', 'span', 0);
-        indicator.attrSet('data-comment', comment);
-        out.push(indicator);
-      }
+      if (comment) out.push(commentSpanOpen(state, comment, token.meta?.manuscriptCommentKey ?? token));
       const closeType = token.type.slice(0, -'_open'.length) + '_close';
       let depth = 1;
       while (depth > 0 && ++i < children.length) {
         if (children[i].type === token.type) depth++;
         else if (children[i].type === closeType) depth--;
+        else if (isCommentToken(children[i])) out.push(children[i]);
+        else if (children[i].nesting === 1 && children[i].attrGet('data-comment')) {
+          // A comment on an element in the deleted text
+          const inner = children[i];
+          out.push(commentSpanOpen(state, inner.attrGet('data-comment')!, inner.meta?.manuscriptCommentKey ?? inner), commentSpanClose(state));
+        }
       }
+      if (comment) out.push(commentSpanClose(state));
       continue;
     }
     if (!ACCEPTED_CHANGE_TYPES.has(token.type)) {
+      if (token.children) token.children = acceptChanges(token.children, state);
       out.push(token);
       continue;
     }
-    const isOpen = token.nesting === 1;
     const kind = token.type.slice(0, token.type.lastIndexOf('_'));
     const stack = opened.get(kind) ?? [];
     opened.set(kind, stack);
-    if (isOpen) {
+    if (token.nesting === 1) {
       const comment = token.attrGet('data-comment');
-      let span: Token | undefined;
-      if (comment) {
-        span = new state.Token('manuscript_markdown_comment_range_open', 'span', 1);
-        span.attrSet('class', 'manuscript-markdown-comment-range');
-        span.attrSet('data-comment', comment);
-        out.push(span);
-      }
+      const span = comment
+        ? commentSpanOpen(state, comment, token.meta?.manuscriptCommentKey ?? token)
+        : undefined;
+      if (span) out.push(span);
       stack.push(span);
     } else if (stack.pop()) {
-      out.push(new state.Token('manuscript_markdown_comment_range_close', 'span', -1));
+      out.push(commentSpanClose(state));
     }
   }
   return withLevels(out);
+}
+
+/** The index of the close of the range's span that opens at `open` */
+function rangeSpanClose(children: Token[], open: number): number {
+  let depth = 0;
+  for (let i = open; i < children.length; i++) {
+    if (children[i].type === 'manuscript_markdown_comment_range_open') depth++;
+    else if (children[i].type === 'manuscript_markdown_comment_range_close' && --depth === 0) return i;
+  }
+  return children.length;
+}
+
+/**
+ * A comment whose range's spans, in every paragraph or piece they're in,
+ * hold no text once every change is accepted, as one on a deletion or on
+ * text deleted, shows as an indicator where its first span was, once, in
+ * place of its spans. A span's key is its comment's ID, or the key of the
+ * change the comment is on (see keyElementCommentsRule).
+ */
+function commentsOnAcceptedText(inlines: Token[], state: StateCore): void {
+  const keyOf = (span: Token): unknown => span.meta?.manuscriptCommentKey ?? span.meta?.id ?? span;
+  const shown = new Set<unknown>();
+  for (const inline of inlines) {
+    const children = inline.children!;
+    children.forEach((child, at) => {
+      if (child.type !== 'manuscript_markdown_comment_range_open') return;
+      const inside = children.slice(at + 1, rangeSpanClose(children, at));
+      if (inside.some(token => isVisibleInlineToken(token))) shown.add(keyOf(child));
+    });
+  }
+  const placed = new Set<unknown>();
+  for (const inline of inlines) {
+    const out: Token[] = [];
+    // For each span open, whether it stays
+    const kept: boolean[] = [];
+    for (const child of inline.children!) {
+      if (child.type === 'manuscript_markdown_comment_range_open') {
+        const key = keyOf(child);
+        const keep = shown.has(key);
+        kept.push(keep);
+        if (keep) out.push(child);
+        else if (!placed.has(key)) {
+          placed.add(key);
+          const indicator = new state.Token('manuscript_markdown_comment_indicator', 'span', 0);
+          indicator.attrSet('data-comment', child.attrGet('data-comment') || '');
+          out.push(indicator);
+        }
+      } else if (child.type === 'manuscript_markdown_comment_range_close') {
+        if (kept.pop()) out.push(child);
+      } else {
+        out.push(child);
+      }
+    }
+    inline.children = withLevels(out);
+  }
 }
 
 /** The containers a paragraph's removal can leave with nothing in them */
@@ -2251,19 +2346,21 @@ const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list'
 
 /**
  * Core rule that, where the preview shows no markup, writes the document as
- * it reads with every change accepted (see acceptChanges). A paragraph or
- * heading that held only deleted text goes, as Word drops a paragraph
- * whose text and mark are deleted, and so does a list item, list or quote
- * that held only such paragraphs.
+ * it reads with every change accepted (see acceptChanges), with each
+ * comment still shown (see commentsOnAcceptedText). A paragraph or heading
+ * that held only deleted text goes, as Word drops a paragraph whose text
+ * and mark are deleted, and so does a list item, list or quote that held
+ * only such paragraphs.
  */
 function acceptChangesRule(state: StateCore): void {
   const tokens = state.tokens;
+  const inlines = tokens.filter(token => token.type === 'inline' && token.children);
+  const hadContent = new Set(inlines.filter(inline => hasVisibleInlineContent(inline.children!)));
+  for (const inline of inlines) inline.children = acceptChanges(inline.children!, state);
+  commentsOnAcceptedText(inlines, state);
   for (let i = 0; i < tokens.length; i++) {
     const inline = tokens[i];
-    if (inline.type !== 'inline' || !inline.children) continue;
-    const hadContent = hasVisibleInlineContent(inline.children);
-    inline.children = acceptChanges(inline.children, state);
-    if (!hadContent || hasVisibleInlineContent(inline.children)) continue;
+    if (!hadContent.has(inline) || hasVisibleInlineContent(inline.children!)) continue;
     const open = tokens[i - 1];
     if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
     // The paragraph's open, inline and close, then each container left empty
@@ -2894,7 +2991,10 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.core.ruler.after('inline', 'manuscript_markdown_autolink_literals', autolinkLiteralsRule);
   md.core.ruler.after('manuscript_markdown_autolink_literals', 'manuscript_markdown_promote_critic_headings', promoteCriticHeadingsRule);
   md.core.ruler.after('manuscript_markdown_promote_critic_headings', 'manuscript_markdown_associate_comments', associateCommentsRule);
-  md.core.ruler.after('manuscript_markdown_associate_comments', 'manuscript_markdown_split_critic_blocks', splitCriticBlocksRule);
+  md.core.ruler.after('manuscript_markdown_associate_comments', 'manuscript_markdown_key_element_comments', (state: StateCore) => {
+    if (md.manuscriptPreviewMarkup === 'none') keyElementCommentsRule(state);
+  });
+  md.core.ruler.after('manuscript_markdown_key_element_comments', 'manuscript_markdown_split_critic_blocks', splitCriticBlocksRule);
   md.core.ruler.after('manuscript_markdown_split_critic_blocks', 'manuscript_markdown_task_list', taskListRule);
   md.core.ruler.after('manuscript_markdown_task_list', 'manuscript_markdown_alert_blockquote', alertBlockquoteRule);
 
