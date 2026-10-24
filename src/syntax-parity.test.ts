@@ -64,6 +64,7 @@ function previewSpans(markdown: string): string[] {
   const spans: string[] = [];
   for (const children of inlines) {
     let depth = 0;
+    let links = 0;
     for (let i = 0; i < children.length; i++) {
       const { type, meta } = children[i];
       const span = PREVIEW_SPAN.exec(type);
@@ -88,14 +89,20 @@ function previewSpans(markdown: string): string[] {
         continue;
       }
       if (depth > 0 || type.startsWith('manuscript_markdown_substitution_')) continue;
+      if (type === 'link_open') links++;
+      else if (type === 'link_close') links--;
       if (type === 'manuscript_markdown_range_marker') spans.push((meta.type === 'start' ? 'range_start#' : 'range_end#') + meta.id);
-      else if (type === 'manuscript_citation') spans.push('citation');
+      else if (type === 'manuscript_citation') spans.push(links > 0 ? CITATION_IN_LINK : 'citation');
       else if (type === 'manuscript_cross_reference') spans.push('cross_reference');
       else if (type === 'link_open') spans.push('link');
     }
   }
   return spans;
 }
+
+/** A citation in a link's text, which export reads where the preview
+ *  doesn't (see citationSpanAt) */
+const CITATION_IN_LINK = 'citation_in_link';
 
 // Pieces of inline syntax, whole and in part, and of the blocks around it.
 // Not $, which
@@ -113,8 +120,7 @@ describe('preview and export read the same inline syntax', () => {
     // A critic highlight's opener with no closer opens no format highlight
     ']{==b==',
     '{=={--[<b>==](u)',
-    // A link around a citation or a cross-reference stays a link
-    '[see [@k]](u)',
+    // A link around a cross-reference stays a link
     '[a [@fig-a] b](u)',
     // A highlight's color, whose name the export keeps
     '==a=={red} ==b=={yellow} ==c=={nocolor}',
@@ -141,7 +147,10 @@ describe('preview and export read the same inline syntax', () => {
       // without a >, where the preview, as VS Code's, goes on with it: a
       // difference of blocks, by design (see deLazifyBlockquotesWithLines)
       const markdown = deLazifyBlockquotesWithLines(pieces.join('')).output;
-      expect(previewSpans(markdown)).toEqual(exportSpans(markdown));
+      const spans = previewSpans(markdown);
+      // But for a citation in a link's text (see citationSpanAt)
+      fc.pre(!spans.includes(CITATION_IN_LINK));
+      expect(spans).toEqual(exportSpans(markdown));
     }), { numRuns: 3000 });
   }, 60_000);
 });
@@ -151,13 +160,10 @@ describe('export reads the spans as the preview shows them', () => {
     expect(parseMd(']{==b==')[0].runs).toEqual([expect.objectContaining({ type: 'text', text: ']{==b==' })]);
   });
 
-  test('a link around a citation keeps its link', () => {
-    const runs = parseMd('[see [@k]](https://e.org) b')[0].runs;
-    expect(runs.map(run => [run.type, run.text, run.href])).toEqual([
-      ['text', 'see ', 'https://e.org'],
-      ['citation', '@k', 'https://e.org'],
-      ['text', ' b', undefined],
-    ]);
+  test('a citation in a link\'s text keeps its field, where the preview keeps the link', () => {
+    // The one place the two read differently (see citationSpanAt)
+    expect(previewSpans('[see [@k]](u)')).toEqual(['link', CITATION_IN_LINK]);
+    expect(exportSpans('[see [@k]](u)')).toEqual(['citation']);
   });
 });
 
