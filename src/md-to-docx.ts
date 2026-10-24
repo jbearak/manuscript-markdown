@@ -14,6 +14,7 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, preprocessGridTablesWithSourceMap } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { xmlInteger } from './xml-elements';
+import { withTrackedStructures } from './latex-to-omml';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
@@ -1405,7 +1406,7 @@ function trackedChangeXml(tag: 'w:ins' | 'w:del', contentXml: string, links: Reg
     xml += '<w:hyperlink r:id="' + link[1] + '">' + change(link[2]) + '</w:hyperlink>';
     last = link.index + link[0].length;
   }
-  return last === 0 || last < contentXml.length ? xml + change(contentXml.slice(last)) : xml;
+  return withTrackedStructures(last === 0 || last < contentXml.length ? xml + change(contentXml.slice(last)) : xml, () => state.commentId++);
 }
 
 /** Deleted content, from generateDeletedCriticContent, in w:del */
@@ -1659,7 +1660,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       }
     } else if (run.type === 'math') {
       const math = run.mathParts
-        ? generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display)
+        ? withTrackedStructures(generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display), () => state.commentId++)
         : generateMathXml(run.text, !!run.display, state.warnings);
       // Not inline math with a tracked change in it, or in one, whose
       // highlight import doesn't read (see mathHighlight in converter.ts)
