@@ -3280,6 +3280,17 @@ describe('No Markup preview', () => {
     expect(html).toContain('<p>Kept <br> here</p>');
   });
 
+  it('keeps raw HTML that shows content of its own beside deleted text', () => {
+    expect(renderNoMarkup('{--old--}<video controls src="movie.mp4"></video>'))
+      .toContain('<p><video controls src="movie.mp4"></video></p>');
+  });
+
+  it('reads an HTML comment as showing nothing', () => {
+    expect(renderNoMarkup('{#1}<!-- why -->{--gone--}{/1}{#1>>note<<}'))
+      .toContain('<span class="manuscript-markdown-comment-indicator" data-comment="note"></span>');
+    expect(renderNoMarkup('- {--gone--}<!-- why -->\n\nText')).not.toContain('<ul');
+  });
+
   it('shows a comment on a substitution with no new text as an indicator', () => {
     expect(renderNoMarkup('{~~gone~>~~}{>>note<<}'))
       .toContain('<p><span class="manuscript-markdown-comment-indicator" data-comment="note"></span></p>');

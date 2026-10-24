@@ -2286,11 +2286,24 @@ function acceptChanges(children: Token[], state: StateCore): Token[] {
   return withLevels(out);
 }
 
+/** The raw HTML elements that only format the text in them, so show
+ *  nothing of their own where it's all deleted */
+const TEXT_FORMATTING_HTML_TAGS = new Set([
+  'a', 'abbr', 'b', 'big', 'cite', 'code', 'del', 'dfn', 'em', 'font', 'i',
+  'ins', 'kbd', 'mark', 'q', 's', 'samp', 'small', 'span', 'strike', 'strong',
+  'sub', 'sup', 'tt', 'u', 'var',
+]);
+
 /** Whether a token shows anything once every change is accepted: as
- *  isVisibleInlineToken, but for a raw HTML tag that wraps text, as <em>
- *  or </em>, which shows nothing of its own */
+ *  isVisibleInlineToken, but for an HTML comment, or a raw HTML tag that
+ *  only formats text, as <em> or </em>. Another element, as <video>, shows
+ *  what it is */
 function isAcceptedTextVisible(token: Token): boolean {
-  return isVisibleInlineToken(token) && rawHtmlTag(token) === undefined;
+  if (!isVisibleInlineToken(token)) return false;
+  if (token.type !== 'html_inline') return true;
+  if (/^<!--[\s\S]*-->$/.test(token.content)) return false;
+  const tag = rawHtmlTag(token);
+  return tag === undefined || !TEXT_FORMATTING_HTML_TAGS.has(tag.tag);
 }
 
 /** The index of the close of the element that opens at `open` */
