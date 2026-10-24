@@ -8,8 +8,16 @@ import type Token from 'markdown-it/lib/token.mjs';
 import { createMarkdownIt, parseMd, preprocessCriticMarkup } from './md-to-docx';
 import { preprocessBlocks } from './block-preprocess';
 import { createMarkdownItWithPlugin } from './test-helpers';
+import { VALID_COLOR_IDS } from './highlight-colors';
+import { formatHighlightAt, criticSpanAt } from './inline-syntax';
 
-type Snapshot = Pick<Token, 'type' | 'content' | 'meta'>;
+type Snapshot = Pick<Token, 'type' | 'content' | 'meta' | 'attrs'>;
+
+/** A format highlight, with the color it names, where the preview knows
+ *  it, as it shows only those (the default color being yellow) */
+function highlightSpan(color: string | undefined): string {
+  return color !== undefined && VALID_COLOR_IDS.includes(color) ? 'format_highlight:' + color : 'format_highlight';
+}
 
 const EXPORT_CRITIC_KINDS: Record<string, string> = {
   critic_add: 'addition',
@@ -30,7 +38,7 @@ function exportSpans(markdown: string): string[] {
       else if (token.type === 'comment_body_with_id') spans.push('comment#' + fields.commentId);
       else if (token.type === 'comment_range_start') spans.push('range_start#' + fields.commentId);
       else if (token.type === 'comment_range_end') spans.push('range_end#' + fields.commentId);
-      else if (token.type === 'highlight_open') spans.push('format_highlight');
+      else if (token.type === 'highlight_open') spans.push(highlightSpan((token as Token & { color?: string }).color));
       else if (token.type === 'citation') spans.push('citation');
       else if (token.type === 'cross_reference') spans.push('cross_reference');
       else if (token.type === 'link_open') spans.push('link');
@@ -50,7 +58,7 @@ function previewSpans(markdown: string): string[] {
   let inlines: Snapshot[][] = [];
   md.core.ruler.after('inline', 'parity_snapshot', state => {
     inlines = state.tokens.filter(token => token.type === 'inline').map(token =>
-      (token.children ?? []).map(child => ({ type: child.type, content: child.content, meta: child.meta ? { ...child.meta } : child.meta })));
+      (token.children ?? []).map(child => ({ type: child.type, content: child.content, meta: child.meta ? { ...child.meta } : child.meta, attrs: child.attrs?.map(([name, value]) => [name, value]) ?? null })));
   });
   md.parse(markdown, {});
   const spans: string[] = [];
@@ -69,7 +77,9 @@ function previewSpans(markdown: string): string[] {
             const newEmpty = children[newOpen + 1].type === 'manuscript_markdown_substitution_new_close';
             spans.push(oldEmpty === newEmpty ? 'substitution' : oldEmpty ? 'addition' : 'deletion');
           } else {
-            spans.push(kind === 'comment' && meta?.id !== undefined ? 'comment#' + meta.id : kind);
+            spans.push(kind === 'comment' && meta?.id !== undefined ? 'comment#' + meta.id
+              : kind === 'format_highlight' ? highlightSpan(/manuscript-markdown-highlight-(\S+)/.exec(children[i].attrs?.find(([name]) => name === 'class')?.[1] ?? '')?.[1])
+              : kind);
           }
         }
         // A format highlight's text is read with the paragraph's, as export
@@ -92,7 +102,7 @@ function previewSpans(markdown: string): string[] {
 // nor a footnote's reference, which the preview doesn't read.
 const PIECES = [
   '{++', '++}', '{--', '--}', '{~~', '~>', '~~}', '{==', '==}', '==', '{>>', '<<}',
-  '{#a}', '{/a}', '{#a>>', '{#fig-a}', '{red}', '{', '}', '\\',
+  '{#a}', '{/a}', '{#a>>', '{#fig-a}', '{red}', '{yellow}', '{', '}', '\\',
   '[@k]', '[see @k, p. 2]', '[', '](u)', ']', '@fig-a', '[@fig-a]',
   '*', '`', '<!--', '-->', '<b>', '</b>', 'a', 'b', ' ',
 ];
@@ -105,8 +115,8 @@ describe('preview and export read the same inline syntax', () => {
     // A link around a citation or a cross-reference stays a link
     '[see [@k]](u)',
     '[a [@fig-a] b](u)',
-    // A color only within the text read
-    '[==a=={red](u)}',
+    // A highlight's color, whose name the export keeps
+    '==a=={red} ==b=={yellow} ==c=={nocolor}',
     // CriticMarkup only within a link's text
     '[a {++b](u) c++}',
     // Each kind, whole
@@ -135,5 +145,20 @@ describe('export reads the spans as the preview shows them', () => {
       ['citation', '@k', 'https://e.org'],
       ['text', ' b', undefined],
     ]);
+  });
+});
+
+describe('a span ends by the end of the text read', () => {
+  test('a color past it is none', () => {
+    expect(formatHighlightAt({ src: '==a=={red}', posMax: 9 }, 0)).toEqual({ contentStart: 2, contentEnd: 3, color: undefined, end: 5 });
+    expect(formatHighlightAt({ src: '==a=={red}', posMax: 10 }, 0)).toEqual({ contentStart: 2, contentEnd: 3, color: 'red', end: 10 });
+  });
+
+  test('CriticMarkup whose closer is past it is none', () => {
+    expect(criticSpanAt({ src: '{++a++}', posMax: 6 }, 0)).toBeUndefined();
+    expect(criticSpanAt({ src: '{>>a<<}', posMax: 6 }, 0)).toBeUndefined();
+    expect(criticSpanAt({ src: '{#a>>b<<}', posMax: 8 }, 0)).toBeUndefined();
+    expect(criticSpanAt({ src: '{#a}', posMax: 3 }, 0)).toBeUndefined();
+    expect(criticSpanAt({ src: '{++a++}', posMax: 7 }, 0)).toEqual({ kind: 'addition', contentStart: 3, contentEnd: 4, end: 7 });
   });
 });
