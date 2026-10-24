@@ -6,7 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import fc from 'fast-check';
 import type Token from 'markdown-it/lib/token.mjs';
 import { createMarkdownIt, parseMd, preprocessCriticMarkup } from './md-to-docx';
-import { preprocessBlocks } from './block-preprocess';
+import { deLazifyBlockquotesWithLines, preprocessBlocks } from './block-preprocess';
 import { createMarkdownItWithPlugin } from './test-helpers';
 import { VALID_COLOR_IDS } from './highlight-colors';
 import { formatHighlightAt, criticSpanAt } from './inline-syntax';
@@ -125,6 +125,8 @@ describe('preview and export read the same inline syntax', () => {
     '{++a\n\nb++} c',
     '{~~b\n\n<b>{~~}@fig-a{',
     '{~~{red}\n==}~~}@fig-a',
+    // In a quote, each of whose lines has its >
+    '> [\n> ](u) {++a\n>\n> b++}',
     // Each kind, whole
     '{++a++} {--b--} {~~c~>d~~} {==e==}{>>f<<} {#x}g{/x}{#x>>h<<} ==i=={red} [@k] [@fig-a]',
   ])('%s', (markdown: string) => {
@@ -133,7 +135,10 @@ describe('preview and export read the same inline syntax', () => {
 
   test('in any text', () => {
     fc.assert(fc.property(fc.array(fc.constantFrom(...PIECES), { maxLength: 12 }), pieces => {
-      const markdown = pieces.join('');
+      // With each quote's lines marked, as export ends a quote before a line
+      // without a >, where the preview, as VS Code's, goes on with it: a
+      // difference of blocks, by design (see deLazifyBlockquotesWithLines)
+      const markdown = deLazifyBlockquotesWithLines(pieces.join('')).output;
       expect(previewSpans(markdown)).toEqual(exportSpans(markdown));
     }), { numRuns: 3000 });
   }, 60_000);
