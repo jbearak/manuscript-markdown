@@ -275,7 +275,15 @@ Buttons: **Download** · **Skip**
 
 Buttons: **Replace** · **New Name** · **Cancel**
 
+If the `.docx` is a symlink:
+
+`"<name>.docx" already exists and is a symlink. Replace the symlink target, replace the symlink with a regular file, or save with a new name?`
+
+Buttons: **Replace Target** · **Replace Symlink** · **New Name** · **Cancel**
+
 Choosing **New Name** opens a save-as dialog.
+
+To skip this dialog, set `manuscriptMarkdown.exportToWordExistingFile` to `replace` (acts as **Replace**, or **Replace Target** for a symlink) or `replaceSymlink` (acts as **Replace**, or **Replace Symlink** for a symlink).
 
 When the export finishes, a notification appears in the bottom-right corner. In a local workspace it has an **Open in Word** button. In a remote workspace (such as SSH, Codespaces, or a dev container), it has a **Show in Explorer** button when the generated DOCX is inside an open workspace folder. For other remote locations, the button is **Copy Path**.
 

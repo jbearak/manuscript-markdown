@@ -1285,6 +1285,21 @@
           "default": "GitHub",
           "description": "Word paragraph style to use for blockquotes when converting Markdown to DOCX"
         },
+        "manuscriptMarkdown.exportToWordExistingFile": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "replace",
+            "replaceSymlink"
+          ],
+          "enumDescriptions": [
+            "Ask whether to replace the existing .docx, replace the symlink, or save with a new name",
+            "Replace the existing .docx without asking; when it is a symlink, write to the file it points to",
+            "Replace the existing .docx without asking; when it is a symlink, replace the symlink with a regular file"
+          ],
+          "default": "ask",
+          "description": "What Export to Word does when the .docx it writes already exists"
+        },
         "manuscriptMarkdown.colors": {
           "type": "string",
           "enum": [
