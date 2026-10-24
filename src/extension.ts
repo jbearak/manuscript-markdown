@@ -8,7 +8,7 @@ import {
 import * as changes from './changes';
 import * as formatting from './formatting';
 import * as author from './author';
-import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt } from './preview/manuscript-markdown-plugin';
+import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt, type PreviewMarkup } from './preview/manuscript-markdown-plugin';
 import { WordCountController } from './wordcount';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx, hasCitations } from './md-to-docx';
@@ -135,6 +135,11 @@ const embedResolver: EmbedResolver = {
 		return path.resolve(path.dirname(basePath), relativePath);
 	},
 };
+function getConfiguredPreviewMarkup(): PreviewMarkup {
+	const value = vscode.workspace.getConfiguration('manuscriptMarkdown').get<string>('previewMarkup');
+	return value === 'none' ? 'none' : 'all';
+}
+
 function syncPreviewColors(scheme: ColorScheme) {
 	if (previewMd) previewMd.manuscriptColors = scheme;
 }
@@ -267,6 +272,26 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manuscript-markdown.nextChange', () => changes.next()),
 		vscode.commands.registerCommand('manuscript-markdown.prevChange', () => changes.prev())
+	);
+
+	// Preview markup: all tracked changes marked, or none, as accepted.
+	// The toggle writes where the setting is set, the workspace if it is
+	// set there, else the user's settings
+	context.subscriptions.push(
+		vscode.commands.registerCommand('manuscript-markdown.togglePreviewMarkup', async () => {
+			const cfg = vscode.workspace.getConfiguration('manuscriptMarkdown');
+			const next: PreviewMarkup = getConfiguredPreviewMarkup() === 'none' ? 'all' : 'none';
+			const target = cfg.inspect('previewMarkup')?.workspaceValue !== undefined
+				? vscode.ConfigurationTarget.Workspace
+				: vscode.ConfigurationTarget.Global;
+			await cfg.update('previewMarkup', next, target);
+		}),
+		vscode.workspace.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('manuscriptMarkdown.previewMarkup') && previewMd) {
+				previewMd.manuscriptPreviewMarkup = getConfiguredPreviewMarkup();
+				void vscode.commands.executeCommand('markdown.preview.refresh');
+			}
+		})
 	);
 
 	// Register embed directive link provider (Cmd+Click on file paths)
@@ -1086,6 +1111,7 @@ export function activate(context: vscode.ExtensionContext) {
 		extendMarkdownIt(md: ManuscriptMarkdownIt) {
 			previewMd = md;
 			md.manuscriptColors = getConfiguredColorScheme();
+			md.manuscriptPreviewMarkup = getConfiguredPreviewMarkup();
 			md.manuscriptEmbedResolver = embedResolver;
 			const maxDtaFileSize = vscode.workspace
 				.getConfiguration('manuscriptMarkdown')

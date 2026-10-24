@@ -46,7 +46,13 @@ export interface ManuscriptMarkdownIt extends MarkdownIt {
   manuscriptEmbedOptions?: EmbedOptions;
   manuscriptDocumentPath?: string;
   manuscriptGetDocumentPath?: (src: string) => string | undefined;
+  manuscriptPreviewMarkup?: PreviewMarkup;
 }
+
+/** How much of the tracked changes the preview shows, as Word's markup
+ *  views do: 'all' shows each change as marked, and 'none' the text as it
+ *  reads with every change accepted, with its comments still shown */
+export type PreviewMarkup = 'all' | 'none';
 
 interface PreviewEnvironment {
   /** The words and separator a caption shows, and where it goes (see captions.ts) */
@@ -2172,6 +2178,111 @@ function nestCrossedElements(children: Token[], state: StateCore): Token[] {
   return out;
 }
 
+/** The opens whose element, and everything in it, accepting every change
+ *  drops: a deletion, and a substitution's old text */
+const REJECTED_CHANGE_OPENS = new Set([
+  'manuscript_markdown_deletion_open',
+  'manuscript_markdown_substitution_old_open',
+]);
+
+/** The opens and closes whose element accepting every change unwraps,
+ *  keeping what's in it: an addition, a substitution, and its new text */
+const ACCEPTED_CHANGE_TYPES = new Set([
+  'manuscript_markdown_addition_open',
+  'manuscript_markdown_addition_close',
+  'manuscript_markdown_substitution_open',
+  'manuscript_markdown_substitution_close',
+  'manuscript_markdown_substitution_new_open',
+  'manuscript_markdown_substitution_new_close',
+]);
+
+/** An inline token's children as they read with every change accepted. A
+ *  comment on a deletion stays, as an indicator where it was, and one on an
+ *  addition or substitution, as a comment's range over the text it added */
+function acceptChanges(children: Token[], state: StateCore): Token[] {
+  const out: Token[] = [];
+  // For each unwrapped open still open, by its type, the range span it
+  // became, or undefined where it wrote nothing
+  const opened = new Map<string, Array<Token | undefined>>();
+  for (let i = 0; i < children.length; i++) {
+    const token = children[i];
+    if (REJECTED_CHANGE_OPENS.has(token.type)) {
+      const comment = token.attrGet('data-comment');
+      if (comment) {
+        const indicator = new state.Token('manuscript_markdown_comment_indicator', 'span', 0);
+        indicator.attrSet('data-comment', comment);
+        out.push(indicator);
+      }
+      const closeType = token.type.slice(0, -'_open'.length) + '_close';
+      let depth = 1;
+      while (depth > 0 && ++i < children.length) {
+        if (children[i].type === token.type) depth++;
+        else if (children[i].type === closeType) depth--;
+      }
+      continue;
+    }
+    if (!ACCEPTED_CHANGE_TYPES.has(token.type)) {
+      out.push(token);
+      continue;
+    }
+    const isOpen = token.nesting === 1;
+    const kind = token.type.slice(0, token.type.lastIndexOf('_'));
+    const stack = opened.get(kind) ?? [];
+    opened.set(kind, stack);
+    if (isOpen) {
+      const comment = token.attrGet('data-comment');
+      let span: Token | undefined;
+      if (comment) {
+        span = new state.Token('manuscript_markdown_comment_range_open', 'span', 1);
+        span.attrSet('class', 'manuscript-markdown-comment-range');
+        span.attrSet('data-comment', comment);
+        out.push(span);
+      }
+      stack.push(span);
+    } else if (stack.pop()) {
+      out.push(new state.Token('manuscript_markdown_comment_range_close', 'span', -1));
+    }
+  }
+  return withLevels(out);
+}
+
+/** The containers a paragraph's removal can leave with nothing in them */
+const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list', 'blockquote']);
+
+/**
+ * Core rule that, where the preview shows no markup, writes the document as
+ * it reads with every change accepted (see acceptChanges). A paragraph or
+ * heading that held only deleted text goes, as Word drops a paragraph
+ * whose text and mark are deleted, and so does a list item, list or quote
+ * that held only such paragraphs.
+ */
+function acceptChangesRule(state: StateCore): void {
+  const tokens = state.tokens;
+  for (let i = 0; i < tokens.length; i++) {
+    const inline = tokens[i];
+    if (inline.type !== 'inline' || !inline.children) continue;
+    const hadContent = hasVisibleInlineContent(inline.children);
+    inline.children = acceptChanges(inline.children, state);
+    if (!hadContent || hasVisibleInlineContent(inline.children)) continue;
+    const open = tokens[i - 1];
+    if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
+    // The paragraph's open, inline and close, then each container left empty
+    let start = i - 1;
+    let end = i + 2;
+    while (
+      start > 0 && end < tokens.length &&
+      tokens[start - 1].nesting === 1 && tokens[end].nesting === -1 &&
+      EMPTIABLE_CONTAINERS.has(tokens[start - 1].type.slice(0, -'_open'.length)) &&
+      tokens[end].type === tokens[start - 1].type.slice(0, -'_open'.length) + '_close'
+    ) {
+      start--;
+      end++;
+    }
+    tokens.splice(start, end - start);
+    i = start - 1;
+  }
+}
+
 /** Inline rule that converts the paragraph placeholder back into line breaks in the token stream. */
 function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
@@ -2828,6 +2939,11 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // Comment ranges' spans, after the rules that split a paragraph
   md.core.ruler.after('manuscript_custom_style_wrap', 'manuscript_markdown_comment_range_spans', commentRangeSpansRule);
+  // With no markup, the text with every change accepted, once each comment
+  // has gone on its element and each range is a span (see acceptChangesRule)
+  md.core.ruler.after('manuscript_markdown_comment_range_spans', 'manuscript_markdown_accept_changes', (state: StateCore) => {
+    if (md.manuscriptPreviewMarkup === 'none') acceptChangesRule(state);
+  });
 
   // Inject a hidden marker element so the preview script can apply the color scheme
   // class to alert elements (needed because VS Code's built-in GFM alert renderer

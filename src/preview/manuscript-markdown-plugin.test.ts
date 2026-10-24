@@ -3206,3 +3206,67 @@ describe('frontmatter for VS Code\'s preview table', () => {
     expect(md.render('---\ntitle: A\ntitle: B\n---\n\nBody.')).toContain('<pre>title:\n  - "A"\n  - "B"</pre>');
   });
 });
+
+describe('No Markup preview', () => {
+  function renderNoMarkup(input: string): string {
+    const md = createMarkdownItWithPlugin();
+    md.manuscriptPreviewMarkup = 'none';
+    return md.render(input);
+  }
+
+  it('shows each change accepted', () => {
+    const html = renderNoMarkup('Hello {++big ++}world{--old--}. A {~~cat~>dog~~} ran.');
+    expect(html).toContain('<p>Hello big world. A dog ran.</p>');
+    expect(html).not.toContain('<ins');
+    expect(html).not.toContain('<del');
+  });
+
+  it('keeps nested formatting in added text', () => {
+    expect(renderNoMarkup('a {++**b**++} c')).toContain('<p>a <strong>b</strong> c</p>');
+  });
+
+  it('drops a paragraph, heading or list item that held only deleted text', () => {
+    const html = renderNoMarkup('One\n\n{--Gone--}\n\n{--# Old heading--}\n\n- a\n- {--b--}\n\n{--x\n\ny--}\n\nTwo');
+    expect(html).toContain('<p>One</p>\n<ul>\n<li>a</li>\n</ul>\n<p>Two</p>');
+    expect(html).not.toContain('<h1');
+  });
+
+  it('drops a list that held only deleted items', () => {
+    expect(renderNoMarkup('- {--only--}\n\nText')).not.toContain('<ul');
+  });
+
+  it('keeps an added heading a heading', () => {
+    expect(renderNoMarkup('{++# New++}\n\nText')).toContain('<h1>New</h1>');
+  });
+
+  it('keeps a table cell whose text was deleted', () => {
+    const html = renderNoMarkup('| a | b |\n|---|---|\n| {--x--} | {++y++} |');
+    expect(html).toContain('<td></td>\n<td>y</td>');
+  });
+
+  it('keeps comments on changes', () => {
+    const html = renderNoMarkup('A {~~cat~>dog~~}{>>why<<} and {--gone--}{>>note<<} and {++new++}{>>added<<}.');
+    expect(html).toContain('<span class="manuscript-markdown-comment-range" data-comment="why">dog</span>');
+    expect(html).toContain('<span class="manuscript-markdown-comment-indicator" data-comment="note"></span>');
+    expect(html).toContain('<span class="manuscript-markdown-comment-range" data-comment="added">new</span>');
+  });
+
+  it('keeps a paragraph whose deletion had a comment', () => {
+    expect(renderNoMarkup('{--gone--}{>>note<<}')).toContain('<p><span class="manuscript-markdown-comment-indicator" data-comment="note"></span></p>');
+  });
+
+  it('keeps a comment range that ends in a deletion', () => {
+    expect(renderNoMarkup('x {#1}a {--b{/1} c--} d{#1>>cmt<<}'))
+      .toContain('<p>x <span class="manuscript-markdown-comment-range" data-comment="cmt">a </span> d</p>');
+  });
+
+  it('leaves standalone comments and highlights as they are', () => {
+    const text = 'See {==this==}{>>hm<<} and ==that== here{>>note<<}.';
+    const marked = renderWithPlugin(text);
+    expect(renderNoMarkup(text)).toBe(marked);
+  });
+
+  it('shows all markup by default', () => {
+    expect(renderWithPlugin('a {--b--}')).toContain('<del class="manuscript-markdown-deletion">b</del>');
+  });
+});
