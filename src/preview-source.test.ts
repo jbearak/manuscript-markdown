@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { isMarkdownPreviewViewType, matchPreviewTabLabel } from './preview-source';
 
-const doc = (path: string) => ({ uri: { path } });
+const doc = (path: string) => ({ path });
 
 describe('matchPreviewTabLabel', () => {
   it('finds the document an unlocked or locked preview names', () => {

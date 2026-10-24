@@ -19,16 +19,15 @@ function basename(uriPath: string): string {
 }
 
 /**
- * The one candidate whose basename the preview's English tab label names, or
- * undefined where none or several do (two open files named notes.md, or a
- * git: copy of the file a diff opened).
+ * The one URI whose basename the preview's English tab label names, or
+ * undefined where none or several do (two files named notes.md).
  */
-export function matchPreviewTabLabel<T extends { uri: { path: string } }>(
+export function matchPreviewTabLabel<T extends { path: string }>(
 	label: string,
 	candidates: readonly T[],
 ): T | undefined {
 	const matches = candidates.filter(c => {
-		const name = basename(c.uri.path);
+		const name = basename(c.path);
 		return label === 'Preview ' + name || label === '[Preview] ' + name;
 	});
 	return matches.length === 1 ? matches[0] : undefined;

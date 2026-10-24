@@ -108,6 +108,11 @@ let languageClient: LanguageClient | undefined;
 let languageClientDisposables: vscode.Disposable[] = [];
 let cslCacheDir: string = '';
 let previewMd: ManuscriptMarkdownIt | undefined;
+// Each document the preview's engine has rendered, by URI string, from the
+// env.currentDocument VS Code's markdown extension passes every render. It
+// only grows: a stale entry can make a tab label match two documents, which
+// falls back to markdown.showSource, but never hides the one a preview shows.
+const previewRenderedUris = new Map<string, vscode.Uri>();
 
 // Embed resolver for reading external files referenced by embed directives.
 // Shared by both the preview plugin and md-to-docx conversion.
@@ -1111,6 +1116,16 @@ export function activate(context: vscode.ExtensionContext) {
 	return {
 		extendMarkdownIt(md: ManuscriptMarkdownIt) {
 			previewMd = md;
+			const render = md.renderer.render.bind(md.renderer);
+			md.renderer.render = (tokens, options, env) => {
+				// Another extension's Uri, so read by its fields, not instanceof
+				const doc: vscode.Uri | undefined = env?.currentDocument;
+				if (typeof doc?.scheme === 'string' && typeof doc.path === 'string') {
+					const docUri = vscode.Uri.from(doc);
+					previewRenderedUris.set(docUri.toString(), docUri);
+				}
+				return render(tokens, options, env);
+			};
 			md.manuscriptColors = getConfiguredColorScheme();
 			md.manuscriptPreviewMarkup = getConfiguredPreviewMarkup();
 			md.manuscriptEmbedResolver = embedResolver;
@@ -1452,17 +1467,15 @@ async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir:
 }
 
 /**
- * The document a dynamic Markdown preview shows: by its tab label
- * where that names one open document, else by markdown.showSource, which
- * knows the preview's source but opens it in an editor. showSource follows
- * only the focused preview, so an unfocused one has its label alone.
+ * The document a dynamic Markdown preview shows: by its tab label where that
+ * names one document a preview has rendered, else by markdown.showSource,
+ * which knows the preview's source but opens it in an editor. showSource
+ * follows only the focused preview, so an unfocused one has its label alone.
  */
-async function activePreviewSource(tabLabel: string, focused: boolean): Promise<vscode.TextDocument | undefined> {
-	const byLabel = matchPreviewTabLabel(
-		tabLabel,
-		vscode.workspace.textDocuments.filter(d => d.languageId === 'markdown'),
-	);
-	if (byLabel || !focused) return byLabel;
+async function previewSource(tabLabel: string, focused: boolean): Promise<vscode.TextDocument | undefined> {
+	const byLabel = matchPreviewTabLabel(tabLabel, [...previewRenderedUris.values()]);
+	if (byLabel) return vscode.workspace.openTextDocument(byLabel);
+	if (!focused) return undefined;
 	const editor = await vscode.commands.executeCommand<vscode.TextEditor | undefined>('markdown.showSource');
 	return editor?.document;
 }
@@ -1482,33 +1495,32 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			markdown = new TextDecoder().decode(data);
 		}
 	} else {
-		// A title-bar button on the dynamic preview passes a webview-panel URI;
-		// the command palette passes nothing, with no text editor active while
-		// a preview has focus. The static preview (Open With) has the file's URI.
-		// A group's title bar shows its buttons without focus, so a webview-panel
-		// URI with another tab focused names the one group showing a preview.
+		// A title-bar button on the dynamic preview passes a webview-panel URI
+		// that names no tab, and clicking it leaves focus where it was (VS Code's
+		// editorGroupView skips focusing for clicks on actions), so it can come
+		// from any group's preview: only one visible preview is sure to be it.
+		// The command palette passes nothing, and has the focused preview. The
+		// static preview (Open With) passes, and its tab holds, the file's URI.
 		const isPreviewTab = (tab: vscode.Tab | undefined): tab is vscode.Tab =>
 			tab?.input instanceof vscode.TabInputWebview && isMarkdownPreviewViewType(tab.input.viewType);
 		const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
-		const unfocusedPreviews = uri && !isPreviewTab(activeTab)
+		const previews = uri
 			? vscode.window.tabGroups.all.map(g => g.activeTab).filter(isPreviewTab)
-			: [];
-		const previewTab = isPreviewTab(activeTab) ? activeTab
-			: unfocusedPreviews.length === 1 ? unfocusedPreviews[0]
-			: undefined;
-		const inPreview = previewTab !== undefined || unfocusedPreviews.length > 1;
+			: [activeTab].filter(isPreviewTab);
 		const input = activeTab?.input;
-		const doc = previewTab
-			? await activePreviewSource(previewTab.label, previewTab === activeTab)
-			: inPreview
+		const doc = previews.length === 1
+			? await previewSource(previews[0].label, previews[0] === activeTab)
+			: previews.length > 1 || uri
 				? undefined
 				: input instanceof vscode.TabInputCustom && input.viewType === 'vscode.markdown.preview.editor'
 					? await vscode.workspace.openTextDocument(input.uri)
 					: vscode.window.activeTextEditor?.document;
 		if (!doc || doc.languageId !== 'markdown') {
-			vscode.window.showErrorMessage(inPreview
-				? 'Could not tell which file this preview shows'
-				: 'No active Markdown file');
+			vscode.window.showErrorMessage(previews.length > 1
+				? 'Several Markdown previews are showing: focus the one to export and run Export to Word from the Command Palette'
+				: previews.length === 1 || uri
+					? 'Could not tell which file this preview shows'
+					: 'No active Markdown file');
 			return undefined;
 		}
 		markdown = doc.getText();
