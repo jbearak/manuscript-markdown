@@ -10,6 +10,7 @@ import * as formatting from './formatting';
 import * as author from './author';
 import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt, type PreviewMarkup } from './preview/manuscript-markdown-plugin';
 import { WordCountController } from './wordcount';
+import { isMarkdownPreviewViewType, matchPreviewTabLabel } from './preview-source';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx, hasCitations } from './md-to-docx';
 import * as fs from 'fs';
@@ -1450,6 +1451,22 @@ async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir:
 	));
 }
 
+/**
+ * The document a dynamic Markdown preview shows: by its tab label
+ * where that names one open document, else by markdown.showSource, which
+ * knows the preview's source but opens it in an editor. showSource follows
+ * only the focused preview, so an unfocused one has its label alone.
+ */
+async function activePreviewSource(tabLabel: string, focused: boolean): Promise<vscode.TextDocument | undefined> {
+	const byLabel = matchPreviewTabLabel(
+		tabLabel,
+		vscode.workspace.textDocuments.filter(d => d.languageId === 'markdown'),
+	);
+	if (byLabel || !focused) return byLabel;
+	const editor = await vscode.commands.executeCommand<vscode.TextEditor | undefined>('markdown.showSource');
+	return editor?.document;
+}
+
 async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undefined> {
 	let markdown: string;
 	let sourceUri: vscode.Uri;
@@ -1465,25 +1482,37 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			markdown = new TextDecoder().decode(data);
 		}
 	} else {
-		// Try active text editor, then visible editors, then the active preview tab
-		const editor = vscode.window.activeTextEditor?.document.languageId === 'markdown'
-			? vscode.window.activeTextEditor
-			: vscode.window.visibleTextEditors.find(e => e.document.languageId === 'markdown');
-		if (editor) {
-			markdown = editor.document.getText();
-			sourceUri = editor.document.uri;
-		} else {
-			// Full-screen preview: no visible editor, find the markdown document
-			const mdDoc = vscode.workspace.textDocuments.find(
-				d => d.languageId === 'markdown' && d.uri.scheme === 'file'
-			);
-			if (!mdDoc) {
-				vscode.window.showErrorMessage('No active Markdown file');
-				return undefined;
-			}
-			markdown = mdDoc.getText();
-			sourceUri = mdDoc.uri;
+		// A title-bar button on the dynamic preview passes a webview-panel URI;
+		// the command palette passes nothing, with no text editor active while
+		// a preview has focus. The static preview (Open With) has the file's URI.
+		// A group's title bar shows its buttons without focus, so a webview-panel
+		// URI with another tab focused names the one group showing a preview.
+		const isPreviewTab = (tab: vscode.Tab | undefined): tab is vscode.Tab =>
+			tab?.input instanceof vscode.TabInputWebview && isMarkdownPreviewViewType(tab.input.viewType);
+		const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+		const unfocusedPreviews = uri && !isPreviewTab(activeTab)
+			? vscode.window.tabGroups.all.map(g => g.activeTab).filter(isPreviewTab)
+			: [];
+		const previewTab = isPreviewTab(activeTab) ? activeTab
+			: unfocusedPreviews.length === 1 ? unfocusedPreviews[0]
+			: undefined;
+		const inPreview = previewTab !== undefined || unfocusedPreviews.length > 1;
+		const input = activeTab?.input;
+		const doc = previewTab
+			? await activePreviewSource(previewTab.label, previewTab === activeTab)
+			: inPreview
+				? undefined
+				: input instanceof vscode.TabInputCustom && input.viewType === 'vscode.markdown.preview.editor'
+					? await vscode.workspace.openTextDocument(input.uri)
+					: vscode.window.activeTextEditor?.document;
+		if (!doc || doc.languageId !== 'markdown') {
+			vscode.window.showErrorMessage(inPreview
+				? 'Could not tell which file this preview shows'
+				: 'No active Markdown file');
+			return undefined;
 		}
+		markdown = doc.getText();
+		sourceUri = doc.uri;
 	}
 
 	const basePath = getOutputBasePath(sourceUri.fsPath);
