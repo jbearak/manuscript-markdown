@@ -40,6 +40,11 @@
         "title": "Next Change"
       },
       {
+        "command": "manuscript-markdown.togglePreviewMarkup",
+        "title": "Toggle Tracked Changes in Preview",
+        "icon": "$(diff)"
+      },
+      {
         "command": "manuscript-markdown.prevChange",
         "title": "Previous Change"
       },
@@ -524,6 +529,11 @@
         }
       ],
       "editor/title": [
+        {
+          "command": "manuscript-markdown.togglePreviewMarkup",
+          "when": "activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'",
+          "group": "navigation@100"
+        },
         {
           "submenu": "markdown.formatting",
           "when": "editorLangId == markdown && !isInDiffEditor",
@@ -1312,6 +1322,23 @@
           ],
           "default": "guttmacher",
           "description": "Color scheme for alert callouts in preview and DOCX export"
+        },
+        "manuscriptMarkdown.previewMarkup": {
+          "type": "string",
+          "enum": [
+            "all",
+            "none"
+          ],
+          "enumItemLabels": [
+            "All Markup",
+            "No Markup"
+          ],
+          "enumDescriptions": [
+            "Show additions, deletions, and substitutions as marked",
+            "Show the document as though every change were accepted; comments still show"
+          ],
+          "default": "all",
+          "description": "How much of the CriticMarkup tracked changes the Markdown preview shows, like Word's markup views"
         },
         "manuscriptMarkdown.alwaysUseCommentIds": {
           "type": "boolean",

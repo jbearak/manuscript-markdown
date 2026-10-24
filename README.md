@@ -64,7 +64,7 @@ manuscript-markdown paper.md      # Markdown → DOCX
 ### Formatting & Authoring
 
 - **Rich Text Support**: Markdown formatting toolbar for bold, italic, lists, headings, code, links, and tables
-- **Preview**: Real-time syntax highlighting and Markdown preview rendering
+- **Preview**: Real-time syntax highlighting and Markdown preview rendering, with a No Markup view that shows the document with every change accepted
 - **Embedded Tables**: Embed tables from external .csv, .tsv, .xlsx, .dta, and .md files with a [single directive](docs/embedded-tables.md)
 
 ### Document Conversion

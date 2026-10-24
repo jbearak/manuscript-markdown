@@ -29,6 +29,12 @@ All settings are under the `manuscriptMarkdown` namespace in VS Code settings.
 | `enableCitekeyLanguageServer` | boolean | `true` | Enable language server features: YAML frontmatter completions, hover, and diagnostics, and the link from the frontmatter bibliography to its file; `@` completions; citation go-to-definition and references; and comment hover |
 | `citekeyReferencesFromMarkdown` | boolean | `false` | Include markdown usages in Find All References when invoked from a markdown file. Off by default because VS Code's built-in Markdown Language Features already reports these; enabling this may produce duplicate entries |
 
+## Preview
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `previewMarkup` | string | `"all"` | How much of the tracked changes the Markdown preview shows, like Word's markup views. `all` (All Markup) shows additions, deletions, and substitutions as marked. `none` (No Markup) shows the document as though every change were accepted: deleted text and paragraphs disappear and added text reads as plain text. Comments still show. The preview's title bar has a button to toggle between them |
+
 ## DOCX Conversion
 
 | Setting | Type | Default | Description |
