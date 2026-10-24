@@ -1066,7 +1066,7 @@ function setCriticBreakSourceOffset(token: Token, sourceOffset: number | undefin
   token.meta = { ...(token.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
 }
 
-function addInlineContent(state: StateInline, content: string, sourceStart?: number): void {
+function addInlineContent(state: StateInline, content: string, sourceStart?: number, inLink = false): void {
   // Handle empty content - no tokens to add
   if (content.length === 0) {
     return;
@@ -1081,7 +1081,20 @@ function addInlineContent(state: StateInline, content: string, sourceStart?: num
   const nestedSourceBase = sourceStart ?? inlineSourceOffset(state, 0);
   if (sourceStart !== undefined) env.manuscriptInlineSourceBase = sourceStart;
   try {
-    state.md.inline.parse(content, state.md, state.env, childTokens);
+    if (inLink) {
+      // In a link around it, as a format highlight's text, where export reads
+      // it so too (see coloredHighlightRule in md-to-docx.ts): as
+      // md.inline.parse would, but where a URL or a cross-reference is the
+      // link's text
+      const inner = new state.md.inline.State(content, state.md, state.env, childTokens);
+      // markdown-it's types leave out linkLevel, which linkify reads
+      type LinkState = StateInline & { linkLevel: number };
+      (inner as LinkState).linkLevel = (state as LinkState).linkLevel;
+      state.md.inline.tokenize(inner);
+      for (const rule of state.md.inline.ruler2.getRules('')) rule(inner);
+    } else {
+      state.md.inline.parse(content, state.md, state.env, childTokens);
+    }
   } finally {
     if (previousSourceBase === undefined) delete env.manuscriptInlineSourceBase;
     else env.manuscriptInlineSourceBase = previousSourceBase;
@@ -1360,7 +1373,7 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
       ? 'manuscript-markdown-format-highlight manuscript-markdown-highlight-' + color
       : 'manuscript-markdown-format-highlight');
     // Add parsed inline content to allow nested Markdown processing
-    addInlineContent(state, state.src.slice(span.contentStart, span.contentEnd), inlineSourceOffset(state, span.contentStart));
+    addInlineContent(state, state.src.slice(span.contentStart, span.contentEnd), inlineSourceOffset(state, span.contentStart), true);
     state.push('manuscript_markdown_format_highlight_close', 'mark', -1);
   }
   state.pos = span.end;

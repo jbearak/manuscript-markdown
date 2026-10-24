@@ -125,6 +125,8 @@ describe('preview and export read the same inline syntax', () => {
     '{++a\n\nb++} c',
     '{~~b\n\n<b>{~~}@fig-a{',
     '{~~{red}\n==}~~}@fig-a',
+    // A cross-reference in a highlight in a link is the link's text
+    '[==[@fig-a]==](u)',
     // In a quote, each of whose lines has its >
     '> [\n> ](u) {++a\n>\n> b++}',
     // Each kind, whole
