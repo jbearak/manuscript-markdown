@@ -13,7 +13,6 @@ import {
   criticBreaksEndLinks,
   criticBreaksInRawHtml,
   criticBreaksLeftOver,
-  criticCloserSearchOf,
   commentTooltipText,
   hasCriticBreak,
   iterateCriticBreaks,
@@ -1280,100 +1279,6 @@ function parseCriticMarkupInInlineMath(state: StateInline, silent: boolean): boo
     }
   }
   state.pos = match.end;
-  return true;
-}
-
-/**
- * Fallback block-level rule for multiline Manuscript Markdown that starts at
- * the beginning of a line. The source preprocessor normally protects all line
- * breaks inside complete spans, including mid-line spans, so they reach the
- * inline parser without being split into separate Markdown blocks.
- * 
- * @param state - The block parsing state
- * @param startLine - Starting line number
- * @param endLine - Ending line number
- * @param silent - Whether to only check without creating tokens
- * @returns true if a Manuscript Markdown block was found and processed
- */
-function manuscriptMarkdownBlock(state: StateBlock, startLine: number, endLine: number, silent: boolean): boolean {
-  const pos = state.bMarks[startLine] + state.tShift[startLine];
-  const max = state.eMarks[startLine];
-  
-  // Quick check: does this line start with a potential Manuscript Markdown pattern?
-  if (pos + 3 > max) return false;
-  
-  const src = state.src;
-  
-  // Quick check: first char must be {
-  if (src.charCodeAt(pos) !== 0x7B /* { */) return false;
-  
-  const ch2 = src.charCodeAt(pos + 1);
-  const ch3 = src.charCodeAt(pos + 2);
-  
-  let closeMarker: string;
-  let isNested = false;
-  if (ch2 === 0x2B /* + */ && ch3 === 0x2B /* + */) closeMarker = '++}';
-  else if (ch2 === 0x2D /* - */ && ch3 === 0x2D /* - */) closeMarker = '--}';
-  else if (ch2 === 0x7E /* ~ */ && ch3 === 0x7E /* ~ */) closeMarker = '~~}';
-  else if (ch2 === 0x3E /* > */ && ch3 === 0x3E /* > */) { closeMarker = '<<}'; isNested = true; }
-  else if (ch2 === 0x3D /* = */ && ch3 === 0x3D /* = */) closeMarker = '==}';
-  else return false;
-  
-  // Search for the closing marker starting from current position, among
-  // the closers of the text, found once for all the rule's calls, as each
-  // line's unclosed opener searched the rest of it
-  const searchStart = pos + 3;
-  const closers = criticCloserSearchOf(state);
-  let closePos: number;
-  if (isNested) {
-    // Use depth-aware matching so nested {>>...<<} replies don't close early
-    closePos = closers.matching(searchStart);
-  } else {
-    closePos = closers.next(closeMarker, searchStart);
-  }
-  if (closePos === -1) {
-    return false;
-  }
-  
-  // Check if the pattern contains any newlines (making it multi-line)
-  const patternContent = src.slice(pos, closePos + closeMarker.length);
-  const hasNewline = patternContent.includes('\n');
-  
-  if (!hasNewline) {
-    // Single-line pattern, let the inline parser handle it
-    return false;
-  }
-  
-  // Find which line the closing marker is on
-  const patternEnd = closePos + closeMarker.length;
-  let nextLine = startLine;
-  
-  // Scan through lines to find where the pattern ends
-  while (nextLine < endLine) {
-    const lineEnd = state.eMarks[nextLine];
-    if (lineEnd >= patternEnd) {
-      // The pattern ends on or before this line
-      nextLine++;
-      break;
-    }
-    nextLine++;
-  }
-  
-  if (silent) return true;
-  
-  // Create a paragraph token that contains the entire Manuscript Markdown pattern
-  const token = state.push('paragraph_open', 'p', 1);
-  token.map = [startLine, nextLine];
-  
-  const contentToken = state.push('inline', '', 0);
-  contentToken.content = patternContent;
-  contentToken.map = [startLine, nextLine];
-  contentToken.children = [];
-  
-  state.push('paragraph_close', 'p', -1);
-  
-  // Advance state.line to skip all lines we've consumed
-  state.line = nextLine;
   return true;
 }
 
@@ -2665,9 +2570,6 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // preview enables html: true).
   md.block.ruler.before('html_block', 'manuscript_grid_table_block', gridTableBlockRule);
 
-  // Register the block-level rule to handle multi-line patterns with empty lines
-  // This must run very early, before heading and paragraph parsing
-  md.block.ruler.before('heading', 'manuscript_markdown_block', manuscriptMarkdownBlock);
 
   // After block parsing, where VS Code's math extension's block rule, which
   // can register before or after this plugin, has made its tokens

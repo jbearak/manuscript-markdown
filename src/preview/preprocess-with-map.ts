@@ -1,177 +1,39 @@
 /**
- * Wrapper functions that run each preprocessor and compute a LineMap
- * tracking how preprocessed line numbers correspond to original line numbers.
+ * The preview's preprocessors, which are export's, each with a LineMap from
+ * the lines it writes back to the lines it read, so VS Code's data-line
+ * scroll sync attributes name the source's lines.
  *
- * These wrappers call the original preprocessor to get the output, then
- * diff the original and output line arrays to build the mapping. This avoids
- * modifying the original preprocessors (which are also used by md-to-docx).
- *
- * Invariant: the line-walk logic in preprocessGridTablesWithMap must stay in
- * sync with preprocessGridTables in ../grid-table-preprocess.ts if the grid
- * table format ever changes.
+ * Each map is the line provenance the preprocessor itself keeps for export
+ * (see line-map.ts in src), so the preview and export agree on where each
+ * line comes from, and no diff of input and output has to guess it.
  */
 
 import { LineMap } from './line-map';
-import { preprocessGridTables } from '../grid-table-preprocess';
-import { wrapBareLatexEnvironments } from '../latex-env-preprocess';
+import { preprocessGridTablesWithSourceMap } from '../grid-table-preprocess';
+import { wrapBareLatexEnvironmentsWithLines } from '../latex-env-preprocess';
 import { paragraphsExportEnds } from '../block-preprocess';
-import { preprocessCriticMarkup, restoreCriticLineBreaks } from '../critic-markup';
-
-/**
- * Build a LineMap by comparing original and output line arrays.
- *
- * Scans both arrays in parallel. Unchanged lines retain exact provenance.
- * Changed regions are mapped monotonically across the corresponding input
- * region, so a collapsed region maps to its first source line and synthetic
- * lines map to the adjacent source boundary. Every output boundary receives a
- * mapping; relying only on unchanged anchors would map a changed first line to
- * the first later anchor.
- *
- * This is a simplified diff that works well for our preprocessors, which make
- * isolated, non-overlapping replacements with unique surrounding context.
- */
-function buildMapFromLines(origLines: string[], outLines: string[]): LineMap {
-  if (origLines.length === outLines.length) {
-    // Quick check: if all lines match, return identity
-    let allMatch = true;
-    for (let i = 0; i < origLines.length; i++) {
-      if (origLines[i] !== outLines[i]) { allMatch = false; break; }
-    }
-    if (allMatch) return LineMap.identity();
-  }
-
-  const mappings = new Array<number>(outLines.length + 1);
-  const originalPositions = new Map<string, number[]>();
-  for (let line = 0; line < origLines.length; line++) {
-    const value = origLines[line];
-    if (value.trim() === '') continue;
-    const positions = originalPositions.get(value);
-    if (positions) positions.push(line);
-    else originalPositions.set(value, [line]);
-  }
-
-  const firstAtOrAfter = (positions: number[], minimum: number): number | undefined => {
-    let lo = 0;
-    let hi = positions.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (positions[mid] < minimum) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo < positions.length ? positions[lo] : undefined;
-  };
-
-  const mapChangedRegion = (
-    originalStart: number,
-    originalEnd: number,
-    outputStart: number,
-    outputEnd: number,
-  ) => {
-    const originalCount = originalEnd - originalStart;
-    const outputCount = outputEnd - outputStart;
-    for (let line = outputStart; line < outputEnd; line++) {
-      if (originalCount <= 0) {
-        mappings[line] = Math.min(originalStart, origLines.length);
-      } else {
-        const relative = line - outputStart;
-        mappings[line] = originalStart + Math.min(
-          originalCount - 1,
-          Math.floor(relative * originalCount / outputCount),
-        );
-      }
-    }
-  };
-
-  let oi = 0; // original index
-  let pi = 0; // preprocessed (output) index
-
-  while (oi < origLines.length && pi < outLines.length) {
-    if (origLines[oi] === outLines[pi]) {
-      while (oi < origLines.length && pi < outLines.length && origLines[oi] === outLines[pi]) {
-        mappings[pi] = oi;
-        oi++;
-        pi++;
-      }
-      continue;
-    }
-
-    let anchorOriginal: number | undefined;
-    let anchorOutput: number | undefined;
-    for (let pScan = pi; pScan < outLines.length; pScan++) {
-      if (outLines[pScan].trim() === '') continue;
-      const positions = originalPositions.get(outLines[pScan]);
-      const match = positions ? firstAtOrAfter(positions, oi) : undefined;
-      if (match !== undefined) {
-        anchorOriginal = match;
-        anchorOutput = pScan;
-        break;
-      }
-    }
-
-    if (anchorOriginal === undefined || anchorOutput === undefined) {
-      mapChangedRegion(oi, origLines.length, pi, outLines.length);
-      oi = origLines.length;
-      pi = outLines.length;
-      break;
-    }
-
-    mapChangedRegion(oi, anchorOriginal, pi, anchorOutput);
-    oi = anchorOriginal;
-    pi = anchorOutput;
-  }
-
-  if (pi < outLines.length) {
-    mapChangedRegion(oi, origLines.length, pi, outLines.length);
-  }
-  // Token maps use an exclusive end-line boundary, so retain the final source
-  // boundary as well as each output line's start provenance.
-  mappings[outLines.length] = origLines.length;
-
-  return LineMap.fromLineMappings(mappings);
-}
-
-// The preview's rule gives these steps \n line ends alone (see
-// normalizeNewlines), each line end as markdown-it reads it
-function splitPhysicalLines(source: string): string[] {
-  return source.split('\n');
-}
-
-function buildCriticLineMap(source: string, output: string): LineMap {
-  const outputLines = splitPhysicalLines(output);
-  const restoredLines: string[] = [];
-  const restoredBoundaries: number[] = [];
-  for (const line of outputLines) {
-    restoredBoundaries.push(restoredLines.length);
-    for (const restoredLine of splitPhysicalLines(restoreCriticLineBreaks(line))) {
-      restoredLines.push(restoredLine);
-    }
-  }
-  restoredBoundaries.push(restoredLines.length);
-
-  const restoredMap = buildMapFromLines(splitPhysicalLines(source), restoredLines);
-  const outputToRestored = LineMap.fromLineMappings(restoredBoundaries);
-  return LineMap.chain(restoredMap, outputToRestored);
-}
+import { preprocessCriticMarkupWithLines } from '../critic-markup';
+import { lineCount, withEnd } from '../line-map';
 
 /** Preprocess grid tables and return the output with a line map. */
 export function preprocessGridTablesWithMap(src: string): { output: string; map: LineMap } {
-  const output = preprocessGridTables(src);
+  const { output, lines } = preprocessGridTablesWithSourceMap(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
+  return { output, map: LineMap.fromLineMappings(withEnd(lines, lineCount(src))) };
 }
 
 /** Preprocess bare LaTeX environments and return the output with a line
  *  map, leaving those in a quote's paragraph export ends the quote inside,
  *  which export leaves (see paragraphsExportEnds) */
 export function wrapBareLatexEnvironmentsWithMap(src: string): { output: string; map: LineMap } {
-  const output = wrapBareLatexEnvironments(src, '', { lazy: paragraphsExportEnds(src) });
+  const { output, lines } = wrapBareLatexEnvironmentsWithLines(src, { lazy: paragraphsExportEnds(src) });
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
+  return { output, map: LineMap.fromLineMappings(withEnd(lines, lineCount(src))) };
 }
 
 /** Preprocess CriticMarkup and return the output with a line map. */
 export function preprocessCriticMarkupWithMap(src: string): { output: string; map: LineMap } {
-  const output = preprocessCriticMarkup(src);
+  const { output, lines } = preprocessCriticMarkupWithLines(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildCriticLineMap(src, output) };
+  return { output, map: LineMap.fromLineMappings(lines) };
 }

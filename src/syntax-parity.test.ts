@@ -97,14 +97,15 @@ function previewSpans(markdown: string): string[] {
   return spans;
 }
 
-// Pieces of inline syntax, whole and in part, on one line. Not $, which
+// Pieces of inline syntax, whole and in part, and of the blocks around it.
+// Not $, which
 // export reads as math and the preview leaves to VS Code's math extension,
 // nor a footnote's reference, which the preview doesn't read.
 const PIECES = [
   '{++', '++}', '{--', '--}', '{~~', '~>', '~~}', '{==', '==}', '==', '{>>', '<<}',
   '{#a}', '{/a}', '{#a>>', '{#fig-a}', '{red}', '{yellow}', '{', '}', '\\',
   '[@k]', '[see @k, p. 2]', '[', '](u)', ']', '@fig-a', '[@fig-a]',
-  '*', '`', '<!--', '-->', '<b>', '</b>', 'a', 'b', ' ',
+  '*', '`', '<!--', '-->', '<b>', '</b>', 'a', 'b', ' ', '\n', '\n\n', '> ', '- ', '# ',
 ];
 
 describe('preview and export read the same inline syntax', () => {
@@ -119,13 +120,18 @@ describe('preview and export read the same inline syntax', () => {
     '==a=={red} ==b=={yellow} ==c=={nocolor}',
     // CriticMarkup only within a link's text
     '[a {++b](u) c++}',
+    // A span over a blank line, which preprocessing joins, or which, with no
+    // ~> in it, is none, and the text after it on its line
+    '{++a\n\nb++} c',
+    '{~~b\n\n<b>{~~}@fig-a{',
+    '{~~{red}\n==}~~}@fig-a',
     // Each kind, whole
     '{++a++} {--b--} {~~c~>d~~} {==e==}{>>f<<} {#x}g{/x}{#x>>h<<} ==i=={red} [@k] [@fig-a]',
   ])('%s', (markdown: string) => {
     expect(previewSpans(markdown)).toEqual(exportSpans(markdown));
   });
 
-  test('in any text on one line', () => {
+  test('in any text', () => {
     fc.assert(fc.property(fc.array(fc.constantFrom(...PIECES), { maxLength: 12 }), pieces => {
       const markdown = pieces.join('');
       expect(previewSpans(markdown)).toEqual(exportSpans(markdown));
