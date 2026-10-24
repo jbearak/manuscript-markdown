@@ -297,6 +297,8 @@ function mapHtmlTableRowsToMdTableRows(rows: HtmlTableRow[]): MdTableRow[] {
   }));
 }
 
+// Custom inline rules
+
 type CriticTokenType = 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment';
 
 interface ManuscriptToken extends Token {
@@ -4508,8 +4510,6 @@ function parseMarkdownImageDimension(attrs: string, attrName: 'width' | 'height'
   if (!match) return undefined;
   return parseImageDimension(match[1] + (match[2] || ''));
 }
-
-// OOXML Generation Layer
 
 /**
  * A paragraph's runs without the spaces and line breaks around comment

@@ -133,8 +133,6 @@ export { CODE_BLOCK_MARGIN_INDENT, TABLE_FONT_SLOTS, THEME_MINOR_FONT, applyAler
 export { annotateHtmlCommentIndices, countsForIndent, recordListBlankLine } from './md-to-docx-custom-props';
 export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
 
-// Custom inline rules
-
 /** A note's self-reference mark `selfRefRun` in the bookmark that
  *  cross-references to note `noteId` point to (see noteReferenceXml) */
 function bookmarkedSelfRef(selfRefRun: string, noteId: number, state: DocxGenState): string {
@@ -415,6 +413,8 @@ function wordText(xml: string): string {
   }
   return text;
 }
+
+// OOXML Generation Layer
 
 interface TemplateParts {
   parts: Map<string, Uint8Array>;
