@@ -13,6 +13,7 @@ LSP: `src/lsp/server.ts` (language server — diagnostics, completions)
 
 - Template literal corruption: never use `$$` in code touched by tool text-replacement operations — `$` is special in replacement strings and `$$` gets corrupted. Use string concatenation instead.
 - Regex parity invariant: keep navigation (`src/changes.ts`) plain-highlight lookaround logic in lockstep with `syntaxes/manuscript-markdown.json` and mirrored regex test copies.
+- One reader for inline syntax: where CriticMarkup, comment ranges, format highlights, citations and cross-references start and end is decided only in `src/inline-syntax.ts`, which the preview plugin and `md-to-docx.ts` both call; each side only builds its own tokens. Don't add a recognizer to either side. `src/syntax-parity.test.ts` fuzzes both parsers against each other.
 - Word dirty-flag invariants: see the 12 numbered invariants in the `md-to-docx.ts` file header.
 
 Per-module invariants live as comments in the corresponding source files.
