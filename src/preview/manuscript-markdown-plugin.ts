@@ -26,7 +26,7 @@ import { GRID_TABLE_PLACEHOLDER_PREFIX, gridColumnAlign } from '../grid-table-pr
 import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preprocessCriticMarkupWithMap } from './preprocess-with-map';
 import { LineMap } from './line-map';
 import { pushAll, spliceAll } from '../arrays';
-import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionLabelId, isCaptionText, tableCaptionSource, type CaptionOptions, type FigureAttributes } from '../captions';
+import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionText, tableCaptionSource, type CaptionOptions, type FigureAttributes } from '../captions';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { blockListAfter, parseFrontmatter, type ColorScheme } from '../frontmatter';
@@ -37,7 +37,8 @@ import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 import { findDollarMathAt } from '../math-delimiters';
-import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText, crossRefAt, crossRefLabel } from '../citation-syntax';
+import { CITATION_ITEM_START_RE, citationPrefixText, crossRefLabel } from '../citation-syntax';
+import { citationSpanAt, criticSpanAt, crossRefSpanAt, formatHighlightAt } from '../inline-syntax';
 import { normalizeNewlines } from '../newlines';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
@@ -1384,10 +1385,8 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   // Not where markdown-it scans a link's label, which it alone does
   // silently, and which a token that takes a [ in it ends: a link around a
   // citation stays a link
-  if (silent) return false;
   const start = state.pos;
-  if (start + 2 >= state.posMax) return false;
-  const end = citationEnd(state, start);
+  const end = citationSpanAt(state, start, silent, false);
   if (end === -1) return false;
   // With the line breaks CriticMarkup protected in it, before which a key
   // starts as after a space
@@ -1415,8 +1414,7 @@ function citationRule(state: StateInline, silent: boolean): boolean {
 function crossRefRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   // As a citation, none where markdown-it scans a link's label
-  if (silent && state.src.charAt(start) === '[') return false;
-  const ref = crossRefAt(state, start);
+  const ref = crossRefSpanAt(state, start, silent);
   if (!ref) return false;
   if (!silent) {
     const token = state.push('manuscript_cross_reference', '', 0);
@@ -1433,423 +1431,114 @@ function crossRefRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
-/** Whether the == at `at` is a {=='s, whose { no backslash escapes, as
- *  export reads it in a format highlight (findClosingHighlightMarker) */
-function opensCriticHighlight(src: string, at: number): boolean {
-  if (src.charCodeAt(at - 1) !== 0x7B /* { */) return false;
-  let slashes = 0;
-  while (src.charCodeAt(at - 2 - slashes) === 0x5C /* \ */) slashes++;
-  return slashes % 2 === 0;
-}
-
-const criticHighlightEnds = new WeakMap<object, { src: string; byMax: Map<number, Map<number, number>> }>();
-
 /**
- * Where the critic highlight that the {== at `at` (its ==) opens in a
- * format highlight ends, as export reads it: just past the ==} that closes
- * it, once each {== in it is closed in turn, or -1 if none does before the
- * state's posMax. Each {=='s end is found once for the state's text and
- * posMax, as a search from each == before a {== that never closes read the
- * rest of the text again.
- */
-function criticHighlightEnd(state: StateInline, at: number): number {
-  const src = state.src;
-  const max = state.posMax;
-  let memo = criticHighlightEnds.get(state);
-  if (!memo || memo.src !== src) criticHighlightEnds.set(state, memo = { src, byMax: new Map() });
-  let ends = memo.byMax.get(max);
-  if (!ends) memo.byMax.set(max, ends = new Map());
-  const known = ends.get(at);
-  if (known !== undefined) return known;
-  // The {=='s still open, innermost last
-  const open = [at];
-  let pos = at + 2;
-  while (open.length > 0) {
-    if (pos >= max) {
-      // None closes, nor any that holds it
-      for (const opener of open) ends.set(opener, -1);
-      return -1;
-    }
-    if (src.charCodeAt(pos) === 0x3D /* = */ && pos + 1 < max && src.charCodeAt(pos + 1) === 0x3D /* = */) {
-      if (opensCriticHighlight(src, pos)) {
-        const end = ends.get(pos);
-        if (end === undefined) {
-          open.push(pos);
-          pos += 2;
-        } else if (end === -1) {
-          pos = max;
-        } else {
-          pos = end;
-        }
-        continue;
-      }
-      if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7D /* } */) {
-        ends.set(open.pop()!, pos + 3);
-        pos += 3;
-        continue;
-      }
-    }
-    pos++;
-  }
-  return ends.get(at)!;
-}
-
-const unbracedEquals = new WeakMap<object, { src: string; at: number[] }>();
-
-/**
- * The first == at or after `from` that a format highlight's search for its
- * closing == stops at: a {=='s, or one that no } follows before the
- * state's posMax, or posMax if none is. Their offsets are found once for
- * the state's text, as reading on past each ==} read the rest of the text
- * again for each == before it, as in ==} repeated.
- */
-function nextUnbracedEquals(state: StateInline, from: number): number {
-  const src = state.src;
-  const max = state.posMax;
-  let memo = unbracedEquals.get(state);
-  if (!memo || memo.src !== src) {
-    const at: number[] = [];
-    for (let k = src.indexOf('=='); k !== -1; k = src.indexOf('==', k + 1)) {
-      if (src.charCodeAt(k + 2) !== 0x7D /* } */ || opensCriticHighlight(src, k)) at.push(k);
-    }
-    unbracedEquals.set(state, memo = { src, at });
-  }
-  // The first at or after `from`
-  const at = memo.at;
-  let lo = 0;
-  let hi = at.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (at[mid] < from) lo = mid + 1;
-    else hi = mid;
-  }
-  let next = lo < at.length && at[lo] + 1 < max ? at[lo] : max;
-  // An == right before posMax, whose } is past it
-  const last = max - 2;
-  if (last >= from && last < next && src.charCodeAt(last) === 0x3D /* = */ && src.charCodeAt(last + 1) === 0x3D /* = */) next = last;
-  return next;
-}
-
-/**
- * Inline rule for ==highlight== patterns (not CriticMarkup)
+ * Inline rule for ==highlight== patterns (not CriticMarkup), where
+ * formatHighlightAt reads one
  * @param state - The inline parsing state
  * @param silent - Whether to only check without creating tokens
  * @returns true if a pattern was found and processed
  */
 function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
-  const start = state.pos;
-  const max = state.posMax;
-  const src = state.src;
-  const resolveDefaultColor = (): string => {
-    const color = getDefaultHighlightColor();
-    return VALID_COLOR_IDS.includes(color) ? color : 'yellow';
-  };
-
-  // Check if we're at ==
-  if (src.charCodeAt(start) !== 0x3D /* = */ || src.charCodeAt(start + 1) !== 0x3D /* = */) {
-    return false;
+  const span = formatHighlightAt(state, state.pos);
+  if (!span) return false;
+  if (!silent) {
+    const resolveDefaultColor = (): string => {
+      const color = getDefaultHighlightColor();
+      return VALID_COLOR_IDS.includes(color) ? color : 'yellow';
+    };
+    // The color it names, or else, for one it doesn't know or none, the
+    // configured default, which is the stylesheet's own where it's yellow
+    const named = span.color !== undefined && VALID_COLOR_IDS.includes(span.color);
+    const color = named ? span.color! : resolveDefaultColor();
+    const tokenOpen = state.push('manuscript_markdown_format_highlight_open', 'mark', 1);
+    tokenOpen.attrSet('class', named || color !== 'yellow'
+      ? 'manuscript-markdown-format-highlight manuscript-markdown-highlight-' + color
+      : 'manuscript-markdown-format-highlight');
+    // Add parsed inline content to allow nested Markdown processing
+    addInlineContent(state, state.src.slice(span.contentStart, span.contentEnd), inlineSourceOffset(state, span.contentStart));
+    state.push('manuscript_markdown_format_highlight_close', 'mark', -1);
   }
-
-  // Check if preceded by { (to avoid matching CriticMarkup {==...==}), but
-  // for one an odd run of backslashes escapes, which is text, as export
-  // reads it: \{==x==\} is a {, the highlighted x and a }, which import
-  // writes for Word's literal braces around a highlight
-  if (opensCriticHighlight(src, start)) {
-    return false;
-  }
-
-  // Find closing ==. As export reads it (findClosingHighlightMarker in
-  // md-to-docx.ts), the == of a {== in the highlight is no closing ==: it
-  // opens a critic highlight, read past to the ==} that closes it, and one
-  // that never closes leaves the highlight unclosed.
-  let pos = start + 2;
-  while (pos < max) {
-    if (src.charCodeAt(pos) === 0x3D /* = */ && pos + 1 < max && src.charCodeAt(pos + 1) === 0x3D /* = */) {
-      if (opensCriticHighlight(src, pos)) {
-        pos = criticHighlightEnd(state, pos);
-        if (pos === -1) return false;
-        continue;
-      }
-      // Check if followed by } (to avoid matching CriticMarkup {==...==}),
-      // and go on to the next == that isn't, or that opens one
-      if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7D /* } */) {
-        pos = nextUnbracedEquals(state, pos + 2);
-        continue;
-      }
-      
-      // Found closing ==
-      if (!silent) {
-        const content = src.slice(start + 2, pos);
-        const tokenOpen = state.push('manuscript_markdown_format_highlight_open', 'mark', 1);
-        
-        // Check for optional {color} suffix after closing ==
-        // Implementation note: Only treat {…} as a color suffix when the closing } is within
-        // parse bounds and the identifier matches [a-z0-9](?:[a-z0-9-]*[a-z0-9])? (no
-        // leading/trailing -); otherwise keep as literal text so adjacent CriticMarkup
-        // (e.g. {--…--}) is not swallowed as a color suffix.
-        let cssClass = 'manuscript-markdown-format-highlight';
-        let endPos = pos + 2;
-        let hasColorSuffix = false;
-        if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7B /* { */) {
-          const closeBrace = src.indexOf('}', pos + 3);
-          if (closeBrace !== -1 && closeBrace < max) {
-            const colorId = src.slice(pos + 3, closeBrace);
-            if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(colorId)) {
-              hasColorSuffix = true;
-              if (VALID_COLOR_IDS.includes(colorId)) {
-                cssClass = 'manuscript-markdown-format-highlight manuscript-markdown-highlight-' + colorId;
-              } else {
-                const defaultColor = resolveDefaultColor();
-                if (defaultColor !== 'yellow') {
-                  cssClass = 'manuscript-markdown-format-highlight manuscript-markdown-highlight-' + defaultColor;
-                }
-              }
-              endPos = closeBrace + 1;
-            }
-          }
-        }
-        if (!hasColorSuffix && cssClass === 'manuscript-markdown-format-highlight') {
-          // Apply configurable default color only for ==text== without color suffix
-          const defaultColor = resolveDefaultColor();
-          if (defaultColor !== 'yellow') {
-            cssClass = 'manuscript-markdown-format-highlight manuscript-markdown-highlight-' + defaultColor;
-          }
-        }
-        tokenOpen.attrSet('class', cssClass);
-        
-        // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content, inlineSourceOffset(state, start + 2));
-        
-        state.push('manuscript_markdown_format_highlight_close', 'mark', -1);
-        state.pos = endPos;
-      } else {
-        // In silent mode, still need to advance past {color} suffix
-        let endPos = pos + 2;
-        if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7B /* { */) {
-          const closeBrace = src.indexOf('}', pos + 3);
-          if (closeBrace !== -1 && closeBrace < max) {
-            const colorId = src.slice(pos + 3, closeBrace);
-            if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(colorId)) {
-              endPos = closeBrace + 1;
-            }
-          }
-        }
-        state.pos = endPos;
-      }
-      return true;
-    }
-    pos++;
-  }
-
-  return false;
+  state.pos = span.end;
+  return true;
 }
 
+/** The tokens of a CriticMarkup span whose text is parsed inline, by kind */
+const CRITIC_SPAN_TOKENS = {
+  addition: { name: 'addition', tag: 'ins', cssClass: 'manuscript-markdown-addition' },
+  deletion: { name: 'deletion', tag: 'del', cssClass: 'manuscript-markdown-deletion' },
+  highlight: { name: 'highlight', tag: 'mark', cssClass: 'manuscript-markdown-highlight' },
+} as const;
+
 /**
- * Inline rule function that scans for Manuscript Markdown patterns and creates tokens
+ * Inline rule function that reads Manuscript Markdown's CriticMarkup spans,
+ * range markers and comments, where criticSpanAt reads one, and creates tokens
  * @param state - The inline parsing state
  * @param silent - Whether to only check without creating tokens
  * @returns true if a pattern was found and processed
  */
 function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  const max = state.posMax;
   const src = state.src;
+  const span = criticSpanAt(state, start);
+  if (!span) return false;
+  state.pos = span.end;
+  if (silent) return true;
 
-  // Check if we're at a potential Manuscript Markdown start
-  if (src.charCodeAt(start) !== 0x7B /* { */) {
-    return false;
-  }
-  // Each closer among those of the inline text, found once for all the
-  // rule's calls, as each unclosed opener searched the rest of it
-  const closers = criticCloserSearchOf(state);
+  switch (span.kind) {
+    case 'addition':
+    case 'deletion':
+    case 'highlight': {
+      const { name, tag, cssClass } = CRITIC_SPAN_TOKENS[span.kind];
+      const tokenOpen = state.push('manuscript_markdown_' + name + '_open', tag, 1);
+      tokenOpen.attrSet('class', cssClass);
+      // Add parsed inline content to allow nested Markdown processing
+      addInlineContent(state, src.slice(span.contentStart, span.contentEnd), inlineSourceOffset(state, span.contentStart));
+      state.push('manuscript_markdown_' + name + '_close', tag, -1);
+      break;
+    }
+    case 'substitution': {
+      const tokenOpen = state.push('manuscript_markdown_substitution_open', 'span', 1);
+      tokenOpen.attrSet('class', 'manuscript-markdown-substitution');
 
-  // Check for addition {++text++}
-  if (src.charCodeAt(start + 1) === 0x2B /* + */ && src.charCodeAt(start + 2) === 0x2B /* + */) {
-    const endMarker = '++}';
-    const endPos = closers.next(endMarker, start + 3);
-    if (endPos !== -1 && endPos + 3 <= max) {
-      if (!silent) {
-        const content = src.slice(start + 3, endPos);
-        const tokenOpen = state.push('manuscript_markdown_addition_open', 'ins', 1);
-        tokenOpen.attrSet('class', 'manuscript-markdown-addition');
-        
-        // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content, inlineSourceOffset(state, start + 3));
-        
-        state.push('manuscript_markdown_addition_close', 'ins', -1);
-      }
-      state.pos = endPos + endMarker.length;
-      return true;
+      // Old text with deletion styling
+      const tokenOldOpen = state.push('manuscript_markdown_substitution_old_open', 'del', 1);
+      tokenOldOpen.attrSet('class', 'manuscript-markdown-deletion');
+      addInlineContent(state, src.slice(span.contentStart, span.separator), inlineSourceOffset(state, span.contentStart));
+      state.push('manuscript_markdown_substitution_old_close', 'del', -1);
+
+      // New text with addition styling
+      const tokenNewOpen = state.push('manuscript_markdown_substitution_new_open', 'ins', 1);
+      tokenNewOpen.attrSet('class', 'manuscript-markdown-addition');
+      addInlineContent(state, src.slice(span.separator + 2, span.contentEnd), inlineSourceOffset(state, span.separator + 2));
+      state.push('manuscript_markdown_substitution_new_close', 'ins', -1);
+
+      state.push('manuscript_markdown_substitution_close', 'span', -1);
+      break;
+    }
+    case 'comment': {
+      // {>>text<<}, or {#id>>text<<}, the body of the comment whose range
+      // {#id} and {/id} mark
+      const content = src.slice(span.contentStart, span.contentEnd);
+      const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
+      tokenOpen.attrSet('class', 'manuscript-markdown-comment');
+      const commentText = commentTooltipText(restoreCriticLineBreaks(content));
+      tokenOpen.meta = span.id === undefined ? { commentText } : { id: span.id, commentText };
+      // Add parsed inline content to allow nested Markdown processing
+      addInlineContent(state, content, inlineSourceOffset(state, span.contentStart));
+      state.push('manuscript_markdown_comment_close', 'span', -1);
+      break;
+    }
+    case 'range_start':
+    case 'range_end': {
+      // A caption's label marks no range (see criticSpanAt), its ID one no
+      // comment has, which shows nothing
+      const token = state.push('manuscript_markdown_range_marker', 'span', 0);
+      token.attrSet('class', 'manuscript-markdown-range-marker');
+      token.meta = { id: span.id, type: span.kind === 'range_start' ? 'start' : 'end' };
+      break;
     }
   }
-
-  // Check for deletion {--text--}
-  if (src.charCodeAt(start + 1) === 0x2D /* - */ && src.charCodeAt(start + 2) === 0x2D /* - */) {
-    const endMarker = '--}';
-    const endPos = closers.next(endMarker, start + 3);
-    if (endPos !== -1 && endPos + 3 <= max) {
-      if (!silent) {
-        const content = src.slice(start + 3, endPos);
-        const tokenOpen = state.push('manuscript_markdown_deletion_open', 'del', 1);
-        tokenOpen.attrSet('class', 'manuscript-markdown-deletion');
-        
-        // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content, inlineSourceOffset(state, start + 3));
-        
-        state.push('manuscript_markdown_deletion_close', 'del', -1);
-      }
-      state.pos = endPos + endMarker.length;
-      return true;
-    }
-  }
-
-  // Check for substitution {~~old~>new~~}
-  if (src.charCodeAt(start + 1) === 0x7E /* ~ */ && src.charCodeAt(start + 2) === 0x7E /* ~ */) {
-    const endMarker = '~~}';
-    const endPos = closers.next(endMarker, start + 3);
-    if (endPos !== -1 && endPos + 3 <= max) {
-      // The first ~> in the span, which none is in where the first after
-      // its opener is past its closer
-      const separatorAt = closers.next('~>', start + 3);
-      const separatorPos = separatorAt !== -1 && separatorAt < endPos ? separatorAt - (start + 3) : -1;
-      if (separatorPos !== -1) {
-        const fullContent = src.slice(start + 3, endPos);
-        if (!silent) {
-          const oldText = fullContent.slice(0, separatorPos);
-          const newText = fullContent.slice(separatorPos + 2);
-          
-          const tokenOpen = state.push('manuscript_markdown_substitution_open', 'span', 1);
-          tokenOpen.attrSet('class', 'manuscript-markdown-substitution');
-          
-          // Old text with deletion styling
-          const tokenOldOpen = state.push('manuscript_markdown_substitution_old_open', 'del', 1);
-          tokenOldOpen.attrSet('class', 'manuscript-markdown-deletion');
-          
-          // Add parsed inline content to allow nested Markdown processing
-          addInlineContent(state, oldText, inlineSourceOffset(state, start + 3));
-          
-          state.push('manuscript_markdown_substitution_old_close', 'del', -1);
-          
-          // New text with addition styling
-          const tokenNewOpen = state.push('manuscript_markdown_substitution_new_open', 'ins', 1);
-          tokenNewOpen.attrSet('class', 'manuscript-markdown-addition');
-          
-          // Add parsed inline content to allow nested Markdown processing
-          addInlineContent(
-            state,
-            newText,
-            inlineSourceOffset(state, start + 3 + separatorPos + 2),
-          );
-          
-          state.push('manuscript_markdown_substitution_new_close', 'ins', -1);
-          
-          state.push('manuscript_markdown_substitution_close', 'span', -1);
-        }
-        state.pos = endPos + endMarker.length;
-        return true;
-      }
-    }
-  }
-
-  // Check for {#id>>...<<} comment body with ID, {#id} range start, or {/id} range end
-  if (src.charCodeAt(start + 1) === 0x23 /* # */) {
-    // Find end of ID: [a-zA-Z0-9_-]+
-    let idEnd = start + 2;
-    while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
-    if (idEnd > start + 2) {
-      // Check for {#id>>...<<} comment body with ID (depth-aware for nested replies)
-      if (idEnd + 1 < max && src.charCodeAt(idEnd) === 0x3E /* > */ && src.charCodeAt(idEnd + 1) === 0x3E /* > */) {
-        const endPos = closers.matching(idEnd + 2);
-        if (endPos !== -1 && endPos + 3 <= max) {
-          if (!silent) {
-            const id = src.slice(start + 2, idEnd);
-            const content = src.slice(idEnd + 2, endPos);
-            const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
-            tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-            tokenOpen.meta = {
-              id,
-              commentText: commentTooltipText(restoreCriticLineBreaks(content)),
-            };
-            addInlineContent(state, content, inlineSourceOffset(state, idEnd + 2));
-            state.push('manuscript_markdown_comment_close', 'span', -1);
-          }
-          state.pos = endPos + 3;
-          return true;
-        }
-      }
-      // Check for {#id} range start marker. A caption's label, as
-      // {#fig-map}, is none (see captions.ts): one an image doesn't take is
-      // a marker of no range, its ID one no comment has, which shows nothing
-      if (idEnd < max && src.charCodeAt(idEnd) === 0x7D /* } */) {
-        if (!silent) {
-          const id = src.slice(start + 2, idEnd);
-          const token = state.push('manuscript_markdown_range_marker', 'span', 0);
-          token.attrSet('class', 'manuscript-markdown-range-marker');
-          token.meta = { id: isCaptionLabelId(id) ? '#' + id : id, type: 'start' };
-        }
-        state.pos = idEnd + 1;
-        return true;
-      }
-    }
-  }
-
-  // Check for {/id} range end marker
-  if (src.charCodeAt(start + 1) === 0x2F /* / */) {
-    let idEnd = start + 2;
-    while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
-    if (idEnd > start + 2 && idEnd < max && src.charCodeAt(idEnd) === 0x7D /* } */) {
-      if (!silent) {
-        const id = src.slice(start + 2, idEnd);
-        const token = state.push('manuscript_markdown_range_marker', 'span', 0);
-        token.attrSet('class', 'manuscript-markdown-range-marker');
-        token.meta = { id, type: 'end' };
-      }
-      state.pos = idEnd + 1;
-      return true;
-    }
-  }
-
-  // Check for comment {>>text<<} (depth-aware for nested replies)
-  if (src.charCodeAt(start + 1) === 0x3E /* > */ && src.charCodeAt(start + 2) === 0x3E /* > */) {
-    const endPos = closers.matching(start + 3);
-    if (endPos !== -1 && endPos + 3 <= max) {
-      if (!silent) {
-        const content = src.slice(start + 3, endPos);
-        const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
-        tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-        tokenOpen.meta = { commentText: commentTooltipText(restoreCriticLineBreaks(content)) };
-
-        // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content, inlineSourceOffset(state, start + 3));
-
-        state.push('manuscript_markdown_comment_close', 'span', -1);
-      }
-      state.pos = endPos + 3;
-      return true;
-    }
-  }
-
-  // Check for highlight {==text==}
-  if (src.charCodeAt(start + 1) === 0x3D /* = */ && src.charCodeAt(start + 2) === 0x3D /* = */) {
-    const endMarker = '==}';
-    const endPos = closers.next(endMarker, start + 3);
-    if (endPos !== -1 && endPos + 3 <= max) {
-      if (!silent) {
-        const content = src.slice(start + 3, endPos);
-        const tokenOpen = state.push('manuscript_markdown_highlight_open', 'mark', 1);
-        tokenOpen.attrSet('class', 'manuscript-markdown-highlight');
-        
-        // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content, inlineSourceOffset(state, start + 3));
-        
-        state.push('manuscript_markdown_highlight_close', 'mark', -1);
-      }
-      state.pos = endPos + endMarker.length;
-      return true;
-    }
-  }
-
-  return false;
+  return true;
 }
 
 /** Check if a token type is a CriticMarkup or format highlight close token */

@@ -30,7 +30,7 @@ import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
-import { attributeValue, captionBookmarkName, captionLabelText, captionOptions, captionSeparator, isCaptionLabelId, isCaptionText, labelOfBookmark, seqIdentifiers, tableCaptionSource, type CaptionOptions, type FigureAttributes } from './captions';
+import { attributeValue, captionBookmarkName, captionLabelText, captionOptions, captionSeparator, isCaptionText, labelOfBookmark, seqIdentifiers, tableCaptionSource, type CaptionOptions, type FigureAttributes } from './captions';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
 import { escapeXmlAttribute, hasNonXmlCharacter, withoutNonXmlCharacters } from './xml-parser';
 import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, withProperties, type Context, type Scope, type XmlNode } from './scoped-xml';
@@ -392,11 +392,12 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
   caution: '⛒',
 };
 
-import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, criticCloserSearch, criticCloserSearchOf, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml, criticBreaksLeftOver } from './critic-markup';
+import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, preprocessCriticMarkupWithLines, findMatchingClose, criticCloserSearch, restoreCriticLineBreaks, criticBreaksEndLinks, criticBreaksInRawHtml, criticBreaksLeftOver } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt } from './math-delimiters';
-import { citationEnd, citationPrefixText, crossRefAt, crossRefLabel, readCitationItems, type CrossRefSource } from './citation-syntax';
+import { citationEnd, citationPrefixText, crossRefLabel, readCitationItems, type CrossRefSource } from './citation-syntax';
 import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments, type ContainerOptions } from './latex-env-preprocess';
+import { citationSpanAt, criticSpanAt, crossRefSpanAt, formatHighlightAt } from './inline-syntax';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines, withEnd } from './line-map';
 import { normalizeNewlines } from './newlines';
 export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
@@ -492,135 +493,63 @@ function extractReplies(content: string): { parentText: string; replies: Array<{
   return { parentText, replies };
 }
 
-/** Parse {#id}, {/id}, and {#id>>...<<} comment range markers */
+/** Parse {#id}, {/id}, and {#id>>...<<} comment range markers (see criticSpanAt) */
 function commentRangeRule(state: StateInline, silent: boolean): boolean {
-  const start = state.pos;
-  const max = state.posMax;
-  const src = state.src;
-
-  if (start >= max || src.charAt(start) !== '{') return false;
-
-  const next = src.charAt(start + 1);
-  if (next === '#') {
-    // Could be {#id} range start or {#id>>...<<} comment body
-    const idStart = start + 2;
-    // Find end of ID: [a-zA-Z0-9_-]+
-    let idEnd = idStart;
-    while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
-    if (idEnd === idStart) return false; // empty ID
-
-    const id = src.slice(idStart, idEnd);
-
-    // Check for {#id>>...<<} comment body
-    if (idEnd + 1 < max && src.charAt(idEnd) === '>' && src.charAt(idEnd + 1) === '>') {
-      // Find matching <<} accounting for nested {>>...<<} replies
-      const endPos = criticCloserSearchOf(state).matching(idEnd + 2);
-      if (endPos === -1) return false;
-
-      if (!silent) {
-        const rawContent = restoreCriticLineBreaks(src.slice(idEnd + 2, endPos));
-        const token = pushManuscriptToken(state, 'comment_body_with_id', '', 0);
-        token.commentId = id;
-
-        // Check for nested replies
-        const { parentText, replies } = extractReplies(rawContent);
-        const parsed = parseCommentContent(parentText);
-        token.author = parsed.author;
-        token.date = parsed.date;
-        token.commentText = parsed.text;
-        if (replies.length > 0) {
-          token.replies = replies;
-        }
+  const span = criticSpanAt(state, state.pos);
+  if (!span || span.kind !== 'range_start' && span.kind !== 'range_end' && span.kind !== 'comment') return false;
+  // A comment's body with no ID is criticMarkupRule's
+  if (span.kind === 'comment' && span.id === undefined) return false;
+  if (!silent) {
+    if (span.kind === 'comment') {
+      const rawContent = restoreCriticLineBreaks(state.src.slice(span.contentStart, span.contentEnd));
+      const token = pushManuscriptToken(state, 'comment_body_with_id', '', 0);
+      token.commentId = span.id;
+      // Check for nested replies
+      const { parentText, replies } = extractReplies(rawContent);
+      const parsed = parseCommentContent(parentText);
+      token.author = parsed.author;
+      token.date = parsed.date;
+      token.commentText = parsed.text;
+      if (replies.length > 0) {
+        token.replies = replies;
       }
-      state.pos = endPos + 3;
-      return true;
+    } else {
+      // A caption's label marks no range (see criticSpanAt): its ID is one
+      // no comment's body has, which writes nothing, as a range start of an
+      // ID with no body does, and gets a warning
+      const token = pushManuscriptToken(state, span.kind === 'range_start' ? 'comment_range_start' : 'comment_range_end', '', 0);
+      token.commentId = span.id;
     }
-
-    // Check for {#id} range start. A caption's label, as {#fig-map}, is
-    // none (see captions.ts): one an image doesn't take is a marker of no
-    // range, its ID one no comment's body has, which writes nothing, as a
-    // range start of an ID with no body does, and gets a warning
-    if (idEnd < max && src.charAt(idEnd) === '}') {
-      if (!silent) {
-        const token = pushManuscriptToken(state, 'comment_range_start', '', 0);
-        token.commentId = isCaptionLabelId(id) ? '#' + id : id;
-      }
-      state.pos = idEnd + 1;
-      return true;
-    }
-
-    return false;
   }
-
-  if (next === '/') {
-    // {/id} range end
-    const idStart = start + 2;
-    let idEnd = idStart;
-    while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
-    if (idEnd === idStart) return false;
-
-    if (idEnd < max && src.charAt(idEnd) === '}') {
-      if (!silent) {
-        const token = pushManuscriptToken(state, 'comment_range_end', '', 0);
-        token.commentId = src.slice(idStart, idEnd);
-      }
-      state.pos = idEnd + 1;
-      return true;
-    }
-
-    return false;
-  }
-
-  return false;
+  state.pos = span.end;
+  return true;
 }
+
+const CRITIC_TOKEN_TYPES = {
+  addition: 'critic_add',
+  deletion: 'critic_del',
+  substitution: 'critic_sub',
+  highlight: 'critic_highlight',
+  comment: 'critic_comment',
+} as const;
 
 function criticMarkupRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  const max = state.posMax;
-
-  if (start + 3 >= max || state.src.charAt(start) !== '{') return false;
-
-  const marker = state.src.slice(start, start + 3);
-  let endMarker: string;
-  let type: CriticTokenType;
-
-  switch (marker) {
-    case '{++': endMarker = '++}'; type = 'critic_add'; break;
-    case '{--': endMarker = '--}'; type = 'critic_del'; break;
-    case '{~~': endMarker = '~~}'; type = 'critic_sub'; break;
-    case '{==': endMarker = '==}'; type = 'critic_highlight'; break;
-    case '{>>': endMarker = '<<}'; type = 'critic_comment'; break;
-    default: return false;
-  }
-
-  // Each search is one of the closers of the inline text, found once for
-  // all the rule's calls, as each unclosed opener's searched the rest of it
-  const closers = criticCloserSearchOf(state);
-  let endPos: number;
-  if (type === 'critic_comment') {
-    // Use depth-aware matching for {>>...<<} which may contain nested replies
-    endPos = closers.matching(start + 3);
-  } else {
-    endPos = closers.next(endMarker, start + 3);
-  }
-  if (endPos === -1) return false;
-
-  // A substitution is only CriticMarkup when its old and new sides are
-  // separated by ~>. Leave malformed substitution-shaped text literal.
-  if (type === 'critic_sub') {
-    const separatorPos = closers.next('~>', start + 3);
-    if (separatorPos === -1 || separatorPos >= endPos) return false;
-  }
+  const span = criticSpanAt(state, start);
+  if (!span || span.kind === 'range_start' || span.kind === 'range_end') return false;
+  // A comment's body with an ID is commentRangeRule's
+  if (span.kind === 'comment' && span.id !== undefined) return false;
 
   if (!silent) {
+    const type = CRITIC_TOKEN_TYPES[span.kind];
     // Replace any paragraph placeholders back to real newlines
-    const content = restoreCriticLineBreaks(state.src.slice(start + 3, endPos));
+    const content = restoreCriticLineBreaks(state.src.slice(span.contentStart, span.contentEnd));
     const token = pushManuscriptToken(state, 'critic_markup', '', 0);
-    token.markup = marker;
+    token.markup = state.src.slice(start, span.contentStart);
     token.content = content;
     token.criticType = type;
 
-    if (type === 'critic_sub') {
+    if (span.kind === 'substitution') {
       const sepPos = content.indexOf('~>');
       if (sepPos !== -1) {
         token.oldText = content.slice(0, sepPos);
@@ -635,7 +564,7 @@ function criticMarkupRule(state: StateInline, silent: boolean): boolean {
       }
     }
 
-    if (type === 'critic_comment') {
+    if (span.kind === 'comment') {
       const { parentText, replies } = extractReplies(content);
       const parsed = parseCommentContent(parentText);
       token.author = parsed.author;
@@ -647,166 +576,22 @@ function criticMarkupRule(state: StateInline, silent: boolean): boolean {
     }
   }
 
-  state.pos = endPos + endMarker.length;
+  state.pos = span.end;
   return true;
 }
 
-/** Whether the == at `at` is a {=='s, whose { no backslash escapes, as
- *  import writes Word's { before a highlight's closing == */
-function opensCriticHighlight(src: string, at: number): boolean {
-  if (at === 0 || src[at - 1] !== '{') return false;
-  let slashes = 0;
-  while (src[at - 2 - slashes] === '\\') slashes++;
-  return slashes % 2 === 0;
-}
-
-/**
- * Where the critic highlight that the {== at `at` (its ==) opens in a
- * format highlight ends: just past the ==} that closes it, once each {== in
- * it is closed in turn, or -1 if none does before `max`. Each {=='s end is
- * kept in `ends`, for the text and `max`, so a search from each == before
- * a {== that never closes doesn't read the rest of the text again.
- */
-function criticHighlightEnd(src: string, at: number, max: number, ends: Map<number, number>): number {
-  const known = ends.get(at);
-  if (known !== undefined) return known;
-  // The {=='s still open, innermost last
-  const open = [at];
-  let pos = at + 2;
-  while (open.length > 0) {
-    if (pos >= max - 1) {
-      // None closes, nor any that holds it
-      for (const opener of open) ends.set(opener, -1);
-      return -1;
-    }
-    if (src[pos] === '=' && src[pos + 1] === '=') {
-      if (opensCriticHighlight(src, pos)) {
-        const end = ends.get(pos);
-        if (end === undefined) {
-          open.push(pos);
-          pos += 2;
-        } else {
-          pos = end === -1 ? max : end;
-        }
-        continue;
-      }
-      // Its closing ==}
-      if (pos + 2 < max && src[pos + 2] === '}') {
-        ends.set(open.pop()!, pos + 3);
-        pos += 3;
-        continue;
-      }
-    }
-    pos++;
-  }
-  return ends.get(at)!;
-}
-
-/** The offsets of the ==s in `src` that a format highlight's search for its
- *  closing == stops at (see findClosingHighlightMarker): each but one with a
- *  } right after it, though one that opens a critic highlight stops it */
-function unbracedEquals(src: string): number[] {
-  const at: number[] = [];
-  for (let k = src.indexOf('=='); k !== -1; k = src.indexOf('==', k + 1)) {
-    if (src[k + 2] !== '}' || opensCriticHighlight(src, k)) at.push(k);
-  }
-  return at;
-}
-
-/** The first == at or after `from` that a format highlight's search for its
- *  closing == stops at, of `unbraced` (see unbracedEquals), or one right
- *  before `max`, whose } is past it, or `max` if none is */
-function nextUnbracedEquals(src: string, from: number, max: number, unbraced: number[]): number {
-  let lo = 0;
-  let hi = unbraced.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (unbraced[mid] < from) lo = mid + 1;
-    else hi = mid;
-  }
-  let next = lo < unbraced.length && unbraced[lo] + 1 < max ? unbraced[lo] : max;
-  const last = max - 2;
-  if (last >= from && last < next && src[last] === '=' && src[last + 1] === '=') next = last;
-  return next;
-}
-
-/** The closing == of a format highlight whose text starts at `from`: the
- *  first == outside the critic highlights in it, each {== opening one that
- *  its ==} closes (see criticHighlightEnd), or -1 if none is before `max`.
- *  An == right before a } closes none, as the preview and the editor read
- *  it, so \{==x==} is text, its { escaped: the search goes on to the next
- *  == (see nextUnbracedEquals), which `unbraced` gives, found once for the
- *  text, as reading on past each ==} read the rest of the text again for
- *  each == before it, as in ==} repeated. Import writes a } right after a
- *  highlight's closing == as \}. */
-function findClosingHighlightMarker(src: string, from: number, max: number, ends = new Map<number, number>(), unbraced?: () => number[]): number {
-  let pos = from;
-  while (pos < max - 1) {
-    if (src[pos] === '=' && src[pos + 1] === '=') {
-      if (!opensCriticHighlight(src, pos)) {
-        if (pos + 2 >= max || src[pos + 2] !== '}') return pos;
-        pos = nextUnbracedEquals(src, pos + 2, max, unbraced ? unbraced() : unbracedEquals(src));
-        continue;
-      }
-      pos = criticHighlightEnd(src, pos, max, ends);
-      if (pos === -1) return -1;
-      continue;
-    }
-    pos++;
-  }
-  return -1;
-}
-
-const criticHighlightEnds = new WeakMap<StateInline, { src: string; byMax: Map<number, Map<number, number>> }>();
-const unbracedEqualsMemo = new WeakMap<StateInline, { src: string; at: number[] }>();
-
-/** The ==s of a state's text that a format highlight's search for its
- *  closing == stops at (see unbracedEquals), found once for the text */
-function unbracedEqualsOf(state: StateInline): number[] {
-  let memo = unbracedEqualsMemo.get(state);
-  if (!memo || memo.src !== state.src) unbracedEqualsMemo.set(state, memo = { src: state.src, at: unbracedEquals(state.src) });
-  return memo.at;
-}
-
-/** The ends of the critic highlights in a state's text found so far, for
- *  its posMax (see criticHighlightEnd), kept for each == the rule meets */
-function criticHighlightEndsOf(state: StateInline): Map<number, number> {
-  let memo = criticHighlightEnds.get(state);
-  if (!memo || memo.src !== state.src) criticHighlightEnds.set(state, memo = { src: state.src, byMax: new Map() });
-  let ends = memo.byMax.get(state.posMax);
-  if (!ends) memo.byMax.set(state.posMax, ends = new Map());
-  return ends;
-}
-
 function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
-  const start = state.pos;
-  const max = state.posMax;
-  
-  if (start + 2 >= max || state.src.slice(start, start + 2) !== '==') return false;
-  
-  const endPos = findClosingHighlightMarker(state.src, start + 2, max, criticHighlightEndsOf(state), () => unbracedEqualsOf(state));
-  if (endPos === -1) return false;
-  
-  let next = endPos + 2;
-  let color: string | undefined;
-  if (next < max && state.src.charAt(next) === '{') {
-    const colorEnd = state.src.indexOf('}', next + 1);
-    // Require identifier-like colors that do not start or end with '-'
-    // so adjacent CriticMarkup like {--deleted--} is not misparsed as a color suffix.
-    if (colorEnd !== -1 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(state.src.slice(next + 1, colorEnd))) {
-      color = state.src.slice(next + 1, colorEnd);
-      next = colorEnd + 1;
-    }
-  }
+  const span = formatHighlightAt(state, state.pos);
+  if (!span) return false;
 
   if (!silent) {
     // The content is Markdown, as the preview reads it, parsed with the
     // document's parser and link definitions, as md.inline.parse would, but
     // in a link around the highlight, where a URL is the link's text
     const open = pushManuscriptToken(state, 'highlight_open', 'mark', 1);
-    open.color = color;
+    open.color = span.color;
     const children: Token[] = [];
-    const inner = new state.md.inline.State(state.src.slice(start + 2, endPos), state.md, state.env, children);
+    const inner = new state.md.inline.State(state.src.slice(span.contentStart, span.contentEnd), state.md, state.env, children);
     // markdown-it's types leave out linkLevel, which linkify reads
     type LinkState = StateInline & { linkLevel: number };
     (inner as LinkState).linkLevel = (state as LinkState).linkLevel;
@@ -815,7 +600,7 @@ function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
     pushAll(state.tokens, children);
     pushManuscriptToken(state, 'highlight_close', 'mark', -1);
   }
-  state.pos = next;
+  state.pos = span.end;
   return true;
 }
 
@@ -1155,10 +940,8 @@ export function htmlBlocksIn(text: string): Array<{ start: number; end: number; 
 
 function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  const max = state.posMax;
-
-  if (start + 2 >= max) return false;
-  const endPos = citationEnd(state, start);
+  // One in a link's label too, which keeps its field (see citationSpanAt)
+  const endPos = citationSpanAt(state, start, silent, true);
   if (endPos === -1) return false;
   // With the line breaks of CriticMarkup in it, as in a comment's body
   const rawContent = restoreCriticLineBreaks(state.src.slice(start + 1, endPos));
@@ -1196,7 +979,7 @@ function citationRule(state: StateInline, silent: boolean): boolean {
  *  citation's brackets with one in them, which Word gets as text */
 function crossRefRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  const ref = crossRefAt(state, start);
+  const ref = crossRefSpanAt(state, start, silent);
   if (!ref) return false;
   if (!silent) {
     const token = pushManuscriptToken(state, 'cross_reference', '', 0);
@@ -4543,12 +4326,11 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           // the content's own parse reads, as the preview does, and which
           // stripped would read as one around a=={red}==b.
           if (criticType === 'critic_highlight' && text.startsWith('==')) {
-            const close = findClosingHighlightMarker(text, 2, text.length);
-            const color = close === -1 ? undefined : /^\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\}$/.exec(text.slice(close + 2))?.[1];
-            if (close !== -1 && (close + 2 === text.length || color)) {
-              text = text.slice(2, close);
+            const highlight = formatHighlightAt({ src: text, posMax: text.length }, 0);
+            if (highlight?.end === text.length) {
+              text = text.slice(highlight.contentStart, highlight.contentEnd);
               innerHighlight = true;
-              innerColor = color;
+              innerColor = highlight.color;
             }
           }
 
