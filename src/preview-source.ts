@@ -6,6 +6,11 @@
 // '[Preview] <basename>' when locked. That only narrows it to a basename and
 // only in English, so callers fall back to markdown.showSource whenever this
 // returns undefined.
+//
+// The label is set when the panel is made, before its source is read and
+// rendered, so a document rendered before then may be another one of that
+// name: only a render after the label took its value counts. Renders and
+// label changes share one sequence for that comparison.
 
 /** viewType suffix of the dynamic preview's tab; VS Code prefixes it, as in 'mainThreadWebview-markdown.preview'. */
 export const MARKDOWN_PREVIEW_VIEW_TYPE = 'markdown.preview';
@@ -18,17 +23,26 @@ function basename(uriPath: string): string {
 	return uriPath.slice(uriPath.lastIndexOf('/') + 1);
 }
 
+export interface RenderedDocument<U extends { path: string }> {
+	uri: U;
+	/** Sequence number of the document's latest render. */
+	seq: number;
+}
+
 /**
- * The one URI whose basename the preview's English tab label names, or
- * undefined where none or several do (two files named notes.md).
+ * The URI of the one rendered document whose basename the preview's English
+ * tab label names, where it rendered after the label took its value at
+ * labelSeq; undefined where none or several documents have that basename
+ * (two files named notes.md), or the one there is rendered only before.
  */
-export function matchPreviewTabLabel<T extends { path: string }>(
+export function matchPreviewTabLabel<U extends { path: string }>(
 	label: string,
-	candidates: readonly T[],
-): T | undefined {
-	const matches = candidates.filter(c => {
-		const name = basename(c.path);
+	labelSeq: number,
+	rendered: Iterable<RenderedDocument<U>>,
+): U | undefined {
+	const matches = [...rendered].filter(r => {
+		const name = basename(r.uri.path);
 		return label === 'Preview ' + name || label === '[Preview] ' + name;
 	});
-	return matches.length === 1 ? matches[0] : undefined;
+	return matches.length === 1 && matches[0].seq > labelSeq ? matches[0].uri : undefined;
 }
