@@ -1335,9 +1335,10 @@ describe('Word math text that reads as CriticMarkup beside braces', () => {
     expect(markdown).toBe(latex.map(equation => '$' + equation + '$').join('\n\n') + '\n');
     const exported = (await convertMdToDocx(markdown)).docx;
     expect((await convertDocx(exported)).markdown).toBe(markdown);
-    // Word shows the same text, in the same changes
+    // Word shows the same text, in the same changes, past each structure's
+    // own mark of the change it's in, which holds no text
     const changes = async (file: Uint8Array) => [...(await (await JSZip.loadAsync(file)).file('word/document.xml')!.async('string'))
-      .matchAll(/<m:oMath>[\s\S]*?<\/m:oMath>/g)].map(math => [...math[0].matchAll(/<w:(ins|del)\b[^>]*>|<\/w:(?:ins|del)>|<m:t( xml:space="preserve")?>([^<]*)<\/m:t>/g)]
+      .matchAll(/<m:oMath>[\s\S]*?<\/m:oMath>/g)].map(math => [...math[0].replace(/<m:ctrlPr>[\s\S]*?<\/m:ctrlPr>/g, '').matchAll(/<w:(ins|del)\b[^>]*>|<\/w:(?:ins|del)>|<m:t( xml:space="preserve")?>([^<]*)<\/m:t>/g)]
       .map(t => t[1] ? '[' + t[1] + ' ' : t[0].startsWith('</w:') ? ']' : t[2] ? t[3] : t[3].trim()).join('')
       .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
     expect(await changes(exported)).toEqual(await changes(docx));
