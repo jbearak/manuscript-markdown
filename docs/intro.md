@@ -218,10 +218,11 @@ The converter preserves text formatting, headings, citations, equations, tables,
 
 #### Exporting to Word (Markdown to DOCX)
 
-Two ways:
+Three ways:
 
 1. **Editor toolbar**: click the document icon > **Export to Word**
-2. **Explorer sidebar**: right-click the `.md` file > **Export to Word**
+2. **Markdown preview**: click the document icon in the preview's title bar
+3. **Explorer sidebar**: right-click the `.md` file > **Export to Word**
 
 If a `.docx` with the same name already exists, its formatting styles (fonts, spacing, colors) are automatically reused — so any changes you previously made to the Word file's appearance are preserved.
 
