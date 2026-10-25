@@ -18,8 +18,8 @@ const FOCUS_GROUP_COMMANDS = ['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Si
 
 /**
  * The command that focuses the editor group in a view column, or undefined
- * past the eighth, which has none. Callers check the group took focus, as
- * these count groups in the main window only.
+ * past the eighth, which has none. Both count groups in VS Code's grid order,
+ * auxiliary windows' too; callers still check the group took focus.
  */
 export function focusGroupCommand(viewColumn: number): string | undefined {
 	return FOCUS_GROUP_COMMANDS[viewColumn - 1];

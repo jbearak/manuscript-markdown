@@ -1451,34 +1451,46 @@ async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir:
 	));
 }
 
+const STATIC_PREVIEW_VIEW_TYPE = 'vscode.markdown.preview.editor';
+
 /**
  * The document the dynamic preview in a tab shows, from markdown.showSource,
  * which answers for the preview the markdown extension holds active and opens
  * its source in an editor. That extension sets its active preview when a
- * preview is made, as one opened to the side without focus, and on each view
- * state event: to the preview gaining focus, or to none for one losing it. So
- * with a text editor focused, after this focuses the tab's group, showSource
- * gives this preview's source, or none until the event comes. A focused static
- * preview stays active until that event, so is refused rather than raced.
+ * dynamic preview is made, as one opened to the side without focus, which is
+ * then the visible one, and on each view state event: to the preview gaining
+ * focus, or to none for one losing it. It also sets it on opening a static
+ * preview, focused or not, which can then hold it with no event to clear it,
+ * so any static preview open is refused rather than trusted. Otherwise, with
+ * this tab focused, showSource gives its source, or none until the event
+ * comes; each try first checks the tab still has focus, so a preview focused
+ * meanwhile is not taken for it.
  */
-async function previewSource(tab: vscode.Tab, focusedInput: unknown): Promise<vscode.TextDocument | undefined> {
+async function previewSource(tab: vscode.Tab): Promise<vscode.TextDocument | undefined> {
+	const staticPreviewOpen = vscode.window.tabGroups.all.some(g => g.tabs.some(t =>
+		t.input instanceof vscode.TabInputCustom && t.input.viewType === STATIC_PREVIEW_VIEW_TYPE));
+	if (staticPreviewOpen) return undefined;
+	const tabFocused = () => tab.group.isActive && tab.isActive;
 	if (!tab.group.isActive) {
-		if (focusedInput instanceof vscode.TabInputCustom) return undefined;
 		const command = focusGroupCommand(tab.group.viewColumn);
 		if (!command) return undefined;
 		await vscode.commands.executeCommand(command);
-		const focused = await pollFor(() => (tab.group.isActive && tab.isActive) || undefined, 1000);
-		if (!focused) return undefined;
+		if (!await pollFor(() => tabFocused() || undefined, 1000)) return undefined;
 	}
-	const editor = await pollFor(
-		() => vscode.commands.executeCommand<vscode.TextEditor | undefined>('markdown.showSource'),
-		1000,
-	);
+	let lostFocus = false;
+	const editor = await pollFor(async () => {
+		if (!tabFocused()) {
+			lostFocus = true;
+			return null;
+		}
+		return vscode.commands.executeCommand<vscode.TextEditor | undefined>('markdown.showSource');
+	}, 1000);
+	if (lostFocus || !editor) return undefined;
 	// A preview in its source's column gave way to the source; bring it back
-	if (editor && editor.viewColumn === tab.group.viewColumn) {
+	if (editor.viewColumn === tab.group.viewColumn) {
 		await vscode.commands.executeCommand('workbench.action.openPreviousRecentlyUsedEditorInGroup');
 	}
-	return editor?.document;
+	return editor.document;
 }
 
 async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undefined> {
@@ -1511,17 +1523,17 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			: [activeTab].filter(isPreviewTab);
 		const input = activeTab?.input;
 		const doc = previews.length === 1
-			? await previewSource(previews[0], activeTab?.input)
+			? await previewSource(previews[0])
 			: previews.length > 1 || uri
 				? undefined
-				: input instanceof vscode.TabInputCustom && input.viewType === 'vscode.markdown.preview.editor'
+				: input instanceof vscode.TabInputCustom && input.viewType === STATIC_PREVIEW_VIEW_TYPE
 					? await vscode.workspace.openTextDocument(input.uri)
 					: vscode.window.activeTextEditor?.document;
 		if (!doc || doc.languageId !== 'markdown') {
 			vscode.window.showErrorMessage(previews.length > 1
 				? 'Several Markdown previews are showing: focus the one to export and run Export to Word from the Command Palette'
 				: previews.length === 1 || uri
-					? 'Could not tell which file this preview shows'
+					? 'Could not tell which file this preview shows. Close any preview opened with Open With, or export from the Markdown file\'s editor'
 					: 'No active Markdown file');
 			return undefined;
 		}
