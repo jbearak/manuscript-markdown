@@ -689,8 +689,10 @@ describe('Word delimiters with separators', () => {
   test.each([
     '$\\left\\{x\\middle|x>0\\right\\}$', '$\\left(a\\middle|b\\middle|c\\right)$', '$\\sin\\left(a\\middle|b\\right)x$',
     '$\\left(\\Pr{(}A\\middle|B)\\right)$',
-    // A change in a part is tracked in place, as the separator is in neither
-    '$\\left(a\\middle|{++b++}\\right)$', '${++\\left(a\\middle|b\\right)++}$',
+    // A change in a part is tracked in place, as the separator is in neither,
+    // and one of the whole delimiter is (beside more of the equation, as one
+    // of all of it Word holds as the equation's, see normalizeTrackedMath)
+    '$\\left(a\\middle|{++b++}\\right)$', '$x + {++\\left(a\\middle|b\\right)++}$',
   ])('goes through Word and back, in %s', async (math) => {
     const md = math + '\n';
     const docx = (await convertMdToDocx(md)).docx;
@@ -1335,11 +1337,18 @@ describe('Word math text that reads as CriticMarkup beside braces', () => {
     expect(markdown).toBe(latex.map(equation => '$' + equation + '$').join('\n\n') + '\n');
     const exported = (await convertMdToDocx(markdown)).docx;
     expect((await convertDocx(exported)).markdown).toBe(markdown);
-    // Word shows the same text, in the same changes
+    // Word shows the same text, in the same changes, past each structure's
+    // own mark of the change it's in, which holds no text, and with
+    // adjacent changes of a kind as one, as export writes a change on each
+    // run of a structure's (see pushedMathChanges in tracked-math.ts)
+    const joined = (trace: string): string => {
+      const next = trace.replace(/\[(ins|del) ([^[\]]*)\]\[\1 /g, (_m: string, kind: string, text: string) => '[' + kind + ' ' + text);
+      return next === trace ? trace : joined(next);
+    };
     const changes = async (file: Uint8Array) => [...(await (await JSZip.loadAsync(file)).file('word/document.xml')!.async('string'))
-      .matchAll(/<m:oMath>[\s\S]*?<\/m:oMath>/g)].map(math => [...math[0].matchAll(/<w:(ins|del)\b[^>]*>|<\/w:(?:ins|del)>|<m:t( xml:space="preserve")?>([^<]*)<\/m:t>/g)]
+      .matchAll(/<m:oMath>[\s\S]*?<\/m:oMath>/g)].map(math => joined([...math[0].replace(/<m:ctrlPr>[\s\S]*?<\/m:ctrlPr>/g, '').matchAll(/<w:(ins|del)\b[^>]*>|<\/w:(?:ins|del)>|<m:t( xml:space="preserve")?>([^<]*)<\/m:t>/g)]
       .map(t => t[1] ? '[' + t[1] + ' ' : t[0].startsWith('</w:') ? ']' : t[2] ? t[3] : t[3].trim()).join('')
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')));
     expect(await changes(exported)).toEqual(await changes(docx));
   });
 

@@ -2407,6 +2407,27 @@ describe('CriticMarkup OOXML generation', () => {
     expect(equations[0]).toMatch(/<w:del w:id="\d+"[^>]*><m:r>(?:(?!<\/m:r>).)*<m:t>d<\/m:t><\/m:r><\/w:del><w:ins w:id="\d+"[^>]*><m:r>(?:(?!<\/m:r>).)*<m:t>e<\/m:t>/);
   });
 
+  it('marks each structure in a tracked equation, or in a change in one, as in the change', async () => {
+    // Word reads a change around a structure for its runs alone, and leaves
+    // a structure without its own mark, as an accent over an empty box,
+    // where it removes the change
+    const md = 'A {~~$y = \\hat{\\pi}(x)$~>$E(y) = \\hat{a}$~~} B {--$\\frac{1}{\\sqrt{2}}$--}'
+      + ' C $a + {--\\hat{b}--} + {++\\overline{c}++} + \\hat{d}$ D {--$\\begin{pmatrix} a \\\\ b \\end{pmatrix}$--}.';
+    const { docx } = await convertMdToDocx(md, { authorName: 'Ann' });
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const marks = (element: string) => [...xml.matchAll(new RegExp('<m:ctrlPr><' + element + ' w:id="(\\d+)" w:author="Ann"[^>]*>'
+      + '<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/></w:rPr></' + element + '></m:ctrlPr></m:(\\w+)Pr>', 'g'))].map(m => m[2]);
+    expect(marks('w:del').sort()).toEqual(['acc', 'acc', 'd', 'f', 'm', 'rad']);
+    expect(marks('w:ins').sort()).toEqual(['acc', 'bar']);
+    // \hat{d}, in no change, has no mark
+    expect(xml.match(/<m:ctrlPr>/g)).toHaveLength(8);
+    const ids = [...xml.matchAll(/<w:(?:ins|del) w:id="(\d+)"/g)].map(m => m[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+    const { convertDocx } = await import('./converter');
+    expect((await convertDocx(docx)).markdown.trim()).toBe(md);
+  });
+
   it('generates w:ins for additions', () => {
     const token: MdToken = {
       type: 'paragraph',
@@ -2640,12 +2661,16 @@ describe('CriticMarkup OOXML generation', () => {
       ['$\\sum{++\\limits++}_{i}^{n} x$', 'inx', '<m:limLoc m:val="undOvr"/>'],
       ['${++\\frac++}{1}{2}$', '12', '<m:f>'],
     ] as const) {
-      const result = generateParagraph(parseMd(md)[0], createState(), { authorName: 'Default' });
+      // Past each structure's own mark of the change it's in, as export puts
+      // a change on each run of a structure's (see pushedMathChanges)
+      const result = generateParagraph(parseMd(md)[0], createState(), { authorName: 'Default' }).replace(/<m:ctrlPr>.*?<\/m:ctrlPr>/g, '');
       const deleted = [...result.matchAll(/<w:del [^>]*>(.*?)<\/w:del>/g)].map(m => m[1]);
       const inserted = [...result.matchAll(/<w:ins [^>]*>(.*?)<\/w:ins>/g)].map(m => m[1]);
-      expect(deleted.map(omml => omml.replace(/<[^>]+>/g, ''))).toEqual([rejected]);
-      expect(inserted).toHaveLength(1);
-      expect(inserted[0]).toContain(structure);
+      expect(deleted.join('').replace(/<[^>]+>/g, '')).toBe(rejected);
+      expect(inserted.length).toBeGreaterThan(0);
+      expect(result.replace(/<\/?w:(?:ins|del)\b[^>]*>/g, '')).toContain(structure);
+      // Every run of the equation is in one or the other
+      expect(result.replace(/<w:(ins|del) [^>]*>.*?<\/w:\1>/g, '')).not.toContain('<m:t');
       expect(result.match(/<m:oMath>/g)).toHaveLength(1);
     }
   });

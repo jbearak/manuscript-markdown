@@ -19668,6 +19668,11 @@ describe('Track changes (CriticMarkup)', () => {
       ['a deletion of an empty equation', '| {--$ $--} |  |', ''],
       ['a deletion of an equation', '| {--$x$--} |  |', 'del'],
       ['a deletion of an empty fraction, whose bar shows', '| {--$\\frac{}{}$--} |  |', 'del'],
+      // Whose structure is in the change by its mark (see pushedMathChanges)
+      ['a deletion of a radical', '| {--$\\sqrt{x}$--} |  |', 'del'],
+      ['a deletion of a bar', '| {--$\\overline{x}$--} |  |', 'del'],
+      ['a deletion of a box', '| {--$\\boxed{x}$--} |  |', 'del'],
+      ['an insertion of a radical', '| {++$\\sqrt{x}$++} |  |', 'ins'],
       ['a deletion of an insertion, which it deletes as its text', '| {--{++c++}--} |  |', 'del'],
       ['a deletion of a substitution', '| {--{~~a~>b~~}--} |  |', 'del'],
       ['a deletion of an empty insertion', '| {--{++++}--} |  |', ''],
