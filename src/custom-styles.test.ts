@@ -723,6 +723,20 @@ describe('Custom Styles — IDs Word gives them', () => {
     expect(warnings).toEqual([ARROW_WARNING('a-->b')]);
   });
 
+  it('warns of a style with --> in its name the custom properties don\'t name', async () => {
+    // The properties name box alone; the paragraph of Pull Quote, under
+    // export's ID, has a name in Word no directive can hold
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(true, false));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: Pull Quote', 'Custom: a--&gt;b'));
+    const props = await zip.file('docProps/custom.xml')!.async('string');
+    expect(props).toContain('Pull Quote');
+    zip.file('docProps/custom.xml', props.replace(/Pull Quote/g, 'Other'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).not.toContain('<!-- style: a-->b');
+    expect(warnings).toEqual([ARROW_WARNING('a-->b')]);
+  });
+
   it('warns of no style with --> in its name whose paragraphs keep it, or that none has', async () => {
     // Word's name changed, but the custom properties keep the paragraphs'
     // style by its own, and the style with --> in its name styles nothing

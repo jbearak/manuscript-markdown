@@ -19435,9 +19435,12 @@ async function documentContentInputs(zip: JSZip, format: CitationKeyFormat = 'au
   // A custom style Word gave an ID of its own takes its name from there
   // whether or not there are custom properties, as no ID of export's
   // gives it (see StyleLayouts.renamedCustomStyles)
-  const namesStyles = !storedCustomStyles && [...styleLayouts.paragraph.byId.keys()].some(id => id.startsWith('MsCustom'));
+  const exportIds = [...styleLayouts.paragraph.byId.keys()].some(id => id.startsWith('MsCustom'));
+  const namesStyles = !storedCustomStyles && exportIds;
   const renamed = styleLayouts.renamedCustomStyles;
-  const stylesXml = namesStyles || renamed ? await readZipText(zip, 'word/styles.xml') : undefined;
+  // Read where there's any custom style, for the names no directive can
+  // hold (see unwritableCustomStyles), as custom properties needn't name it
+  const stylesXml = exportIds || renamed ? await readZipText(zip, 'word/styles.xml') : undefined;
   const names = stylesXml === undefined ? undefined : customStyleNames(styleElementsOf(stylesXml));
   const options = {
     numberingDefs: numbering.defs,
