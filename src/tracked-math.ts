@@ -260,11 +260,13 @@ function holdsEquation(nodes: XmlNode[]): boolean {
  *  change already, in their structures' parts too, but not on a structure,
  *  whose own mark says whether it is in a change */
 function onRuns(nodes: XmlNode[], change: Change): XmlNode[] {
-  return nodes.map(node => {
+  return nodes.flatMap((node): XmlNode[] => {
     const tag = tagOf(node);
-    if (tag === 'm:r') return changeNode(change, [node]);
-    if (tag === '#text' || tag === '' || tag.endsWith('Pr') || changeOf(node)) return node;
-    return { ...node, [tag]: onRuns(asXmlNodes(node[tag]), change) };
+    // A run's own changes, as Word saves them in it, keep its content they
+    // hold, and the change goes on the rest
+    if (tag === 'm:r') return runChanges(node, asXmlNodes(node[tag])).map(run => changeOf(run) ? run : changeNode(change, [run]));
+    if (tag === '#text' || tag === '' || tag.endsWith('Pr') || changeOf(node)) return [node];
+    return [{ ...node, [tag]: onRuns(asXmlNodes(node[tag]), change) }];
   });
 }
 

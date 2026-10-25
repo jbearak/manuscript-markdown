@@ -124,6 +124,13 @@ describe('a tracked change to an equation, as Word saves it', () => {
     expect(markdown).toContain('y');
   });
 
+  it('keeps a change Word saved in a run of a display paragraph\'s equation in a change', async () => {
+    const math = '<m:oMath><m:r><w:ins w:id="4" w:author="Lab"><m:t>y</m:t></w:ins></m:r></m:oMath>';
+    const markdown = await displayImported(plain('z') + '<w:del w:id="3" w:author="Lab">' + math + '</w:del>');
+    expect(markdown).toContain('{++y++}');
+    expect(markdown).not.toContain('{--{++');
+  });
+
   test.each([
     ['in a change in a change', (math: string) => '<w:del w:id="3" w:author="Lab"><w:ins w:id="4" w:author="Lab">' + math + '</w:ins></w:del>'],
     ['in a change with bookmarks', (math: string) => '<w:del w:id="3" w:author="Lab"><w:bookmarkStart w:id="0" w:name="b"/>' + math
