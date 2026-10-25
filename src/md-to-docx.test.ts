@@ -7,6 +7,8 @@ import * as fc from 'fast-check';
 import MarkdownIt from 'markdown-it';
 import { XMLValidator } from 'fast-xml-parser';
 import { LATENT_STYLES } from './latent-styles';
+import { MANUSCRIPT_STYLES, withStyleReferences, withStylesOnce } from './md-to-docx-styles';
+import { decodeXml } from './template-sections';
 import {
   generateRPr,
   generateRun,
@@ -2892,6 +2894,218 @@ describe('CriticMarkup OOXML generation', () => {
     const convertedZip = await JSZip.loadAsync(converted.docx);
     const convertedStyles = await convertedZip.file('word/styles.xml')!.async('string');
     expect(convertedStyles.match(/w:styleId\s*=\s*["']ManuscriptListContinuation["']/g)).toHaveLength(1);
+  });
+
+  describe('export\'s own styles through a template Word saved', () => {
+    const md = '---\nstyles:\n  box:\n    font-style: italic\n---\n\n<!-- style: box -->\n\nBoxed.\n\n<!-- /style -->\n\n'
+      + 'A <span\ntitle="a">x</span> c.\n\n- item\n\n  continued\n';
+    /** Each style of `docx` by its type, ID and name */
+    const stylesOf = async (docx: Uint8Array) => {
+      const JSZip = (await import('jszip')).default;
+      const xml = await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+      return [...xml.matchAll(/<w:style\b([^>]*)>([\s\S]*?)<\/w:style>/g)].map(([, tag, content]) => ({
+        type: /w:type="([^"]*)"/.exec(tag)?.[1] ?? 'paragraph',
+        id: /w:styleId="([^"]*)"/.exec(tag)![1],
+        name: /<w:name w:val="([^"]*)"/.exec(content)?.[1] ?? '',
+      }));
+    };
+    /** That no two styles of one type share an ID, whatever its case, or a
+     *  name, and the IDs of those named `name` */
+    const once = async (docx: Uint8Array, name: string) => {
+      const styles = await stylesOf(docx);
+      const ids = styles.map(style => style.type + ' ' + style.id.toLowerCase());
+      const names = styles.map(style => style.type + ' ' + style.name.toLowerCase());
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(new Set(names).size).toBe(names.length);
+      return styles.filter(style => style.name.startsWith(name)).map(style => style.id);
+    };
+    /** `docx` with its parts' text changed by `edit`, as Word saves one */
+    const edited = async (docx: Uint8Array, edit: (path: string, xml: string) => string) => {
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync(docx);
+      for (const path of Object.keys(zip.files).filter(path => path.endsWith('.xml'))) {
+        zip.file(path, edit(path, await zip.file(path)!.async('string')));
+      }
+      return zip.generateAsync({ type: 'uint8array' });
+    };
+    // Word gives a custom style an ID from its name when it saves (see
+    // OwnStyle in md-to-docx-styles.ts)
+    const wordIds = (_path: string, xml: string) => xml.replace(/"ManuscriptHtml"/g, '"ManuscriptHTML"').replace(/"MsCustomBox"/g, '"Custombox"');
+    const copy = (id: string, name: string, inner = '<w:semiHidden/><w:unhideWhenUsed/>') => '<w:style w:type="character" w:customStyle="1" w:styleId="' + id + '"><w:name w:val="' + name + '"/>' + inner + '</w:style>';
+    const HEADER_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    /** A header part of `body`, in UTF-8 */
+    const header = (body: string) => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:hdr ' + HEADER_NS + '>' + body + '</w:hdr>';
+    /** `docx` with `styles` added to its styles and a default header at
+     *  `path`, of `data`, which its relationship and content types name */
+    const withHeader = async (docx: Uint8Array, styles: string, path: string, data: string | Uint8Array) => {
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync(docx);
+      const text = async (part: string) => zip.file(part)!.async('string');
+      zip.file('word/styles.xml', (await text('word/styles.xml')).replace('</w:styles>', styles + '</w:styles>'));
+      zip.file(path, data);
+      zip.file('word/_rels/document.xml.rels', (await text('word/_rels/document.xml.rels')).replace('</Relationships>',
+        '<Relationship Id="rIdHead" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="' + (path.startsWith('word/') ? path.slice('word/'.length) : '/' + path) + '"/></Relationships>'));
+      zip.file('[Content_Types].xml', (await text('[Content_Types].xml')).replace('</Types>',
+        '<Override PartName="/' + path + '" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>'));
+      zip.file('word/document.xml', (await text('word/document.xml')).replace(/<w:sectPr\b([^>]*)>/,
+        '<w:sectPr$1><w:headerReference w:type="default" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdHead"/>'));
+      return zip.generateAsync({ type: 'uint8array' });
+    };
+    /** The text of the header export wrote, wherever it put it, in the
+     *  encoding it's in */
+    const headerOf = async (docx: Uint8Array) => {
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync(docx);
+      const path = Object.keys(zip.files).find(part => /^(?:.*\/)?header\d*\.xml$/.test(part) && !part.includes('_rels/'))!;
+      return decodeXml(await zip.file(path)!.async('uint8array'));
+    };
+    // As a document exported through and saved by Word many times holds
+    // them: export's own again, the IDs Word gave the clashing ones, and the
+    // names it gave them in a repair
+    const COPIES = copy('ManuscriptHTMLa', 'Manuscript HTML') + copy('ManuscriptHTML0', 'Manuscript HTML0')
+      + copy('ManuscriptHTML00', 'Manuscript HTML00') + copy('ManuscriptHtml', 'Manuscript HTML');
+
+    it('leaves a template\'s styles that aren\'t copies of export\'s as they are', () => {
+      // Styles whose IDs differ only in case, as numbering styles numbering
+      // refers to, styles of other types that share an ID, and a user's
+      // styles named as a repaired copy would be, but not formatted as
+      // export writes the style, of the ID Word gives a style of the name
+      // too
+      const style = (type: string, id: string, name: string, inner = '') => '<w:style w:type="' + type + '" w:styleId="' + id + '"><w:name w:val="' + name + '"/>' + inner + '</w:style>';
+      const others = style('paragraph', 'Note', 'Note') + '<!-- c -->' + style('paragraph', 'note', 'Note 2')
+        + style('numbering', 'List', 'List') + style('numbering', 'list', 'list') + style('character', 'Note', 'Note Char')
+        + style('paragraph', 'Other', 'Other', '<w:basedOn w:val="note"/>')
+        + copy('UserHtml', 'Manuscript HTML2', '<w:rPr><w:b/></w:rPr>') + copy('ManuscriptHTML12', 'Manuscript HTML12', '<w:rPr><w:i/></w:rPr>');
+      expect(withStylesOnce('<w:styles>' + others + '</w:styles>', MANUSCRIPT_STYLES)).toEqual({ xml: '<w:styles>' + others + '</w:styles>', ids: new Map() });
+
+      // But copies of export's are one, those of its name and digits by
+      // export's formatting, as Word writes it
+      const copies = copy('ManuscriptHTMLc', 'Manuscript HTML')
+        + copy('Renamed', 'Manuscript HTML3', '\n<w:rsid w:val="00A1B2C3"/><w:semiHidden/>\n<w:unhideWhenUsed/>')
+        + style('character', 'Mine', 'Mine', '<w:basedOn w:val="Renamed"/>');
+      const { xml, ids } = withStylesOnce('<w:styles>' + others + copies + '</w:styles>', MANUSCRIPT_STYLES);
+      expect(xml).toBe('<w:styles>' + others + copy('ManuscriptHtml', 'Manuscript HTML') + style('character', 'Mine', 'Mine', '<w:basedOn w:val="ManuscriptHtml"/>') + '</w:styles>');
+      expect([...ids]).toEqual([['character ManuscriptHTMLc', 'ManuscriptHtml'], ['character Renamed', 'ManuscriptHtml']]);
+      // A template without copies goes as it came
+      expect(withStylesOnce(xml, MANUSCRIPT_STYLES)).toEqual({ xml, ids: new Map() });
+    });
+
+    it('points numbering\'s links to a numbering style at the style\'s ID', () => {
+      const numbering = '<w:abstractNum w:abstractNumId="1"><w:styleLink w:val="old"/></w:abstractNum><w:abstractNum w:abstractNumId="2"><w:numStyleLink w:val="old"/></w:abstractNum>';
+      expect(withStyleReferences(numbering, (id, type) => type === 'numbering' && id === 'old' ? 'New' : undefined)).toBe(numbering.replace(/"old"/g, '"New"'));
+    });
+
+    it('points only WordprocessingML\'s references at another style, whatever their prefix', () => {
+      // x bound to WordprocessingML, and w, inside, to another namespace
+      const WML = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+      const idFor = (id: string, type: string) => type === 'character' && id === 'Old' ? 'New' : undefined;
+      const xml = '<x:hdr xmlns:x="' + WML + '"><x:p><x:r><x:rPr><x:rStyle x:val="Old"/></x:rPr></x:r></x:p>'
+        + '<o:ext xmlns:o="urn:other" xmlns:w="urn:other"><w:rStyle w:val="Old"/></o:ext><!-- <x:rStyle x:val="Old"/> --></x:hdr>';
+      expect(withStyleReferences(xml, idFor)).toBe(xml.replace('<x:rStyle x:val="Old"/></x:rPr>', '<x:rStyle x:val="New"/></x:rPr>'));
+      // And a style's base by its type, in a style of a prefix of its own
+      const styles = '<s:styles xmlns:s="' + WML + '"><s:style s:type="character" s:styleId="A"><s:basedOn s:val="Old"/></s:style>'
+        + '<s:style s:styleId="B"><s:basedOn s:val="Old"/></s:style></s:styles>';
+      expect(withStyleReferences(styles, idFor)).toBe(styles.replace('<s:basedOn s:val="Old"/></s:style><s:style', '<s:basedOn s:val="New"/></s:style><s:style'));
+    });
+
+    it('keeps a template\'s numbering styles whose IDs differ only in case, and its lists', async () => {
+      const style = (id: string) => '<w:style w:type="numbering" w:customStyle="1" w:styleId="' + id + '"><w:name w:val="' + id + ' style"/></w:style>';
+      const templateDocx = await edited((await convertMdToDocx('- a\n')).docx, (path, xml) => path === 'word/styles.xml' ? xml.replace('</w:styles>', style('List') + style('list') + '</w:styles>') : xml);
+      const { docx } = await convertMdToDocx('- item\n', { templateDocx });
+      expect((await stylesOf(docx)).filter(s => s.type === 'numbering').map(s => s.id)).toEqual(expect.arrayContaining(['List', 'list']));
+      const { convertDocx } = await import('./converter');
+      expect((await convertDocx(docx)).markdown).toContain('- item');
+    });
+
+    it('adds none of its own styles again where Word gave them IDs of its own', async () => {
+      const saved = await edited((await convertMdToDocx(md)).docx, wordIds);
+      const { docx } = await convertMdToDocx(md, { templateDocx: saved });
+      expect(await once(docx, 'Manuscript HTML')).toEqual(['ManuscriptHtml']);
+      expect(await once(docx, 'Custom: box')).toEqual(['MsCustomBox']);
+      expect(await once(docx, 'Manuscript List Continuation')).toEqual(['ManuscriptListContinuation']);
+      // And again through what it wrote, saved by Word
+      const again = (await convertMdToDocx(md, { templateDocx: await edited(docx, wordIds) })).docx;
+      expect(await once(again, 'Manuscript HTML')).toEqual(['ManuscriptHtml']);
+      expect(await once(again, 'Custom: box')).toEqual(['MsCustomBox']);
+      const JSZip = (await import('jszip')).default;
+      const document = await (await JSZip.loadAsync(again)).file('word/document.xml')!.async('string');
+      expect(document).toContain('<w:rStyle w:val="ManuscriptHtml"/>');
+      expect(document).toContain('<w:pStyle w:val="MsCustomBox"/>');
+    });
+
+    it('points what refers to a custom style under the ID Word gave it at export\'s', async () => {
+      // A header and a user's style that refer to Custombox, which export
+      // writes as MsCustomBox
+      const saved = await edited((await convertMdToDocx(md)).docx, wordIds);
+      const templateDocx = await withHeader(saved, '<w:style w:type="paragraph" w:customStyle="1" w:styleId="Boxier"><w:name w:val="Boxier"/><w:basedOn w:val="Custombox"/></w:style>',
+        'word/header1.xml', header('<w:p><w:pPr><w:pStyle w:val="Custombox"/></w:pPr><w:r><w:t>Head</w:t></w:r></w:p>'));
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      expect(await once(docx, 'Custom: box')).toEqual(['MsCustomBox']);
+      const JSZip = (await import('jszip')).default;
+      const styles = await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+      expect(styles).toContain('w:styleId="Boxier"><w:name w:val="Boxier"/><w:basedOn w:val="MsCustomBox"/></w:style>');
+      expect(styles).not.toContain('Custombox');
+      const head = await headerOf(docx);
+      expect(head).toContain('<w:pStyle w:val="MsCustomBox"/>');
+      expect(head).not.toContain('Custombox');
+    });
+
+    it('keeps one of the copies Word left of its styles, and refers to the one it kept', async () => {
+      // With a user's style based on one, a header that refers to another,
+      // and a paragraph style of a copy's ID and name, which a character
+      // style's copies leave be
+      const templateDocx = await withHeader(await edited((await convertMdToDocx(md)).docx, wordIds),
+        COPIES + '<w:style w:type="character" w:customStyle="1" w:styleId="Mine"><w:name w:val="Mine"/><w:basedOn w:val="ManuscriptHTMLa"/></w:style>'
+          + '<w:style w:type="paragraph" w:customStyle="1" w:styleId="ManuscriptHTMLb"><w:name w:val="Manuscript HTML"/></w:style>',
+        'word/header1.xml', header('<w:p><w:r><w:rPr><w:rStyle w:val="ManuscriptHTML0"/></w:rPr><w:t>Head</w:t></w:r></w:p>'));
+      expect((await stylesOf(templateDocx)).filter(style => style.name.startsWith('Manuscript HTML'))).toHaveLength(6);
+
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      const styles = await stylesOf(docx);
+      expect(styles.filter(style => style.name.startsWith('Manuscript HTML'))).toEqual([
+        { type: 'character', id: 'ManuscriptHtml', name: 'Manuscript HTML' },
+        { type: 'paragraph', id: 'ManuscriptHTMLb', name: 'Manuscript HTML' },
+      ]);
+      expect(await once(docx, 'Custom: box')).toEqual(['MsCustomBox']);
+      const JSZip = (await import('jszip')).default;
+      const out = await JSZip.loadAsync(docx);
+      const written = await out.file('word/styles.xml')!.async('string');
+      expect(written).toContain('<w:style w:type="character" w:customStyle="1" w:styleId="Mine"><w:name w:val="Mine"/><w:basedOn w:val="ManuscriptHtml"/></w:style>');
+      expect(await headerOf(docx)).toContain('<w:rStyle w:val="ManuscriptHtml"/>');
+      expect(await out.file('word/document.xml')!.async('string')).toContain('<w:rStyle w:val="ManuscriptHtml"/>');
+    });
+
+    it('keeps a user\'s style named as a repaired copy of its own would be, and what refers to it', async () => {
+      // Word gives a style a user names Manuscript HTML2 the ID it gives a
+      // repaired copy; it's bold, as export's isn't
+      const bold = copy('ManuscriptHTML2', 'Manuscript HTML2', '<w:rPr><w:b/></w:rPr>');
+      const templateDocx = await withHeader((await convertMdToDocx(md)).docx, bold, 'word/header1.xml',
+        header('<w:p><w:r><w:rPr><w:rStyle w:val="ManuscriptHTML2"/></w:rPr><w:t>Head</w:t></w:r></w:p>'));
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      expect(await once(docx, 'Manuscript HTML')).toEqual(['ManuscriptHtml', 'ManuscriptHTML2']);
+      const JSZip = (await import('jszip')).default;
+      expect(await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string')).toContain(bold);
+      expect(await headerOf(docx)).toContain('<w:rStyle w:val="ManuscriptHTML2"/>');
+    });
+
+    it.each([
+      ['in UTF-16', 'word/header1.xml', true],
+      ['in a folder of its own', 'word/headers/header1.xml', false],
+      ['outside word/', 'headers/header1.xml', false],
+      ['of another prefix', 'word/header1.xml', false, 'x'],
+    ])('points a template\'s header %s at the copy it kept', async (_name, path, utf16, prefix = 'w') => {
+      const text = header('<w:p><w:r><w:rPr><' + prefix + ':rStyle xmlns:' + prefix + '="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        + prefix + ':val="ManuscriptHTMLa"/></w:rPr><w:t>Head</w:t></w:r></w:p>');
+      // UTF-16, little-endian, with its BOM, and a declaration that says so
+      const data = utf16 ? Uint8Array.from([0xFF, 0xFE, ...[...text.replace('UTF-8', 'UTF-16')].flatMap(c => [c.charCodeAt(0) & 0xFF, c.charCodeAt(0) >> 8])]) : text;
+      const templateDocx = await withHeader(await edited((await convertMdToDocx(md)).docx, wordIds), COPIES, path, data);
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      expect(await once(docx, 'Manuscript HTML')).toEqual(['ManuscriptHtml']);
+      const head = await headerOf(docx);
+      expect(head).toMatch(new RegExp('<' + prefix + ':rStyle [^>]*' + prefix + ':val="ManuscriptHtml"/>'));
+      expect(head).toContain('<w:t>Head</w:t>');
+      expect(head).not.toContain('ManuscriptHTMLa');
+    });
   });
 
   it('splits Critic display math across Word blockquote paragraphs', () => {

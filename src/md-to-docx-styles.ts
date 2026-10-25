@@ -10,7 +10,8 @@ import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { asUtf8, decodeXml } from './template-sections';
 import { escapeXmlAttribute } from './xml-parser';
 import { findStyleElement, styleFinder } from './style-element';
-import { holdsXmlElement, otherXmlAttributes, replaceXmlElements, withXmlAttribute, xmlAttribute, xmlElement, xmlElementParts, xmlSearch, xmlStartTag, xmlStartTags } from './xml-elements';
+import { XML_TAG_ATTRIBUTES, holdsXmlElement, otherXmlAttributes, replaceXmlElements, withXmlAttribute, xmlAttribute, xmlElement, xmlElementParts, xmlMatches, xmlSearch, xmlStartTag } from './xml-elements';
+import { type Scope, WORDPROCESSINGML, expandName } from './scoped-xml';
 import { orderPPr, orderRPr, textElements } from './md-to-docx-citations';
 import { wordIgnoresStyle, xmlHalfPoints } from './converter';
 
@@ -351,20 +352,23 @@ export function templateStyleIds(stylesXml: string | undefined): Map<string, str
   return ids;
 }
 
-/** The type of style each element that refers to a style by its ID refers
- *  to, by the type of the style it's in, where it's in one: a style's base
- *  and next style are of its type, and the style it's linked to of the
- *  other, a paragraph style's a character style and a character style's a
- *  paragraph style */
+/** The type of style each element of WordprocessingML that refers to a
+ *  style by its ID refers to, by its local name, and by the type of the
+ *  style it's in, where it's in one: a style's base and next style are of
+ *  its type, and the style it's linked to of the other, a paragraph style's
+ *  a character style and a character style's a paragraph style. An abstract
+ *  numbering's w:numStyleLink and w:styleLink, in numbering.xml, refer to a
+ *  numbering style. */
 const STYLE_REFERENCE_TYPES: Record<string, (owner: string | undefined) => string | undefined> = {
-  'w:pStyle': () => 'paragraph',
-  'w:rStyle': () => 'character',
-  'w:tblStyle': () => 'table',
-  'w:basedOn': owner => owner,
-  'w:next': owner => owner,
-  'w:link': owner => owner === 'paragraph' ? 'character' : owner === 'character' ? 'paragraph' : undefined,
+  pStyle: () => 'paragraph',
+  rStyle: () => 'character',
+  tblStyle: () => 'table',
+  numStyleLink: () => 'numbering',
+  styleLink: () => 'numbering',
+  basedOn: owner => owner,
+  next: owner => owner,
+  link: owner => owner === 'paragraph' ? 'character' : owner === 'character' ? 'paragraph' : undefined,
 };
-const STYLE_REFERENCE_ELEMENTS = Object.keys(STYLE_REFERENCE_TYPES);
 
 /** `xml` with each reference to a built-in style by its English ID by the
  *  template's ID for the style instead (see templateStyleIds), where it
@@ -374,32 +378,70 @@ const STYLE_REFERENCE_ELEMENTS = Object.keys(STYLE_REFERENCE_TYPES);
  *  paragraph style `Standard` named Normal, stays. */
 export function withTemplateStyleIds(xml: string, ids: Map<string, string>): string {
   if (ids.size === 0) return xml;
-  // Each reference in `part`, in a style of the type `owner` or in none,
-  // its tag read as an XML parser reads it (see xmlStartTag)
-  const references = (part: string, owner: string | undefined) => {
-    let out = '';
-    let at = 0;
-    for (const { name, tag, start, end } of xmlStartTags(part, STYLE_REFERENCE_ELEMENTS)) {
-      const id = xmlAttribute(tag, 'w:val');
-      const type = STYLE_REFERENCE_TYPES[name](owner);
-      if (id === undefined || !ids.has(id) || type === undefined || BUILT_IN_STYLES.get(id)?.type !== type) continue;
-      out += part.slice(at, start) + withXmlAttribute(tag, 'w:val', ids.get(id)!);
-      at = end;
-    }
-    return out + part.slice(at);
+  return withStyleReferences(xml, (id, type) => BUILT_IN_STYLES.get(id)?.type === type ? ids.get(id) : undefined);
+}
+
+// A start, end or empty tag, read in markup (see xmlMatches): whether it
+// ends, its name, its attributes and whether it's empty
+const ANY_TAG = new RegExp('<(/?)([^\\s/>!?]+)(' + XML_TAG_ATTRIBUTES + ')(/?)>');
+
+/** A start tag's attributes, each by its qualified name, with its value
+ *  read as an XML parser reads it (see xmlAttribute) */
+const tagAttributes = (attributes: string) =>
+  [...attributes.matchAll(/\s([^\s=/>]+)\s*=\s*(?:"[^"]*"|'[^']*')/g)].map(([attribute, name]) => ({ name, value: xmlAttribute(attribute, name)! }));
+
+/**
+ * `xml` with each reference to a style, a paragraph's, run's or table's
+ * style, a style's base, next style or link, or numbering's link to a
+ * numbering style, to the ID `idFor` gives for the ID it refers to and the
+ * type of style it refers to (see STYLE_REFERENCE_TYPES), where it gives
+ * one, and as it was where it gives none. A reference is an element of
+ * WordprocessingML's namespace, whatever its prefix, as `x:rStyle` where x
+ * is bound to it, and not another namespace's of its name, as `w:rStyle`
+ * where w is bound to another, with its val of that namespace too. Each tag
+ * is read as an XML parser reads it, in markup, not a comment (see
+ * xmlMatches), its prefixes by the declarations around it; a part that
+ * declares none, as a fragment of one, binds w to WordprocessingML, as
+ * export's parts do. A reference in a style, a w:style, is by the style's
+ * type, a paragraph style's where it has none.
+ */
+export function withStyleReferences(xml: string, idFor: (id: string, type: string) => string | undefined): string {
+  // The elements open around each tag: their scopes, and the type of the
+  // style they're in, where they're in one
+  const stack: Array<{ scope: Scope; style: string | undefined }> = [{ scope: new Map([['w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main']]), style: undefined }];
+  // A name's local name, where it's WordprocessingML's
+  const wml = (qname: string, scope: Scope, attribute = false) => {
+    const name = expandName(qname, scope, attribute);
+    return name.namespace !== undefined && WORDPROCESSINGML.has(name.namespace) ? name.local : undefined;
   };
-  // Those in a style by its type, a style without one a paragraph style's,
-  // and the others by none, each style read as an XML parser reads it (see
-  // xmlElement), so one written as <w:style .../> holds none
   let out = '';
   let at = 0;
-  for (let style = xmlElement(xml, 'w:style'); style; style = xmlElement(xml, 'w:style', style.end)) {
-    const contentEnd = style.start + style.tag.length + style.content.length;
-    out += references(xml.slice(at, style.start), undefined) + style.tag
-      + references(style.content, xmlAttribute(style.tag, 'w:type') ?? 'paragraph') + xml.slice(contentEnd, style.end);
-    at = style.end;
+  for (const match of xmlMatches(xml, ANY_TAG)) {
+    const [tag, closing, qname, attributesText, empty] = match;
+    if (closing) {
+      if (stack.length > 1) stack.pop();
+      continue;
+    }
+    const outer = stack[stack.length - 1];
+    const attributes = tagAttributes(attributesText);
+    let declared: Map<string, string> | undefined;
+    for (const { name, value } of attributes) {
+      const prefix = name === 'xmlns' ? '' : name.startsWith('xmlns:') ? name.slice('xmlns:'.length) : undefined;
+      if (prefix !== undefined) (declared ??= new Map(outer.scope)).set(prefix, value);
+    }
+    const scope = declared ?? outer.scope;
+    const local = wml(qname, scope);
+    const attribute = (name: string) => attributes.find(candidate => wml(candidate.name, scope, true) === name);
+    const style = local === 'style' ? attribute('type')?.value ?? 'paragraph' : outer.style;
+    if (!empty) stack.push({ scope, style });
+    const val = local !== undefined && Object.hasOwn(STYLE_REFERENCE_TYPES, local) ? attribute('val') : undefined;
+    const type = val && STYLE_REFERENCE_TYPES[local!](outer.style);
+    const to = val && type !== undefined ? idFor(val.value, type) : undefined;
+    if (to === undefined || to === val!.value) continue;
+    out += xml.slice(at, match.index) + withXmlAttribute(tag, val!.name, to);
+    at = match.index + tag.length;
   }
-  return out + references(xml.slice(at), undefined);
+  return out + xml.slice(at);
 }
 
 /** The w:style element of the style `id` in `stylesXml`, found as import
@@ -877,7 +919,9 @@ export function templateWithFontOverrides(
       const newStyleXml = customStyleXml(name, def, bodyFontStr, localSzPair, property => turnsOn('Normal', property));
       // Replace existing custom style, of any type, as it's found, in its
       // place, before what follows it as it was, whitespace or a comment,
-      // or inject new one
+      // or inject new one. A copy of it under the ID Word gave it, as
+      // `Custombox` (see OwnStyle), stays till withStylesOnce, which leaves
+      // it out and points what refers to it to this one.
       const existing = findStyleElement(xml, sid, ids, true);
       if (existing) {
         xml = xml.slice(0, existing.at) + newStyleXml.replace(/\n$/, '') + xml.slice(existing.at + existing.element.length);
@@ -1056,13 +1100,150 @@ export function withCaptionStyle(xml: string, ids: Map<string, string>): string 
   return findStyleElement(xml, 'Caption', ids, true) ? xml : withoutInheritedSizes(withStyleAdded(xml, CAPTION_STYLE_XML), ['Caption'], ids);
 }
 
-/** A template's styles with export's own, where it lacks them */
+/**
+ * A style export adds to a template's, as it writes it: its type, ID and
+ * name. Word keeps a style's name but, when it saves, gives a custom style
+ * an ID of its own, from its name without its spaces and punctuation, so
+ * `ManuscriptHtml`, named Manuscript HTML, comes back as `ManuscriptHTML`,
+ * and `MsCustomBox`, named Custom: box, as `Custombox`. Where two styles'
+ * IDs differ only in case, as `ManuscriptHTML` and `ManuscriptHtml`, Word
+ * takes them for one and gives the second another ID, `ManuscriptHTMLa`,
+ * then `ManuscriptHTMLb` and on, and, where it repairs a document, which it
+ * reports as Styles in Show Repairs, gives each style whose name another
+ * has a name of its own, `Manuscript HTML0`, `Manuscript HTML00`,
+ * `Manuscript HTML1` and on, though Word saves two of one name otherwise. So a
+ * template saved by Word holds export's style under another ID, and, where
+ * export through it added its own again, more of them each time, which is
+ * how a document comes to hold dozens. `numbered`, export's own XML for
+ * the style, takes a style whose name is its name and digits, as Word names
+ * one in a repair, for a copy too, but only where it's formatted as export
+ * writes the style, as a user's style named `Manuscript HTML2` needn't be;
+ * a custom style has none, as `Custom: box2` is another custom style's
+ * (see isOwnStyleCopy).
+ */
+export interface OwnStyle { type: string; id: string; name: string; numbered?: string }
+
+/** Export's own styles, which a template saved by Word holds under other
+ *  IDs (see OwnStyle) */
+export const MANUSCRIPT_STYLES: OwnStyle[] = [
+  { type: 'paragraph', id: 'ManuscriptListContinuation', name: 'Manuscript List Continuation', numbered: LIST_CONTINUATION_STYLE_XML },
+  { type: 'character', id: RAW_HTML_STYLE_ID, name: 'Manuscript HTML', numbered: RAW_HTML_STYLE_XML },
+];
+
+/** A custom style the frontmatter defines, as export writes it (see
+ *  customStyleXml) */
+export function customOwnStyle(name: string): OwnStyle {
+  return { type: 'paragraph', id: customStyleId(name), name: customStyleDisplayName(name) };
+}
+
+/** The styles of `stylesXml`, each read as an XML parser reads it (see
+ *  xmlElement), with its type, a paragraph style's where it has none, its
+ *  ID and its name, where it has them, and its content */
+function stylesOf(stylesXml: string): Array<{ start: number; end: number; tag: string; type: string; id: string | undefined; name: string | undefined; content: string }> {
+  const styles = [];
+  for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
+    const nameTag = xmlStartTag(style.content, 'w:name');
+    styles.push({
+      start: style.start, end: style.end, tag: style.tag,
+      type: xmlAttribute(style.tag, 'w:type') ?? 'paragraph',
+      id: xmlAttribute(style.tag, 'w:styleId'),
+      name: nameTag && xmlAttribute(nameTag.tag, 'w:val'),
+      content: style.content,
+    });
+  }
+  return styles;
+}
+
+/** What a style's content says of its formatting, as Word writes it, for
+ *  comparing two: without its name, which names its copies apart, or its
+ *  revision IDs (w:rsid), which Word adds as it saves, nor whitespace
+ *  between its elements */
+const styleFormatting = (content: string) => replaceXmlElements(content, ['w:name', 'w:rsid'], () => '').replace(/>\s+</g, '><').trim();
+
+/** Whether a style of `stylesOf` is a copy of `own`, as Word saves it (see
+ *  OwnStyle): of its type, with its ID whatever its case, or with its name,
+ *  whatever its case, as Word compares names, or, for a `numbered` one, its
+ *  name and digits, where it's formatted as export writes the style. Its
+ *  ID says nothing of that, as Word gives a style a user names `Manuscript
+ *  HTML2` the ID `ManuscriptHTML2` as it gives a repaired copy. */
+function isOwnStyleCopy(style: { type: string; id: string | undefined; name: string | undefined; content: string }, own: OwnStyle): boolean {
+  if (style.type !== own.type || style.id === undefined) return false;
+  if (style.id.toLowerCase() === own.id.toLowerCase()) return true;
+  const name = style.name?.toLowerCase();
+  const ownName = own.name.toLowerCase();
+  if (name === ownName) return true;
+  if (own.numbered === undefined || name === undefined || !name.startsWith(ownName) || !/^\d+$/.test(name.slice(ownName.length))) return false;
+  return styleFormatting(style.content) === styleFormatting(xmlElement(own.numbered, 'w:style')?.content ?? '');
+}
+
+/** The w:style element of the first copy of `own` in `stylesXml` (see
+ *  isOwnStyleCopy), of export's own ID first, where it starts, or undefined
+ *  for none */
+export function findOwnStyle(stylesXml: string, own: OwnStyle): { at: number; element: string } | undefined {
+  const copies = stylesOf(stylesXml).filter(style => isOwnStyleCopy(style, own));
+  const style = copies.find(copy => copy.id === own.id) ?? copies[0];
+  return style && { at: style.start, element: stylesXml.slice(style.start, style.end) };
+}
+
+/** A template's styles with export's own, where it lacks them, and has no
+ *  copy of them under another ID, as Word saves them (see OwnStyle) */
 export function ensureManuscriptStyles(xml: string): string {
-  for (const [id, style] of [['ManuscriptListContinuation', LIST_CONTINUATION_STYLE_XML], [RAW_HTML_STYLE_ID, RAW_HTML_STYLE_XML]]) {
-    // One of any type, as it's found
-    if (!findStyleElement(xml, id, new Map(), true)) xml = withStyleAdded(xml, style);
+  for (const [own, style] of [[MANUSCRIPT_STYLES[0], LIST_CONTINUATION_STYLE_XML], [MANUSCRIPT_STYLES[1], RAW_HTML_STYLE_XML]] as const) {
+    // One of any type of the ID itself, as it's found, is the style too, as
+    // a template may give a style of its own export's ID
+    if (!findStyleElement(xml, own.id, new Map(), true) && !findOwnStyle(xml, own)) xml = withStyleAdded(xml, style);
   }
   return xml;
+}
+
+/**
+ * Styles XML with one of each style, as export writes them through a
+ * template, and the IDs of the styles it left out or gave another ID, by
+ * their types and IDs (`type + ' ' + id`), which references to them in the
+ * other parts take instead (see withStyleReferences).
+ *
+ * Of each of export's own styles, `own`, the copies Word left under other
+ * IDs and names (see OwnStyle) become one, of export's ID, which the
+ * document's runs and paragraphs refer to: the one of that ID, where export
+ * wrote or replaced it, or else the first, as the template's, whose
+ * formatting the user may have changed, with that ID. The template's other
+ * styles stay as they are, those whose IDs differ only in case too, as a
+ * numbering style `List` beside `list`, which numbering refers to by its ID
+ * (w:numStyleLink), and those of other types that share an ID or a name, as
+ * a paragraph style and the character style linked to it may. What's left
+ * between the styles, whitespace or a comment, stays.
+ */
+export function withStylesOnce(stylesXml: string, own: OwnStyle[]): { xml: string; ids: Map<string, string> } {
+  const styles = stylesOf(stylesXml);
+  const dropped = new Set<number>();
+  const retagged = new Map<number, string>();
+  const ids = new Map<string, string>();
+  for (const style of own) {
+    const copies = styles.flatMap((candidate, index) => isOwnStyleCopy(candidate, style) ? [index] : []);
+    if (copies.length === 0) continue;
+    const kept = copies.find(index => styles[index].id === style.id) ?? copies[0];
+    for (const index of copies) {
+      if (index !== kept) dropped.add(index);
+      if (styles[index].id !== style.id) ids.set(style.type + ' ' + styles[index].id, style.id);
+    }
+    if (styles[kept].id !== style.id) retagged.set(kept, style.id);
+  }
+  if (dropped.size === 0 && retagged.size === 0) return { xml: stylesXml, ids };
+  let xml = '';
+  let at = 0;
+  styles.forEach((style, index) => {
+    if (dropped.has(index)) {
+      xml += stylesXml.slice(at, style.start);
+      at = style.end;
+    } else if (retagged.has(index)) {
+      xml += stylesXml.slice(at, style.start) + withXmlAttribute(style.tag, 'w:styleId', retagged.get(index)!);
+      at = style.start + style.tag.length;
+    }
+  });
+  xml += stylesXml.slice(at);
+  // The styles left refer to those that went, as their base, next style or
+  // link, by the ID of the one that stayed
+  return { xml: withStyleReferences(xml, (id, type) => ids.get(type + ' ' + id)), ids };
 }
 
 export function applyAlertColorsToTemplate(stylesXml: string, scheme: ColorScheme): string {

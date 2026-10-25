@@ -123,7 +123,7 @@ import { crossRefLabel } from './citation-syntax';
 import { type LineEdit, type LineMap, lineCount, linesAfterEdits, sameLines, throughLines, withEnd } from './line-map';
 import { normalizeNewlines } from './newlines';
 import { DOCUMENT_START, bodyClosingSectPrXml, fencedBodySectPrXml, isLandscapeSectPr, nextPageSectPrXml, pageContentWidthPx, parseTemplateMargins, parseTemplatePgSz, sectPrPropertyIn, sectionBreakSectPrXml, sectionIsLandscape, textWidthTwips, wAttributeOf, withTemplateSectPrs, writableWidthTwips } from './md-to-docx-sections';
-import { CODE_BLOCK_INSET_TWIPS, type CodeBlockConfig, type FontOverrides, GITHUB_BLOCKQUOTE_BORDER_COLOR, GITHUB_BLOCKQUOTE_BORDER_SIZE, GITHUB_BLOCKQUOTE_BORDER_SPACE, GITHUB_BLOCKQUOTE_INDENT, RAW_HTML_STYLE_ID, SINGLE_LINE_SPACING, applyAlertColorsToTemplate, applyLineSpacingToTemplate, codeFontName, customStyleId, ensureManuscriptStyles, extractNormalStyleSizeHp, holdsRawHtmlLineEnd, rawHtmlTextElements, resolveAtIndex, resolveFontOverrides, resolveLineSpacingTwips, stylesXml, tableFontOnRuns, tableRFonts, templateStyleIds, templateWithFontOverrides, withCaptionStyle, withTemplateStyleIds, withoutInheritedSizes } from './md-to-docx-styles';
+import { CODE_BLOCK_INSET_TWIPS, type CodeBlockConfig, type FontOverrides, GITHUB_BLOCKQUOTE_BORDER_COLOR, GITHUB_BLOCKQUOTE_BORDER_SIZE, GITHUB_BLOCKQUOTE_BORDER_SPACE, GITHUB_BLOCKQUOTE_INDENT, MANUSCRIPT_STYLES, RAW_HTML_STYLE_ID, SINGLE_LINE_SPACING, applyAlertColorsToTemplate, applyLineSpacingToTemplate, codeFontName, customOwnStyle, customStyleId, ensureManuscriptStyles, extractNormalStyleSizeHp, holdsRawHtmlLineEnd, rawHtmlTextElements, resolveAtIndex, resolveFontOverrides, resolveLineSpacingTwips, stylesXml, tableFontOnRuns, tableRFonts, templateStyleIds, templateWithFontOverrides, withCaptionStyle, withStyleReferences, withStylesOnce, withTemplateStyleIds, withoutInheritedSizes } from './md-to-docx-styles';
 import { type ListLevels, type NumberingOverride, listNumIds, numberingXml, styleNumIds, templateListLevels, templateNumIdsInUse, withNumberingOverrides, withOwnNums, withoutUnusedNums } from './md-to-docx-numbering';
 import { appPropsXml, contentTypesXml, corePropsXml, defaultThemeXml, documentRelsXml, fontTableXml, noteRelsXml, relsXml, settingsXml, webSettingsXml } from './md-to-docx-parts';
 import { type CustomPropEntry, type ListItemRead, annotateHtmlCommentIndices, bibDataProps, bibKeyOrderProps, bibliographyHangingIndentProps, bibliographyPathProps, chunkCustomProps, codeBlockLanguageProps, codeBlockStylingProps, commentIdMappingProps, consecutiveReplyProps, customPropsXml, defaultCslProps, footnoteBookmarkName, footnoteCrossRefProps, footnoteIdMappingProps, frontmatterBlankLineProps, frontmatterFieldOrderProps, frontmatterLayoutProps, frontmatterSettingsProps, gridTableMaxLineWidthProps, htmlCommentAfterGapProps, htmlCommentGapProps, indentOverrideProps, lineSpacingProps, listBlankLineProps, listIndentOverrideProps, listIndentProps, listItemIndentOverrideProps, noteCodeBlockProps, paragraphIndentProps, pipeTableMaxLineWidthProps, recordListBlankLine, recordListItemsRead, zoteroCustomProps } from './md-to-docx-custom-props';
@@ -5294,6 +5294,18 @@ export async function convertMdToDocx(
   const zip = new JSZip();
   zip.file('word/document.xml', withTemplateStyleIds(injectParaIds(finalDocumentXml, state), templateIds));
 
+  // A template's styles, as export writes them, hold one of each style, as
+  // a template saved by Word may hold several of export's own under other
+  // IDs, and the IDs of those that went, which the parts' references to
+  // them take instead (see withStylesOnce), last, once every part is in
+  const ownStyles = [...MANUSCRIPT_STYLES, ...Object.keys(frontmatter.styles ?? {}).map(customOwnStyle)];
+  let styleIdsOnce = new Map<string, string>();
+  const withTemplateStylesOnce = (xml: string) => {
+    const once = withStylesOnce(xml, ownStyles);
+    styleIdsOnce = once.ids;
+    return once.xml;
+  };
+
   // Use template styles if available, otherwise default; apply font/color overrides when present
   if (templateParts?.has('word/styles.xml') && fontOverrides) {
     const withFonts = templateWithFontOverrides(
@@ -5310,13 +5322,13 @@ export async function convertMdToDocx(
     // heading may be based on (dirty-flag invariant #5)
     mutated = withoutInheritedSizes(ensureManuscriptStyles(mutated), withFonts.sizedStyleIds, withFonts.ids);
     if (state.figureNumber + state.tableNumber > 0) mutated = withCaptionStyle(mutated, templateIds);
-    zip.file('word/styles.xml', withTemplateStyleIds(mutated, templateIds));
+    zip.file('word/styles.xml', withTemplateStylesOnce(withTemplateStyleIds(mutated, templateIds)));
   } else if (templateParts?.has('word/styles.xml')) {
     let decoded = asUtf8(decodeXml(templateParts.get('word/styles.xml')!));
     decoded = applyLineSpacingToTemplate(decoded, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
     decoded = ensureManuscriptStyles(applyAlertColorsToTemplate(decoded, effectiveColors));
     if (state.figureNumber + state.tableNumber > 0) decoded = withCaptionStyle(decoded, templateIds);
-    zip.file('word/styles.xml', withTemplateStyleIds(decoded, templateIds));
+    zip.file('word/styles.xml', withTemplateStylesOnce(withTemplateStyleIds(decoded, templateIds)));
   } else {
     const styles = stylesXml(fontOverrides, codeBlockConfig, effectiveColors, frontmatter.styles, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
     zip.file('word/styles.xml', state.figureNumber + state.tableNumber > 0 ? withCaptionStyle(styles, new Map()) : styles);
@@ -5606,6 +5618,26 @@ export async function convertMdToDocx(
   }
   if (removed > 0) {
     state.warnings.push('Removed ' + removed + ' character' + (removed === 1 ? '' : 's') + ' a Word document can\'t hold, such as control characters');
+  }
+
+  // References to the styles of a template's that went, or took export's
+  // ID, as copies of its own (see withStylesOnce), in every XML part the
+  // package holds but the styles, to the one that stayed, by the type of
+  // style each refers to: the document, notes and comments export writes,
+  // and the headers, footers and numbering the template gives, wherever
+  // their relationships put them, as /headers/header1.xml. Only elements of
+  // WordprocessingML's namespace refer to a style (see withStyleReferences),
+  // so a part of another vocabulary goes as it came. A part is read in the
+  // encoding its BOM or declaration names, as a template's in UTF-16, and
+  // one that changes goes in UTF-8, as template-sections writes one it
+  // changes (see decodeXml and asUtf8).
+  if (styleIdsOnce.size > 0) {
+    for (const path of Object.keys(zip.files)) {
+      if (zip.files[path].dir || !/\.xml$/i.test(path) || path === 'word/styles.xml') continue;
+      const xml = decodeXml(await zip.file(path)!.async('uint8array'));
+      const referring = withStyleReferences(xml, (id, type) => styleIdsOnce.get(type + ' ' + id));
+      if (referring !== xml) zip.file(path, asUtf8(referring));
+    }
   }
 
   // Remove directory entries — Word marks files with explicit folder entries as modified on open.
