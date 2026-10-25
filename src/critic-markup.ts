@@ -841,6 +841,15 @@ export function criticPayloadRanges(markdown: string): Array<[number, number]> {
   return [...criticSpans(computeCriticBlockAnalysis(markdown))].map(({ contentStart, closeIdx }) => [contentStart, closeIdx]);
 }
 
+/** Where each CriticMarkup span in `markdown` that preprocessCriticMarkup
+ *  reads starts, at its opener's {, in order (see criticSpans): none in
+ *  code, HTML or an equation, nor escaped, nor the spans in a span's text.
+ *  Its line ends are \n alone. */
+export function criticSpanStarts(markdown: string): number[] {
+  if (!/\{(?:\+\+|--|~~|==|>>|#)/.test(markdown)) return [];
+  return Array.from(criticSpans(computeCriticBlockAnalysis(markdown)), ({ start }) => start);
+}
+
 /** `markdown` with each CriticMarkup span's line ends in placeholders, so
  *  markdown-it reads the span as one block. Its line ends are \n alone (see
  *  normalizeNewlines in newlines.ts), as each caller gives them. */

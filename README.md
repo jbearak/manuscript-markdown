@@ -49,7 +49,7 @@ manuscript-markdown paper.md      # Markdown → DOCX
 
 - **CriticMarkup annotations**: Track changes with comment attribution and timestamps
 - **Colored highlights**: Highlight colors match Word's color palette
-- **Word count**: Live word count in the status bar
+- **Word count**: Live word count in the status bar; click it to count the words as they'd be with every change accepted and comments left out (`manuscriptMarkdown.wordCount.acceptChanges`)
 - **AI-friendly**: Plain text in a git repository gives AI coding assistants full context — manuscript, bibliography, and revision history
 
 ### Academic Writing
