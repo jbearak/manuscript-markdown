@@ -73,6 +73,21 @@ describe('a tracked change to an equation, as Word saves it', () => {
     expect(await imported(math)).toBe('A ${--y = --}\\hat{{--\\pi--}}{--(x) + z--}$ B.\n');
   });
 
+  it('reads a structure marked deleted, with one unmarked in it, as its parts\' changes', async () => {
+    // The inner accent isn't in the deletion, so the outer can't hold it
+    const math = '<m:oMath>' + wordAccent(wordAccent(wordRun('del', 2, 'x')), 'del') + '</m:oMath>';
+    expect(await imported(math)).toBe('A $\\hat{\\hat{{--x--}}}$ B.\n');
+  });
+
+  it('keeps each equation of a display equation\'s paragraph where only one is in a change', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('$$\nq\n$$\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMathPara>[\s\S]*?<\/m:oMathPara>/, () => '<m:oMathPara><m:oMath>'
+      + wordAccent(wordRun('del', 2, 'x'), 'del') + '</m:oMath><m:oMath><m:r><m:t>y</m:t></m:r></m:oMath></m:oMathPara>'));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe('$$\n{--\\hat{x}--}\n$$\n$$\ny\n$$\n');
+  });
+
   it('reads a structure marked deleted, with a run inserted in it, as its parts\' changes', async () => {
     const math = '<m:oMath>' + wordAccent(wordRun('ins', 2, 'b'), 'del') + '</m:oMath>';
     expect(await imported(math)).toBe('A $\\hat{{++b++}}$ B.\n');

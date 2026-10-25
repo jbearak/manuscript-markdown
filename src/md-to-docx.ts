@@ -1970,7 +1970,7 @@ function shownChanges(xml: string): { kind: string; attrs: string }[] {
     if (tag === 'w:vanish' && open[open.length - 1] === 'w:rPr' && /^[wm]:r$/.test(open[open.length - 2] ?? '')
         && !['0', 'false', 'off'].includes(val(attrs) ?? '')) {
       runs[runs.length - 1].hidden = true;
-    } else if (['w:sym', 'm:rad', 'm:bar', 'm:borderBox'].includes(tag) || runContentShows(tag)) {
+    } else if (tag === 'w:sym' || runContentShows(tag)) {
       show();
     } else if (['m:type', 'm:chr', 'm:begChr', 'm:endChr'].includes(tag) && structures.length > 0) {
       structures[structures.length - 1].chars.set(tag, val(attrs) ?? '');
@@ -1988,7 +1988,9 @@ function shownChanges(xml: string): { kind: string; attrs: string }[] {
     if (tag === 'w:ins' || tag === 'w:del') changes.push({ kind: tag.slice(2), attrs });
     else if (tag === 'w:r' || tag === 'm:r') runs.push({ hidden: false });
     else if (tag === 'm:phant') phantoms.push(false);
-    else if (['m:f', 'm:d', 'm:acc', 'm:nary', 'm:groupChr'].includes(tag)) {
+    else if (['m:f', 'm:d', 'm:acc', 'm:nary', 'm:groupChr', 'm:rad', 'm:bar', 'm:borderBox'].includes(tag)) {
+      // A radical, a bar and a box each draw theirs, at their close, in the
+      // change they're in or that their mark says they are
       structures.push({ tag, change: changes[changes.length - 1] ?? none, chars: new Map() });
     }
   }

@@ -209,27 +209,33 @@ export function normalizeTrackedMath(nodes: XmlNode[]): XmlNode[] {
       return whole ? [changeNode(whole.change, [{ ...node, [tag]: whole.children }])] : [math];
     }
     if (tag === 'm:oMathPara') {
-      const para = { ...node, [tag]: normalizeTrackedMath(children) };
-      // Its equations, each in a change, in one change of all of them
-      const inner = asXmlNodes(para[tag]);
-      const changes = inner.filter(child => !isBlank(child) && tagOf(child) !== 'm:oMathParaPr');
-      const change = changes.length > 0 ? changeOf(changes[0]) : undefined;
-      if (change && changes.every(child => sameChange(changeOf(child), change) && asXmlNodes(child[tagOf(child)]).every(n => isBlank(n) || tagOf(n) === 'm:oMath'))) {
-        return [changeNode(change, [{ ...node, [tag]: inner.flatMap(child => changes.includes(child) ? asXmlNodes(child[tagOf(child)]) : [child]) }])];
+      // Its equations in one change only where all of them are, each whole,
+      // as import reads only the paragraph's own m:oMath: one in a change of
+      // its own, beside another, would go unread
+      const inner = children.map(child => tagOf(child) === 'm:oMath' ? { ...child, 'm:oMath': mathChildren(asXmlNodes(child['m:oMath'])) } : child);
+      const equations = inner.filter(child => tagOf(child) === 'm:oMath');
+      const wholes = equations.map(math => wholeChange(math, false));
+      const change = wholes[0]?.change;
+      if (change && wholes.every(whole => sameChange(whole?.change, change)) && wholes.some(whole => whole!.children.some(holdsStructureNode))) {
+        return [changeNode(change, [{ ...node, [tag]: inner.map(child => {
+          const at = equations.indexOf(child);
+          return at === -1 ? child : { ...child, 'm:oMath': wholes[at]!.children };
+        }) }])];
       }
-      return [para];
+      return [{ ...node, [tag]: inner }];
     }
     return [{ ...node, [tag]: normalizeTrackedMath(children) }];
   });
 }
 
 /** The change all of an equation's content is in, and that content out of
- *  it, or undefined where its content is not all in one */
-function wholeChange(math: XmlNode): { change: Change; children: XmlNode[] } | undefined {
+ *  it, or undefined where its content is not all in one, or, where
+ *  `structured`, holds no structure (see pushedMathChanges) */
+function wholeChange(math: XmlNode, structured = true): { change: Change; children: XmlNode[] } | undefined {
   const content = asXmlNodes(math['m:oMath']).filter(child => !isBlank(child));
   const change = content.length === 1 ? changeOf(content[0]) : undefined;
   const children = change && asXmlNodes(content[0][change.tag]);
-  return change && children!.some(holdsStructureNode) ? { change, children: children! } : undefined;
+  return change && (!structured || children!.some(holdsStructureNode)) ? { change, children: children! } : undefined;
 }
 
 /** Whether `node` is or holds a structure of an equation */
@@ -323,14 +329,18 @@ function trackedStructure(structure: XmlNode, tag: string, inner: XmlNode[]): Xm
   return changeNode(mark, [{ ...structure, [tag]: [unmarkedProps, ...rest.map(child => outOf(child, mark))] }]);
 }
 
-/** Whether every run of text in `node` is in a change of the same edit as
- *  `change`, past properties, whose mark is a structure's own */
+/** Whether every run of text and structure in `node` is in a change of the
+ *  same edit as `change`, past properties, whose mark is a structure's own */
 function allIn(node: XmlNode, change: Change): boolean {
   const tag = tagOf(node);
   if (tag === '#text') return !String(node['#text']).trim();
   if (changeOf(node)) return sameChange(changeOf(node), change);
   if (tag === 'm:r') return !asXmlNodes(node[tag]).some(child => tagOf(child) === 'm:t' && extractText(asXmlNodes(child['m:t'])) !== '');
   if (tag.endsWith('Pr')) return true;
+  // A structure in it is in the change where it's marked so, which wraps it
+  // in the change already (see trackedStructure), and isn't, empty or not,
+  // where it isn't
+  if (STRUCTURES.has(tag)) return false;
   return asXmlNodes(node[tag]).every(child => allIn(child, change));
 }
 
