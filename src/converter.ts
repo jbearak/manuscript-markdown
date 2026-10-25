@@ -1714,6 +1714,10 @@ interface FigureCaption {
 export interface FootnoteBody {
   id: string;
   content: ContentItem[];
+  /** The custom style of the note's first paragraph, whose text starts
+   *  `content` with no para item to hold it, as each later paragraph's para
+   *  item holds its own (see parseNoteBody) */
+  customStyleName?: string;
 }
 
 /** Context for parsing rich content in footnote/endnote bodies. */
@@ -1735,6 +1739,10 @@ interface NoteBodyContext {
   styleLayouts?: StyleLayouts;
   /** Bookmark name → "noteKind:noteId", for a NOTEREF field in a note */
   footnoteCrossRefMap?: Map<string, string>;
+  /** What a note's paragraph's custom style is read by, as the body's,
+   *  which export gives a note's paragraph in a style block (see
+   *  readCustomStyle) */
+  customStyleReading?: CustomStyleReading;
 }
 
 export interface TableRow {
@@ -2642,6 +2650,34 @@ export function parseCustomStyleName(pPrChildren: XmlNode[], knownStyles?: Recor
   // Fallback: derive name from PascalCase by lowering and inserting hyphens
   const suffix = val.slice('MsCustom'.length);
   return suffix.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
+}
+
+/** What import reads a paragraph's custom style by, the body's and the
+ *  notes' alike (see extractDocumentContent's options, which have these) */
+interface CustomStyleReading {
+  customStyles?: Record<string, CustomStyleDef>;
+  customStyleNames?: ReadonlyMap<string, string>;
+  renamedCustomStyleNames?: ReadonlyMap<string, string>;
+  unwritableCustomStyles?: ReadonlyMap<string, string>;
+  lostCustomStyles?: Set<string>;
+}
+
+/** The name of the custom style of the paragraph whose properties are
+ *  `pPrChildren`, which a directive can hold, or undefined (see
+ *  parseCustomStyleName). No directive of a name with a -->, which would
+ *  end its comment, whatever gives the name, and a warning where the
+ *  paragraph loses its style (see lostCustomStyles) */
+function readCustomStyle(pPrChildren: XmlNode[], reading: CustomStyleReading): string | undefined {
+  const customStyle = parseCustomStyleName(pPrChildren, reading.customStyles, reading.customStyleNames, reading.renamedCustomStyleNames);
+  const unwritable = reading.unwritableCustomStyles?.get(getAttr(pPrChildren.find(child => child['w:pStyle'] !== undefined), 'val').toLowerCase());
+  if (customStyle?.includes('-->')) {
+    reading.lostCustomStyles?.add(customStyle);
+    return undefined;
+  }
+  if (unwritable !== undefined && !(customStyle !== undefined && Object.hasOwn(reading.customStyles ?? {}, customStyle))) {
+    reading.lostCustomStyles?.add(unwritable);
+  }
+  return customStyle;
 }
 
 export function parseTitleStyle(pPrChildren: XmlNode[]): boolean {
@@ -5262,14 +5298,13 @@ async function extractNotes(
     if (!Array.isArray(noteChildren)) continue;
 
     noteNodes.set(id, { children: noteChildren, citations: citationCounter.idx });
-    const content = parseNoteBody(noteChildren, tagName, withoutImages, citationCounter);
-    notes.set(id, { id, content });
+    notes.set(id, { id, ...parseNoteBody(noteChildren, tagName, withoutImages, citationCounter) });
   }
   const withImages = (ids: ReadonlySet<string>) => {
     if (!context?.images) return;
     for (const [id, { children, citations }] of noteNodes) {
       if (ids.has(id) && findAllDeep(children, 'w:drawing').length > 0) {
-        notes.set(id, { id, content: parseNoteBody(children, tagName, context, { idx: citations }) });
+        notes.set(id, { id, ...parseNoteBody(children, tagName, context, { idx: citations }) });
       }
     }
   };
@@ -6034,8 +6069,11 @@ function parseNoteBody(
   tagName: string,
   context?: NoteBodyContext,
   citationCounter?: { idx: number },
-): ContentItem[] {
+): Omit<FootnoteBody, 'id'> {
   const content: ContentItem[] = [];
+  // The custom style of the paragraph whose text starts `content` (see
+  // FootnoteBody.customStyleName)
+  let firstStyle: string | undefined;
   // Determine self-ref tag: w:footnoteRef or w:endnoteRef
   const selfRefTag = tagName === 'w:footnote' ? 'w:footnoteRef' : 'w:endnoteRef';
   let skippedSelfRef = false;
@@ -6383,10 +6421,13 @@ function parseNoteBody(
           let paraFormatting = currentFormatting;
           let paraMarkRevision: RevisionInfo | undefined;
           let isCodeBlock = false;
+          let customStyle: string | undefined;
           for (const child of paraChildren) {
             if (child['w:pPr']) {
               const pPrChildren = asXmlNodes(child['w:pPr']);
               isCodeBlock = !inTableCell && parseCodeBlockStyle(pPrChildren);
+              // Not a cell's, as in the body, whose table export gives none
+              if (!inTableCell && !isCodeBlock && context?.customStyleReading) customStyle = readCustomStyle(pPrChildren, context.customStyleReading);
               const pRPrElement = pPrChildren.find((c) => c['w:rPr'] !== undefined);
               if (pRPrElement) {
                 const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
@@ -6417,7 +6458,15 @@ function parseNoteBody(
             if (isCodeBlock) paraItem.isCodeBlock = true;
             // A cell's tracked mark, for its table (see cellParagraphMarks)
             if (inTableCell && paraMarkRevision) paraItem.paraMarkRevision = paraMarkRevision;
+            if (customStyle !== undefined) paraItem.customStyleName = customStyle;
             target.push(paraItem);
+          } else if (last?.type === 'para') {
+            // An empty paragraph's para item, which this one's text takes,
+            // and so its style
+            if (customStyle !== undefined) last.customStyleName = customStyle;
+            else delete last.customStyleName;
+          } else if (target === content) {
+            firstStyle = customStyle;
           }
           const lenBeforeContent = target.length;
           const markBefore = skippedSelfRef;
@@ -6519,7 +6568,7 @@ function parseNoteBody(
   if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
     content.push({ type: 'para', breakRevision: trackedParaMark.revision });
   }
-  return content;
+  return { content, ...(firstStyle !== undefined ? { customStyleName: firstStyle } : {}) };
 }
 
 /** The note a NOTEREF field's instruction points to, by its bookmark's
@@ -6541,6 +6590,8 @@ interface NoteEntry {
   body: ContentItem[];
   noteKind: 'footnote' | 'endnote';
   reached?: true;
+  /** See FootnoteBody.customStyleName */
+  customStyleName?: string;
 }
 
 /** The note references in `items`, in table cells too, in order, after `refs` */
@@ -8304,17 +8355,7 @@ export async function extractDocumentContent(
               alertType = parseAlertType(pPrChildren);
               isCodeBlock = parseCodeBlockStyle(pPrChildren);
               generatedListContinuation = parseListContinuationStyle(pPrChildren);
-              customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined, options?.customStyleNames, options?.renamedCustomStyleNames);
-              // No directive of a name with a -->, which would end its
-              // comment, whatever gives the name, and a warning where the
-              // paragraph loses its style (see lostCustomStyles)
-              const unwritable = options?.unwritableCustomStyles?.get(getAttr(pPrChildren.find(child => child['w:pStyle'] !== undefined), 'val').toLowerCase());
-              if (customStyle?.includes('-->')) {
-                options?.lostCustomStyles?.add(customStyle);
-                customStyle = undefined;
-              } else if (unwritable !== undefined && !(customStyle !== undefined && Object.hasOwn(options?.customStyles ?? {}, customStyle))) {
-                options?.lostCustomStyles?.add(unwritable);
-              }
+              customStyle = readCustomStyle(pPrChildren, options ?? {});
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
               spacerShaped = pPrChildren.length === 1 && pPrChildren[0]['w:spacing'] !== undefined
                 && Object.keys(pPrChildren[0][':@'] ?? {}).join() === '@_w:after' && xmlTwips(getAttr(pPrChildren[0], 'after')) === 0;
@@ -15867,8 +15908,14 @@ function withoutSpaceInTexts(texts: string[]): string[] {
  *  paragraph. A heading's mark is a break after its text, # a{--\n\n--}b,
  *  but for a heading all in the mark's revision, {--# a--}. The break is plain text,
  *  so formatting, code and links close before it, and
- *  joinSpansAtTrackedBreaks then joins its span to the spans around it. */
-function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => ''): ContentItem[] {
+ *  joinSpansAtTrackedBreaks then joins its span to the spans around it.
+ *  `first` stands for the paragraph whose text starts `content`, which has
+ *  no para item of its own, as a note's first, whose custom style
+ *  FootnoteBody keeps apart: a break after it joins no paragraph of another
+ *  style, as in the body, where a styled paragraph has a para item, and
+ *  ends its text instead, in its style block. */
+function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => '',
+  first?: ParaItem): ContentItem[] {
   // The content up to `copied`, and the breaks' in place of their
   // paragraphs: inserting each into a copy of all of it moved what came
   // after, in time in the square of the breaks' number
@@ -15920,7 +15967,7 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     if (!inlinePrev && !afterEmpty) continue;
     let openingIndex = k - 1;
     while (openingIndex >= 0 && content[openingIndex].type !== 'para') openingIndex--;
-    const opening = content[openingIndex] as ParaItem | undefined;
+    const opening = openingIndex < 0 ? first : content[openingIndex] as ParaItem | undefined;
     // A heading all in its mark's revision holds the mark, as {++# a++}
     if (opening?.headingLevel && headingInMarkRevision(content, openingIndex)) continue;
     sides ??= contentAroundTrackedBreaks(content);
@@ -16540,7 +16587,8 @@ function buildMarkdownOnce(
   // Whether each of a note's code blocks goes as its paragraphs, before
   // what reads code paragraphs apart from text
   const noteCodeDemoted = new Map(noteEntries.map(entry => [entry, demoteNoteCodeBlocks(entry.body)]));
-  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(withoutHiddenCommentSpace(joinTrackedParagraphBreaks(entry.body, marks)))]));
+  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(withoutHiddenCommentSpace(joinTrackedParagraphBreaks(entry.body, marks, undefined,
+    entry.customStyleName === undefined ? undefined : { type: 'para', customStyleName: entry.customStyleName })))]));
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
   // The comments export named take their names first, and then the others
@@ -18772,6 +18820,11 @@ function buildMarkdownOnce(
       const bodyMerged = noteBodies.get(entry)!;
       // Render body, splitting on para/table markers for multi-paragraph footnotes
       const bodyParts: string[] = [];
+      // The custom style of each part's paragraph, where it has one, and of
+      // the paragraph being written, the first one's the note's (see
+      // FootnoteBody.customStyleName), each later one's its para item's
+      const partStyles: (string | undefined)[] = [];
+      let paraStyle = entry.customStyleName;
       // The comment bodies that go after each part, as after their
       // paragraph in the body: those of a paragraph's comments go after the
       // part that ends it (see endParagraph)
@@ -18817,6 +18870,7 @@ function buildMarkdownOnce(
         if (paragraphPart === undefined) {
           bodyParts.push(text);
           paragraphPart = bodyParts.length - 1;
+          partStyles[paragraphPart] = paraStyle;
           return;
         }
         const fenceBefore = bodyMerged[partStart - 1];
@@ -18880,6 +18934,7 @@ function buildMarkdownOnce(
           endParagraph();
           partStart = bi + 1;
           paragraphPart = undefined;
+          paraStyle = item.customStyleName;
         } else if (item.type === 'math' && item.display) {
           // Flush preceding inline content and keep display math as its own block part.
           if (bi > partStart) {
@@ -18896,6 +18951,7 @@ function buildMarkdownOnce(
           } else {
             if (!item.inParagraph) endParagraph();
             bodyParts.push(commented.block);
+            partStyles[bodyParts.length - 1] = paraStyle;
             paragraphPart = item.inParagraph ? bodyParts.length - 1 : undefined;
           }
           pushAll(paragraphBodies, commented.bodies);
@@ -18993,18 +19049,20 @@ function buildMarkdownOnce(
         bodyParts.push('');
       }
       endParagraph();
+      bodyParts[0] = bodyParts[0].replace(/^\s+/, '');
+      const parts = styledNoteParts(bodyParts, partStyles, partBodies);
       const indent4 = (s: string) => s.split('\n').map(l => '    ' + l).join('\n');
       // On the lines after the part, as in the body (see deferredComments)
-      const withBodies = (pi: number) => partBodies[pi] ? '\n' + partBodies[pi].map(l => indent4(l)).join('\n') : '';
-      const first = bodyParts[0].replace(/^\s+/, '');
+      const withBodies = (pi: number) => parts[pi].bodies ? '\n' + parts[pi].bodies!.map(l => indent4(l)).join('\n') : '';
+      const first = parts[0].text;
       if (first.includes('\n')) {
         // Block form: label on its own line, blank line, then indented body
         output.push(`[^${entry.label}]:\n\n` + indent4(first) + withBodies(0));
       } else {
         output.push(`[^${entry.label}]: ${first}` + withBodies(0));
       }
-      for (let pi = 1; pi < bodyParts.length; pi++) {
-        output.push('\n\n' + indent4(bodyParts[pi]) + withBodies(pi));
+      for (let pi = 1; pi < parts.length; pi++) {
+        output.push('\n\n' + indent4(parts[pi].text) + withBodies(pi));
       }
     }
   }
@@ -19014,6 +19072,35 @@ function buildMarkdownOnce(
   knownCrossRefLabels = new Set();
   citationsNoted = true;
   return breakMarks ? joinSpansAtTrackedBreaks(output.join(''), breakMarks) : output.join('');
+}
+
+/** A note's parts, each with the comment bodies that go on the lines after
+ *  it, and each run of those of paragraphs in one custom style, as
+ *  `styles` gives them, in a style block, as export reads one in a note,
+ *  whose paragraphs take its style (see generateDocumentXml in
+ *  md-to-docx.ts): one paragraph on one line as a block on one line, with
+ *  its text between the fences, where the fences' reader reads that text
+ *  back (see styleFence), and the rest between fences, each a part of its
+ *  own, with blank lines around it, as export writes no table or code in a
+ *  note in a style, so a run of paragraphs ends at one */
+function styledNoteParts(parts: string[], styles: readonly (string | undefined)[], bodies: readonly (string[] | undefined)[]): Array<{ text: string; bodies?: string[] }> {
+  const out: Array<{ text: string; bodies?: string[] }> = [];
+  for (let pi = 0; pi < parts.length;) {
+    const style = styles[pi];
+    let end = pi + 1;
+    while (style !== undefined && end < parts.length && styles[end] === style) end++;
+    const line = '<!-- style: ' + style + ' -->' + parts[pi] + '<!-- /style -->';
+    const fence = style === undefined || end > pi + 1 || parts[pi].includes('\n') ? undefined : styleFence(line);
+    if (style === undefined) out.push({ text: parts[pi], bodies: bodies[pi] });
+    else if (fence?.kind === 'inline' && fence.style === style && fence.content === parts[pi]) out.push({ text: line, bodies: bodies[pi] });
+    else {
+      out.push({ text: '<!-- style: ' + style + ' -->' });
+      for (let k = pi; k < end; k++) out.push({ text: parts[k], bodies: bodies[k] });
+      out.push({ text: '<!-- /style -->' });
+    }
+    pi = end;
+  }
+  return out;
 }
 
 function formatOffsetString(offsetMinutes: number): string {
@@ -19663,6 +19750,34 @@ function customStyleNames(styleElements: { tag: string; block: string }[]): Map<
 function lostCustomStyleWarnings(lost: ReadonlySet<string>): string[] {
   return [...lost].map(name => 'Custom style "' + name + '" has --> in its name, which would end a style directive\'s comment, '
     + 'so import can\'t keep it on its paragraphs; rename the style to keep it.');
+}
+
+/** The names of the custom styles on comments' paragraphs, read as the
+ *  body's are (see parseCustomStyleName), which a Word user gave them, as
+ *  export gives a comment's paragraph none: a comment holds no directive,
+ *  whose fences in one are its text, so import warns that they go. One
+ *  whose name no directive could hold, with a --> in it, which reads as no
+ *  style, or as one by its ID, goes by its name in Word (see
+ *  unwritableCustomStyles), but for one the custom properties name, as a
+ *  paragraph of the body keeps. Read only where the document has a custom
+ *  style */
+async function commentCustomStyles(zip: JSZip, styleLayouts: StyleLayouts, reading: CustomStyleReading): Promise<Set<string>> {
+  const names = new Set<string>();
+  if (!styleLayouts.renamedCustomStyles && ![...styleLayouts.paragraph.byId.keys()].some(id => id.startsWith('MsCustom'))) return names;
+  const parsed = await readZipXml(zip, 'word/comments.xml');
+  if (!parsed) return names;
+  for (const comment of findAllDeep(parsed, 'w:comment')) {
+    for (const paragraph of findAllDeep(asXmlNodes(comment['w:comment']), 'w:p')) {
+      const pPr = asXmlNodes(paragraph['w:p']).find(child => child['w:pPr'] !== undefined);
+      if (!pPr) continue;
+      const pPrChildren = asXmlNodes(pPr['w:pPr']);
+      const name = parseCustomStyleName(pPrChildren, reading.customStyles, reading.customStyleNames, reading.renamedCustomStyleNames);
+      const unwritable = reading.unwritableCustomStyles?.get(getAttr(pPrChildren.find(child => child['w:pStyle'] !== undefined), 'val').toLowerCase());
+      const named = name !== undefined && Object.hasOwn(reading.customStyles ?? {}, name) ? name : unwritable ?? name;
+      if (named !== undefined) names.add(named);
+    }
+  }
+  return names;
 }
 
 /**
@@ -20715,8 +20830,8 @@ export async function convertDocx(
   const fnRelsMerged = new Map([...docRels, ...fnRelsParsed.hyperlinks]);
   const enRelsMerged = new Map([...docRels, ...enRelsParsed.hyperlinks]);
   const imageFolder = options?.imageFolder ?? '';
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap, customStyleReading: contentOptions };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts, footnoteCrossRefMap, customStyleReading: contentOptions };
 
   const { content: docContent, zoteroBiblData, leadingBlankParagraphs, captionParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, contentOptions);
   // The figures' and tables' captions, which go with their pictures and
@@ -20902,7 +21017,8 @@ export async function convertDocx(
     }
     usedLabels.add(label);
     assignedLabels.set(key, label);
-    notesMap.set(key, { label, body: body.content, noteKind: ref.noteKind, ...(reached ? { reached: true as const } : {}) });
+    notesMap.set(key, { label, body: body.content, noteKind: ref.noteKind, ...(reached ? { reached: true as const } : {}),
+      ...(body.customStyleName !== undefined ? { customStyleName: body.customStyleName } : {}) });
   };
   for (const ref of refOrder) addNote(ref, false);
   // Then the notes only notes refer to, as export writes a note's reference
@@ -21249,5 +21365,7 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles)] };
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles),
+    ...[...await commentCustomStyles(zip, styleLayouts, contentOptions)].map(name => 'Custom style "' + name + '" is on a comment\'s paragraph, '
+      + 'which a comment can\'t keep, as it holds no style directive; import drops it there.')] };
 }
