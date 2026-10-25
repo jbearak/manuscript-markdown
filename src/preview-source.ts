@@ -13,12 +13,26 @@ export function isMarkdownPreviewViewType(viewType: string): boolean {
 	return viewType === MARKDOWN_PREVIEW_VIEW_TYPE || viewType.endsWith('-' + MARKDOWN_PREVIEW_VIEW_TYPE);
 }
 
+/** viewType of the static preview, the custom editor of Open With > Markdown Preview. */
+export const STATIC_PREVIEW_VIEW_TYPE = 'vscode.markdown.preview.editor';
+
 /**
- * Whether a tab label may name a .md file, the one kind the static preview
- * opens, as a diff's 'a.md ↔ b.md' does.
+ * Whether a webview or custom editor tab's viewType is the static preview's:
+ * a rendered diff of static previews is a webview tab in newer VS Code.
  */
-export function labelNamesMdFile(label: string): boolean {
-	return /\.md\b/i.test(label);
+export function isStaticPreviewViewType(viewType: string): boolean {
+	return viewType === STATIC_PREVIEW_VIEW_TYPE || viewType.endsWith('-' + STATIC_PREVIEW_VIEW_TYPE);
+}
+
+// The static preview's selector in VS Code 1.143's markdown extension; 1.103's is *.md alone.
+const STATIC_PREVIEW_FILE = /\.(md|mkd|mkdn|mdwn|mdown|markdown|markdn|mdtxt|mdtext|litcoffee|ron|ronn|workbook)\b/i;
+
+/**
+ * Whether a tab label may name a file the static preview opens, as a diff's
+ * 'a.md ↔ b.md' does.
+ */
+export function labelNamesStaticPreviewFile(label: string): boolean {
+	return STATIC_PREVIEW_FILE.test(label);
 }
 
 const FOCUS_GROUP_COMMANDS = ['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Eighth']

@@ -10,7 +10,7 @@ import * as formatting from './formatting';
 import * as author from './author';
 import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt, type PreviewMarkup } from './preview/manuscript-markdown-plugin';
 import { WordCountController } from './wordcount';
-import { focusGroupCommand, isMarkdownPreviewViewType, labelNamesMdFile, pollFor } from './preview-source';
+import { focusGroupCommand, isMarkdownPreviewViewType, isStaticPreviewViewType, labelNamesStaticPreviewFile, pollFor } from './preview-source';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx, hasCitations } from './md-to-docx';
 import * as fs from 'fs';
@@ -1451,8 +1451,6 @@ async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir:
 	));
 }
 
-const STATIC_PREVIEW_VIEW_TYPE = 'vscode.markdown.preview.editor';
-
 function isDynamicPreviewTab(tab: vscode.Tab | undefined): tab is vscode.Tab {
 	return tab?.input instanceof vscode.TabInputWebview && isMarkdownPreviewViewType(tab.input.viewType);
 }
@@ -1463,15 +1461,16 @@ function visibleDynamicPreviews(): vscode.Tab[] {
 }
 
 /**
- * Whether a static preview may be open: a tab of one, or a tab the API can't
- * describe that names a .md file, the one kind of file the static preview
- * opens, as a diff of two static previews has no input the API exposes.
+ * Whether a static preview may be open: a custom editor or webview tab of
+ * one, or a tab the API can't describe that names a file the static preview
+ * opens, as a side-by-side diff of two static previews has no input the API
+ * exposes.
  */
 function staticPreviewMayBeOpen(): boolean {
 	return vscode.window.tabGroups.all.some(g => g.tabs.some(t =>
-		t.input instanceof vscode.TabInputCustom
-			? t.input.viewType === STATIC_PREVIEW_VIEW_TYPE
-			: t.input === undefined && labelNamesMdFile(t.label)));
+		t.input instanceof vscode.TabInputCustom || t.input instanceof vscode.TabInputWebview
+			? isStaticPreviewViewType(t.input.viewType)
+			: t.input === undefined && labelNamesStaticPreviewFile(t.label)));
 }
 
 /**
@@ -1546,7 +1545,7 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			? await previewSource(previews[0])
 			: previews.length > 1 || uri
 				? undefined
-				: input instanceof vscode.TabInputCustom && input.viewType === STATIC_PREVIEW_VIEW_TYPE
+				: input instanceof vscode.TabInputCustom && isStaticPreviewViewType(input.viewType)
 					? await vscode.workspace.openTextDocument(input.uri)
 					: vscode.window.activeTextEditor?.document;
 		if (!doc || doc.languageId !== 'markdown') {
