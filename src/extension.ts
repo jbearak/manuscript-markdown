@@ -1454,17 +1454,17 @@ async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir:
 const STATIC_PREVIEW_VIEW_TYPE = 'vscode.markdown.preview.editor';
 
 /**
- * The document the dynamic preview in a tab shows, from markdown.showSource,
- * which answers for the preview the markdown extension holds active and opens
- * its source in an editor. That extension sets its active preview when a
- * dynamic preview is made, as one opened to the side without focus, which is
- * then the visible one, and on each view state event: to the preview gaining
- * focus, or to none for one losing it. It also sets it on opening a static
- * preview, focused or not, which can then hold it with no event to clear it,
- * so any static preview open is refused rather than trusted. Otherwise, with
- * this tab focused, showSource gives its source, or none until the event
- * comes; each try first checks the tab still has focus, so a preview focused
- * meanwhile is not taken for it.
+ * The document the dynamic preview in a tab shows, where it is the one
+ * preview visible, from markdown.showSource, which answers for the preview
+ * the markdown extension holds active and opens its source in an editor.
+ * That extension sets its active preview when a dynamic preview is made,
+ * visible but perhaps unfocused, as one opened to the side, and on each view
+ * state event, which a preview's hiding fires too: to the preview gaining
+ * focus, or to none for any other. So it is none or a visible dynamic
+ * preview, which is this tab's, except that opening a static preview sets it,
+ * focused or not, with no event to clear it: with one open this refuses.
+ * Otherwise, with this tab focused, showSource gives its source, or none until
+ * the event comes; each try first checks the tab still has focus.
  */
 async function previewSource(tab: vscode.Tab): Promise<vscode.TextDocument | undefined> {
 	const staticPreviewOpen = vscode.window.tabGroups.all.some(g => g.tabs.some(t =>
@@ -1511,16 +1511,17 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 		// A title-bar button on the dynamic preview passes a webview-panel URI
 		// that names no tab, and clicking it leaves focus where it was (VS Code's
 		// editorGroupView skips focusing for clicks on actions), so it can come
-		// from any group's preview: only one visible preview is sure to be it.
-		// A preview is visible as its group's active tab.
-		// The command palette passes nothing, and has the focused preview. The
-		// static preview (Open With) passes, and its tab holds, the file's URI.
+		// from any group's preview. The command palette passes nothing, and
+		// means the focused preview, if a preview has focus. Either way only one
+		// visible preview (its group's active tab) is sure to be it, and only
+		// then can showSource be trusted (see previewSource). The static
+		// preview (Open With) passes, and its tab holds, the file's URI.
 		const isPreviewTab = (tab: vscode.Tab | undefined): tab is vscode.Tab =>
 			tab?.input instanceof vscode.TabInputWebview && isMarkdownPreviewViewType(tab.input.viewType);
 		const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
-		const previews = uri
+		const previews = uri || isPreviewTab(activeTab)
 			? vscode.window.tabGroups.all.map(g => g.activeTab).filter(isPreviewTab)
-			: [activeTab].filter(isPreviewTab);
+			: [];
 		const input = activeTab?.input;
 		const doc = previews.length === 1
 			? await previewSource(previews[0])
@@ -1531,7 +1532,7 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 					: vscode.window.activeTextEditor?.document;
 		if (!doc || doc.languageId !== 'markdown') {
 			vscode.window.showErrorMessage(previews.length > 1
-				? 'Several Markdown previews are showing: focus the one to export and run Export to Word from the Command Palette'
+				? 'Several Markdown previews are showing: close all but the one to export, or export from the Markdown file\'s editor'
 				: previews.length === 1 || uri
 					? 'Could not tell which file this preview shows. Close any preview opened with Open With, or export from the Markdown file\'s editor'
 					: 'No active Markdown file');
