@@ -13,6 +13,7 @@
 // equation as Word does (see pushedMathChanges), and import reads what Word
 // writes back as one change around what it holds (see normalizeTrackedMath).
 
+import { pushAll } from './arrays';
 import { asXmlNodes, type XmlAttributes, type XmlNode } from './omml';
 
 /** Equation structures, each of whose properties (`<name>Pr`) can end in an
@@ -109,7 +110,7 @@ function pushed(pieces: Piece[], change: Element, state: { first: boolean }, id:
       state.first = false;
       out.push({ name: change.name, attrs, children: group });
     } else {
-      out.push(...group);
+      pushAll(out, group);
     }
     group = [];
   };
@@ -126,7 +127,7 @@ function pushed(pieces: Piece[], change: Element, state: { first: boolean }, id:
     flush();
     // A change in the change, as an equation's in a deletion of it, holds
     // its own runs
-    if (inner) out.push(...walk([element], id));
+    if (inner) pushAll(out, walk([element], id));
     else if (MATH_CONTAINERS.has(name)) out.push({ ...element, children: pushed(element.children!, change, state, id) });
     else out.push(markedStructure(element, change, state, id));
   }
