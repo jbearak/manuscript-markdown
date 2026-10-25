@@ -664,44 +664,6 @@ function highlightedRuns(omml: string): string {
 /** Wraps a tracked part's OMML in w:ins or w:del. */
 export type TrackChange = (element: 'w:ins' | 'w:del', omml: string) => string;
 
-/** A tracked change's opening or closing tag, or a structure's opening tag
- *  and its properties, which hold no structure, where it has them */
-const TRACKED_STRUCTURE_RE = /<(\/?)w:(ins|del)((?:\s[^>]*)?)>|<m:(f|sSup|sSub|sSubSup|sPre|rad|nary|d|acc|m|func|eqArr|borderBox|limLow|limUpp|bar|groupChr|box|phant)>(?:<m:\4Pr\/>|<m:\4Pr>([\s\S]*?)<\/m:\4Pr>)?/g;
-
-/**
- * `xml` with each equation structure in a tracked change, as the m:acc of
- * {--$\hat{x}$--}, marked as in the change, as Word records an inserted or
- * deleted structure: a w:ins or w:del, with the change's author and date,
- * in its m:ctrlPr. The change around the structure is what Word reads for
- * its runs alone, so without the mark Word leaves the structure where it
- * removes the change, as an accent over an empty box. `id` gives each mark
- * its revision ID. A structure whose m:ctrlPr has a change already keeps
- * it, as one in an equation's change, in a change of the equation, does.
- */
-export function withTrackedStructures(xml: string, id: () => number): string {
-  const changes: { element: string; attrs: string }[] = [];
-  return xml.replace(TRACKED_STRUCTURE_RE, (match: string, closing: string, element: string | undefined, attrs: string | undefined,
-    structure: string | undefined, props: string | undefined) => {
-    if (element !== undefined) {
-      if (attrs!.endsWith('/')) return match;
-      if (closing) changes.pop();
-      else changes.push({ element: 'w:' + element, attrs: attrs!.replace(/\s+w:id="[^"]*"/, '') });
-      return match;
-    }
-    const change = changes[changes.length - 1];
-    if (!change || /<w:(?:ins|del)\b/.test(props ?? '')) return match;
-    // The mark holds the control's run properties, which the schema requires,
-    // as math's font where it had none, as Word writes it
-    let rPr = '<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/></w:rPr>';
-    const kept = (props ?? '').replace(/<m:ctrlPr\/>|<m:ctrlPr>([\s\S]*?)<\/m:ctrlPr>/, (_ctrlPr: string, own: string | undefined) => {
-      if (own && /^<w:rPr>[\s\S]*<\/w:rPr>$/.test(own)) rPr = own;
-      return '';
-    });
-    const mark = '<' + change.element + ' w:id="' + id() + '"' + change.attrs + '>' + rPr + '</' + change.element + '>';
-    return '<m:' + structure + '><m:' + structure + 'Pr>' + kept + '<m:ctrlPr>' + mark + '</m:ctrlPr></m:' + structure + 'Pr>';
-  });
-}
-
 /** A \tag's text, and whether it is \tag*, which LaTeX shows without parentheses. */
 export interface EquationTag { text: string; star: boolean }
 

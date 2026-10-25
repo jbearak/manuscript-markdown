@@ -2661,13 +2661,16 @@ describe('CriticMarkup OOXML generation', () => {
       ['$\\sum{++\\limits++}_{i}^{n} x$', 'inx', '<m:limLoc m:val="undOvr"/>'],
       ['${++\\frac++}{1}{2}$', '12', '<m:f>'],
     ] as const) {
-      // Past each structure's own mark of the change it's in
+      // Past each structure's own mark of the change it's in, as export puts
+      // a change on each run of a structure's (see pushedMathChanges)
       const result = generateParagraph(parseMd(md)[0], createState(), { authorName: 'Default' }).replace(/<m:ctrlPr>.*?<\/m:ctrlPr>/g, '');
       const deleted = [...result.matchAll(/<w:del [^>]*>(.*?)<\/w:del>/g)].map(m => m[1]);
       const inserted = [...result.matchAll(/<w:ins [^>]*>(.*?)<\/w:ins>/g)].map(m => m[1]);
-      expect(deleted.map(omml => omml.replace(/<[^>]+>/g, ''))).toEqual([rejected]);
-      expect(inserted).toHaveLength(1);
-      expect(inserted[0]).toContain(structure);
+      expect(deleted.join('').replace(/<[^>]+>/g, '')).toBe(rejected);
+      expect(inserted.length).toBeGreaterThan(0);
+      expect(result.replace(/<\/?w:(?:ins|del)\b[^>]*>/g, '')).toContain(structure);
+      // Every run of the equation is in one or the other
+      expect(result.replace(/<w:(ins|del) [^>]*>.*?<\/w:\1>/g, '')).not.toContain('<m:t');
       expect(result.match(/<m:oMath>/g)).toHaveLength(1);
     }
   });

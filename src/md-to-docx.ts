@@ -14,7 +14,7 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, preprocessGridTablesWithSourceMap } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { xmlInteger } from './xml-elements';
-import { withTrackedStructures } from './latex-to-omml';
+import { pushedMathChanges } from './tracked-math';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
@@ -1406,7 +1406,7 @@ function trackedChangeXml(tag: 'w:ins' | 'w:del', contentXml: string, links: Reg
     xml += '<w:hyperlink r:id="' + link[1] + '">' + change(link[2]) + '</w:hyperlink>';
     last = link.index + link[0].length;
   }
-  return withTrackedStructures(last === 0 || last < contentXml.length ? xml + change(contentXml.slice(last)) : xml, () => state.commentId++);
+  return pushedMathChanges(last === 0 || last < contentXml.length ? xml + change(contentXml.slice(last)) : xml, () => state.commentId++);
 }
 
 /** Deleted content, from generateDeletedCriticContent, in w:del */
@@ -1660,7 +1660,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       }
     } else if (run.type === 'math') {
       const math = run.mathParts
-        ? withTrackedStructures(generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display), () => state.commentId++)
+        ? pushedMathChanges(generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display), () => state.commentId++)
         : generateMathXml(run.text, !!run.display, state.warnings);
       // Not inline math with a tracked change in it, or in one, whose
       // highlight import doesn't read (see mathHighlight in converter.ts)
@@ -1978,6 +1978,12 @@ function shownChanges(xml: string): { kind: string; attrs: string }[] {
       phantoms[phantoms.length - 1] = ['0', 'false', 'off'].includes(val(attrs) ?? '');
     }
     if (selfClosing) continue;
+    // A structure's change is its mark, in its m:ctrlPr, where it has one
+    // (see pushedMathChanges in tracked-math.ts)
+    if ((tag === 'w:ins' || tag === 'w:del') && open[open.length - 1] === 'm:ctrlPr' && structures.length > 0
+        && open[open.length - 2] === structures[structures.length - 1].tag + 'Pr') {
+      structures[structures.length - 1].change = { kind: tag.slice(2), attrs };
+    }
     open.push(tag);
     if (tag === 'w:ins' || tag === 'w:del') changes.push({ kind: tag.slice(2), attrs });
     else if (tag === 'w:r' || tag === 'm:r') runs.push({ hidden: false });
