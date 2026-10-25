@@ -10,7 +10,7 @@ import * as formatting from './formatting';
 import * as author from './author';
 import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt, type PreviewMarkup } from './preview/manuscript-markdown-plugin';
 import { WordCountController } from './wordcount';
-import { isMarkdownPreviewViewType, matchPreviewTabLabel, type RenderedDocument } from './preview-source';
+import { focusGroupCommand, isMarkdownPreviewViewType, pollFor } from './preview-source';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx, hasCitations } from './md-to-docx';
 import * as fs from 'fs';
@@ -108,22 +108,6 @@ let languageClient: LanguageClient | undefined;
 let languageClientDisposables: vscode.Disposable[] = [];
 let cslCacheDir: string = '';
 let previewMd: ManuscriptMarkdownIt | undefined;
-// Each document the preview's engine has rendered, by URI string, from the
-// env.currentDocument VS Code's markdown extension passes every render, with
-// the sequence number of its latest render. It only grows: a stale entry can
-// make a tab label match two documents, which falls back to
-// markdown.showSource, but never hides the one a preview shows.
-const previewRenderedUris = new Map<string, RenderedDocument<vscode.Uri>>();
-// Each tab's label and the sequence number at which it took it, on the
-// sequence renders count on too (see preview-source.ts).
-const tabLabelSeqs = new WeakMap<vscode.Tab, { label: string; seq: number }>();
-let previewSeq = 0;
-
-function noteTabLabel(tab: vscode.Tab): void {
-	if (tabLabelSeqs.get(tab)?.label !== tab.label) {
-		tabLabelSeqs.set(tab, { label: tab.label, seq: ++previewSeq });
-	}
-}
 
 // Embed resolver for reading external files referenced by embed directives.
 // Shared by both the preview plugin and md-to-docx conversion.
@@ -263,13 +247,6 @@ async function writeFileThroughSymlink(symlinkUri: vscode.Uri, data: Uint8Array)
 }
 
 export function activate(context: vscode.ExtensionContext) {
-	// Before any preview renders: VS Code activates this extension to build the
-	// markdown engine, as it contributes markdown.markdownItPlugins.
-	for (const group of vscode.window.tabGroups.all) group.tabs.forEach(noteTabLabel);
-	context.subscriptions.push(vscode.window.tabGroups.onDidChangeTabs(e => {
-		e.opened.forEach(noteTabLabel);
-		e.changed.forEach(noteTabLabel);
-	}));
 	cslCacheDir = path.join(context.globalStorageUri.fsPath, 'csl-styles');
 	syncLanguageClient(context);
 	context.subscriptions.push(
@@ -1134,16 +1111,6 @@ export function activate(context: vscode.ExtensionContext) {
 	return {
 		extendMarkdownIt(md: ManuscriptMarkdownIt) {
 			previewMd = md;
-			const render = md.renderer.render.bind(md.renderer);
-			md.renderer.render = (tokens, options, env) => {
-				// Another extension's Uri, so read by its fields, not instanceof
-				const doc: vscode.Uri | undefined = env?.currentDocument;
-				if (typeof doc?.scheme === 'string' && typeof doc.path === 'string') {
-					const docUri = vscode.Uri.from(doc);
-					previewRenderedUris.set(docUri.toString(), { uri: docUri, seq: ++previewSeq });
-				}
-				return render(tokens, options, env);
-			};
 			md.manuscriptColors = getConfiguredColorScheme();
 			md.manuscriptPreviewMarkup = getConfiguredPreviewMarkup();
 			md.manuscriptEmbedResolver = embedResolver;
@@ -1485,18 +1452,32 @@ async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir:
 }
 
 /**
- * The document a dynamic Markdown preview shows: by its tab label where that
- * names one document a preview has rendered, and rendered since the tab took
- * that label, else by markdown.showSource, which knows the preview's source
- * but opens it in an editor. showSource
- * follows only the focused preview, so an unfocused one has its label alone.
+ * The document the dynamic preview in a tab shows, from markdown.showSource,
+ * which answers for the preview the markdown extension holds active and opens
+ * its source in an editor. That extension sets its active preview when a
+ * preview is made, as one opened to the side without focus, and on each view
+ * state event: to the preview gaining focus, or to none for one losing it. So
+ * with a text editor focused, after this focuses the tab's group, showSource
+ * gives this preview's source, or none until the event comes. A focused static
+ * preview stays active until that event, so is refused rather than raced.
  */
-async function previewSource(tab: vscode.Tab, focused: boolean): Promise<vscode.TextDocument | undefined> {
-	const labelSeq = tabLabelSeqs.get(tab)?.label === tab.label ? tabLabelSeqs.get(tab)!.seq : Infinity;
-	const byLabel = matchPreviewTabLabel(tab.label, labelSeq, previewRenderedUris.values());
-	if (byLabel) return vscode.workspace.openTextDocument(byLabel);
-	if (!focused) return undefined;
-	const editor = await vscode.commands.executeCommand<vscode.TextEditor | undefined>('markdown.showSource');
+async function previewSource(tab: vscode.Tab, focusedInput: unknown): Promise<vscode.TextDocument | undefined> {
+	if (!tab.group.isActive) {
+		if (focusedInput instanceof vscode.TabInputCustom) return undefined;
+		const command = focusGroupCommand(tab.group.viewColumn);
+		if (!command) return undefined;
+		await vscode.commands.executeCommand(command);
+		const focused = await pollFor(() => (tab.group.isActive && tab.isActive) || undefined, 1000);
+		if (!focused) return undefined;
+	}
+	const editor = await pollFor(
+		() => vscode.commands.executeCommand<vscode.TextEditor | undefined>('markdown.showSource'),
+		1000,
+	);
+	// A preview in its source's column gave way to the source; bring it back
+	if (editor && editor.viewColumn === tab.group.viewColumn) {
+		await vscode.commands.executeCommand('workbench.action.openPreviousRecentlyUsedEditorInGroup');
+	}
 	return editor?.document;
 }
 
@@ -1519,6 +1500,7 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 		// that names no tab, and clicking it leaves focus where it was (VS Code's
 		// editorGroupView skips focusing for clicks on actions), so it can come
 		// from any group's preview: only one visible preview is sure to be it.
+		// A preview is visible as its group's active tab.
 		// The command palette passes nothing, and has the focused preview. The
 		// static preview (Open With) passes, and its tab holds, the file's URI.
 		const isPreviewTab = (tab: vscode.Tab | undefined): tab is vscode.Tab =>
@@ -1529,7 +1511,7 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			: [activeTab].filter(isPreviewTab);
 		const input = activeTab?.input;
 		const doc = previews.length === 1
-			? await previewSource(previews[0], previews[0] === activeTab)
+			? await previewSource(previews[0], activeTab?.input)
 			: previews.length > 1 || uri
 				? undefined
 				: input instanceof vscode.TabInputCustom && input.viewType === 'vscode.markdown.preview.editor'

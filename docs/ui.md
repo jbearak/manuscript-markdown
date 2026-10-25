@@ -130,7 +130,7 @@ Export and document-setting commands. See [Converter](converter.md) for details 
 
 > **Export to Word** converts the Markdown file to `.docx`. If a `.docx` with the same name already exists, its paragraph and formatting styles, and its headers and footers, are automatically reused as a template — so fonts, spacing, colors, and page numbers you previously set in Word are preserved.
 >
-> The Markdown preview's title bar has the same icon, which exports the previewed file. If previews have shown two files with that file name, it opens the previewed file's editor to find which one it is, which needs the preview focused. With previews showing side by side, the button can't tell which one you clicked: focus the one to export and run **Export to Word** from the Command Palette.
+> The Markdown preview's title bar has the same icon, which exports the previewed file. To learn which file that is, it asks VS Code to show the preview's source, so focus moves to that file's editor; a preview that fills its editor group stays in view. With previews showing side by side, the button can't tell which one you clicked: focus the one to export and run **Export to Word** from the Command Palette.
 >
 > **Export to Word with Template** first opens a file picker so you can choose any `.docx` file whose paragraph formatting styles (fonts, sizes, spacing, colors), and headers and footers, will be applied to the exported document.
 >
