@@ -790,6 +790,128 @@ describe('Custom Styles — IDs Word gives them', () => {
   });
 });
 
+describe('Custom Styles — Notes and comments', () => {
+  // Export gives a note's paragraph in a style block the block's style, in
+  // the notes' part, but import read custom styles only in the body's, so
+  // the note came back with no directive, and lost the style on the next
+  // export, with no warning
+  const head = '---\nstyles:\n  box:\n    font-style: italic\n  Pull Quote:\n    font-style: bold\n---\n\n';
+  /** Each paragraph's style and text in `part` of `docx`, but the notes'
+   *  separators' */
+  const partParagraphs = async (docx: Uint8Array, part = 'word/footnotes.xml') => {
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file(part)!.async('string');
+    return [...xml.matchAll(/<w:p\b[^>]*>((?:(?!<\/w:p>).)*)<\/w:p>/gs)].map(([, p]) =>
+      (/<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? '') + ':' + [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''))
+      .filter(p => p !== ':');
+  };
+
+  it.each([
+    ['a note whose only paragraph is styled', 'Text.[^1]\n\n[^1]: <!-- style: box -->Boxed note.<!-- /style -->\n',
+      ['MsCustomBox: Boxed note.']],
+    ['one styled paragraph of several', 'Text.[^1]\n\n[^1]: Plain one.\n\n    <!-- style: box -->Boxed two.<!-- /style -->\n\n    Plain three.\n',
+      ['FootnoteText: Plain one.', 'MsCustomBox:Boxed two.', 'FootnoteText:Plain three.']],
+    ['several styled paragraphs in a row', 'Text.[^1]\n\n[^1]: Plain one.\n\n    <!-- style: box -->\n\n    Boxed two.\n\n    Boxed three.\n\n    <!-- /style -->\n\n    Plain four.\n',
+      ['FootnoteText: Plain one.', 'MsCustomBox:Boxed two.', 'MsCustomBox:Boxed three.', 'FootnoteText:Plain four.']],
+    ['styled paragraphs the note starts with', 'Text.[^1]\n\n[^1]: <!-- style: box -->\n\n    Boxed one.\n\n    Boxed two.\n\n    <!-- /style -->\n\n    Plain.\n',
+      ['MsCustomBox: Boxed one.', 'MsCustomBox:Boxed two.', 'FootnoteText:Plain.']],
+    ['paragraphs of two styles in a row', 'Text.[^1]\n\n[^1]: <!-- style: box -->Boxed.<!-- /style -->\n\n    <!-- style: Pull Quote -->Quoted.<!-- /style -->\n',
+      ['MsCustomBox: Boxed.', 'MsCustomPullQuote:Quoted.']],
+    ['a styled paragraph with a line break', 'Text.[^1]\n\n[^1]: Plain.\n\n    <!-- style: box -->\n\n    Line one\\\n    line two.\n\n    <!-- /style -->\n',
+      ['FootnoteText: Plain.', 'MsCustomBox:Line oneline two.']],
+    ['a styled paragraph with formatting, a change and a comment', 'Text.[^1]\n\n[^1]: <!-- style: box -->Some **bold** [link](https://example.org) $x$ {++new++} {==this==}{>>Why?<<}<!-- /style -->\n',
+      ['MsCustomBox: Some bold link  new this']],
+    ['notes of a body in a style block', '<!-- style: box -->\nBody.[^1]\n<!-- /style -->\n\nMore.[^2]\n\n[^1]: <!-- style: Pull Quote -->First.<!-- /style -->\n\n[^2]: Plain.\n\n    <!-- style: box -->Second.<!-- /style -->\n',
+      ['MsCustomPullQuote: First.', 'FootnoteText: Plain.', 'MsCustomBox:Second.']],
+  ])('come back as they were from %s', async (_name, body, paragraphs) => {
+    const { docx } = await convertMdToDocx(head + body);
+    expect(await partParagraphs(docx)).toEqual(paragraphs);
+    const { markdown, warnings } = await convertDocx(docx);
+    expect(warnings).toEqual([]);
+    expect(markdown).toBe(head + body);
+  });
+
+  it('come back as they were from endnotes', async () => {
+    const md = '---\nnotes: endnotes\nstyles:\n  box:\n    font-style: italic\n---\n\nText.[^1]\n\n[^1]: Plain.\n\n    <!-- style: box -->Boxed.<!-- /style -->\n';
+    const { docx } = await convertMdToDocx(md);
+    expect(await partParagraphs(docx, 'word/endnotes.xml')).toEqual(['EndnoteText: Plain.', 'MsCustomBox:Boxed.']);
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  it.each([
+    // A block of one paragraph, which comes back on one line
+    ['Text.[^1]\n\n[^1]: <!-- style: box -->\n\n    Boxed.\n\n    <!-- /style -->\n', 'Text.[^1]\n\n[^1]: <!-- style: box -->Boxed.<!-- /style -->\n'],
+    // Code and a table in a block, which Word can't give its style, as in
+    // the body where export records no edges, and which so end it
+    ['Text.[^1]\n\n[^1]: Plain.\n\n    <!-- style: box -->\n\n    ```\n    code\n    ```\n\n    After.\n\n    <!-- /style -->\n',
+      'Text.[^1]\n\n[^1]: Plain.\n\n    ```\n    code\n    ```\n\n    <!-- style: box -->After.<!-- /style -->\n'],
+    ['Text.[^1]\n\n[^1]: <!-- style: box -->\n\n    | a |\n    |---|\n    | b |\n\n    After.\n\n    <!-- /style -->\n',
+      'Text.[^1]\n\n[^1]:\n\n    | a |\n    | --- |\n    | b |\n\n    <!-- style: box -->After.<!-- /style -->\n'],
+  ])('come back in the form of what export wrote of them, which comes back as it is', async (body, back) => {
+    const { docx } = await convertMdToDocx(head + body);
+    expect((await convertDocx(docx)).markdown).toBe(head + back);
+    const again = await convertMdToDocx(head + back);
+    expect(await partParagraphs(again.docx)).toEqual(await partParagraphs(docx));
+    expect((await convertDocx(again.docx)).markdown).toBe(head + back);
+  });
+
+  const notes = 'Text.[^1]\n\n[^1]: <!-- style: box -->Boxed.<!-- /style -->\n\n    <!-- style: Pull Quote -->Quoted.<!-- /style -->\n\n    Plain.\n';
+  /** The document export writes of `notes`, as Word saves it, with each
+   *  custom style's ID one Word builds from its name where `renamed`, and
+   *  with or without export's custom properties */
+  const savedByWord = async (properties: boolean, renamed = true) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(head + notes)).docx);
+    if (!properties) zip.remove('docProps/custom.xml');
+    for (const part of ['word/styles.xml', 'word/footnotes.xml']) {
+      const xml = await zip.file(part)!.async('string');
+      expect(xml).toContain('MsCustomBox');
+      if (renamed) zip.file(part, xml.replace(/MsCustomBox/g, 'Custombox').replace(/MsCustomPullQuote/g, 'CustomPullQuote'));
+    }
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  it.each([['with', true], ['without', false]])('come back under the IDs Word gives them %s custom properties', async (_name, properties) => {
+    const { markdown, warnings } = await convertDocx(await savedByWord(properties));
+    expect(warnings).toEqual([]);
+    expect(markdown).toBe((await convertDocx(await savedByWord(properties, false))).markdown);
+    expect(markdown).toEndWith(notes);
+  });
+
+  // As the body's (see IDs Word gives them): under export's ID, the
+  // paragraph keeps a directive by it, which names no style the frontmatter
+  // has; under Word's, it has none
+  it.each([
+    ['export\'s', false, '[^1]: <!-- style: box -->Boxed.<!-- /style -->\n'],
+    ['Word\'s', true, '[^1]: Boxed.\n'],
+  ])('warn that a custom style named with --> comes back without its note\'s paragraphs, under %s ID', async (_name, renamed, first) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(false, renamed));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: box', 'Custom: a--&gt;b'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(warnings).toEqual(['Custom style "a-->b" has --> in its name, which would end a style directive\'s comment, '
+      + 'so import can\'t keep it on its paragraphs; rename the style to keep it.']);
+    expect(markdown).not.toContain('<!-- style: a-->b');
+    expect(markdown).toContain(first + '\n    <!-- style: Pull Quote -->Quoted.<!-- /style -->\n');
+  });
+
+  it('warn of a custom style a Word user gave a comment\'s paragraph, which a comment can\'t keep', async () => {
+    // Export writes a directive in a comment as its text, which comes back
+    // as it was; a style on its paragraph, which only Word gives, is lost
+    const md = head + 'Text {>>Note: <!-- style: box -->Boxed<!-- /style --><<} more.\n';
+    const { docx } = await convertMdToDocx(md);
+    expect(await partParagraphs(docx, 'word/comments.xml')).toEqual([':Note: &lt;!-- style: box --&gt;Boxed&lt;!-- /style --&gt;']);
+    expect(await convertDocx(docx)).toMatchObject({ markdown: md, warnings: [] });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const comments = await zip.file('word/comments.xml')!.async('string');
+    zip.file('word/comments.xml', comments.replace(/(<w:comment\b[^>]*>\s*<w:p\b[^>]*>)/, '$1<w:pPr><w:pStyle w:val="MsCustomPullQuote"/></w:pPr>'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toBe(md);
+    expect(warnings).toEqual(['Custom style "Pull Quote" is on a comment\'s paragraph, which a comment can\'t keep, as it holds no style directive; import drops it there.']);
+  });
+});
+
 describe('Custom Styles — List items', () => {
   const styled = '---\nstyles:\n  box:\n    font-style: italic\n---\n\n';
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
