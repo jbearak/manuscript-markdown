@@ -754,6 +754,32 @@ describe('Custom Styles — IDs Word gives them', () => {
     expect((await convertDocx(await unused.generateAsync({ type: 'uint8array' }))).warnings).toEqual([]);
   });
 
+  it('reads a paragraph whose reference to a style Word renamed differs from its ID in case, as Word does', async () => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(false));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/w:val="Custombox"/g, 'w:val="CUSTOMBOX"'));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toBe((await convertDocx(await savedByWord(false, false))).markdown);
+  });
+
+  it('defines a style whose name was changed in Word, which the custom properties hold under its old name, as Word does', async () => {
+    // Word's Callout, once box, whose settings the custom properties keep
+    // under box: its paragraphs' directive names Callout, which the
+    // frontmatter defines as the styles part does, so export keeps it
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(true));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: box', 'Custom: Callout').replace(/Custombox/g, 'CustomCallout'));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/Custombox/g, 'CustomCallout'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(warnings).toEqual([]);
+    expect(markdown).toMatch(/<!-- style: Callout -->\n+Boxed\./);
+    expect(parseFrontmatter(markdown).metadata.styles?.['Callout']).toEqual({ fontStyle: 'italic' });
+    const exported = await convertMdToDocx(markdown);
+    expect(exported.warnings.filter(warning => warning.includes('Callout'))).toEqual([]);
+    const xml = await (await JSZip.loadAsync(exported.docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:pStyle w:val="MsCustomCallout"/>');
+  });
+
   it('leaves a style of the document\'s own whose name isn\'t a custom style\'s', async () => {
     const JSZip = (await import('jszip')).default;
     const zip = await JSZip.loadAsync(await savedByWord(false));
