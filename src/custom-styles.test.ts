@@ -823,6 +823,13 @@ describe('Custom Styles — Notes and comments', () => {
       ['MsCustomBox: Some bold link  new this']],
     ['notes of a body in a style block', '<!-- style: box -->\nBody.[^1]\n<!-- /style -->\n\nMore.[^2]\n\n[^1]: <!-- style: Pull Quote -->First.<!-- /style -->\n\n[^2]: Plain.\n\n    <!-- style: box -->Second.<!-- /style -->\n',
       ['MsCustomPullQuote: First.', 'FootnoteText: Plain.', 'MsCustomBox:Second.']],
+    // A display equation of its own paragraph, whose text this doesn't read,
+    // takes that paragraph's style:
+    // the block's, which export gives it, or none after a styled paragraph
+    ['a display equation in a style block', 'Text.[^1]\n\n[^1]: First.\n\n    <!-- style: box -->\n\n    Boxed.\n\n    $$\n    x = 1\n    $$\n\n    <!-- /style -->\n\n    After.\n',
+      ['FootnoteText: First.', 'MsCustomBox:Boxed.', 'MsCustomBox:', 'FootnoteText:After.']],
+    ['a display equation after a styled paragraph', 'Text.[^1]\n\n[^1]: <!-- style: box -->Boxed.<!-- /style -->\n\n    $$\n    x = 1\n    $$\n\n    After.\n',
+      ['MsCustomBox: Boxed.', 'FootnoteText:', 'FootnoteText:After.']],
   ])('come back as they were from %s', async (_name, body, paragraphs) => {
     const { docx } = await convertMdToDocx(head + body);
     expect(await partParagraphs(docx)).toEqual(paragraphs);
