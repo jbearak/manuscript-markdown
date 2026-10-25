@@ -108,6 +108,32 @@ describe('a tracked change to an equation, as Word saves it', () => {
     expect(markdown.startsWith('{--')).toBe(true);
   });
 
+  /** The Markdown of a display paragraph of `equations`' XML, as Word's */
+  const displayImported = async (equations: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('$$\nq\n$$\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMathPara>[\s\S]*?<\/m:oMathPara>/, () => '<m:oMathPara>' + equations + '</m:oMathPara>'));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+  const plain = (text: string) => '<m:oMath><m:r><m:t>' + text + '</m:t></m:r></m:oMath>';
+
+  it('reads a change around a display paragraph\'s equation as on its runs, not on a structure it doesn\'t mark', async () => {
+    const unmarked = '<m:oMath>' + wordAccent('<m:r><m:t>x</m:t></m:r>') + '</m:oMath>';
+    const markdown = await displayImported('<w:del w:id="3" w:author="Lab">' + unmarked + '</w:del>' + plain('y'));
+    expect(markdown).toContain('\\hat{{--x--}}');
+    expect(markdown).toContain('y');
+  });
+
+  test.each([
+    ['in a change in a change', (math: string) => '<w:del w:id="3" w:author="Lab"><w:ins w:id="4" w:author="Lab">' + math + '</w:ins></w:del>'],
+    ['in a change with bookmarks', (math: string) => '<w:del w:id="3" w:author="Lab"><w:bookmarkStart w:id="0" w:name="b"/>' + math
+      + '<w:bookmarkEnd w:id="0"/></w:del>'],
+  ])('keeps a display paragraph\'s equation %s', async (_name, wrap) => {
+    const markdown = await displayImported(plain('z') + wrap(plain('y')));
+    expect(markdown).toContain('z');
+    expect(markdown).toContain('y');
+  });
+
   it('reads a structure marked deleted, with a run inserted in it, as its parts\' changes', async () => {
     const math = '<m:oMath>' + wordAccent(wordRun('ins', 2, 'b'), 'del') + '</m:oMath>';
     expect(await imported(math)).toBe('A $\\hat{{++b++}}$ B.\n');

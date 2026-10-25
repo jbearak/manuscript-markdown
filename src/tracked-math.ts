@@ -131,9 +131,10 @@ function pushed(pieces: Piece[], change: Element, state: { first: boolean; inPar
     // its own runs
     if (inner) pushAll(out, walk([element], id));
     else if (name === 'm:oMathPara') {
+      const outer = state.inParagraph;
       state.inParagraph = true;
       out.push({ ...element, children: pushed(element.children!, change, state, id) });
-      state.inParagraph = false;
+      state.inParagraph = outer;
     } else if (MATH_CONTAINERS.has(name)) out.push({ ...element, children: pushed(element.children!, change, state, id) });
     else out.push(markedStructure(element, change, state, id));
   }
@@ -218,15 +219,7 @@ export function normalizeTrackedMath(nodes: XmlNode[]): XmlNode[] {
       // Its equations in one change only where all of them are, each whole,
       // as import reads only the paragraph's own m:oMath: one in a change of
       // its own, beside another, would go unread
-      // An equation in a change, as the schema allows there, as one whose
-      // content is in it
-      const unwrapped = children.flatMap((child): XmlNode[] => {
-        const change = changeOf(child);
-        const held = change ? asXmlNodes(child[change.tag]) : [];
-        if (!change || !held.some(n => tagOf(n) === 'm:oMath') || !held.every(n => isBlank(n) || tagOf(n) === 'm:oMath')) return [child];
-        return held.map(n => isBlank(n) ? n : { ...n, 'm:oMath': [changeNode(change, asXmlNodes(n['m:oMath']))] });
-      });
-      const inner = unwrapped.map(child => tagOf(child) === 'm:oMath' ? { ...child, 'm:oMath': mathChildren(asXmlNodes(child['m:oMath'])) } : child);
+      const inner = unwrappedEquations(children).map(child => tagOf(child) === 'm:oMath' ? { ...child, 'm:oMath': mathChildren(asXmlNodes(child['m:oMath'])) } : child);
       const equations = inner.filter(child => tagOf(child) === 'm:oMath');
       const wholes = equations.map(math => wholeChange(math, false));
       const change = wholes[0]?.change;
@@ -239,6 +232,39 @@ export function normalizeTrackedMath(nodes: XmlNode[]): XmlNode[] {
       return [{ ...node, [tag]: inner }];
     }
     return [{ ...node, [tag]: normalizeTrackedMath(children) }];
+  });
+}
+
+/** A display paragraph's `children` with each equation in a change, as the
+ *  schema allows there, the change in changes, past range markers such as
+ *  bookmarks, which stay, as an equation with the innermost change on its
+ *  runs, which is what Word reads a change around an equation for (see the
+ *  file's header) */
+function unwrappedEquations(children: XmlNode[], change?: Change): XmlNode[] {
+  return children.flatMap((child): XmlNode[] => {
+    const inner = changeOf(child);
+    if (inner) {
+      const held = asXmlNodes(child[inner.tag]);
+      return holdsEquation(held) ? unwrappedEquations(held, inner) : [child];
+    }
+    return change && tagOf(child) === 'm:oMath' ? [{ ...child, 'm:oMath': onRuns(asXmlNodes(child['m:oMath']), change) }] : [child];
+  });
+}
+
+/** Whether `nodes`, or the changes among them, hold an equation */
+function holdsEquation(nodes: XmlNode[]): boolean {
+  return nodes.some(node => tagOf(node) === 'm:oMath' || (!!changeOf(node) && holdsEquation(asXmlNodes(node[tagOf(node)]))));
+}
+
+/** `nodes` of an equation with `change` around each of their runs not in a
+ *  change already, in their structures' parts too, but not on a structure,
+ *  whose own mark says whether it is in a change */
+function onRuns(nodes: XmlNode[], change: Change): XmlNode[] {
+  return nodes.map(node => {
+    const tag = tagOf(node);
+    if (tag === 'm:r') return changeNode(change, [node]);
+    if (tag === '#text' || tag === '' || tag.endsWith('Pr') || changeOf(node)) return node;
+    return { ...node, [tag]: onRuns(asXmlNodes(node[tag]), change) };
   });
 }
 
