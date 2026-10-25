@@ -1794,6 +1794,11 @@ export interface StyleLayouts {
    *  each style the document gives another, by its name (see
    *  BUILT_IN_PARAGRAPH_STYLES) */
   builtInIds?: Map<string, string>;
+  /** The paragraph styles that are custom styles by their names, as export
+   *  writes one ("Custom: " and the name), under an ID Word gave it, not
+   *  export's: Word builds a style's ID from its name when it saves, so
+   *  export's MsCustomBox comes back as Custombox */
+  renamedCustomStyles?: Set<string>;
 }
 
 /** The built-in paragraph styles import reads by their IDs, in the text or
@@ -1945,6 +1950,9 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
     const name = children.find(c => c['w:name'] !== undefined);
     const builtInId = type === 'paragraph' && name ? BUILT_IN_PARAGRAPH_STYLES.get(getAttr(name, 'val').toLowerCase()) : undefined;
     if (builtInId && builtInId.toLowerCase() !== id.toLowerCase()) builtIn.set(id, builtInId);
+    if (type === 'paragraph' && name && !id.startsWith('MsCustom') && xmlOn(getAttr(node, 'customStyle')) && /^Custom:/.test(getAttr(name, 'val'))) {
+      (layouts.renamedCustomStyles ??= new Set()).add(id);
+    }
     const tblPr = childrenOf(children, 'w:tblPr');
     const band = (tag: string) => {
       const size = tblPr.find(c => c[tag] !== undefined);
@@ -2611,12 +2619,16 @@ export function parseHeadingLevel(pPrChildren: XmlNode[]): number | undefined {
 
 /** Detect a custom style (MsCustomXxx) and return the user-facing name, or
  *  undefined: the one of `knownStyles` whose ID it is, or else the name
- *  `names` gives its ID (see customStyleNames), or else one from the ID. */
-export function parseCustomStyleName(pPrChildren: XmlNode[], knownStyles?: Record<string, CustomStyleDef>, names?: ReadonlyMap<string, string>): string | undefined {
+ *  `names` gives its ID (see customStyleNames), or else one from the ID.
+ *  A custom style under an ID Word gave it takes the name `renamed` gives
+ *  that ID (see StyleLayouts.renamedCustomStyles). */
+export function parseCustomStyleName(pPrChildren: XmlNode[], knownStyles?: Record<string, CustomStyleDef>, names?: ReadonlyMap<string, string>,
+  renamed?: ReadonlyMap<string, string>): string | undefined {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return undefined;
   const val = getAttr(pStyleElement, 'val');
-  if (!val.startsWith('MsCustom')) return undefined;
+  // By the ID's lowercase, as Word matches a style's ID whatever its case
+  if (!val.startsWith('MsCustom')) return renamed?.get(val.toLowerCase());
   // Reverse-lookup: if we have the known styles map, find the name whose customStyleId matches
   if (knownStyles) {
     for (const name of Object.keys(knownStyles)) {
@@ -7689,6 +7701,19 @@ export async function extractDocumentContent(
     /** The custom styles' names by their IDs, from the styles part, where
      *  there are no customStyles (see customStyleNames) */
     customStyleNames?: ReadonlyMap<string, string>;
+    /** The names of the custom styles Word gave IDs of its own, by those IDs
+     *  (see StyleLayouts.renamedCustomStyles), whether or not there are
+     *  customStyles */
+    renamedCustomStyleNames?: ReadonlyMap<string, string>;
+    /** The custom styles whose names in the styles part have a -->, by
+     *  their IDs, which no directive can hold (see lostCustomStyles) */
+    unwritableCustomStyles?: ReadonlyMap<string, string>;
+    /** The names of the custom styles whose paragraphs lost them, as no
+     *  directive could hold the name, which import warns of: one with a -->
+     *  in it, from the styles part or the custom properties. A paragraph
+     *  that keeps its style by the name the custom properties give it
+     *  counts for none. */
+    lostCustomStyles?: Set<string>;
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
     footnoteCrossRefMap?: Map<string, string>;
     styleLayouts?: StyleLayouts;
@@ -8279,7 +8304,17 @@ export async function extractDocumentContent(
               alertType = parseAlertType(pPrChildren);
               isCodeBlock = parseCodeBlockStyle(pPrChildren);
               generatedListContinuation = parseListContinuationStyle(pPrChildren);
-              customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined, options?.customStyleNames);
+              customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined, options?.customStyleNames, options?.renamedCustomStyleNames);
+              // No directive of a name with a -->, which would end its
+              // comment, whatever gives the name, and a warning where the
+              // paragraph loses its style (see lostCustomStyles)
+              const unwritable = options?.unwritableCustomStyles?.get(getAttr(pPrChildren.find(child => child['w:pStyle'] !== undefined), 'val').toLowerCase());
+              if (customStyle?.includes('-->')) {
+                options?.lostCustomStyles?.add(customStyle);
+                customStyle = undefined;
+              } else if (unwritable !== undefined && !(customStyle !== undefined && Object.hasOwn(options?.customStyles ?? {}, customStyle))) {
+                options?.lostCustomStyles?.add(unwritable);
+              }
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
               spacerShaped = pPrChildren.length === 1 && pPrChildren[0]['w:spacing'] !== undefined
                 && Object.keys(pPrChildren[0][':@'] ?? {}).join() === '@_w:after' && xmlTwips(getAttr(pPrChildren[0], 'after')) === 0;
@@ -19398,8 +19433,16 @@ async function documentContentInputs(zip: JSZip, format: CitationKeyFormat = 'au
   const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
   // Without custom properties, the frontmatter takes the custom styles from
   // the styles part, by their names there, which their paragraphs take too
-  const stylesXml = storedCustomStyles || ![...styleLayouts.paragraph.byId.keys()].some(id => id.startsWith('MsCustom'))
-    ? undefined : await readZipText(zip, 'word/styles.xml');
+  // A custom style Word gave an ID of its own takes its name from there
+  // whether or not there are custom properties, as no ID of export's
+  // gives it (see StyleLayouts.renamedCustomStyles)
+  const exportIds = [...styleLayouts.paragraph.byId.keys()].some(id => id.startsWith('MsCustom'));
+  const namesStyles = !storedCustomStyles && exportIds;
+  const renamed = styleLayouts.renamedCustomStyles;
+  // Read where there's any custom style, for the names no directive can
+  // hold (see unwritableCustomStyles), as custom properties needn't name it
+  const stylesXml = exportIds || renamed ? await readZipText(zip, 'word/styles.xml') : undefined;
+  const names = stylesXml === undefined ? undefined : customStyleNames(styleElementsOf(stylesXml));
   const options = {
     numberingDefs: numbering.defs,
     numberingStartOverrides: numbering.startOverrides,
@@ -19413,7 +19456,12 @@ async function documentContentInputs(zip: JSZip, format: CitationKeyFormat = 'au
     imageFiles,
     ...sections,
     customStyles: storedCustomStyles ?? undefined,
-    customStyleNames: stylesXml === undefined ? undefined : customStyleNames(styleElementsOf(stylesXml)),
+    customStyleNames: namesStyles ? names : undefined,
+    renamedCustomStyleNames: renamed && names
+      ? new Map([...names].filter(([id]) => renamed.has(id)).map(([id, name]) => [id.toLowerCase(), name] as const)) : undefined,
+    unwritableCustomStyles: stylesXml === undefined ? undefined
+      : new Map(customStyleEntries(styleElementsOf(stylesXml)).filter(([, name]) => name.includes('-->')).map(([id, name]) => [id.toLowerCase(), name] as const)),
+    lostCustomStyles: new Set<string>(),
     footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined,
     styleLayouts,
   };
@@ -19607,6 +19655,14 @@ function customStyleNames(styleElements: { tag: string; block: string }[]): Map<
     if (fence?.kind === 'open' && fence.style === name && read.length === 1 && read[0] === name) names.set(id, name);
   }
   return names;
+}
+
+/** A warning for each custom style whose paragraphs lost it, as its name
+ *  has a -->, which would end the HTML comment of its directive (see
+ *  lostCustomStyles) */
+function lostCustomStyleWarnings(lost: ReadonlySet<string>): string[] {
+  return [...lost].map(name => 'Custom style "' + name + '" has --> in its name, which would end a style directive\'s comment, '
+    + 'so import can\'t keep it on its paragraphs; rename the style to keep it.');
 }
 
 /**
@@ -21015,6 +21071,14 @@ export async function convertDocx(
       const shown = fontFields.styles?.[name]?.font;
       return [name, def.font === undefined && shown !== undefined && shown !== fontFields.font ? { ...def, font: shown } : def];
     }));
+    // A custom style Word gave an ID of its own, by a name the custom
+    // properties don't hold, as where its name was changed in Word, whose
+    // paragraphs' directives name it (see renamedCustomStyleNames), as the
+    // styles part defines it, so that export has it
+    for (const name of contentOptions.renamedCustomStyleNames?.values() ?? []) {
+      const defined = fontFields.styles?.[name];
+      if (defined !== undefined && !Object.hasOwn(fm.styles, name)) fm.styles[name] = defined;
+    }
   }
   if (codeBlockStyling) {
     const bg = codeBlockStyling.get('bg');
@@ -21185,5 +21249,5 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: formatChanges === undefined ? [] : [formatChanges] };
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles)] };
 }

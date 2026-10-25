@@ -660,6 +660,136 @@ describe('Custom Styles — Round-Trip', () => {
   });
 });
 
+describe('Custom Styles — IDs Word gives them', () => {
+  // Word builds a style's ID from its name when it saves, so export's
+  // MsCustomBox ("Custom: box") comes back as Custombox, and import, which
+  // knew a custom style's paragraphs only by export's IDs, wrote them without
+  // their directives
+  const md = '---\nstyles:\n  box:\n    font-style: italic\n  Pull Quote:\n    font-style: bold\n---\n\n'
+    + '<!-- style: box -->\n\nBoxed.\n\n<!-- /style -->\n\n<!-- style: Pull Quote -->\n\nQuoted.\n\n<!-- /style -->\n\nPlain.\n';
+  /** The document export writes of `md`, with each custom style's ID as Word
+   *  gives it where `renamed`, and with or without export's custom properties */
+  const savedByWord = async (properties: boolean, renamed = true) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    if (!properties) zip.remove('docProps/custom.xml');
+    for (const part of ['word/styles.xml', 'word/document.xml']) {
+      const xml = await zip.file(part)!.async('string');
+      expect(xml).toContain('MsCustomBox');
+      if (renamed) zip.file(part, xml.replace(/MsCustomBox/g, 'Custombox').replace(/MsCustomPullQuote/g, 'CustomPullQuote'));
+    }
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  it.each([['with', true], ['without', false]])('come back as under export\'s IDs %s custom properties, and export writes them as before', async (_name, properties) => {
+    const { markdown, warnings } = await convertDocx(await savedByWord(properties));
+    expect(warnings).toEqual([]);
+    expect(markdown).toBe((await convertDocx(await savedByWord(properties, false))).markdown);
+    expect(markdown).toMatch(/<!-- style: box -->\n+Boxed\./);
+    expect(markdown).toMatch(/<!-- style: Pull Quote -->\n+Quoted\./);
+    const xml = await (await (await import('jszip')).default.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:pStyle w:val="MsCustomBox"/>');
+    expect(xml).toContain('<w:pStyle w:val="MsCustomPullQuote"/>');
+  });
+
+  const ARROW_WARNING = (name: string) => 'Custom style "' + name + '" has --> in its name, which would end a style directive\'s comment, '
+    + 'so import can\'t keep it on its paragraphs; rename the style to keep it.';
+
+  // A name Word allows, which would end the HTML comment of a directive:
+  // import writes none of it, and says the paragraphs lost the style
+  it.each([
+    ['under export\'s ID, without custom properties', false, false],
+    ['under Word\'s ID, with custom properties', true, true],
+    ['under Word\'s ID, without custom properties', false, true],
+  ])('warns that a custom style named with --> comes back without its paragraphs, %s', async (_name, properties, renamed) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(properties, renamed));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: box', 'Custom: a--&gt;b'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(warnings).toEqual([ARROW_WARNING('a-->b')]);
+    expect(markdown).not.toMatch(/<!-- style: [^\n]*-->[^\n]*-->/);
+    // The other style keeps its directive
+    expect(markdown).toMatch(/<!-- style: Pull Quote -->\n+Quoted\./);
+    // What import wrote exports and comes back
+    expect((await convertMdToDocx(markdown)).docx.length).toBeGreaterThan(0);
+  });
+
+  it('writes no directive of a name with --> the custom properties give, and warns', async () => {
+    // a-->b and ab share export's ID, MsCustomAb, so the paragraph of ab
+    // read back by the properties' first name for it
+    const arrow = '---\nstyles:\n  a-->b:\n    font-style: italic\n  ab:\n    font-style: bold\n---\n\n<!-- style: ab -->\n\nStyled.\n\n<!-- /style -->\n';
+    const { markdown, warnings } = await convertDocx((await convertMdToDocx(arrow)).docx);
+    expect(markdown).not.toContain('<!-- style: a-->b');
+    expect(warnings).toEqual([ARROW_WARNING('a-->b')]);
+  });
+
+  it('warns of a style with --> in its name the custom properties don\'t name', async () => {
+    // The properties name box alone; the paragraph of Pull Quote, under
+    // export's ID, has a name in Word no directive can hold
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(true, false));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: Pull Quote', 'Custom: a--&gt;b'));
+    const props = await zip.file('docProps/custom.xml')!.async('string');
+    expect(props).toContain('Pull Quote');
+    zip.file('docProps/custom.xml', props.replace(/Pull Quote/g, 'Other'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).not.toContain('<!-- style: a-->b');
+    expect(warnings).toEqual([ARROW_WARNING('a-->b')]);
+  });
+
+  it('warns of no style with --> in its name whose paragraphs keep it, or that none has', async () => {
+    // Word's name changed, but the custom properties keep the paragraphs'
+    // style by its own, and the style with --> in its name styles nothing
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(true, false));
+    const styles = (await zip.file('word/styles.xml')!.async('string')).replace('Custom: box', 'Custom: a--&gt;b');
+    zip.file('word/styles.xml', styles.replace('MsCustomPullQuote', 'CustomPullQuote'));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/MsCustomPullQuote/g, 'CustomPullQuote'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(warnings).toEqual([]);
+    expect(markdown).toMatch(/<!-- style: box -->\n+Boxed\./);
+    const unused = await JSZip.loadAsync(await savedByWord(false, true));
+    unused.file('word/document.xml', (await unused.file('word/document.xml')!.async('string')).replace(/<w:pStyle w:val="Custombox"\/>/g, ''));
+    unused.file('word/styles.xml', (await unused.file('word/styles.xml')!.async('string')).replace('Custom: box', 'Custom: a--&gt;b'));
+    expect((await convertDocx(await unused.generateAsync({ type: 'uint8array' }))).warnings).toEqual([]);
+  });
+
+  it('reads a paragraph whose reference to a style Word renamed differs from its ID in case, as Word does', async () => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(false));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/w:val="Custombox"/g, 'w:val="CUSTOMBOX"'));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toBe((await convertDocx(await savedByWord(false, false))).markdown);
+  });
+
+  it('defines a style whose name was changed in Word, which the custom properties hold under its old name, as Word does', async () => {
+    // Word's Callout, once box, whose settings the custom properties keep
+    // under box: its paragraphs' directive names Callout, which the
+    // frontmatter defines as the styles part does, so export keeps it
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(true));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: box', 'Custom: Callout').replace(/Custombox/g, 'CustomCallout'));
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/Custombox/g, 'CustomCallout'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(warnings).toEqual([]);
+    expect(markdown).toMatch(/<!-- style: Callout -->\n+Boxed\./);
+    expect(parseFrontmatter(markdown).metadata.styles?.['Callout']).toEqual({ fontStyle: 'italic' });
+    const exported = await convertMdToDocx(markdown);
+    expect(exported.warnings.filter(warning => warning.includes('Callout'))).toEqual([]);
+    const xml = await (await JSZip.loadAsync(exported.docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:pStyle w:val="MsCustomCallout"/>');
+  });
+
+  it('leaves a style of the document\'s own whose name isn\'t a custom style\'s', async () => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(false));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: box', 'Boxed text'));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).not.toContain('<!-- style: box -->');
+    expect(markdown).toContain('<!-- style: Pull Quote -->');
+  });
+});
+
 describe('Custom Styles — List items', () => {
   const styled = '---\nstyles:\n  box:\n    font-style: italic\n---\n\n';
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
