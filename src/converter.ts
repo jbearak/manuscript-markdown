@@ -7704,6 +7704,15 @@ export async function extractDocumentContent(
      *  (see StyleLayouts.renamedCustomStyles), whether or not there are
      *  customStyles */
     renamedCustomStyleNames?: ReadonlyMap<string, string>;
+    /** The custom styles whose names in the styles part have a -->, by
+     *  their IDs, which no directive can hold (see lostCustomStyles) */
+    unwritableCustomStyles?: ReadonlyMap<string, string>;
+    /** The names of the custom styles whose paragraphs lost them, as no
+     *  directive could hold the name, which import warns of: one with a -->
+     *  in it, from the styles part or the custom properties. A paragraph
+     *  that keeps its style by the name the custom properties give it
+     *  counts for none. */
+    lostCustomStyles?: Set<string>;
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
     footnoteCrossRefMap?: Map<string, string>;
     styleLayouts?: StyleLayouts;
@@ -8295,6 +8304,16 @@ export async function extractDocumentContent(
               isCodeBlock = parseCodeBlockStyle(pPrChildren);
               generatedListContinuation = parseListContinuationStyle(pPrChildren);
               customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined, options?.customStyleNames, options?.renamedCustomStyleNames);
+              // No directive of a name with a -->, which would end its
+              // comment, whatever gives the name, and a warning where the
+              // paragraph loses its style (see lostCustomStyles)
+              const unwritable = options?.unwritableCustomStyles?.get(getAttr(pPrChildren.find(child => child['w:pStyle'] !== undefined), 'val'));
+              if (customStyle?.includes('-->')) {
+                options?.lostCustomStyles?.add(customStyle);
+                customStyle = undefined;
+              } else if (unwritable !== undefined && !(customStyle !== undefined && Object.hasOwn(options?.customStyles ?? {}, customStyle))) {
+                options?.lostCustomStyles?.add(unwritable);
+              }
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
               spacerShaped = pPrChildren.length === 1 && pPrChildren[0]['w:spacing'] !== undefined
                 && Object.keys(pPrChildren[0][':@'] ?? {}).join() === '@_w:after' && xmlTwips(getAttr(pPrChildren[0], 'after')) === 0;
@@ -19435,11 +19454,13 @@ async function documentContentInputs(zip: JSZip, format: CitationKeyFormat = 'au
     customStyles: storedCustomStyles ?? undefined,
     customStyleNames: namesStyles ? names : undefined,
     renamedCustomStyleNames: renamed && names ? new Map([...names].filter(([id]) => renamed.has(id))) : undefined,
+    unwritableCustomStyles: stylesXml === undefined ? undefined
+      : new Map(customStyleEntries(styleElementsOf(stylesXml)).filter(([, name]) => name.includes('-->'))),
+    lostCustomStyles: new Set<string>(),
     footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined,
     styleLayouts,
   };
-  const styleWarnings = stylesXml === undefined ? [] : unwritableCustomStyleWarnings(styleElementsOf(stylesXml));
-  return { zoteroCitations, keyMap, options, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles, styleWarnings };
+  return { zoteroCitations, keyMap, options, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles };
 }
 
 /** The records of the document's sections that export writes in custom
@@ -19631,16 +19652,12 @@ function customStyleNames(styleElements: { tag: string; block: string }[]): Map<
   return names;
 }
 
-/** A warning for each custom style in the styles part whose name has a
- *  -->, which would end the HTML comment of its directive. customStyleNames
- *  leaves such a name out, so import writes no directive that would take
- *  in the text after it, and the style's paragraphs lose it. A name it
- *  leaves out for another reason, as caption: revised, comes back under a
- *  name from the style's ID, which keeps the style. */
-function unwritableCustomStyleWarnings(styleElements: { tag: string; block: string }[]): string[] {
-  const names = new Set(customStyleEntries(styleElements).map(([, name]) => name).filter(name => name.includes('-->')));
-  return [...names].map(name => 'Custom style "' + name + '" in Word has --> in its name, which would end a style directive\'s comment, '
-    + 'so its paragraphs come back without it; rename the style in Word to keep it.');
+/** A warning for each custom style whose paragraphs lost it, as its name
+ *  has a -->, which would end the HTML comment of its directive (see
+ *  lostCustomStyles) */
+function lostCustomStyleWarnings(lost: ReadonlySet<string>): string[] {
+  return [...lost].map(name => 'Custom style "' + name + '" has --> in its name, which would end a style directive\'s comment, '
+    + 'so import can\'t keep it on its paragraphs; rename the style to keep it.');
 }
 
 /**
@@ -20671,7 +20688,7 @@ export async function convertDocx(
 
   // The inputs extractDocumentContent reads the body with, which export's
   // read-back of its own document reads with too
-  const { zoteroCitations, keyMap, options: contentOptions, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles, styleWarnings } = inputs;
+  const { zoteroCitations, keyMap, options: contentOptions, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles } = inputs;
   const { numberingDefs, numberingStartOverrides, relationshipMap: docRels, replyIds, commentBodies, imageFiles, styleLayouts, footnoteCrossRefMap } = contentOptions;
 
   // Mark parent comments whose replies were originally in consecutive format
@@ -21219,5 +21236,5 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...styleWarnings] };
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles)] };
 }
