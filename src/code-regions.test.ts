@@ -10,6 +10,7 @@ import {
 } from './code-regions';
 import { extractAllDecorationRanges } from './highlight-colors';
 import { navigationMatches } from './navigation-matches';
+import { fastestRun } from './test-timing';
 
 // ---------------------------------------------------------------------------
 // Task 3.2: Unit tests for computeCodeRegions() and isInsideCodeRegion()
@@ -458,4 +459,20 @@ describe('navigation scanner skips code regions', () => {
 		expect(matchTexts).not.toContain('{==inside highlight==}');
 		expect(matchTexts).not.toContain('{++inside add++}');
 	});
+});
+
+describe('inline code spans of unclosed backtick runs', () => {
+	test('a run with no run of its length after it is text', () => {
+		expect(computeCodeRegions('a `` b ` c `` d ``` e')).toEqual([{ start: 2, end: 13 }]);
+		expect(computeCodeRegions('``` a ` b `` c ` d')).toEqual([{ start: 6, end: 16 }]);
+	});
+
+	// Runs of 1 to n backticks, each unclosed: the search for each one's
+	// closer read the rest of the text again, so n of them took seconds at
+	// 1,600, as many lengths as a text of 1.3 MB holds
+	test('reads runs of many lengths, none closed, in linear time', () => {
+		const text = (n: number) => Array.from({ length: n }, (_, i) => 'x' + '`'.repeat(i + 1) + ' ').join('');
+		expect(computeCodeRegions(text(50))).toEqual([]);
+		expect(fastestRun(() => computeCodeRegions(text(1600)))).toBeLessThan(200);
+	}, 60000);
 });

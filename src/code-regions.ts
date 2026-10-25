@@ -311,6 +311,15 @@ function computeInlineCodeRegions(text: string, blockRegions: CodeRegion[], wall
 	const regions: CodeRegion[] = [];
 	let blockIndex = 0;
 	let wallIndex = 0;
+	// The start of the last run of backticks of each length that the search
+	// for an opener's closer read, and of the last search that found none,
+	// to its limit, from before the openers after it: an opener of a length
+	// with no run of it after the opener has no closer, so it's text at once,
+	// as markdown-it's backtick rule reads it. Each such opener's search read
+	// the rest of the text again, as runs of 1, 2, 3 and more backticks, each
+	// once, did in a time in their number times the text's length.
+	let runs = new Map<number, number>();
+	let unclosed: { limit: number; runs: Map<number, number> } | undefined;
 	let i = 0;
 	while (i < text.length) {
 		while (blockIndex < blockRegions.length && blockRegions[blockIndex].end <= i) blockIndex++;
@@ -343,8 +352,11 @@ function computeInlineCodeRegions(text: string, blockRegions: CodeRegion[], wall
 		while (wallIndex < walls.length && walls[wallIndex].end <= start) wallIndex++;
 		const wall = walls[wallIndex];
 		const limit = !wall ? text.length : wall.start <= start ? wall.end : wall.start;
+		if (unclosed && unclosed.limit === limit && (unclosed.runs.get(backtickCount) ?? -1) < i) continue;
+		if (runs.size > 0) runs.clear();
 		let innerBlockIndex = blockIndex;
 		let j = i;
+		let closed = false;
 		while (j < limit) {
 			while (innerBlockIndex < blockRegions.length && blockRegions[innerBlockIndex].end <= j) {
 				innerBlockIndex++;
@@ -360,17 +372,20 @@ function computeInlineCodeRegions(text: string, blockRegions: CodeRegion[], wall
 				continue;
 			}
 
-			let closeCount = 0;
-			while (j < limit && text[j] === '`') {
-				closeCount++;
-				j++;
-			}
-			if (closeCount === backtickCount) {
+			const runStart = j;
+			while (j < limit && text[j] === '`') j++;
+			if (j - runStart === backtickCount) {
 				regions.push({ start, end: j });
 				i = j;
 				blockIndex = innerBlockIndex;
+				closed = true;
 				break;
 			}
+			runs.set(j - runStart, runStart);
+		}
+		if (!closed) {
+			unclosed = { limit, runs };
+			runs = new Map();
 		}
 	}
 	return regions;

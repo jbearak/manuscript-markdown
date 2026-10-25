@@ -45,6 +45,10 @@
         "icon": "$(diff)"
       },
       {
+        "command": "manuscript-markdown.toggleWordCountAcceptChanges",
+        "title": "Toggle Word Count With Changes Accepted"
+      },
+      {
         "command": "manuscript-markdown.prevChange",
         "title": "Previous Change"
       },
@@ -1327,6 +1331,11 @@
           ],
           "default": "guttmacher",
           "description": "Color scheme for alert callouts in preview and DOCX export"
+        },
+        "manuscriptMarkdown.wordCount.acceptChanges": {
+          "type": "boolean",
+          "default": false,
+          "description": "Count words in the status bar as though every change were accepted, leaving out comments. Click the word count to turn this on or off."
         },
         "manuscriptMarkdown.previewMarkup": {
           "type": "string",

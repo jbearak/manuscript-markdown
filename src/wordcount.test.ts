@@ -16,14 +16,20 @@ mock.module('vscode', () => ({
   },
   workspace: {
     onDidChangeTextDocument: () => ({ dispose: () => {} }),
+    onDidChangeConfiguration: () => ({ dispose: () => {} }),
+    getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }),
   },
+  commands: {
+    registerCommand: () => ({ dispose: () => {} }),
+  },
+  ConfigurationTarget: { Global: 1, Workspace: 2 },
   StatusBarAlignment: {
     Left: 1,
     Right: 2,
   },
 }));
 
-const { countWords, isTextDocument } = await import('./wordcount');
+const { countWords, countAcceptedWords, isTextDocument, wordCountText } = await import('./wordcount');
 
 describe('Word Count Property Tests', () => {
   // Feature: word-count-status-bar, Property 1: Status bar text format
@@ -632,6 +638,10 @@ describe('WordCountController Resource Cleanup Tests', () => {
       vscode.window.onDidChangeActiveTextEditor = () => ({ dispose: editorListenerDispose });
       vscode.window.onDidChangeTextEditorSelection = () => ({ dispose: selectionListenerDispose });
       vscode.workspace.onDidChangeTextDocument = () => ({ dispose: documentListenerDispose });
+      const configListenerDispose = mock(() => {});
+      const commandDispose = mock(() => {});
+      vscode.workspace.onDidChangeConfiguration = () => ({ dispose: configListenerDispose });
+      vscode.commands.registerCommand = () => ({ dispose: commandDispose });
 
       const { WordCountController } = require('./wordcount');
       const controller = new WordCountController();
@@ -641,6 +651,186 @@ describe('WordCountController Resource Cleanup Tests', () => {
       expect(editorListenerDispose).toHaveBeenCalledTimes(1);
       expect(selectionListenerDispose).toHaveBeenCalledTimes(1);
       expect(documentListenerDispose).toHaveBeenCalledTimes(1);
+      expect(configListenerDispose).toHaveBeenCalledTimes(1);
+      expect(commandDispose).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('countWords matches splitting on whitespace', () => {
+  it('counts as trim().split(/\\s+/) does, for any text', () => {
+    const chars = fc.constantFrom('a', 'b', '-', ' ', '\t', '\n', '\r', '\u00a0', '\u2003', '\u3000', '\ufeff', '\u200b', '\u0085', '\v');
+    fc.assert(
+      fc.property(fc.array(chars, { maxLength: 40 }).map(a => a.join('')), (text) => {
+        const trimmed = text.trim();
+        const expected = trimmed === '' ? 0 : trimmed.split(/\s+/).length;
+        return countWords(text) === expected;
+      }),
+      { numRuns: 500 }
+    );
+  });
+});
+
+describe('countAcceptedWords', () => {
+  it('counts plain text as countWords does', () => {
+    fc.assert(
+      fc.property(fc.string(), (text) => {
+        const plain = text.replace(/\{/g, '(');
+        return countAcceptedWords(plain) === countWords(plain);
+      }),
+      { numRuns: 300 }
+    );
+    expect(countAcceptedWords('one two {three} \\frac{a}{b}')).toBe(4);
+  });
+
+  it('keeps additions and drops deletions', () => {
+    expect(countAcceptedWords('a {++b c++} d')).toBe(4);
+    expect(countAcceptedWords('a {--b c--} d')).toBe(2);
+  });
+
+  it('keeps a substitution\'s new text', () => {
+    expect(countAcceptedWords('a {~~old words here~>new~~} d')).toBe(3);
+  });
+
+  it('keeps highlighted text, drops comments and counts range markers as written', () => {
+    expect(countAcceptedWords('a {==b c==}{>>a long comment<<} d')).toBe(4);
+    expect(countAcceptedWords('{#c1}a b{/c1}{#c1>>note here<<} c')).toBe(3);
+    expect(countAcceptedWords('a {#c1} b {/c1} c')).toBe(5);
+  });
+
+  it('drops a comment with replies to its matching closer', () => {
+    expect(countAcceptedWords('a {>>x {>>y<<} z<<} b')).toBe(2);
+  });
+
+  it('joins the words around an accepted deletion', () => {
+    expect(countAcceptedWords('foo{--x--}bar')).toBe(1);
+    expect(countAcceptedWords('foo{++ ++}bar')).toBe(2);
+  });
+
+  it('reads markup nested in an addition', () => {
+    expect(countAcceptedWords('{++a {--b--} c {>>n<<}++}')).toBe(2);
+  });
+
+  it('reads spans across paragraphs', () => {
+    expect(countAcceptedWords('a {--b\n\nc--} d {++e\n\nf++}')).toBe(4);
+  });
+
+  it('counts CriticMarkup in code or after a backslash as text', () => {
+    expect(countAcceptedWords('a `{--b--}` c')).toBe(3);
+    expect(countAcceptedWords('```\n{--b c--}\n```\nd')).toBe(5);
+    expect(countAcceptedWords('a \\{--b--} c')).toBe(3);
+  });
+
+  // Each as the preview and Word export read the markup (see criticSpans in critic-markup.ts)
+  it('reads a code span inside an addition on its own', () => {
+    expect(countAcceptedWords('{++a `{--b--}` c++}')).toBe(3);
+  });
+
+  it('pairs no backtick in frontmatter with one after it', () => {
+    expect(countAcceptedWords('---\ntitle: `\n---\na {--b c--} ` d')).toBe(3);
+  });
+
+  it('counts CriticMarkup in an HTML block as text', () => {
+    expect(countAcceptedWords('<div>\n{--b c--}\n</div>\n\nd')).toBe(5);
+  });
+
+  it('counts an opener in an equation as text', () => {
+    expect(countAcceptedWords('Ions $x^{--}$ one two three {--del--} four')).toBe(6);
+    expect(countAcceptedWords('$$\nx_{--}\n$$\n\none two three {--del--} four')).toBe(7);
+  });
+
+  it('breaks the words around an opener at a line end, as a new paragraph starts there', () => {
+    expect(countAcceptedWords('x a{--\nb--}c y')).toBe(4);
+    expect(countAcceptedWords('a{--\n\n--}b')).toBe(1);
+  });
+
+  it('reads CRLF line ends as LF', () => {
+    expect(countAcceptedWords('x a{--\r\nb--}c y\r\n{++z++}')).toBe(5);
+  });
+
+  it('counts an unclosed opener as text', () => {
+    expect(countAcceptedWords('a {--b c')).toBe(3);
+  });
+
+  it('leaves out frontmatter', () => {
+    expect(countAcceptedWords('---\ntitle: x y\n---\na {--b--} c')).toBe(2);
+  });
+
+  it('counts a document as written where it has no changes', () => {
+    const text = 'word '.repeat(1000) + '{x}';
+    expect(countAcceptedWords(text)).toBe(countWords(text));
+  });
+});
+
+describe('wordCountText', () => {
+  it('marks the count with changes accepted', () => {
+    expect(wordCountText(3, false)).toBe('$(book) 3 words');
+    expect(wordCountText(3, true)).toBe('$(book) 3 words (accepted)');
+  });
+});
+
+describe('WordCountController', () => {
+  function setup(options: { acceptChanges?: boolean; workspaceValue?: boolean } = {}) {
+    const vscode = require('vscode');
+    let setting = options.acceptChanges ?? false;
+    let configListener: ((e: { affectsConfiguration(key: string): boolean }) => void) | undefined;
+    let editorListener: (() => void) | undefined;
+    let toggle: (() => Promise<void>) | undefined;
+    const updates: unknown[][] = [];
+    const item = { text: '', tooltip: '', command: undefined as string | undefined, visible: false, show() { this.visible = true; }, hide() { this.visible = false; }, dispose() {} };
+    vscode.window.createStatusBarItem = () => item;
+    vscode.window.onDidChangeActiveTextEditor = (f: () => void) => { editorListener = f; return { dispose() {} }; };
+    vscode.window.onDidChangeTextEditorSelection = () => ({ dispose() {} });
+    vscode.workspace.onDidChangeTextDocument = () => ({ dispose() {} });
+    vscode.workspace.onDidChangeConfiguration = (f: typeof configListener) => { configListener = f; return { dispose() {} }; };
+    vscode.workspace.getConfiguration = () => ({
+      get: () => setting,
+      inspect: () => ({ workspaceValue: options.workspaceValue }),
+      update: async (key: string, value: boolean, target: number) => {
+        updates.push([key, value, target]);
+        setting = value;
+        configListener!({ affectsConfiguration: k => k === 'manuscriptMarkdown.' + key });
+      },
+    });
+    vscode.commands.registerCommand = (_id: string, f: () => Promise<void>) => { toggle = f; return { dispose() {} }; };
+    const document = { languageId: 'markdown', version: 1, text: 'a {--b--} c', reads: 0, getText() { this.reads++; return this.text; } };
+    vscode.window.activeTextEditor = { document, selections: [{ isEmpty: true }] };
+    const { WordCountController } = require('./wordcount');
+    const controller = new WordCountController();
+    return { controller, item, document, updates, toggle: () => toggle!(), refresh: () => editorListener!() };
+  }
+
+  it('counts as written, and with changes accepted once toggled, in the user\'s settings', async () => {
+    const { controller, item, updates, toggle } = setup();
+    expect(item.text).toBe('$(book) 3 words');
+    expect(item.command).toBe('manuscript-markdown.toggleWordCountAcceptChanges');
+    await toggle();
+    expect(updates).toEqual([['wordCount.acceptChanges', true, 1]]);
+    expect(item.text).toBe('$(book) 2 words (accepted)');
+    await toggle();
+    expect(item.text).toBe('$(book) 3 words');
+    controller.dispose();
+  });
+
+  it('toggles in the workspace\'s settings where they set it', async () => {
+    const { controller, updates, toggle } = setup({ acceptChanges: true, workspaceValue: true });
+    await toggle();
+    expect(updates).toEqual([['wordCount.acceptChanges', false, 2]]);
+    controller.dispose();
+  });
+
+  it('reads the document again only for a new version or mode', async () => {
+    const { controller, item, document, refresh, toggle } = setup();
+    expect(document.reads).toBe(1);
+    refresh();
+    expect(document.reads).toBe(1);
+    document.text = 'a b c d';
+    document.version = 2;
+    refresh();
+    expect(document.reads).toBe(2);
+    expect(item.text).toBe('$(book) 4 words');
+    await toggle();
+    expect(document.reads).toBe(3);
+    controller.dispose();
   });
 });
