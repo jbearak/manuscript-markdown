@@ -5612,17 +5612,19 @@ export async function convertMdToDocx(
   }
 
   // References to the styles of a template's that went, or took export's
-  // ID, as copies of its own (see withStylesOnce), in the parts that refer
-  // to styles, the document, notes and comments export writes and the
-  // headers, footers and numbering the template gives, wherever under word/
-  // their relationships put them, as word/headers/header1.xml, to the one
-  // that stayed, by the type of style each refers to. A part is read in the
+  // ID, as copies of its own (see withStylesOnce), in every XML part the
+  // package holds but the styles, to the one that stayed, by the type of
+  // style each refers to: the document, notes and comments export writes,
+  // and the headers, footers and numbering the template gives, wherever
+  // their relationships put them, as /headers/header1.xml. Only elements of
+  // WordprocessingML's namespace refer to a style (see withStyleReferences),
+  // so a part of another vocabulary goes as it came. A part is read in the
   // encoding its BOM or declaration names, as a template's in UTF-16, and
   // one that changes goes in UTF-8, as template-sections writes one it
   // changes (see decodeXml and asUtf8).
   if (styleIdsOnce.size > 0) {
     for (const path of Object.keys(zip.files)) {
-      if (zip.files[path].dir || !/^word\/.+\.xml$/.test(path) || path === 'word/styles.xml') continue;
+      if (zip.files[path].dir || !/\.xml$/i.test(path) || path === 'word/styles.xml') continue;
       const xml = decodeXml(await zip.file(path)!.async('uint8array'));
       const referring = withStyleReferences(xml, (id, type) => styleIdsOnce.get(type + ' ' + id));
       if (referring !== xml) zip.file(path, asUtf8(referring));
