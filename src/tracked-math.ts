@@ -101,7 +101,7 @@ function walk(pieces: Piece[], id: () => number): Piece[] {
 
 /** `pieces`, which `change` held, with it on each of their runs and
  *  structures in turn (see pushedMathChanges) */
-function pushed(pieces: Piece[], change: Element, state: { first: boolean }, id: () => number): Piece[] {
+function pushed(pieces: Piece[], change: Element, state: { first: boolean; inParagraph?: boolean }, id: () => number): Piece[] {
   const out: Piece[] = [];
   let group: Piece[] = [];
   const flush = () => {
@@ -117,8 +117,10 @@ function pushed(pieces: Piece[], change: Element, state: { first: boolean }, id:
   for (const piece of pieces) {
     const name = typeof piece === 'string' || !piece.children ? '' : piece.name;
     const inner = name === 'w:ins' || name === 'w:del';
-    // An equation of runs alone stays whole in the change, as it would alone
-    const whole = (name === 'm:oMath' || name === 'm:oMathPara') && !holdsStructure((piece as Element).children!);
+    // An equation of runs alone stays whole in the change, as it would alone,
+    // but not one of a display paragraph's, which import reads only where
+    // it's the paragraph's own (see normalizeTrackedMath)
+    const whole = (name === 'm:oMathPara' || (name === 'm:oMath' && !state.inParagraph)) && !holdsStructure((piece as Element).children!);
     if (whole || (!inner && !MATH_CONTAINERS.has(name) && !STRUCTURES.has(name))) {
       group.push(piece);
       continue;
@@ -128,7 +130,11 @@ function pushed(pieces: Piece[], change: Element, state: { first: boolean }, id:
     // A change in the change, as an equation's in a deletion of it, holds
     // its own runs
     if (inner) pushAll(out, walk([element], id));
-    else if (MATH_CONTAINERS.has(name)) out.push({ ...element, children: pushed(element.children!, change, state, id) });
+    else if (name === 'm:oMathPara') {
+      state.inParagraph = true;
+      out.push({ ...element, children: pushed(element.children!, change, state, id) });
+      state.inParagraph = false;
+    } else if (MATH_CONTAINERS.has(name)) out.push({ ...element, children: pushed(element.children!, change, state, id) });
     else out.push(markedStructure(element, change, state, id));
   }
   flush();
@@ -137,7 +143,7 @@ function pushed(pieces: Piece[], change: Element, state: { first: boolean }, id:
 
 /** `structure` with `change` as its mark, unless it has one, and on the
  *  runs and structures of its parts */
-function markedStructure(structure: Element, change: Element, state: { first: boolean }, id: () => number): Element {
+function markedStructure(structure: Element, change: Element, state: { first: boolean; inParagraph?: boolean }, id: () => number): Element {
   const propsName = structure.name + 'Pr';
   const children = structure.children!;
   const props = children.find((piece): piece is Element => typeof piece !== 'string' && piece.name === propsName);
@@ -212,7 +218,15 @@ export function normalizeTrackedMath(nodes: XmlNode[]): XmlNode[] {
       // Its equations in one change only where all of them are, each whole,
       // as import reads only the paragraph's own m:oMath: one in a change of
       // its own, beside another, would go unread
-      const inner = children.map(child => tagOf(child) === 'm:oMath' ? { ...child, 'm:oMath': mathChildren(asXmlNodes(child['m:oMath'])) } : child);
+      // An equation in a change, as the schema allows there, as one whose
+      // content is in it
+      const unwrapped = children.flatMap((child): XmlNode[] => {
+        const change = changeOf(child);
+        const held = change ? asXmlNodes(child[change.tag]) : [];
+        if (!change || !held.some(n => tagOf(n) === 'm:oMath') || !held.every(n => isBlank(n) || tagOf(n) === 'm:oMath')) return [child];
+        return held.map(n => isBlank(n) ? n : { ...n, 'm:oMath': [changeNode(change, asXmlNodes(n['m:oMath']))] });
+      });
+      const inner = unwrapped.map(child => tagOf(child) === 'm:oMath' ? { ...child, 'm:oMath': mathChildren(asXmlNodes(child['m:oMath'])) } : child);
       const equations = inner.filter(child => tagOf(child) === 'm:oMath');
       const wholes = equations.map(math => wholeChange(math, false));
       const change = wholes[0]?.change;

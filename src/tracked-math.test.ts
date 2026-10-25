@@ -45,6 +45,15 @@ describe('pushedMathChanges', () => {
       + '<m:num/><m:den/></m:f></m:e></m:d>');
   });
 
+  it('puts a change around a display paragraph on each of its equations, of runs alone too', () => {
+    const xml = '<w:del w:id="5" w:author="A"><m:oMathPara><m:oMath><m:acc><m:accPr/><m:e><m:r><m:t>x</m:t></m:r></m:e></m:acc></m:oMath>'
+      + '<m:oMath><m:r><m:t>y</m:t></m:r></m:oMath></m:oMathPara></w:del>';
+    let id = 10;
+    expect(pushedMathChanges(xml, () => id++)).toBe('<m:oMathPara><m:oMath><m:acc><m:accPr><m:ctrlPr><w:del w:id="10" w:author="A">' + RPR
+      + '</w:del></m:ctrlPr></m:accPr><m:e><w:del w:id="5" w:author="A"><m:r><m:t>x</m:t></m:r></w:del></m:e></m:acc></m:oMath>'
+      + '<m:oMath><w:del w:id="11" w:author="A"><m:r><m:t>y</m:t></m:r></w:del></m:oMath></m:oMathPara>');
+  });
+
   it('leaves a change of runs alone as it is, in an equation or around one, and text\'s', () => {
     for (const xml of ['<w:del w:id="1"><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:del>',
       '<m:oMath><w:ins w:id="1"><m:r><m:t>x</m:t></m:r></w:ins></m:oMath>', '<w:del w:id="1"><w:r><w:delText>x</w:delText></w:r></w:del>']) {
@@ -86,6 +95,17 @@ describe('a tracked change to an equation, as Word saves it', () => {
       + wordAccent(wordRun('del', 2, 'x'), 'del') + '</m:oMath><m:oMath><m:r><m:t>y</m:t></m:r></m:oMath></m:oMathPara>'));
     const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
     expect(markdown).toBe('$$\n{--\\hat{x}--}\n$$\n$$\ny\n$$\n');
+  });
+
+  it('reads a display paragraph whose equations are each in its change, one around the equation, as in the change', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('$$\nq\n$$\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<m:oMathPara>[\s\S]*?<\/m:oMathPara>/, () => '<m:oMathPara><m:oMath>'
+      + wordAccent(wordRun('del', 2, 'x'), 'del') + '</m:oMath><w:del w:id="3" w:author="Lab"><m:oMath><m:r><m:t>y</m:t></m:r></m:oMath></w:del></m:oMathPara>'));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toContain('\\hat{x}');
+    expect(markdown).toContain('y');
+    expect(markdown.startsWith('{--')).toBe(true);
   });
 
   it('reads a structure marked deleted, with a run inserted in it, as its parts\' changes', async () => {
