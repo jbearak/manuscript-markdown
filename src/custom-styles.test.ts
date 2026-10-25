@@ -910,6 +910,48 @@ describe('Custom Styles — Notes and comments', () => {
     expect(markdown).toBe(md);
     expect(warnings).toEqual(['Custom style "Pull Quote" is on a comment\'s paragraph, which a comment can\'t keep, as it holds no style directive; import drops it there.']);
   });
+
+  // One no directive could hold, which read as no style under Word's ID,
+  // and so went with no warning: the comment's warning names it as Word
+  // does, and there's no advice to rename it, which wouldn't keep it there
+  it.each([
+    ['Word\'s ID, with custom properties', true, true],
+    ['export\'s ID, without custom properties', false, false],
+  ])('warn of a custom style named with --> a Word user gave a comment\'s paragraph, under %s', async (_name, properties, renamed) => {
+    const md = head + 'Text {>>Note.<<} more.\n';
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    if (!properties) zip.remove('docProps/custom.xml');
+    const id = renamed ? 'CustomPullQuote' : 'MsCustomPullQuote';
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace(/MsCustomPullQuote/g, id).replace('Custom: Pull Quote', 'Custom: a--&gt;b'));
+    const comments = await zip.file('word/comments.xml')!.async('string');
+    zip.file('word/comments.xml', comments.replace(/(<w:comment\b[^>]*>\s*<w:p\b[^>]*>)/, '$1<w:pPr><w:pStyle w:val="' + id + '"/></w:pPr>'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toEndWith('Text {>>Note.<<} more.\n');
+    expect(warnings).toEqual(['Custom style "a-->b" is on a comment\'s paragraph, which a comment can\'t keep, as it holds no style directive; import drops it there.']);
+  });
+
+  // A tracked break after the first paragraph, whose style the note kept
+  // apart from the break's para items, joined the paragraph after it, of
+  // none, to it, in its style block, so the next export gave that one the
+  // style
+  it.each(['ins', 'del'])('keep a note\'s first paragraph\'s style off the paragraph after its tracked mark (w:%s)', async kind => {
+    const md = head + 'Text.[^1]\n\n[^1]: <!-- style: box -->A<!-- /style -->\n\n    B\n';
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    zip.file('word/footnotes.xml', xml.replace('<w:pStyle w:val="MsCustomBox"/>',
+      '<w:pStyle w:val="MsCustomBox"/><w:rPr><w:' + kind + ' w:id="99" w:author="x" w:date="2026-01-01T00:00:00Z"/></w:rPr>'));
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    expect(await partParagraphs(docx)).toEqual(['MsCustomBox: A', 'FootnoteText:B']);
+    // As the body's: the break ends the paragraph's text, in its block
+    const mark = kind === 'ins' ? '{++\n    \n    ++}' : '{--\n    \n    --}';
+    const { markdown } = await convertDocx(docx);
+    expect(markdown).toBe(head + 'Text.[^1]\n\n[^1]: <!-- style: box -->\n\n    A' + mark + '\n\n    <!-- /style -->\n\n    B\n');
+    const again = await convertMdToDocx(markdown);
+    expect(await partParagraphs(again.docx)).toEqual(['MsCustomBox: A', 'FootnoteText:B']);
+    expect((await convertDocx(again.docx)).markdown).toBe(markdown);
+  });
 });
 
 describe('Custom Styles — List items', () => {

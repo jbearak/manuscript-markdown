@@ -15908,8 +15908,14 @@ function withoutSpaceInTexts(texts: string[]): string[] {
  *  paragraph. A heading's mark is a break after its text, # a{--\n\n--}b,
  *  but for a heading all in the mark's revision, {--# a--}. The break is plain text,
  *  so formatting, code and links close before it, and
- *  joinSpansAtTrackedBreaks then joins its span to the spans around it. */
-function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => ''): ContentItem[] {
+ *  joinSpansAtTrackedBreaks then joins its span to the spans around it.
+ *  `first` stands for the paragraph whose text starts `content`, which has
+ *  no para item of its own, as a note's first, whose custom style
+ *  FootnoteBody keeps apart: a break after it joins no paragraph of another
+ *  style, as in the body, where a styled paragraph has a para item, and
+ *  ends its text instead, in its style block. */
+function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => '',
+  first?: ParaItem): ContentItem[] {
   // The content up to `copied`, and the breaks' in place of their
   // paragraphs: inserting each into a copy of all of it moved what came
   // after, in time in the square of the breaks' number
@@ -15961,7 +15967,7 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     if (!inlinePrev && !afterEmpty) continue;
     let openingIndex = k - 1;
     while (openingIndex >= 0 && content[openingIndex].type !== 'para') openingIndex--;
-    const opening = content[openingIndex] as ParaItem | undefined;
+    const opening = openingIndex < 0 ? first : content[openingIndex] as ParaItem | undefined;
     // A heading all in its mark's revision holds the mark, as {++# a++}
     if (opening?.headingLevel && headingInMarkRevision(content, openingIndex)) continue;
     sides ??= contentAroundTrackedBreaks(content);
@@ -16581,7 +16587,8 @@ function buildMarkdownOnce(
   // Whether each of a note's code blocks goes as its paragraphs, before
   // what reads code paragraphs apart from text
   const noteCodeDemoted = new Map(noteEntries.map(entry => [entry, demoteNoteCodeBlocks(entry.body)]));
-  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(withoutHiddenCommentSpace(joinTrackedParagraphBreaks(entry.body, marks)))]));
+  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(withoutHiddenCommentSpace(joinTrackedParagraphBreaks(entry.body, marks, undefined,
+    entry.customStyleName === undefined ? undefined : { type: 'para', customStyleName: entry.customStyleName })))]));
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
   // The comments export named take their names first, and then the others
@@ -19748,8 +19755,12 @@ function lostCustomStyleWarnings(lost: ReadonlySet<string>): string[] {
 /** The names of the custom styles on comments' paragraphs, read as the
  *  body's are (see parseCustomStyleName), which a Word user gave them, as
  *  export gives a comment's paragraph none: a comment holds no directive,
- *  whose fences in one are its text, so import warns that they go. Read
- *  only where the document has a custom style */
+ *  whose fences in one are its text, so import warns that they go. One
+ *  whose name no directive could hold, with a --> in it, which reads as no
+ *  style, or as one by its ID, goes by its name in Word (see
+ *  unwritableCustomStyles), but for one the custom properties name, as a
+ *  paragraph of the body keeps. Read only where the document has a custom
+ *  style */
 async function commentCustomStyles(zip: JSZip, styleLayouts: StyleLayouts, reading: CustomStyleReading): Promise<Set<string>> {
   const names = new Set<string>();
   if (!styleLayouts.renamedCustomStyles && ![...styleLayouts.paragraph.byId.keys()].some(id => id.startsWith('MsCustom'))) return names;
@@ -19758,8 +19769,12 @@ async function commentCustomStyles(zip: JSZip, styleLayouts: StyleLayouts, readi
   for (const comment of findAllDeep(parsed, 'w:comment')) {
     for (const paragraph of findAllDeep(asXmlNodes(comment['w:comment']), 'w:p')) {
       const pPr = asXmlNodes(paragraph['w:p']).find(child => child['w:pPr'] !== undefined);
-      const name = pPr && parseCustomStyleName(asXmlNodes(pPr['w:pPr']), reading.customStyles, reading.customStyleNames, reading.renamedCustomStyleNames);
-      if (name !== undefined) names.add(name);
+      if (!pPr) continue;
+      const pPrChildren = asXmlNodes(pPr['w:pPr']);
+      const name = parseCustomStyleName(pPrChildren, reading.customStyles, reading.customStyleNames, reading.renamedCustomStyleNames);
+      const unwritable = reading.unwritableCustomStyles?.get(getAttr(pPrChildren.find(child => child['w:pStyle'] !== undefined), 'val').toLowerCase());
+      const named = name !== undefined && Object.hasOwn(reading.customStyles ?? {}, name) ? name : unwritable ?? name;
+      if (named !== undefined) names.add(named);
     }
   }
   return names;
