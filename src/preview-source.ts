@@ -35,6 +35,28 @@ export function labelNamesStaticPreviewFile(label: string): boolean {
 	return STATIC_PREVIEW_FILE.test(label);
 }
 
+// What may stand beside the file name in a preview's title in any locale:
+// white space, the [ ] of a locked preview's, or brackets of other scripts.
+const TITLE_SEPARATOR = /[\s[\]()（）「」『』【】]/;
+
+/**
+ * Whether a dynamic preview's tab label names a file, as its title, a
+ * localized 'Preview {0}' or '[Preview] {0}', always does. It names only the
+ * basename, so this can confirm showSource's answer but not stand in for it.
+ */
+export function previewLabelNamesFile(label: string, uriPath: string): boolean {
+	const name = uriPath.slice(uriPath.lastIndexOf('/') + 1);
+	if (!name) return false;
+	for (let i = label.indexOf(name); i !== -1; i = label.indexOf(name, i + 1)) {
+		const end = i + name.length;
+		if ((i === 0 || TITLE_SEPARATOR.test(label[i - 1]))
+			&& (end === label.length || TITLE_SEPARATOR.test(label[end]))) {
+			return true;
+		}
+	}
+	return false;
+}
+
 const FOCUS_GROUP_COMMANDS = ['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Eighth']
 	.map(n => 'workbench.action.focus' + n + 'EditorGroup');
 

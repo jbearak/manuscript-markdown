@@ -10,7 +10,7 @@ import * as formatting from './formatting';
 import * as author from './author';
 import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt, type PreviewMarkup } from './preview/manuscript-markdown-plugin';
 import { WordCountController } from './wordcount';
-import { focusGroupCommand, isMarkdownPreviewViewType, isStaticPreviewViewType, labelNamesStaticPreviewFile, pollFor } from './preview-source';
+import { focusGroupCommand, isMarkdownPreviewViewType, isStaticPreviewViewType, labelNamesStaticPreviewFile, pollFor, previewLabelNamesFile } from './preview-source';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx, hasCitations } from './md-to-docx';
 import * as fs from 'fs';
@@ -1506,12 +1506,17 @@ async function previewSource(tab: vscode.Tab): Promise<vscode.TextDocument | und
 		}
 		return vscode.commands.executeCommand<vscode.TextEditor | undefined>('markdown.showSource');
 	}, 1000);
-	// The source's editor may now hide the preview, so only a static preview counts here
-	if (voided || !editor || staticPreviewMayBeOpen()) return undefined;
+	if (voided || !editor) return undefined;
 	// A preview in its source's column gave way to the source; bring it back
 	if (editor.viewColumn === tab.group.viewColumn) {
 		await vscode.commands.executeCommand('workbench.action.openPreviousRecentlyUsedEditorInGroup');
 	}
+	// The source's editor may have hidden the preview, so only a static
+	// preview counts here. The markdown extension can still hold another
+	// preview a moment after this one shows, as one restored lazily, or a
+	// static diff under a title naming no file: the tab's label, which names
+	// its file, refuses an answer for a file of another name.
+	if (staticPreviewMayBeOpen() || !previewLabelNamesFile(tab.label, editor.document.uri.path)) return undefined;
 	return editor.document;
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { focusGroupCommand, isMarkdownPreviewViewType, isStaticPreviewViewType, labelNamesStaticPreviewFile, pollFor } from './preview-source';
+import { focusGroupCommand, isMarkdownPreviewViewType, isStaticPreviewViewType, labelNamesStaticPreviewFile, pollFor, previewLabelNamesFile } from './preview-source';
 
 describe('isMarkdownPreviewViewType', () => {
   it('accepts the preview viewType with or without VS Code\'s prefix', () => {
@@ -27,6 +27,23 @@ describe('labelNamesStaticPreviewFile', () => {
     expect(labelNamesStaticPreviewFile('Settings')).toBe(false);
     expect(labelNamesStaticPreviewFile('Welcome')).toBe(false);
     expect(labelNamesStaticPreviewFile('a.mdx')).toBe(false);
+  });
+});
+
+describe('previewLabelNamesFile', () => {
+  it('finds the file an unlocked, locked or localized preview names', () => {
+    expect(previewLabelNamesFile('Preview paper.md', '/w/paper.md')).toBe(true);
+    expect(previewLabelNamesFile('[Preview] paper.md', '/w/paper.md')).toBe(true);
+    expect(previewLabelNamesFile('Vorschau my notes.md', '/w/my notes.md')).toBe(true);
+    expect(previewLabelNamesFile('paper.md のプレビュー', '/w/paper.md')).toBe(true);
+    expect(previewLabelNamesFile('Preview Untitled-1', 'Untitled-1')).toBe(true);
+  });
+
+  it('refuses another file, or one whose name only ends the title\'s', () => {
+    expect(previewLabelNamesFile('Preview paper.md', '/w/notes.md')).toBe(false);
+    expect(previewLabelNamesFile('Preview data.md', '/w/a.md')).toBe(false);
+    expect(previewLabelNamesFile('Preview a.md.bak', '/w/a.md')).toBe(false);
+    expect(previewLabelNamesFile('Preview a.md', '/w/')).toBe(false);
   });
 });
 
