@@ -14,6 +14,7 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, preprocessGridTablesWithSourceMap } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { xmlInteger } from './xml-elements';
+import { pushedMathChanges } from './tracked-math';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
@@ -1405,7 +1406,7 @@ function trackedChangeXml(tag: 'w:ins' | 'w:del', contentXml: string, links: Reg
     xml += '<w:hyperlink r:id="' + link[1] + '">' + change(link[2]) + '</w:hyperlink>';
     last = link.index + link[0].length;
   }
-  return last === 0 || last < contentXml.length ? xml + change(contentXml.slice(last)) : xml;
+  return pushedMathChanges(last === 0 || last < contentXml.length ? xml + change(contentXml.slice(last)) : xml, () => state.commentId++);
 }
 
 /** Deleted content, from generateDeletedCriticContent, in w:del */
@@ -1659,7 +1660,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       }
     } else if (run.type === 'math') {
       const math = run.mathParts
-        ? generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display)
+        ? pushedMathChanges(generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display), () => state.commentId++)
         : generateMathXml(run.text, !!run.display, state.warnings);
       // Not inline math with a tracked change in it, or in one, whose
       // highlight import doesn't read (see mathHighlight in converter.ts)
@@ -1969,7 +1970,7 @@ function shownChanges(xml: string): { kind: string; attrs: string }[] {
     if (tag === 'w:vanish' && open[open.length - 1] === 'w:rPr' && /^[wm]:r$/.test(open[open.length - 2] ?? '')
         && !['0', 'false', 'off'].includes(val(attrs) ?? '')) {
       runs[runs.length - 1].hidden = true;
-    } else if (['w:sym', 'm:rad', 'm:bar', 'm:borderBox'].includes(tag) || runContentShows(tag)) {
+    } else if (tag === 'w:sym' || runContentShows(tag)) {
       show();
     } else if (['m:type', 'm:chr', 'm:begChr', 'm:endChr'].includes(tag) && structures.length > 0) {
       structures[structures.length - 1].chars.set(tag, val(attrs) ?? '');
@@ -1977,11 +1978,19 @@ function shownChanges(xml: string): { kind: string; attrs: string }[] {
       phantoms[phantoms.length - 1] = ['0', 'false', 'off'].includes(val(attrs) ?? '');
     }
     if (selfClosing) continue;
+    // A structure's change is its mark, in its m:ctrlPr, where it has one
+    // (see pushedMathChanges in tracked-math.ts)
+    if ((tag === 'w:ins' || tag === 'w:del') && open[open.length - 1] === 'm:ctrlPr' && structures.length > 0
+        && open[open.length - 2] === structures[structures.length - 1].tag + 'Pr') {
+      structures[structures.length - 1].change = { kind: tag.slice(2), attrs };
+    }
     open.push(tag);
     if (tag === 'w:ins' || tag === 'w:del') changes.push({ kind: tag.slice(2), attrs });
     else if (tag === 'w:r' || tag === 'm:r') runs.push({ hidden: false });
     else if (tag === 'm:phant') phantoms.push(false);
-    else if (['m:f', 'm:d', 'm:acc', 'm:nary', 'm:groupChr'].includes(tag)) {
+    else if (['m:f', 'm:d', 'm:acc', 'm:nary', 'm:groupChr', 'm:rad', 'm:bar', 'm:borderBox'].includes(tag)) {
+      // A radical, a bar and a box each draw theirs, at their close, in the
+      // change they're in or that their mark says they are
       structures.push({ tag, change: changes[changes.length - 1] ?? none, chars: new Map() });
     }
   }

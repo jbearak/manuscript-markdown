@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import { apartFromCurrency, asXmlNodes, endsInLatexComment, ommlToLatex, symbolFontCharacter, type XmlNode } from './omml';
+import { normalizeTrackedMath } from './tracked-math';
 import { resolveMarkdownColor } from './highlight-colors';
 import { FRONTMATTER_OPENING_RE, Frontmatter, type FrontmatterLayout, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CrossrefOptions, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
@@ -2825,8 +2826,11 @@ async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
   if (text === undefined) { return null; }
   // Each reference to a character, as &#x25CF; for a bullet, which other
   // tools than Word write, read as that character, and an attribute's white
-  // space as XML reads it (see xmlParser)
-  return asXmlNodes(xmlParser(parserOptions).parse(text));
+  // space as XML reads it (see xmlParser), and each equation's tracked
+  // changes as Word writes them read as one change around what each holds
+  // (see normalizeTrackedMath)
+  const nodes = asXmlNodes(xmlParser(parserOptions).parse(text));
+  return text.includes('<m:oMath') ? normalizeTrackedMath(nodes) : nodes;
 }
 
 function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50): XmlNode[] {
