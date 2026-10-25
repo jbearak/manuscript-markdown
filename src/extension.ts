@@ -10,6 +10,7 @@ import * as formatting from './formatting';
 import * as author from './author';
 import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt, type PreviewMarkup } from './preview/manuscript-markdown-plugin';
 import { WordCountController } from './wordcount';
+import { focusGroupCommand, isMarkdownPreviewViewType, isStaticPreviewViewType, labelNamesStaticPreviewFile, pollFor, previewLabelNamesFile } from './preview-source';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx, hasCitations } from './md-to-docx';
 import * as fs from 'fs';
@@ -1450,6 +1451,75 @@ async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir:
 	));
 }
 
+function isDynamicPreviewTab(tab: vscode.Tab | undefined): tab is vscode.Tab {
+	return tab?.input instanceof vscode.TabInputWebview && isMarkdownPreviewViewType(tab.input.viewType);
+}
+
+/** Visible dynamic previews: each group's active tab that is one. */
+function visibleDynamicPreviews(): vscode.Tab[] {
+	return vscode.window.tabGroups.all.map(g => g.activeTab).filter(isDynamicPreviewTab);
+}
+
+/**
+ * Whether a static preview may be open: a custom editor or webview tab of
+ * one, or a tab the API can't describe that names a file the static preview
+ * opens, as a side-by-side diff of two static previews has no input the API
+ * exposes.
+ */
+function staticPreviewMayBeOpen(): boolean {
+	return vscode.window.tabGroups.all.some(g => g.tabs.some(t =>
+		t.input instanceof vscode.TabInputCustom || t.input instanceof vscode.TabInputWebview
+			? isStaticPreviewViewType(t.input.viewType)
+			: t.input === undefined && labelNamesStaticPreviewFile(t.label)));
+}
+
+/**
+ * The document the dynamic preview in a tab shows, where it is the one
+ * preview visible, from markdown.showSource, which answers for the preview
+ * the markdown extension holds active and opens its source in an editor.
+ * That extension sets its active preview when a dynamic preview is made,
+ * visible but perhaps unfocused, as one opened to the side, and on each view
+ * state event, which a preview's hiding fires too: to the preview gaining
+ * focus, or to none for any other. So it is none or a visible dynamic
+ * preview, which is this tab's, except that opening a static preview sets it,
+ * focused or not, with no event to clear it: with one open this refuses.
+ * Otherwise, with this tab focused, showSource gives its source, or none until
+ * the event comes. Each try first checks all of that again, as tabs open
+ * while it waits, and a static preview opened during the last one voids it.
+ */
+async function previewSource(tab: vscode.Tab): Promise<vscode.TextDocument | undefined> {
+	const trusted = () => !staticPreviewMayBeOpen()
+		&& visibleDynamicPreviews().length === 1 && visibleDynamicPreviews()[0] === tab;
+	const ready = () => trusted() && tab.group.isActive && tab.isActive;
+	if (!trusted()) return undefined;
+	if (!tab.group.isActive) {
+		const command = focusGroupCommand(tab.group.viewColumn);
+		if (!command) return undefined;
+		await vscode.commands.executeCommand(command);
+		if (!await pollFor(() => ready() || undefined, 1000)) return undefined;
+	}
+	let voided = false;
+	const editor = await pollFor(async () => {
+		if (!ready()) {
+			voided = true;
+			return null;
+		}
+		return vscode.commands.executeCommand<vscode.TextEditor | undefined>('markdown.showSource');
+	}, 1000);
+	if (voided || !editor) return undefined;
+	// A preview in its source's column gave way to the source; bring it back
+	if (editor.viewColumn === tab.group.viewColumn) {
+		await vscode.commands.executeCommand('workbench.action.openPreviousRecentlyUsedEditorInGroup');
+	}
+	// The source's editor may have hidden the preview, so only a static
+	// preview counts here. The markdown extension can still hold another
+	// preview a moment after this one shows, as one restored lazily, or a
+	// static diff under a title naming no file: the tab's label, which names
+	// its file, refuses an answer for a file of another name.
+	if (staticPreviewMayBeOpen() || !previewLabelNamesFile(tab.label, editor.document.uri.path)) return undefined;
+	return editor.document;
+}
+
 async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undefined> {
 	let markdown: string;
 	let sourceUri: vscode.Uri;
@@ -1465,25 +1535,34 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			markdown = new TextDecoder().decode(data);
 		}
 	} else {
-		// Try active text editor, then visible editors, then the active preview tab
-		const editor = vscode.window.activeTextEditor?.document.languageId === 'markdown'
-			? vscode.window.activeTextEditor
-			: vscode.window.visibleTextEditors.find(e => e.document.languageId === 'markdown');
-		if (editor) {
-			markdown = editor.document.getText();
-			sourceUri = editor.document.uri;
-		} else {
-			// Full-screen preview: no visible editor, find the markdown document
-			const mdDoc = vscode.workspace.textDocuments.find(
-				d => d.languageId === 'markdown' && d.uri.scheme === 'file'
-			);
-			if (!mdDoc) {
-				vscode.window.showErrorMessage('No active Markdown file');
-				return undefined;
-			}
-			markdown = mdDoc.getText();
-			sourceUri = mdDoc.uri;
+		// A title-bar button on the dynamic preview passes a webview-panel URI
+		// that names no tab, and clicking it leaves focus where it was (VS Code's
+		// editorGroupView skips focusing for clicks on actions), so it can come
+		// from any group's preview. The command palette passes nothing, and
+		// means the focused preview, if a preview has focus. Either way only one
+		// visible preview (its group's active tab) is sure to be it, and only
+		// then can showSource be trusted (see previewSource). The static
+		// preview (Open With) passes, and its tab holds, the file's URI.
+		const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+		const previews = uri || isDynamicPreviewTab(activeTab) ? visibleDynamicPreviews() : [];
+		const input = activeTab?.input;
+		const doc = previews.length === 1
+			? await previewSource(previews[0])
+			: previews.length > 1 || uri
+				? undefined
+				: input instanceof vscode.TabInputCustom && isStaticPreviewViewType(input.viewType)
+					? await vscode.workspace.openTextDocument(input.uri)
+					: vscode.window.activeTextEditor?.document;
+		if (!doc || doc.languageId !== 'markdown') {
+			vscode.window.showErrorMessage(previews.length > 1
+				? 'Several Markdown previews are showing: close all but the one to export, or export from the Markdown file\'s editor'
+				: previews.length === 1 || uri
+					? 'Could not tell which file this preview shows. Close any preview opened with Open With, or export from the Markdown file\'s editor'
+					: 'No active Markdown file');
+			return undefined;
 		}
+		markdown = doc.getText();
+		sourceUri = doc.uri;
 	}
 
 	const basePath = getOutputBasePath(sourceUri.fsPath);
