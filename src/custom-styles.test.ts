@@ -682,13 +682,34 @@ describe('Custom Styles — IDs Word gives them', () => {
   };
 
   it.each([['with', true], ['without', false]])('come back as under export\'s IDs %s custom properties, and export writes them as before', async (_name, properties) => {
-    const markdown = (await convertDocx(await savedByWord(properties))).markdown;
+    const { markdown, warnings } = await convertDocx(await savedByWord(properties));
+    expect(warnings).toEqual([]);
     expect(markdown).toBe((await convertDocx(await savedByWord(properties, false))).markdown);
     expect(markdown).toMatch(/<!-- style: box -->\n+Boxed\./);
     expect(markdown).toMatch(/<!-- style: Pull Quote -->\n+Quoted\./);
     const xml = await (await (await import('jszip')).default.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
     expect(xml).toContain('<w:pStyle w:val="MsCustomBox"/>');
     expect(xml).toContain('<w:pStyle w:val="MsCustomPullQuote"/>');
+  });
+
+  // A name Word allows, which would end the HTML comment of a directive:
+  // import writes none of it, and says the paragraphs lost the style
+  it.each([
+    ['under export\'s ID, without custom properties', false, false],
+    ['under Word\'s ID, with custom properties', true, true],
+    ['under Word\'s ID, without custom properties', false, true],
+  ])('warns that a custom style named with --> comes back without its paragraphs, %s', async (_name, properties, renamed) => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await savedByWord(properties, renamed));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('Custom: box', 'Custom: a--&gt;b'));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(warnings).toEqual(['Custom style "a-->b" in Word has --> in its name, which would end a style directive\'s comment, '
+      + 'so its paragraphs come back without it; rename the style in Word to keep it.']);
+    expect(markdown).not.toMatch(/<!-- style: [^\n]*-->[^\n]*-->/);
+    // The other style keeps its directive
+    expect(markdown).toMatch(/<!-- style: Pull Quote -->\n+Quoted\./);
+    // What import wrote exports and comes back
+    expect((await convertMdToDocx(markdown)).docx.length).toBeGreaterThan(0);
   });
 
   it('leaves a style of the document\'s own whose name isn\'t a custom style\'s', async () => {

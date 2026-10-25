@@ -19438,7 +19438,8 @@ async function documentContentInputs(zip: JSZip, format: CitationKeyFormat = 'au
     footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined,
     styleLayouts,
   };
-  return { zoteroCitations, keyMap, options, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles };
+  const styleWarnings = stylesXml === undefined ? [] : unwritableCustomStyleWarnings(styleElementsOf(stylesXml));
+  return { zoteroCitations, keyMap, options, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles, styleWarnings };
 }
 
 /** The records of the document's sections that export writes in custom
@@ -19628,6 +19629,18 @@ function customStyleNames(styleElements: { tag: string; block: string }[]): Map<
     if (fence?.kind === 'open' && fence.style === name && read.length === 1 && read[0] === name) names.set(id, name);
   }
   return names;
+}
+
+/** A warning for each custom style in the styles part whose name has a
+ *  -->, which would end the HTML comment of its directive. customStyleNames
+ *  leaves such a name out, so import writes no directive that would take
+ *  in the text after it, and the style's paragraphs lose it. A name it
+ *  leaves out for another reason, as caption: revised, comes back under a
+ *  name from the style's ID, which keeps the style. */
+function unwritableCustomStyleWarnings(styleElements: { tag: string; block: string }[]): string[] {
+  const names = new Set(customStyleEntries(styleElements).map(([, name]) => name).filter(name => name.includes('-->')));
+  return [...names].map(name => 'Custom style "' + name + '" in Word has --> in its name, which would end a style directive\'s comment, '
+    + 'so its paragraphs come back without it; rename the style in Word to keep it.');
 }
 
 /**
@@ -20658,7 +20671,7 @@ export async function convertDocx(
 
   // The inputs extractDocumentContent reads the body with, which export's
   // read-back of its own document reads with too
-  const { zoteroCitations, keyMap, options: contentOptions, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles } = inputs;
+  const { zoteroCitations, keyMap, options: contentOptions, blockquotePlaces, comments, footnoteCitations, endnoteCitations, allCitations, storedCustomStyles, styleWarnings } = inputs;
   const { numberingDefs, numberingStartOverrides, relationshipMap: docRels, replyIds, commentBodies, imageFiles, styleLayouts, footnoteCrossRefMap } = contentOptions;
 
   // Mark parent comments whose replies were originally in consecutive format
@@ -21206,5 +21219,5 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: formatChanges === undefined ? [] : [formatChanges] };
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...styleWarnings] };
 }
