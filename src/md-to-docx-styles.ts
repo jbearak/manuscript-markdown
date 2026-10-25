@@ -355,11 +355,14 @@ export function templateStyleIds(stylesXml: string | undefined): Map<string, str
  *  to, by the type of the style it's in, where it's in one: a style's base
  *  and next style are of its type, and the style it's linked to of the
  *  other, a paragraph style's a character style and a character style's a
- *  paragraph style */
+ *  paragraph style. An abstract numbering's w:numStyleLink and w:styleLink,
+ *  in numbering.xml, refer to a numbering style. */
 const STYLE_REFERENCE_TYPES: Record<string, (owner: string | undefined) => string | undefined> = {
   'w:pStyle': () => 'paragraph',
   'w:rStyle': () => 'character',
   'w:tblStyle': () => 'table',
+  'w:numStyleLink': () => 'numbering',
+  'w:styleLink': () => 'numbering',
   'w:basedOn': owner => owner,
   'w:next': owner => owner,
   'w:link': owner => owner === 'paragraph' ? 'character' : owner === 'character' ? 'paragraph' : undefined,
@@ -885,12 +888,12 @@ export function templateWithFontOverrides(
       if (seenIds.has(sid)) continue;
       seenIds.add(sid);
       const newStyleXml = customStyleXml(name, def, bodyFontStr, localSzPair, property => turnsOn('Normal', property));
-      // Replace existing custom style, of any type, as it's found, or else
-      // the template's copy of it under the ID Word gave it, as `Custombox`
-      // (see OwnStyle), in its place, before what follows it as it was,
-      // whitespace or a comment, or inject new one. Its other copies go
-      // after (see withStylesOnce).
-      const existing = findStyleElement(xml, sid, ids, true) ?? findOwnStyle(xml, customOwnStyle(name));
+      // Replace existing custom style, of any type, as it's found, in its
+      // place, before what follows it as it was, whitespace or a comment,
+      // or inject new one. A copy of it under the ID Word gave it, as
+      // `Custombox` (see OwnStyle), stays till withStylesOnce, which leaves
+      // it out and points what refers to it to this one.
+      const existing = findStyleElement(xml, sid, ids, true);
       if (existing) {
         xml = xml.slice(0, existing.at) + newStyleXml.replace(/\n$/, '') + xml.slice(existing.at + existing.element.length);
       } else {
@@ -1082,31 +1085,33 @@ export function withCaptionStyle(xml: string, ids: Map<string, string>): string 
  * `Manuscript HTML1` and on, though Word saves two of one name otherwise. So a
  * template saved by Word holds export's style under another ID, and, where
  * export through it added its own again, more of them each time, which is
- * how a document comes to hold dozens. `numbered`, for a name no other
- * style of export's starts with, takes a style whose name is its name and
- * digits, as Word names one in a repair, for a copy too; a custom style's
- * isn't, as `Custom: box2` is another custom style's (see
- * isOwnStyleCopy).
+ * how a document comes to hold dozens. `numbered`, export's own XML for
+ * the style, takes a style whose name is its name and digits, as Word names
+ * one in a repair, for a copy too, but only where Word's ID for it is
+ * export's and a suffix, as `ManuscriptHTML12`, or where it's formatted as
+ * export writes the style, as a user's style named `Manuscript HTML2`
+ * needn't be either; a custom style has none, as `Custom: box2` is another
+ * custom style's (see isOwnStyleCopy).
  */
-export interface OwnStyle { type: string; id: string; name: string; numbered: boolean }
+export interface OwnStyle { type: string; id: string; name: string; numbered?: string }
 
 /** Export's own styles, which a template saved by Word holds under other
  *  IDs (see OwnStyle) */
 export const MANUSCRIPT_STYLES: OwnStyle[] = [
-  { type: 'paragraph', id: 'ManuscriptListContinuation', name: 'Manuscript List Continuation', numbered: true },
-  { type: 'character', id: RAW_HTML_STYLE_ID, name: 'Manuscript HTML', numbered: true },
+  { type: 'paragraph', id: 'ManuscriptListContinuation', name: 'Manuscript List Continuation', numbered: LIST_CONTINUATION_STYLE_XML },
+  { type: 'character', id: RAW_HTML_STYLE_ID, name: 'Manuscript HTML', numbered: RAW_HTML_STYLE_XML },
 ];
 
 /** A custom style the frontmatter defines, as export writes it (see
  *  customStyleXml) */
 export function customOwnStyle(name: string): OwnStyle {
-  return { type: 'paragraph', id: customStyleId(name), name: customStyleDisplayName(name), numbered: false };
+  return { type: 'paragraph', id: customStyleId(name), name: customStyleDisplayName(name) };
 }
 
 /** The styles of `stylesXml`, each read as an XML parser reads it (see
  *  xmlElement), with its type, a paragraph style's where it has none, its
- *  ID and its name, where it has them */
-function stylesOf(stylesXml: string): Array<{ start: number; end: number; tag: string; type: string; id: string | undefined; name: string | undefined }> {
+ *  ID and its name, where it has them, and its content */
+function stylesOf(stylesXml: string): Array<{ start: number; end: number; tag: string; type: string; id: string | undefined; name: string | undefined; content: string }> {
   const styles = [];
   for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
     const nameTag = xmlStartTag(style.content, 'w:name');
@@ -1115,21 +1120,35 @@ function stylesOf(stylesXml: string): Array<{ start: number; end: number; tag: s
       type: xmlAttribute(style.tag, 'w:type') ?? 'paragraph',
       id: xmlAttribute(style.tag, 'w:styleId'),
       name: nameTag && xmlAttribute(nameTag.tag, 'w:val'),
+      content: style.content,
     });
   }
   return styles;
 }
 
+/** What a style's content says of its formatting, as Word writes it, for
+ *  comparing two: without its name, which names its copies apart, or its
+ *  revision IDs (w:rsid), which Word adds as it saves, nor whitespace
+ *  between its elements */
+const styleFormatting = (content: string) => replaceXmlElements(content, ['w:name', 'w:rsid'], () => '').replace(/>\s+</g, '><').trim();
+
 /** Whether a style of `stylesOf` is a copy of `own`, as Word saves it (see
  *  OwnStyle): of its type, with its ID whatever its case, or with its name,
  *  whatever its case, as Word compares names, or, for a `numbered` one, its
- *  name and digits */
-function isOwnStyleCopy(style: { type: string; id: string | undefined; name: string | undefined }, own: OwnStyle): boolean {
+ *  name and digits, where its ID is export's and a suffix of letters and
+ *  digits, whatever their case, as Word gives one, or it's formatted as
+ *  export writes the style */
+function isOwnStyleCopy(style: { type: string; id: string | undefined; name: string | undefined; content: string }, own: OwnStyle): boolean {
   if (style.type !== own.type || style.id === undefined) return false;
-  if (style.id.toLowerCase() === own.id.toLowerCase()) return true;
+  const id = style.id.toLowerCase();
+  const ownId = own.id.toLowerCase();
+  if (id === ownId) return true;
   const name = style.name?.toLowerCase();
   const ownName = own.name.toLowerCase();
-  return name === ownName || own.numbered && name !== undefined && name.startsWith(ownName) && /^\d+$/.test(name.slice(ownName.length));
+  if (name === ownName) return true;
+  if (own.numbered === undefined || name === undefined || !name.startsWith(ownName) || !/^\d+$/.test(name.slice(ownName.length))) return false;
+  return id.startsWith(ownId) && /^[a-z0-9]+$/.test(id.slice(ownId.length))
+    || styleFormatting(style.content) === styleFormatting(xmlElement(own.numbered, 'w:style')?.content ?? '');
 }
 
 /** The w:style element of the first copy of `own` in `stylesXml` (see
@@ -1162,12 +1181,12 @@ export function ensureManuscriptStyles(xml: string): string {
  * IDs and names (see OwnStyle) become one, of export's ID, which the
  * document's runs and paragraphs refer to: the one of that ID, where export
  * wrote or replaced it, or else the first, as the template's, whose
- * formatting the user may have changed, with that ID. Then of any other
- * styles of one type whose IDs differ only in case, which Word takes for
- * one, the first stays, as Word reads the first. Styles of other types may
- * share an ID or a name, as a paragraph style and the character style
- * linked to it may, and stay. What's left between the styles, whitespace or
- * a comment, stays.
+ * formatting the user may have changed, with that ID. The template's other
+ * styles stay as they are, those whose IDs differ only in case too, as a
+ * numbering style `List` beside `list`, which numbering refers to by its ID
+ * (w:numStyleLink), and those of other types that share an ID or a name, as
+ * a paragraph style and the character style linked to it may. What's left
+ * between the styles, whitespace or a comment, stays.
  */
 export function withStylesOnce(stylesXml: string, own: OwnStyle[]): { xml: string; ids: Map<string, string> } {
   const styles = stylesOf(stylesXml);
@@ -1184,18 +1203,6 @@ export function withStylesOnce(stylesXml: string, own: OwnStyle[]): { xml: strin
     }
     if (styles[kept].id !== style.id) retagged.set(kept, style.id);
   }
-  const first = new Map<string, string>();
-  styles.forEach((style, index) => {
-    const id = retagged.get(index) ?? style.id;
-    if (dropped.has(index) || id === undefined) return;
-    const kept = first.get(style.type + ' ' + id.toLowerCase());
-    if (kept === undefined) {
-      first.set(style.type + ' ' + id.toLowerCase(), id);
-      return;
-    }
-    dropped.add(index);
-    if (id !== kept) ids.set(style.type + ' ' + id, kept);
-  });
   if (dropped.size === 0 && retagged.size === 0) return { xml: stylesXml, ids };
   let xml = '';
   let at = 0;

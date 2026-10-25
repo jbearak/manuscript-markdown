@@ -5614,17 +5614,18 @@ export async function convertMdToDocx(
   // References to the styles of a template's that went, or took export's
   // ID, as copies of its own (see withStylesOnce), in the parts that refer
   // to styles, the document, notes and comments export writes and the
-  // headers, footers and numbering the template gives, to the one that
-  // stayed, by the type of style each refers to. A template's part in
-  // UTF-16 goes as it came, as removeCharactersXmlCantHold leaves it.
+  // headers, footers and numbering the template gives, wherever under word/
+  // their relationships put them, as word/headers/header1.xml, to the one
+  // that stayed, by the type of style each refers to. A part is read in the
+  // encoding its BOM or declaration names, as a template's in UTF-16, and
+  // one that changes goes in UTF-8, as template-sections writes one it
+  // changes (see decodeXml and asUtf8).
   if (styleIdsOnce.size > 0) {
     for (const path of Object.keys(zip.files)) {
-      if (zip.files[path].dir || !/^word\/[^/]+\.xml$/.test(path) || path === 'word/styles.xml') continue;
-      const bytes = await zip.file(path)!.async('uint8array');
-      if (bytes[0] === 0 || bytes[1] === 0 || bytes[0] === 0xFF && bytes[1] === 0xFE || bytes[0] === 0xFE && bytes[1] === 0xFF) continue;
-      const xml = new TextDecoder().decode(bytes);
+      if (zip.files[path].dir || !/^word\/.+\.xml$/.test(path) || path === 'word/styles.xml') continue;
+      const xml = decodeXml(await zip.file(path)!.async('uint8array'));
       const referring = withStyleReferences(xml, (id, type) => styleIdsOnce.get(type + ' ' + id));
-      if (referring !== xml) zip.file(path, referring);
+      if (referring !== xml) zip.file(path, asUtf8(referring));
     }
   }
 
