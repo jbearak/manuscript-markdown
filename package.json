@@ -530,6 +530,11 @@
       ],
       "editor/title": [
         {
+          "command": "manuscript-markdown.exportToWord",
+          "when": "activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'",
+          "group": "navigation@99"
+        },
+        {
           "command": "manuscript-markdown.togglePreviewMarkup",
           "when": "activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'",
           "group": "navigation@100"
