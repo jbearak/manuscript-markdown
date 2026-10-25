@@ -58,6 +58,7 @@ import {
 	findBibFieldLinkAtLine,
 	findBibFileFieldAtLine,
 	findBibKeyAtOffset,
+	findOpenDocumentForPath,
 	findCitekeyAtOffset,
 	findRepeatedBibFields,
 	findUncitableBibKeys,
@@ -91,7 +92,11 @@ import {
 } from './frontmatter-language';
 import { toLspFrontmatterCompletionItem } from './frontmatter-completion-adapter';
 import { findBibliographyLink } from './bibliography-link';
-import { findBibKeyMatches, WORKSPACE_BIB_FILES_REQUEST } from './bib-workspace-symbols';
+import {
+	findBibKeyMatches,
+	WORKSPACE_BIB_FILES_CHANGED_NOTIFICATION,
+	WORKSPACE_BIB_FILES_REQUEST,
+} from './bib-workspace-symbols';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -680,7 +685,7 @@ connection.onWorkspaceSymbol(async (params: WorkspaceSymbolParams, token): Promi
 		if (!bibData) {
 			continue;
 		}
-		const uri = fsPathToUri(bibPath);
+		const uri = (await findOpenDocumentForPath(documents, bibPath))?.uri ?? fsPathToUri(bibPath);
 		// Positions from bibData.text, the snapshot its offsets are into, as
 		// in onDocumentSymbol
 		const doc = TextDocument.create(uri, 'bibtex', 0, bibData.text);
@@ -1136,7 +1141,7 @@ async function revalidateMarkdownDocsForBib(changedBibPath: string): Promise<voi
 
 async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undefined> {
 	const cacheKey = await canonicalizeFsPathAsync(bibPath);
-	const openDoc = documents.get(fsPathToUri(bibPath));
+	const openDoc = await findOpenDocumentForPath(documents, bibPath);
 	if (openDoc) {
 		const cached = openDocBibCache.get(cacheKey);
 		if (cached && cached.version === openDoc.version) {
@@ -1208,8 +1213,13 @@ async function resolveSymbolAtPosition(uri: string, position: Position): Promise
 }
 
 // The client's list of the workspace's .bib files, fetched on the first
-// workspace symbol request and dropped when one is created or deleted
+// workspace symbol request and dropped when one is created or deleted, or
+// when the client says the list may have changed (files.exclude, folders)
 let workspaceBibUris: Promise<string[]> | undefined;
+
+connection.onNotification(WORKSPACE_BIB_FILES_CHANGED_NOTIFICATION, () => {
+	workspaceBibUris = undefined;
+});
 
 /** The .bib files workspace symbols come from: the workspace's, any open
  *  in an editor, and any an open markdown document pairs with, which can be
@@ -1266,8 +1276,10 @@ async function getDefinitionLocationForKey(key: string, bibPath: string): Promis
 	if (startOffset === undefined) {
 		return undefined;
 	}
-	const bibUri = fsPathToUri(bibPath);
-	const bibDoc = (await getTextDocument(bibUri, 'bibtex')) ?? TextDocument.create(bibUri, 'bibtex', 0, bibData.text);
+	// Positions from bibData.text, the snapshot its offsets are into (an
+	// open document's, found by path, else the file's), as in onDocumentSymbol
+	const bibUri = (await findOpenDocumentForPath(documents, bibPath))?.uri ?? fsPathToUri(bibPath);
+	const bibDoc = TextDocument.create(bibUri, 'bibtex', 0, bibData.text);
 	const start = bibDoc.positionAt(startOffset);
 	const end = bibDoc.positionAt(startOffset + key.length);
 	return Location.create(bibUri, Range.create(start, end));

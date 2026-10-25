@@ -15,6 +15,10 @@ import type { ParsedBibData } from './citekey-language';
 
 /** Client request: returns the URIs of the workspace's `.bib` files. */
 export const WORKSPACE_BIB_FILES_REQUEST = 'manuscriptMarkdown/workspaceBibFiles';
+/** Client notification: the list WORKSPACE_BIB_FILES_REQUEST returns may
+ *  have changed other than by a `.bib` file's creation or deletion, as by
+ *  `files.exclude` or the workspace's folders. */
+export const WORKSPACE_BIB_FILES_CHANGED_NOTIFICATION = 'manuscriptMarkdown/workspaceBibFilesChanged';
 
 export interface BibKeyMatch {
 	key: string;
