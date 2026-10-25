@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { focusGroupCommand, isMarkdownPreviewViewType, pollFor } from './preview-source';
+import { focusGroupCommand, isMarkdownPreviewViewType, labelNamesMdFile, pollFor } from './preview-source';
 
 describe('isMarkdownPreviewViewType', () => {
   it('accepts the preview viewType with or without VS Code\'s prefix', () => {
@@ -7,6 +7,16 @@ describe('isMarkdownPreviewViewType', () => {
     expect(isMarkdownPreviewViewType('markdown.preview')).toBe(true);
     expect(isMarkdownPreviewViewType('mainThreadWebview-other.markdown.previewer')).toBe(false);
     expect(isMarkdownPreviewViewType('mainThreadWebview-foo.markdown.preview')).toBe(false);
+  });
+});
+
+describe('labelNamesMdFile', () => {
+  it('finds a .md file in a diff\'s label or a plain one, and not in other tabs\' labels', () => {
+    expect(labelNamesMdFile('b.md ↔ c.md')).toBe(true);
+    expect(labelNamesMdFile('NOTES.MD')).toBe(true);
+    expect(labelNamesMdFile('Settings')).toBe(false);
+    expect(labelNamesMdFile('Welcome')).toBe(false);
+    expect(labelNamesMdFile('a.mdx')).toBe(false);
   });
 });
 

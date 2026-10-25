@@ -13,6 +13,14 @@ export function isMarkdownPreviewViewType(viewType: string): boolean {
 	return viewType === MARKDOWN_PREVIEW_VIEW_TYPE || viewType.endsWith('-' + MARKDOWN_PREVIEW_VIEW_TYPE);
 }
 
+/**
+ * Whether a tab label may name a .md file, the one kind the static preview
+ * opens, as a diff's 'a.md ↔ b.md' does.
+ */
+export function labelNamesMdFile(label: string): boolean {
+	return /\.md\b/i.test(label);
+}
+
 const FOCUS_GROUP_COMMANDS = ['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Eighth']
 	.map(n => 'workbench.action.focus' + n + 'EditorGroup');
 
