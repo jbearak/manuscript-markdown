@@ -17,6 +17,7 @@ import {
 	DocumentLinkParams,
 	DocumentSymbol,
 	DocumentSymbolParams,
+	FileChangeType,
 	Hover,
 	HoverParams,
 	InitializeParams,
@@ -26,9 +27,11 @@ import {
 	ProposedFeatures,
 	Range,
 	ReferenceParams,
+	SymbolInformation,
 	SymbolKind,
 	TextDocumentSyncKind,
 	TextDocuments,
+	WorkspaceSymbolParams,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { BibtexEntry, BibtexSourceRange, bibtexFieldAsPlainText, parseBibtexWithRaw } from '../bibtex-parser';
@@ -88,6 +91,7 @@ import {
 } from './frontmatter-language';
 import { toLspFrontmatterCompletionItem } from './frontmatter-completion-adapter';
 import { findBibliographyLink } from './bibliography-link';
+import { findBibKeyMatches, WORKSPACE_BIB_FILES_REQUEST } from './bib-workspace-symbols';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -248,6 +252,7 @@ connection.onInitialize((params: InitializeParams) => {
 			documentSymbolProvider: true,
 			hoverProvider: true,
 			referencesProvider: true,
+			workspaceSymbolProvider: true,
 		},
 	};
 });
@@ -325,6 +330,9 @@ connection.onDidChangeWatchedFiles((params: DidChangeWatchedFilesParams) => {
 	for (const change of params.changes) {
 		if (isBibUri(change.uri)) {
 			bibChanged = true;
+			if (change.type !== FileChangeType.Changed) {
+				workspaceBibUris = undefined;
+			}
 			invalidateBibCache(change.uri);
 			const fsPath = uriToFsPath(change.uri);
 			if (fsPath) {
@@ -659,6 +667,33 @@ connection.onDocumentSymbol(async (params: DocumentSymbolParams): Promise<Docume
 		));
 	}
 
+	return symbols;
+});
+
+connection.onWorkspaceSymbol(async (params: WorkspaceSymbolParams, token): Promise<SymbolInformation[]> => {
+	const symbols: SymbolInformation[] = [];
+	for (const bibPath of await getWorkspaceSymbolBibPaths()) {
+		if (token.isCancellationRequested) {
+			break;
+		}
+		const bibData = await getBibDataForPath(bibPath);
+		if (!bibData) {
+			continue;
+		}
+		const uri = fsPathToUri(bibPath);
+		// Positions from bibData.text, the snapshot its offsets are into, as
+		// in onDocumentSymbol
+		const doc = TextDocument.create(uri, 'bibtex', 0, bibData.text);
+		for (const match of findBibKeyMatches(bibData, params.query)) {
+			symbols.push(SymbolInformation.create(
+				match.key,
+				SymbolKind.Key,
+				Range.create(doc.positionAt(match.keyStart), doc.positionAt(match.keyEnd)),
+				uri,
+				getEntryDetail(bibData.entries.get(match.key)!),
+			));
+		}
+	}
 	return symbols;
 });
 
@@ -1170,6 +1205,56 @@ async function resolveSymbolAtPosition(uri: string, position: Position): Promise
 	}
 
 	return undefined;
+}
+
+// The client's list of the workspace's .bib files, fetched on the first
+// workspace symbol request and dropped when one is created or deleted
+let workspaceBibUris: Promise<string[]> | undefined;
+
+/** The .bib files workspace symbols come from: the workspace's, any open
+ *  in an editor, and any an open markdown document pairs with, which can be
+ *  outside the workspace. One path per file. */
+async function getWorkspaceSymbolBibPaths(): Promise<string[]> {
+	if (!workspaceBibUris) {
+		const request = connection.sendRequest<string[]>(WORKSPACE_BIB_FILES_REQUEST);
+		workspaceBibUris = request;
+		request.catch(() => {
+			if (workspaceBibUris === request) {
+				workspaceBibUris = undefined;
+			}
+		});
+	}
+	let uris: string[] = [];
+	try {
+		uris = await workspaceBibUris;
+	} catch (error) {
+		connection.console.error(`Error listing workspace .bib files: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const candidates: string[] = [];
+	for (const uri of [...uris, ...documents.all().map(doc => doc.uri)]) {
+		const fsPath = isBibUri(uri) ? uriToFsPath(uri) : undefined;
+		if (fsPath) {
+			candidates.push(fsPath);
+		}
+	}
+	// Not bibReverseMap's keys: on macOS and Windows those are lowercased
+	for (const doc of documents.all()) {
+		if (isMarkdownUri(doc.uri, doc.languageId) && docToBibMap.has(doc.uri)) {
+			const bibPath = await resolveBibliographyPathAsync(doc.uri, doc.getText(), workspaceRootPaths);
+			if (bibPath) {
+				candidates.push(bibPath);
+			}
+		}
+	}
+
+	const byCanonicalPath = new Map<string, string>();
+	for (const fsPath of candidates) {
+		const canonical = await canonicalizeFsPathAsync(fsPath);
+		if (!byCanonicalPath.has(canonical)) {
+			byCanonicalPath.set(canonical, fsPath);
+		}
+	}
+	return [...byCanonicalPath.values()];
 }
 
 async function getDefinitionLocationForKey(key: string, bibPath: string): Promise<Location | undefined> {

@@ -31,6 +31,12 @@ From a `[@citekey]` in markdown, navigates to the key's declaration in the `.bib
 - **From markdown**: returns the `.bib` declaration location. Markdown-to-markdown references are provided by VS Code's built-in Markdown Language Features extension.
 - **From `.bib`**: finds all `[@citekey]` usages across paired markdown files.
 
+### Go to Symbol in Workspace
+
+**Go to Symbol in Workspace** (Cmd+T on macOS, Ctrl+T on Windows and Linux, or `#` in Quick Open) lists the citation keys of the workspace's `.bib` files, from any file, a markdown file too, with each entry's author and year. Choosing one opens its `.bib` file at the key. The keys come from every `.bib` file in the workspace that `files.exclude` doesn't hide, any `.bib` file open in an editor, and the `.bib` file each open markdown document is paired with (see [Bib file pairing](#bib-file-pairing)), which can be outside the workspace.
+
+In a `.bib` file, **Go to Symbol in Editor** (Cmd+Shift+O, or `@` in Quick Open) lists that file's keys.
+
 ### Cross-References
 
 The server reads a document's cross-references to its figures and tables as export does (see [Cross-References](specification.md#cross-references)), with no `.bib` file, by the preview's parse of the document, with export's notes, quotes and equations: none in the frontmatter, code, HTML, as a comment or a table's cell, an equation, a link's text or an image's alt text, and a citation's brackets over lines read as one, as export reads them. A label is a figure's or a table's where export captions one with it, as the preview does: after an image alone in its paragraph, or at the end of a table's caption. A `{#fig-…}` that labels nothing, as in a sentence or a list, is none.
@@ -54,7 +60,7 @@ When finding references from a `.bib` file, paired markdown files are discovered
 1. Same-basename `.md` file on disk
 2. Open editor documents whose frontmatter `bibliography` resolves to the `.bib`
 
-No workspace directory tree scanning is performed.
+No workspace directory tree scanning is performed. (Go to Symbol in Workspace gets the workspace's `.bib` files from VS Code's file search, not by scanning.)
 
 ## Frontmatter Intelligence
 
