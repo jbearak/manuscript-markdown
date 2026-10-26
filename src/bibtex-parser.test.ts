@@ -948,17 +948,17 @@ describe('mergeBibtex', () => {
     ['a field that uses a macro an @string declares', '@string{extra = {Custom text}}\n\n@article{k, title = {Title}, note = extra}',
       '@string{extra = {Custom text}}\n\n@article{k,\n  title = {Title},\n  note = extra\n}'],
     ['declarations that use each other, in braces and parens', '@string{a = {A}}\n@string(b = a # {B})\n@article{k, title = {Title}, note = {x} # b}',
-      '@string{a = {A}}\n\n@string(b = a # {B})\n\n@article{k,\n  title = {Title},\n  note = {x} # b\n}'],
+      '@string{a = {A}}\n@string(b = a # {B})\n@article{k,\n  title = {Title},\n  note = {x} # b\n}'],
     ['an entry only in the existing file that uses a macro', '@string{extra = {E}}\n@book{b, note = Extra}\n@article{k, title = {Title}}',
-      '@string{extra = {E}}\n\n@book{b, note = Extra}\n\n@article{k,\n  title = {Title}\n}'],
+      '@string{extra = {E}}\n@book{b, note = Extra}\n@article{k,\n  title = {Title}\n}'],
     ['a declaration between entries, and one after them', '@book{b, note = {N}}\n@STRING{x = {X}}\n@article{k, title = {Title}, note = x}\n@string{y = {Y}}',
-      '@book{b, note = {N}}\n\n@STRING{x = {X}}\n\n@article{k,\n  title = {Title},\n  note = x\n}\n\n@string{y = {Y}}'],
+      '@book{b, note = {N}}\n@STRING{x = {X}}\n@article{k,\n  title = {Title},\n  note = x\n}\n@string{y = {Y}}'],
     ['a macro declared again between entries', '@string{x = {1}}\n@book{b, note = x}\n@string{x = {2}}\n@article{k, title = {Title}, note = x}',
-      '@string{x = {1}}\n\n@book{b, note = x}\n\n@string{x = {2}}\n\n@article{k,\n  title = {Title},\n  note = x\n}'],
+      '@string{x = {1}}\n@book{b, note = x}\n@string{x = {2}}\n@article{k,\n  title = {Title},\n  note = x\n}'],
     // Guards: a declaration's text in a comment and in a field, which
     // BibTeX reads none in
     ['a declaration\'s text in a comment and in a field', '@comment{@string{x = {X}}}\n@article{k, title = {Title}, note = {@string{y = {Y}}}}',
-      '@article{k,\n  title = {Title},\n  note = {@string{y = {Y}}}\n}'],
+      '@comment{@string{x = {X}}}\n@article{k,\n  title = {Title},\n  note = {@string{y = {Y}}}\n}'],
   ])('merges %s, with the file\'s declarations where they were', (_name, existing, merged) => {
     expect(mergeBibtex(existing, '@article{k,\n  title = {Title}\n}')).toBe(merged);
   });
@@ -983,6 +983,89 @@ describe('mergeBibtex', () => {
   ])('merges an entry the file gives %s, where its last was', (_name, existing, produced, merged) => {
     expect(mergeBibtex(existing, produced)).toBe(merged);
     expect(mergeBibtex(merged, produced)).toBe(merged);
+  });
+
+  // Which wrote the file's entries and declarations alone, with one blank
+  // line between each two, so a .bib that went through Word and back lost
+  // its % comments, its @comment and @preamble, and its own blank lines
+  it.each([
+    ['% comments before, between and after its entries',
+      '% Header\n% two lines\n\n@article{k, title = {A}}\n\n% Section ----\n\n@book{b, note = {B}}\n% trailing\n',
+      '% Header\n% two lines\n\n@article{k,\n  title = {Title}\n}\n\n% Section ----\n\n@book{b, note = {B}}\n% trailing\n'],
+    ['a comment right above an entry, and no blank line between two',
+      '@book{b, note = {B}}\n% Verified: https://example.org/k\n@article{k, title = {A}}\n@book{c, note = {C}}',
+      '@book{b, note = {B}}\n% Verified: https://example.org/k\n@article{k,\n  title = {Title}\n}\n@book{c, note = {C}}'],
+    ['two blank lines between entries',
+      '@book{b, note = {B}}\n\n\n@article{k, title = {A}}\n',
+      '@book{b, note = {B}}\n\n\n@article{k,\n  title = {Title}\n}\n'],
+    ['@comment and @preamble',
+      '@preamble{"\\newcommand{\\x}{X}"}\n@comment{jabref-meta: databaseType:bibtex;}\n@article{k, title = {A}}',
+      '@preamble{"\\newcommand{\\x}{X}"}\n@comment{jabref-meta: databaseType:bibtex;}\n@article{k,\n  title = {Title}\n}'],
+  ])('keeps %s as written', (_name, existing, merged) => {
+    expect(mergeBibtex(existing, '@article{k,\n  title = {Title}\n}')).toBe(merged);
+    expect(mergeBibtex(merged, '@article{k,\n  title = {Title}\n}')).toBe(merged);
+  });
+
+  it('appends a produced-only entry after the file\'s last comment, before its own ending', () => {
+    const existing = '% Header\n\n@book{b, note = {B}}\n\n% Last section\n';
+    expect(mergeBibtex(existing, '@article{n,\n  title = {N}\n}'))
+      .toBe('% Header\n\n@book{b, note = {B}}\n\n% Last section\n\n@article{n,\n  title = {N}\n}\n');
+  });
+
+  it('appends a produced-only entry in the line ends of a CRLF file', () => {
+    const existing = '% Header\r\n\r\n@book{b, note = {B}}\r\n';
+    expect(mergeBibtex(existing, '@article{n, title = {N}}'))
+      .toBe('% Header\r\n\r\n@book{b, note = {B}}\r\n\r\n@article{n, title = {N}}\r\n');
+  });
+
+  it('drops the earlier copies of many repeated keys in linear time', () => {
+    const time = (n: number) => {
+      const text = Array.from({ length: n }, (_, k) => '@book{d, note = {' + k + '}}\n% c' + k).join('\n') + '\n';
+      return fastestRun(() => mergeBibtex(text, '@article{other,\n  title = {T}\n}'));
+    };
+    time(4000);
+    expect(time(16000) / time(4000)).toBeLessThan(8);
+  }, 30000);
+
+  // Which dropped an earlier copy of a repeated key, so the text on either
+  // side of it joined: a `@comment` before it and a `{` after it then read
+  // as a comment that held the entries, or a declaration, up to its `}`,
+  // and a `@preamble` and a `{"…"}` as a preamble
+  it.each([
+    ['an entry', '@comment\n@book{k, title = {old}}\n{\n@book{b, title = {keep}}\n}\n@book{k, title = {last}}', ['b', 'k']],
+    ['a declaration', '@comment\n@book{k, title = {old}}\n{\n@string{x = {X}}\n}\n@book{k, title = {last}, note = x}', ['k']],
+    ['a preamble that dropping it would add', '@preamble\n@book{k, title = {old}}\n{"WRONG"}\n@preamble{"RIGHT"}\n@book{k, title = {last}}', ['k']],
+  ])('keeps %s that dropping a repeated key would put in a comment, or out of one', (_name, existing, keys) => {
+    const merged = mergeBibtex(existing, '@book{k,\n  title = {new}\n}');
+    expect([...parseBibtex(merged).keys()].sort()).toEqual(keys);
+    expect(parseBibtexWithRaw(merged).rangesTrusted).toBe(true);
+    if (existing.includes('@string')) expect(merged).toMatch(/^@string\{x = \{X\}\}\n\n@book\{k,/);
+    expect(merged).not.toContain('WRONG');
+  });
+
+  // Which took the result where it held the same keys and as many
+  // declarations, so the text on either side of a dropped copy could join
+  // into another construct with the same key or a declaration of another
+  // macro: `@article` and `{b, …}` read as an entry b in place of the one
+  // inside, and `@string` and `{x = …}` as a declaration of x in place of y
+  it('keeps an entry that dropping a repeated key would put another of its key around', () => {
+    const existing = '@article\n@book{k, title = {old}}\n{b, note = {WRONG},\n@book{b, title = {RIGHT}}\n}\n@book{k, title = {last}}';
+    const b = parseBibtex(mergeBibtex(existing, '@book{k,\n  title = {new}\n}')).get('b')!;
+    expect([b.type, b.fields.get('title'), b.fields.has('note')]).toEqual(['book', 'RIGHT', false]);
+  });
+
+  it('keeps a declaration that dropping a repeated key would put another around', () => {
+    const existing = '@string\n@book{k, title = {old}}\n{x = {WRONG},\n@string{y = {RIGHT}}\n}\n@book{k, title = {last}, note = y}';
+    const merged = mergeBibtex(existing, '@book{k,\n  title = {new}\n}');
+    expect(merged).toMatch(/^@string\{y = \{RIGHT\}\}\n\n@book\{k,[^]*note = y/);
+  });
+
+  // Guard: a file the scan loses its place in, whose text between entries
+  // may be part of one, is merged from its entries and declarations alone
+  it('writes the entries and declarations alone of a file the scan loses its place in', () => {
+    const existing = '% c\n@string{j = "J"}\n@book{b, note = {unclosed}\n@article{k, title = {A}}';
+    expect(parseBibtexWithRaw(existing).rangesTrusted).toBe(false);
+    expect(mergeBibtex(existing, '@article{k,\n  title = {Title}\n}')).not.toContain('% c');
   });
 
   it('keeps the declarations between many entries in linear time', () => {

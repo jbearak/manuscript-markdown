@@ -2159,6 +2159,10 @@ export function spliceFieldsIntoEntry(
  *  - Entries in both: produced text wins, but existing-only fields are spliced in.
  *  - An entry whose key the existing file gives more than once goes where
  *    the last was, whose text and fields the parser keeps.
+ *  - Everything between the existing file's entries — `%` comments,
+ *    `@comment`, `@preamble` and `@string` declarations, blank lines — stays
+ *    as written, so a file that round-trips through Word comes back as it
+ *    was, unless the file repeats a key or the scan loses its place in it.
  *  - Produced-only entries are appended at the end.
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
@@ -2180,42 +2184,19 @@ export function mergeBibtex(existing: string, produced: string): string {
   const existingRaw = existingResult.raw;
   const producedRaw = producedResult.raw;
 
-  const result: string[] = [];
-  const emittedKeys = new Set<string>();
-
-  // The existing file's @string declarations, as written, each before the
-  // first entry that came after it there, so BibTeX reads each macro an
-  // entry uses, a field copied into a merged entry too, as the existing
-  // file declared it where it read that entry. Without them, it warns that
-  // the macro is undefined and drops the field's text.
-  const declarations = existingResult.strings;
   // Where each key's last entry starts, whose text and fields the parser
   // keeps, so a key the file gives more than once goes where its kept text
   // was, after each declaration the file has before it, and the entries
   // between keep their places and the macros they read
   const entryStarts = new Map<string, number>();
   for (const range of existingResult.ranges) entryStarts.set(range.key, range.start);
-  const existingKeys = existingResult.ranges.filter(range => entryStarts.get(range.key) === range.start && existingParsed.has(range.key)).map(range => range.key);
-  let declared = 0;
-  const declareBefore = (at: number) => {
-    for (; declared < declarations.length && declarations[declared].start < at; declared++) {
-      result.push(existing.slice(declarations[declared].start, declarations[declared].end));
-    }
-  };
 
-  // Iterate existing entries in their original order, each at its last
-  for (const key of existingKeys) {
+  /** The text the merge writes for `key`, an entry the existing file has */
+  const mergedEntry = (key: string): string | undefined => {
     const existingEntry = existingParsed.get(key)!;
-    emittedKeys.add(key);
-    declareBefore(entryStarts.get(key) ?? existing.length);
-
     const producedEntry = producedParsed.get(key);
-    if (!producedEntry) {
-      // Only in existing → emit raw text verbatim
-      const raw = existingRaw.get(key);
-      if (raw) result.push(raw);
-      continue;
-    }
+    // Only in existing → emit raw text verbatim
+    if (!producedEntry) return existingRaw.get(key);
 
     // In both — find fields in existing but not in produced
     const missingFields: string[] = [];
@@ -2226,56 +2207,135 @@ export function mergeBibtex(existing: string, produced: string): string {
     }
 
     const producedText = producedRaw.get(key);
-    if (!producedText) {
-      // Defensive fallback: emit existing raw text
-      const raw = existingRaw.get(key);
-      if (raw) result.push(raw);
-      continue;
-    }
+    // Defensive fallback: emit existing raw text
+    if (!producedText) return existingRaw.get(key);
 
-    if (missingFields.length === 0) {
-      // No missing fields → emit produced raw text (fields may have been updated)
-      result.push(producedText);
-    } else {
-      // Splice missing fields from existing into produced, each at the
-      // produced entry's indentation
-      const existingText = existingRaw.get(key);
-      const fieldTexts: string[] = [];
-      const indent = detectBibtexFieldIndent(producedText);
-      const existingFields = existingText === undefined ? undefined : readEntryFields(existingText);
+    // No missing fields → emit produced raw text (fields may have been updated)
+    if (missingFields.length === 0) return producedText;
 
-      for (const fName of missingFields) {
-        const field = existingFields?.get(fName.toLowerCase());
-        if (field) {
-          fieldTexts.push(bibtexFieldLine(field, indent));
-          continue;
-        }
-        // Fallback: re-serialize with escapeBibtex + single braces
-        const value = existingEntry.fields.get(fName) ?? '';
-        const escapedValue = VERBATIM_BIBTEX_FIELDS.has(fName)
-          ? value
-          : escapeBibtex(value, AUTHOR_FIELDS.has(fName.toLowerCase()));
-        fieldTexts.push(formatBibtexFieldLine(fName, escapedValue, indent));
+    // Splice missing fields from existing into produced, each at the
+    // produced entry's indentation
+    const existingText = existingRaw.get(key);
+    const fieldTexts: string[] = [];
+    const indent = detectBibtexFieldIndent(producedText);
+    const existingFields = existingText === undefined ? undefined : readEntryFields(existingText);
+
+    for (const fName of missingFields) {
+      const field = existingFields?.get(fName.toLowerCase());
+      if (field) {
+        fieldTexts.push(bibtexFieldLine(field, indent));
+        continue;
       }
-
-      // Keep each entry internally consistent: a mixed-ending file must not
-      // have its minority-convention entries rewritten to the majority one.
-      // Only a newline at the entry's own level counts — one buried in a field
-      // value is payload and says nothing about the entry's layout.
-      const entryEol = detectEntryEol(producedText) ?? producedEol();
-      result.push(spliceFieldsIntoEntry(producedText, fieldTexts, entryEol));
+      // Fallback: re-serialize with escapeBibtex + single braces
+      const value = existingEntry.fields.get(fName) ?? '';
+      const escapedValue = VERBATIM_BIBTEX_FIELDS.has(fName)
+        ? value
+        : escapeBibtex(value, AUTHOR_FIELDS.has(fName.toLowerCase()));
+      fieldTexts.push(formatBibtexFieldLine(fName, escapedValue, indent));
     }
+
+    // Keep each entry internally consistent: a mixed-ending file must not
+    // have its minority-convention entries rewritten to the majority one.
+    // Only a newline at the entry's own level counts — one buried in a field
+    // value is payload and says nothing about the entry's layout.
+    const entryEol = detectEntryEol(producedText) ?? producedEol();
+    return spliceFieldsIntoEntry(producedText, fieldTexts, entryEol);
+  };
+
+  const producedOnly = () => [...producedParsed.keys()]
+    .filter(key => !existingParsed.has(key))
+    .map(key => ({ key, text: producedRaw.get(key) }))
+    .filter((entry): entry is { key: string; text: string } => entry.text !== undefined);
+
+  /** The existing file as the skeleton: each entry's text replaced by the
+   *  merge's, and the text between entries copied as it is. That text is
+   *  all at the top level — the scan stayed in sync — so it holds nothing
+   *  the parser read as an entry, and with an entry in each entry's place,
+   *  reads as it did. Only for a file that gives each key once: dropping a
+   *  repeated key's earlier copy would join the text on either side of it,
+   *  which can then read otherwise, as `@comment` or `@preamble` before it
+   *  and a `{` after it. The result is read again, and taken only where each
+   *  entry and @string declaration it holds is where the merge put it. */
+  const inSkeleton = (): string | undefined => {
+    // Where each entry and declaration should be in the result
+    const entries: Array<{ key: string; start: number; end: number }> = [];
+    const strings: Array<{ start: number; end: number }> = [];
+    let declared = 0;
+    let out = '';
+    let at = 0;
+    // The existing file's text from `at` to `to`, with the declarations in it
+    const copy = (to: number) => {
+      const shift = out.length - at;
+      for (; declared < existingResult.strings.length && existingResult.strings[declared].start < to; declared++) {
+        const { start, end } = existingResult.strings[declared];
+        strings.push({ start: start + shift, end: end + shift });
+      }
+      out += existing.slice(at, to);
+    };
+    const put = (key: string, text: string) => {
+      entries.push({ key, start: out.length, end: out.length + text.length });
+      out += text;
+    };
+    for (const range of existingResult.ranges) {
+      copy(range.start);
+      at = range.end;
+      const text = existingParsed.has(range.key) ? mergedEntry(range.key) : existing.slice(range.start, range.end);
+      if (text) put(range.key, text);
+    }
+    copy(existing.length);
+    const added = producedOnly();
+    if (added.length > 0) {
+      // After the last of the existing file, with a blank line between each
+      // two in the file's line ends, and the file's own ending after them
+      const blank = detectBibtexEol(existing).repeat(2);
+      const ending = out.slice(out.trimEnd().length);
+      out = out.slice(0, out.length - ending.length);
+      for (const entry of added) {
+        out += blank;
+        put(entry.key, entry.text);
+      }
+      out += ending;
+    }
+    const read = scanBibtex(out);
+    const same = read.rangesTrusted
+      && read.ranges.length === entries.length && read.ranges.every((range, k) => range.key === entries[k].key && range.start === entries[k].start && range.end === entries[k].end)
+      && read.strings.length === strings.length && read.strings.every((string, k) => string.start === strings[k].start && string.end === strings[k].end);
+    return same ? out : undefined;
+  };
+
+  if (existingResult.rangesTrusted && findDuplicateBibtexKeys(existingResult.ranges).size === 0) {
+    const out = inSkeleton();
+    if (out !== undefined) return out;
+  }
+
+  // A file the scan lost its place in, that repeats a key, or whose
+  // skeleton reads otherwise: its entries and @string declarations alone,
+  // as the parser read them, since the text between them may be part of an
+  // entry
+  const result: string[] = [];
+
+  // The existing file's @string declarations, as written, each before the
+  // first entry that came after it there, so BibTeX reads each macro an
+  // entry uses, a field copied into a merged entry too, as the existing
+  // file declared it where it read that entry. Without them, it warns that
+  // the macro is undefined and drops the field's text.
+  const declarations = existingResult.strings;
+  const existingKeys = existingResult.ranges.filter(range => entryStarts.get(range.key) === range.start && existingParsed.has(range.key)).map(range => range.key);
+  let declared = 0;
+  const declareBefore = (at: number) => {
+    for (; declared < declarations.length && declarations[declared].start < at; declared++) {
+      result.push(existing.slice(declarations[declared].start, declarations[declared].end));
+    }
+  };
+
+  // Iterate existing entries in their original order, each at its last
+  for (const key of existingKeys) {
+    declareBefore(entryStarts.get(key) ?? existing.length);
+    const text = mergedEntry(key);
+    if (text) result.push(text);
   }
 
   declareBefore(existing.length);
-
-  // Append entries only in produced
-  for (const key of producedParsed.keys()) {
-    if (!emittedKeys.has(key)) {
-      const raw = producedRaw.get(key);
-      if (raw) result.push(raw);
-    }
-  }
-
+  for (const entry of producedOnly()) result.push(entry.text);
   return result.join('\n\n');
 }
