@@ -1027,6 +1027,19 @@ describe('mergeBibtex', () => {
     expect(time(16000) / time(4000)).toBeLessThan(8);
   }, 30000);
 
+  // Which dropped an earlier copy of a repeated key, so the text on either
+  // side of it joined: a `@comment` before it and a `{` after it then read
+  // as a comment that held the entries, or a declaration, up to its `}`
+  it.each([
+    ['an entry', '@comment\n@book{k, title = {old}}\n{\n@book{b, title = {keep}}\n}\n@book{k, title = {last}}', ['b', 'k']],
+    ['a declaration', '@comment\n@book{k, title = {old}}\n{\n@string{x = {X}}\n}\n@book{k, title = {last}, note = x}', ['k']],
+  ])('keeps %s that dropping a repeated key would put in a comment', (_name, existing, keys) => {
+    const merged = mergeBibtex(existing, '@book{k,\n  title = {new}\n}');
+    expect([...parseBibtex(merged).keys()].sort()).toEqual(keys);
+    expect(parseBibtexWithRaw(merged).rangesTrusted).toBe(true);
+    if (existing.includes('@string')) expect(merged).toMatch(/^@string\{x = \{X\}\}\n\n@book\{k,/);
+  });
+
   // Guard: a file the scan loses its place in, whose text between entries
   // may be part of one, is merged from its entries and declarations alone
   it('writes the entries and declarations alone of a file the scan loses its place in', () => {

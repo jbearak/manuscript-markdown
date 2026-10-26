@@ -2243,14 +2243,19 @@ export function mergeBibtex(existing: string, produced: string): string {
 
   const producedOnly = () => [...producedParsed.keys()]
     .filter(key => !existingParsed.has(key))
-    .map(key => producedRaw.get(key))
-    .filter((raw): raw is string => raw !== undefined);
+    .map(key => ({ key, text: producedRaw.get(key) }))
+    .filter((entry): entry is { key: string; text: string } => entry.text !== undefined);
 
-  if (existingResult.rangesTrusted) {
-    // The existing file is the skeleton: each entry's text is replaced by the
-    // merge's, and the text between entries is copied as it is. That text is
-    // all at the top level — the scan stayed in sync — so it holds nothing
-    // the parser read as an entry.
+  /** The existing file as the skeleton: each entry's text replaced by the
+   *  merge's, and the text between entries copied as it is. That text is
+   *  all at the top level — the scan stayed in sync — so it holds nothing
+   *  the parser read as an entry. But dropping an entry joins the text on
+   *  either side of it, which can then read otherwise, as `@comment` before
+   *  it and a `{` after it, which open a comment that holds the entries up
+   *  to its `}`; so the result is read again, and taken only where it holds
+   *  the entries it should, in their order, and each @string declaration. */
+  const inSkeleton = (): string | undefined => {
+    const keys: string[] = [];
     let out = '';
     let at = 0;
     // From where it's set, so a drop reads no copy of the rest of the file
@@ -2269,21 +2274,34 @@ export function mergeBibtex(existing: string, produced: string): string {
         else out = out.trimEnd();
         continue;
       }
-      out += existingParsed.has(range.key) ? mergedEntry(range.key) ?? '' : existing.slice(range.start, range.end);
+      const text = existingParsed.has(range.key) ? mergedEntry(range.key) : existing.slice(range.start, range.end);
+      if (text) keys.push(range.key);
+      out += text ?? '';
     }
     out += existing.slice(at);
     const added = producedOnly();
-    if (added.length === 0) return out;
-    // After the last of the existing file, with a blank line between each
-    // two in the file's line ends, and the file's own ending after them
-    const blank = detectBibtexEol(existing).repeat(2);
-    const body = out.trimEnd();
-    return body + blank + added.join(blank) + out.slice(body.length);
+    if (added.length > 0) {
+      // After the last of the existing file, with a blank line between each
+      // two in the file's line ends, and the file's own ending after them
+      const blank = detectBibtexEol(existing).repeat(2);
+      const body = out.trimEnd();
+      out = body + blank + added.map(entry => entry.text).join(blank) + out.slice(body.length);
+      for (const entry of added) keys.push(entry.key);
+    }
+    const read = scanBibtex(out);
+    const same = read.rangesTrusted && read.strings.length === existingResult.strings.length
+      && read.ranges.length === keys.length && read.ranges.every((range, k) => range.key === keys[k]);
+    return same ? out : undefined;
+  };
+
+  if (existingResult.rangesTrusted) {
+    const out = inSkeleton();
+    if (out !== undefined) return out;
   }
 
-  // A file the scan lost its place in: its entries and @string declarations
-  // alone, as the parser read them, since the text between them may be part
-  // of an entry the scan didn't delimit
+  // A file the scan lost its place in, or whose skeleton reads otherwise:
+  // its entries and @string declarations alone, as the parser read them,
+  // since the text between them may be part of an entry
   const result: string[] = [];
 
   // The existing file's @string declarations, as written, each before the
@@ -2308,6 +2326,6 @@ export function mergeBibtex(existing: string, produced: string): string {
   }
 
   declareBefore(existing.length);
-  result.push(...producedOnly());
+  for (const entry of producedOnly()) result.push(entry.text);
   return result.join('\n\n');
 }
