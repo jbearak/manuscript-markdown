@@ -971,15 +971,15 @@ describe('mergeBibtex', () => {
   // each other entry and declaration stays where it was
   it.each([
     ['twice, with a macro declared between them', '@article{k, title = {A}}\n@string{j = "J"}\n@article{k, journal = j}', '@article{k,\n  title = {Title}\n}',
-      '@string{j = "J"}\n@article{k,\n  title = {Title},\n  journal = j\n}'],
+      '@string{j = "J"}\n\n@article{k,\n  title = {Title},\n  journal = j\n}'],
     ['twice, with a macro declared between them, the last with the produced field', '@article{k, title = {A}}\n@string{x = {X}}\n@article{k, title = {Title}, note = x}', '@article{k,\n  title = {Title}\n}',
-      '@string{x = {X}}\n@article{k,\n  title = {Title},\n  note = x\n}'],
+      '@string{x = {X}}\n\n@article{k,\n  title = {Title},\n  note = x\n}'],
     ['twice, with a macro declared between them, which the produced file lacks', '@article{k, title = {A}}\n@string{j = "J"}\n@article{k, journal = j}', '@article{p,\n  title = {P}\n}',
-      '@string{j = "J"}\n@article{k, journal = j}\n\n@article{p,\n  title = {P}\n}'],
+      '@string{j = "J"}\n\n@article{k, journal = j}\n\n@article{p,\n  title = {P}\n}'],
     ['twice, with a macro declared again between them, after an entry that uses it', '@string{x = {1}}\n@article{k, title = {A}}\n@book{b, note = x}\n@string{x = {2}}\n@article{k, note = x}', '@article{k,\n  title = {Title}\n}',
-      '@string{x = {1}}\n@book{b, note = x}\n@string{x = {2}}\n@article{k,\n  title = {Title},\n  note = x\n}'],
+      '@string{x = {1}}\n\n@book{b, note = x}\n\n@string{x = {2}}\n\n@article{k,\n  title = {Title},\n  note = x\n}'],
     ['three times, among other entries', '@book{a, note = {A}}\n@article{k, title = {1}}\n@book{b, note = {B}}\n@article{k, title = {2}}\n@string{j = "J"}\n@book{c, note = {C}}\n@article{k, journal = j}\n@book{d, note = {D}}', '@article{k,\n  title = {Title}\n}',
-      '@book{a, note = {A}}\n@book{b, note = {B}}\n@string{j = "J"}\n@book{c, note = {C}}\n@article{k,\n  title = {Title},\n  journal = j\n}\n@book{d, note = {D}}'],
+      '@book{a, note = {A}}\n\n@book{b, note = {B}}\n\n@string{j = "J"}\n\n@book{c, note = {C}}\n\n@article{k,\n  title = {Title},\n  journal = j\n}\n\n@book{d, note = {D}}'],
   ])('merges an entry the file gives %s, where its last was', (_name, existing, produced, merged) => {
     expect(mergeBibtex(existing, produced)).toBe(merged);
     expect(mergeBibtex(merged, produced)).toBe(merged);
@@ -1029,15 +1029,18 @@ describe('mergeBibtex', () => {
 
   // Which dropped an earlier copy of a repeated key, so the text on either
   // side of it joined: a `@comment` before it and a `{` after it then read
-  // as a comment that held the entries, or a declaration, up to its `}`
+  // as a comment that held the entries, or a declaration, up to its `}`,
+  // and a `@preamble` and a `{"…"}` as a preamble
   it.each([
     ['an entry', '@comment\n@book{k, title = {old}}\n{\n@book{b, title = {keep}}\n}\n@book{k, title = {last}}', ['b', 'k']],
     ['a declaration', '@comment\n@book{k, title = {old}}\n{\n@string{x = {X}}\n}\n@book{k, title = {last}, note = x}', ['k']],
-  ])('keeps %s that dropping a repeated key would put in a comment', (_name, existing, keys) => {
+    ['a preamble that dropping it would add', '@preamble\n@book{k, title = {old}}\n{"WRONG"}\n@preamble{"RIGHT"}\n@book{k, title = {last}}', ['k']],
+  ])('keeps %s that dropping a repeated key would put in a comment, or out of one', (_name, existing, keys) => {
     const merged = mergeBibtex(existing, '@book{k,\n  title = {new}\n}');
     expect([...parseBibtex(merged).keys()].sort()).toEqual(keys);
     expect(parseBibtexWithRaw(merged).rangesTrusted).toBe(true);
     if (existing.includes('@string')) expect(merged).toMatch(/^@string\{x = \{X\}\}\n\n@book\{k,/);
+    expect(merged).not.toContain('WRONG');
   });
 
   // Which took the result where it held the same keys and as many

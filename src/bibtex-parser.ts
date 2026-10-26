@@ -2161,7 +2161,8 @@ export function spliceFieldsIntoEntry(
  *    the last was, whose text and fields the parser keeps.
  *  - Everything between the existing file's entries — `%` comments,
  *    `@comment`, `@preamble` and `@string` declarations, blank lines — stays
- *    as written, so a file that round-trips through Word comes back as it was.
+ *    as written, so a file that round-trips through Word comes back as it
+ *    was, unless the file repeats a key or the scan loses its place in it.
  *  - Produced-only entries are appended at the end.
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
@@ -2249,13 +2250,12 @@ export function mergeBibtex(existing: string, produced: string): string {
   /** The existing file as the skeleton: each entry's text replaced by the
    *  merge's, and the text between entries copied as it is. That text is
    *  all at the top level — the scan stayed in sync — so it holds nothing
-   *  the parser read as an entry. But dropping an entry joins the text on
-   *  either side of it, which can then read otherwise, as `@comment` before
-   *  it and a `{` after it, which open a comment that holds the entries up
-   *  to its `}`, or `@article` and a `{b, …}`, which then read as an entry
-   *  in place of the one inside it; so the result is read again, and taken
-   *  only where each entry and @string declaration it holds is where the
-   *  merge put it, and nothing else reads as one. */
+   *  the parser read as an entry, and with an entry in each entry's place,
+   *  reads as it did. Only for a file that gives each key once: dropping a
+   *  repeated key's earlier copy would join the text on either side of it,
+   *  which can then read otherwise, as `@comment` or `@preamble` before it
+   *  and a `{` after it. The result is read again, and taken only where each
+   *  entry and @string declaration it holds is where the merge put it. */
   const inSkeleton = (): string | undefined => {
     // Where each entry and declaration should be in the result
     const entries: Array<{ key: string; start: number; end: number }> = [];
@@ -2276,22 +2276,9 @@ export function mergeBibtex(existing: string, produced: string): string {
       entries.push({ key, start: out.length, end: out.length + text.length });
       out += text;
     };
-    // From where it's set, so a drop reads no copy of the rest of the file
-    const space = /\s*/y;
     for (const range of existingResult.ranges) {
       copy(range.start);
       at = range.end;
-      if (entryStarts.get(range.key) !== range.start) {
-        // An earlier occurrence of a key the file repeats, whose text the
-        // parser doesn't keep: drop it, and the white space after it, so no
-        // gap is left where it was, unless that runs to the file's end,
-        // which then ends as it did
-        space.lastIndex = at;
-        space.exec(existing);
-        if (space.lastIndex < existing.length) at = space.lastIndex;
-        else out = out.trimEnd();
-        continue;
-      }
       const text = existingParsed.has(range.key) ? mergedEntry(range.key) : existing.slice(range.start, range.end);
       if (text) put(range.key, text);
     }
@@ -2316,14 +2303,15 @@ export function mergeBibtex(existing: string, produced: string): string {
     return same ? out : undefined;
   };
 
-  if (existingResult.rangesTrusted) {
+  if (existingResult.rangesTrusted && findDuplicateBibtexKeys(existingResult.ranges).size === 0) {
     const out = inSkeleton();
     if (out !== undefined) return out;
   }
 
-  // A file the scan lost its place in, or whose skeleton reads otherwise:
-  // its entries and @string declarations alone, as the parser read them,
-  // since the text between them may be part of an entry
+  // A file the scan lost its place in, that repeats a key, or whose
+  // skeleton reads otherwise: its entries and @string declarations alone,
+  // as the parser read them, since the text between them may be part of an
+  // entry
   const result: string[] = [];
 
   // The existing file's @string declarations, as written, each before the
