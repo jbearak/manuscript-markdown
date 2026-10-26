@@ -403,8 +403,9 @@ describe('BibTeX field reader parity', () => {
    * as BibTeX read it in the existing entry, the last of a repeated name,
    * as the parser keeps the last, each of the produced entry's as it was.
    * The existing file's @string declarations stay, as written, those
-   * before the entry before it and those after it after it, so BibTeX
-   * reads each macro the entry uses as the existing file declared it.
+   * before the entry before it and those after it after it, with the line
+   * ends between as the file has them, so BibTeX reads each macro the entry
+   * uses as the existing file declared it.
    */
   it('copies each field the produced entry lacks into an entry BibTeX reads, as BibTeX read it', () => {
     const content = fc.array(fc.constantFrom('a', ' ', ',', '=', '#', '%', '{x}', '{"}', '\n', '\\&', 'doi = ', '{a {b} c}'), { maxLength: 4 })
@@ -431,7 +432,7 @@ describe('BibTeX field reader parity', () => {
         const before = readAsBibtex(entry);
         const merged = mergeBibtex(existing, producedEntry);
         const at = merged.indexOf('@article{k,');
-        const tail = declaredAfter.map(d => '\n\n' + d).join('');
+        const tail = declaredAfter.map(d => '\n' + d).join('');
         let after: Array<[string, string[]]>;
         try {
           after = readAsBibtex(merged.slice(at, merged.length - tail.length));
@@ -452,7 +453,7 @@ describe('BibTeX field reader parity', () => {
         }
         if (JSON.stringify(copied) !== JSON.stringify([...expected.values()])) throw new Error(failure + ', copied ' + JSON.stringify(copied) + ', not ' + JSON.stringify([...expected.values()]));
         // The existing file's declarations, where they were
-        const declaring = declared.map(d => d + '\n\n').join('');
+        const declaring = declared.map(d => d + '\n').join('');
         if (merged.slice(0, at) !== declaring || !merged.endsWith(tail)) throw new Error(failure + ', not with ' + JSON.stringify(declaring) + ' before and ' + JSON.stringify(tail) + ' after');
         return true;
       }),
