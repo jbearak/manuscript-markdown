@@ -1040,6 +1040,23 @@ describe('mergeBibtex', () => {
     if (existing.includes('@string')) expect(merged).toMatch(/^@string\{x = \{X\}\}\n\n@book\{k,/);
   });
 
+  // Which took the result where it held the same keys and as many
+  // declarations, so the text on either side of a dropped copy could join
+  // into another construct with the same key or a declaration of another
+  // macro: `@article` and `{b, …}` read as an entry b in place of the one
+  // inside, and `@string` and `{x = …}` as a declaration of x in place of y
+  it('keeps an entry that dropping a repeated key would put another of its key around', () => {
+    const existing = '@article\n@book{k, title = {old}}\n{b, note = {WRONG},\n@book{b, title = {RIGHT}}\n}\n@book{k, title = {last}}';
+    const b = parseBibtex(mergeBibtex(existing, '@book{k,\n  title = {new}\n}')).get('b')!;
+    expect([b.type, b.fields.get('title'), b.fields.has('note')]).toEqual(['book', 'RIGHT', false]);
+  });
+
+  it('keeps a declaration that dropping a repeated key would put another around', () => {
+    const existing = '@string\n@book{k, title = {old}}\n{x = {WRONG},\n@string{y = {RIGHT}}\n}\n@book{k, title = {last}, note = y}';
+    const merged = mergeBibtex(existing, '@book{k,\n  title = {new}\n}');
+    expect(merged).toMatch(/^@string\{y = \{RIGHT\}\}\n\n@book\{k,[^]*note = y/);
+  });
+
   // Guard: a file the scan loses its place in, whose text between entries
   // may be part of one, is merged from its entries and declarations alone
   it('writes the entries and declarations alone of a file the scan loses its place in', () => {

@@ -2252,16 +2252,34 @@ export function mergeBibtex(existing: string, produced: string): string {
    *  the parser read as an entry. But dropping an entry joins the text on
    *  either side of it, which can then read otherwise, as `@comment` before
    *  it and a `{` after it, which open a comment that holds the entries up
-   *  to its `}`; so the result is read again, and taken only where it holds
-   *  the entries it should, in their order, and each @string declaration. */
+   *  to its `}`, or `@article` and a `{b, …}`, which then read as an entry
+   *  in place of the one inside it; so the result is read again, and taken
+   *  only where each entry and @string declaration it holds is where the
+   *  merge put it, and nothing else reads as one. */
   const inSkeleton = (): string | undefined => {
-    const keys: string[] = [];
+    // Where each entry and declaration should be in the result
+    const entries: Array<{ key: string; start: number; end: number }> = [];
+    const strings: Array<{ start: number; end: number }> = [];
+    let declared = 0;
     let out = '';
     let at = 0;
+    // The existing file's text from `at` to `to`, with the declarations in it
+    const copy = (to: number) => {
+      const shift = out.length - at;
+      for (; declared < existingResult.strings.length && existingResult.strings[declared].start < to; declared++) {
+        const { start, end } = existingResult.strings[declared];
+        strings.push({ start: start + shift, end: end + shift });
+      }
+      out += existing.slice(at, to);
+    };
+    const put = (key: string, text: string) => {
+      entries.push({ key, start: out.length, end: out.length + text.length });
+      out += text;
+    };
     // From where it's set, so a drop reads no copy of the rest of the file
     const space = /\s*/y;
     for (const range of existingResult.ranges) {
-      out += existing.slice(at, range.start);
+      copy(range.start);
       at = range.end;
       if (entryStarts.get(range.key) !== range.start) {
         // An earlier occurrence of a key the file repeats, whose text the
@@ -2275,22 +2293,26 @@ export function mergeBibtex(existing: string, produced: string): string {
         continue;
       }
       const text = existingParsed.has(range.key) ? mergedEntry(range.key) : existing.slice(range.start, range.end);
-      if (text) keys.push(range.key);
-      out += text ?? '';
+      if (text) put(range.key, text);
     }
-    out += existing.slice(at);
+    copy(existing.length);
     const added = producedOnly();
     if (added.length > 0) {
       // After the last of the existing file, with a blank line between each
       // two in the file's line ends, and the file's own ending after them
       const blank = detectBibtexEol(existing).repeat(2);
-      const body = out.trimEnd();
-      out = body + blank + added.map(entry => entry.text).join(blank) + out.slice(body.length);
-      for (const entry of added) keys.push(entry.key);
+      const ending = out.slice(out.trimEnd().length);
+      out = out.slice(0, out.length - ending.length);
+      for (const entry of added) {
+        out += blank;
+        put(entry.key, entry.text);
+      }
+      out += ending;
     }
     const read = scanBibtex(out);
-    const same = read.rangesTrusted && read.strings.length === existingResult.strings.length
-      && read.ranges.length === keys.length && read.ranges.every((range, k) => range.key === keys[k]);
+    const same = read.rangesTrusted
+      && read.ranges.length === entries.length && read.ranges.every((range, k) => range.key === entries[k].key && range.start === entries[k].start && range.end === entries[k].end)
+      && read.strings.length === strings.length && read.strings.every((string, k) => string.start === strings[k].start && string.end === strings[k].end);
     return same ? out : undefined;
   };
 
