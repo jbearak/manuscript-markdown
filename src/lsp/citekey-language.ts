@@ -134,6 +134,27 @@ export function uriToFsPath(uri: string): string | undefined {
 export function fsPathToUri(fsPath: string): string {
 	return pathToFileURL(fsPath).toString();
 }
+/** The open document at `fsPath`, by its path and not its URI's text: the
+ *  client's URI need not be the one fsPathToUri makes, as VS Code's
+ *  `file:///c%3A/…` for `C:\…` on Windows, or `%3A` for a `:` in a name. */
+export async function findOpenDocumentForPath<T extends { uri: string }>(
+	documents: { get(uri: string): T | undefined; all(): T[] },
+	fsPath: string,
+): Promise<T | undefined> {
+	const exact = documents.get(fsPathToUri(fsPath));
+	if (exact) {
+		return exact;
+	}
+	const canonical = await canonicalizeFsPathAsync(fsPath);
+	for (const doc of documents.all()) {
+		const docPath = uriToFsPath(doc.uri);
+		if (docPath && (await canonicalizeFsPathAsync(docPath)) === canonical) {
+			return doc;
+		}
+	}
+	return undefined;
+}
+
 export function canonicalizeFsPath(fsPath: string): string {
 	let value = path.resolve(fsPath);
 	try {

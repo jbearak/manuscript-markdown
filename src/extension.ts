@@ -19,6 +19,7 @@ import { parseFrontmatter, normalizeColorScheme, type ColorScheme } from './fron
 import type { EmbedResolver } from './embed-preprocess';
 import { BUNDLED_STYLE_LABELS } from './csl-loader';
 import { shouldAutoTriggerLspSuggest } from './lsp/auto-suggest';
+import { WORKSPACE_BIB_FILES_CHANGED_NOTIFICATION, WORKSPACE_BIB_FILES_REQUEST } from './lsp/bib-workspace-symbols';
 import {
 	getOutputBasePath,
 	getOutputConflictMessage,
@@ -1236,6 +1237,25 @@ function startLanguageClient(context: vscode.ExtensionContext): void {
 		'Manuscript Markdown Language Server',
 		serverOptions,
 		clientOptions
+	);
+	// The server's workspace symbols come from these .bib files; findFiles
+	// applies files.exclude, so the server doesn't walk the tree itself
+	languageClient.onRequest(WORKSPACE_BIB_FILES_REQUEST, async () =>
+		(await vscode.workspace.findFiles('**/*.bib')).map(uri => uri.toString())
+	);
+	const client = languageClient;
+	const bibFilesChanged = () => {
+		if (client.isRunning()) {
+			void client.sendNotification(WORKSPACE_BIB_FILES_CHANGED_NOTIFICATION);
+		}
+	};
+	languageClientDisposables.push(
+		vscode.workspace.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('files.exclude')) {
+				bibFilesChanged();
+			}
+		}),
+		vscode.workspace.onDidChangeWorkspaceFolders(bibFilesChanged),
 	);
 	void languageClient.start();
 }
