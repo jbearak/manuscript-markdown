@@ -1247,9 +1247,11 @@ async function getWorkspaceSymbolBibPaths(): Promise<string[]> {
 			candidates.push(fsPath);
 		}
 	}
-	// Not bibReverseMap's keys: on macOS and Windows those are lowercased
+	// Not bibReverseMap's keys: on macOS and Windows those are lowercased.
+	// Nor gated on docToBibMap, which misses a .bib outside the workspace
+	// created after its document was last validated (no watcher sees it)
 	for (const doc of documents.all()) {
-		if (isMarkdownUri(doc.uri, doc.languageId) && docToBibMap.has(doc.uri)) {
+		if (isMarkdownUri(doc.uri, doc.languageId)) {
 			const bibPath = await resolveBibliographyPathAsync(doc.uri, doc.getText(), workspaceRootPaths);
 			if (bibPath) {
 				candidates.push(bibPath);
