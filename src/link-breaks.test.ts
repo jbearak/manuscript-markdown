@@ -28,6 +28,14 @@ describe('a backslash at a line end after a URL', () => {
     expect(paragraph('{++https://e.com/a\\\nb++}')).toContain('<a href="https://e.com/a">https://e.com/a</a><br>');
   });
 
+  test('before a blank line in CriticMarkup\'s text is dropped from the URL, as from text, in both', () => {
+    // The preview reads the blank line's placeholder, export the line ends
+    const markdown = '{++https://e.com/a\\\n\nb++}';
+    expect(preview.render(markdown)).toContain('<a href="https://e.com/a">https://e.com/a</a></ins>');
+    const runs = parseMd(markdown).flatMap(token => token.criticParaMarkRun?.innerRuns ?? token.runs ?? []);
+    expect(runs.filter(run => run.href).map(run => run.text + ' -> ' + run.href)).toEqual(['https://e.com/a -> https://e.com/a']);
+  });
+
   test('escaped, as \\\\, is the URL\'s, and starts no break', () => {
     expect(paragraph('https://e.com/a\\\\\nb')).not.toContain('<br>');
     expect(exported('https://e.com/a\\\\\nb')).not.toContain('<br>');
