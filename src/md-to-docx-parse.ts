@@ -19,6 +19,7 @@ import { type TableDecimalMark, type TableDigitGrouping, type TableDigits, parse
 import Token from 'markdown-it/lib/token.mjs';
 import { citationSpanAt, criticSpanAt, crossRefSpanAt, formatHighlightAt } from './inline-syntax';
 import { codeSpansOfSpaces } from './code-spans';
+import { hardBreaksEndLinks } from './link-breaks';
 import { commentsEnd, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
 import { countsForIndent, isCommentsWithIds } from './md-to-docx-custom-props';
 import { decodeHtmlAttribute } from './html-entities';
@@ -1071,6 +1072,7 @@ export function createMarkdownIt(): MarkdownIt {
   md.use(codeSpansOfSpaces);
   md.use(linearInlineComments);
   md.use(criticBreaksEndLinks);
+  md.use(hardBreaksEndLinks);
   md.use(criticBreaksInRawHtml);
 
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
