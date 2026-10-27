@@ -9762,7 +9762,12 @@ function resolveBareLinks(markdown: string, cell = false, beforeMath = false): s
       ? keepParagraphEdgeWhitespace(address + after, false, true) : undefined;
     const written = ending !== undefined ? (beforeMath ? beforeParagraphMath(ending) : ending).slice(address.length)
       : lineEnd !== undefined ? gridLineBeforeBreak(address + lineEnd).slice(address.length) + '\n' : undefined;
-    const readsBack = (lead: string) => head !== undefined && bareLinkReadsBack(lead, address, closer, head, lineStart)
+    // Spaces and tabs alone between it and a line end, as a tracked break's
+    // after its start mark, a private-use character (see trackedBreakMarks),
+    // which Markdown would drop there, so joinSpansAtTrackedBreaks writes
+    // them as references, which linkify reads on into
+    const spacesEndLine = /^[ \t]+[\uE000-\uF8FF]?\n/.test(after);
+    const readsBack = (lead: string) => head !== undefined && !spacesEndLine && bareLinkReadsBack(lead, address, closer, head, lineStart)
       && (!edgeBefore && written === undefined || bareLinkReadsBack(
         edgeBefore ? keepParagraphEdgeWhitespace(lead + address, true, false).slice(0, -address.length) : lead, address, closer,
         written ?? head, lineStart));
@@ -9792,6 +9797,13 @@ function bareLinkReadsBack(before: string, address: string, closer: string, foll
     const at = following.indexOf(closer);
     if (at >= 0 && !following.slice(0, at).includes('{')) following = following.slice(0, at);
   }
+  // An address that ends in an unescaped backslash, which linkify reads in
+  // the URL, goes bare only before a space or a tab. Before punctuation,
+  // inline-syntax.ts reads the backslash as its escape, which leaves a
+  // tracked paragraph mark's {++ as text; before a tracked break's line end,
+  // joinSpansAtTrackedBreaks escapes it, and the URL reads both; and at the
+  // end of its span or text, what's written after is unread here.
+  if (/(?:^|[^\\])(?:\\\\)*\\$/.test(address) && !/^[ \t]/.test(following)) return false;
   // The text before it to a space or the opener of the span it starts
   let lead = before.slice(-BARE_LINK_CONTEXT);
   if (/(?:^|[^\\])(?:\\\\)*(?:\{(?:\+\+|--|~~|==)|~>)$/.test(lead)) lead = '';

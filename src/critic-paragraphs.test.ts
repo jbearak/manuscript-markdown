@@ -801,3 +801,39 @@ describe('CriticMarkup\'s openers in an equation, and the breaks no rule reads',
     expect(time(16_000) / time(4_000)).toBeLessThan(8);
   }, 30000);
 });
+
+describe('a link whose text is its address before a tracked paragraph break', () => {
+  // A target Word wrote may hold the backslash as it is, so the link's text
+  // is its address, which import may write bare
+  async function importedWithLiteralBackslash(md: string): Promise<string> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    zip.file('word/_rels/document.xml.rels', rels.split('%5C').join('\\'));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    return markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  }
+  const link = '[https://e.com/a\\\\](https://e.com/a%5C)';
+
+  it.each([
+    ['in an insertion that goes on past it', '{++x ' + link + '\n\nb++}'],
+    ['in a deletion that ends with it', '{--' + link + '\n\n--}b'],
+    ['before an inserted paragraph mark alone', 'x ' + link + '{++\n\n++}b'],
+  ])('keeps a backslash that ends it and the break, %s', async (_, md) => {
+    const imported = await importedWithLiteralBackslash(md);
+    const first = parseMd(imported)[0];
+    const runs = (first.runs ?? []).flatMap(run => run.innerRuns ?? [run]);
+    expect(runs.filter(run => run.href).map(run => run.text + ' -> ' + run.href)).toEqual(['https://e.com/a\\ -> https://e.com/a%5C']);
+    expect(first.criticParaMark).toBe(md.startsWith('{--') ? 'deletion' : 'addition');
+  });
+
+  it.each([
+    ['a space', '{++x ' + link + '&#32;\n\nb++}', 'https://e.com/a\\ -> https://e.com/a%5C'],
+    ['a tab, in a deletion', '{--x ' + link + '&#9;\n\nb--}', 'https://e.com/a\\ -> https://e.com/a%5C'],
+    ['a space after an address with no backslash', '{++x [https://e.com/a](https://e.com/a)&#32;\n\nb++}', 'https://e.com/a -> https://e.com/a'],
+  ])('keeps its address before %s at the break, which is written as a reference', async (_, md, expected) => {
+    // Bare, linkify read on into the reference
+    const first = parseMd(await importedWithLiteralBackslash(md))[0];
+    const runs = (first.runs ?? []).flatMap(run => run.innerRuns ?? [run]);
+    expect(runs.filter(run => run.href).map(run => run.text + ' -> ' + run.href)).toEqual([expected]);
+  });
+});
