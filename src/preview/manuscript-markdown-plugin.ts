@@ -1,6 +1,7 @@
 import type MarkdownIt from 'markdown-it';
 import { imagePathsWithSpaces } from '../image-paths';
 import { codeSpansOfSpaces } from '../code-spans';
+import { hardBreaksEndLinks } from '../link-breaks';
 import { linearInlineComments } from '../inline-html-comments';
 import type StateCore from 'markdown-it/lib/rules_core/state_core.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
@@ -2432,6 +2433,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.use(codeSpansOfSpaces);
   md.use(linearInlineComments);
   md.use(criticBreaksEndLinks);
+  md.use(hardBreaksEndLinks);
   md.use(criticBreaksInRawHtml);
   // Standalone markdown-it consumers (including unit tests) do not load VS
   // Code's math extension. Keep CriticMarkup-in-math output readable there;
