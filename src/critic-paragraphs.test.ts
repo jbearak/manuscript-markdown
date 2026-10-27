@@ -801,3 +801,28 @@ describe('CriticMarkup\'s openers in an equation, and the breaks no rule reads',
     expect(time(16_000) / time(4_000)).toBeLessThan(8);
   }, 30000);
 });
+
+describe('a link whose address ends in a backslash before a tracked paragraph break', () => {
+  // A target Word wrote may hold the backslash as it is, so the link's text
+  // is its address, which import may write bare
+  async function importedWithLiteralBackslash(md: string): Promise<string> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    zip.file('word/_rels/document.xml.rels', rels.split('%5C').join('\\'));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    return markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  }
+  const link = '[https://e.com/a\\\\](https://e.com/a%5C)';
+
+  it.each([
+    ['in an insertion that goes on past it', '{++x ' + link + '\n\nb++}'],
+    ['in a deletion that ends with it', '{--' + link + '\n\n--}b'],
+    ['before an inserted paragraph mark alone', 'x ' + link + '{++\n\n++}b'],
+  ])('keeps its backslash and the break, %s', async (_, md) => {
+    const imported = await importedWithLiteralBackslash(md);
+    const first = parseMd(imported)[0];
+    const runs = (first.runs ?? []).flatMap(run => run.innerRuns ?? [run]);
+    expect(runs.filter(run => run.href).map(run => run.text + ' -> ' + run.href)).toEqual(['https://e.com/a\\ -> https://e.com/a%5C']);
+    expect(first.criticParaMark).toBe(md.startsWith('{--') ? 'deletion' : 'addition');
+  });
+});

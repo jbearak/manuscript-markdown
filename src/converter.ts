@@ -9792,6 +9792,13 @@ function bareLinkReadsBack(before: string, address: string, closer: string, foll
     const at = following.indexOf(closer);
     if (at >= 0 && !following.slice(0, at).includes('{')) following = following.slice(0, at);
   }
+  // An address that ends in an unescaped backslash, which linkify reads in
+  // the URL, goes bare only before a space or a tab. Before punctuation,
+  // inline-syntax.ts reads the backslash as its escape, which leaves a
+  // tracked paragraph mark's {++ as text; before a tracked break's line end,
+  // joinSpansAtTrackedBreaks escapes it, and the URL reads both; and at the
+  // end of its span or text, what's written after is unread here.
+  if (/(?:^|[^\\])(?:\\\\)*\\$/.test(address) && !/^[ \t]/.test(following)) return false;
   // The text before it to a space or the opener of the span it starts
   let lead = before.slice(-BARE_LINK_CONTEXT);
   if (/(?:^|[^\\])(?:\\\\)*(?:\{(?:\+\+|--|~~|==)|~>)$/.test(lead)) lead = '';
