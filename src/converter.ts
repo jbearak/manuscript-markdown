@@ -9762,7 +9762,12 @@ function resolveBareLinks(markdown: string, cell = false, beforeMath = false): s
       ? keepParagraphEdgeWhitespace(address + after, false, true) : undefined;
     const written = ending !== undefined ? (beforeMath ? beforeParagraphMath(ending) : ending).slice(address.length)
       : lineEnd !== undefined ? gridLineBeforeBreak(address + lineEnd).slice(address.length) + '\n' : undefined;
-    const readsBack = (lead: string) => head !== undefined && bareLinkReadsBack(lead, address, closer, head, lineStart)
+    // Spaces and tabs alone between it and a line end, as a tracked break's
+    // after its start mark, a private-use character (see trackedBreakMarks),
+    // which Markdown would drop there, so joinSpansAtTrackedBreaks writes
+    // them as references, which linkify reads on into
+    const spacesEndLine = /^[ \t]+[-]?\n/.test(after);
+    const readsBack = (lead: string) => head !== undefined && !spacesEndLine && bareLinkReadsBack(lead, address, closer, head, lineStart)
       && (!edgeBefore && written === undefined || bareLinkReadsBack(
         edgeBefore ? keepParagraphEdgeWhitespace(lead + address, true, false).slice(0, -address.length) : lead, address, closer,
         written ?? head, lineStart));
