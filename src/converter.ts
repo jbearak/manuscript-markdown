@@ -9766,7 +9766,7 @@ function resolveBareLinks(markdown: string, cell = false, beforeMath = false): s
     // after its start mark, a private-use character (see trackedBreakMarks),
     // which Markdown would drop there, so joinSpansAtTrackedBreaks writes
     // them as references, which linkify reads on into
-    const spacesEndLine = /^[ \t]+[-]?\n/.test(after);
+    const spacesEndLine = /^[ \t]+[\uE000-\uF8FF]?\n/.test(after);
     const readsBack = (lead: string) => head !== undefined && !spacesEndLine && bareLinkReadsBack(lead, address, closer, head, lineStart)
       && (!edgeBefore && written === undefined || bareLinkReadsBack(
         edgeBefore ? keepParagraphEdgeWhitespace(lead + address, true, false).slice(0, -address.length) : lead, address, closer,
