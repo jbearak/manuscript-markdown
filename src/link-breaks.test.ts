@@ -37,7 +37,10 @@ describe('a backslash at a line end after a URL', () => {
   });
 
   test('escaped, as \\\\, is the URL\'s, and starts no break', () => {
-    expect(paragraph('https://e.com/a\\\\\nb')).not.toContain('<br>');
-    expect(exported('https://e.com/a\\\\\nb')).not.toContain('<br>');
+    const markdown = 'https://e.com/a\\\\\nb';
+    expect(paragraph(markdown)).toContain('<a href="https://e.com/a%5C%5C">https://e.com/a\\\\</a>');
+    expect(exported(markdown)).toContain('https://e.com/a\\\\ -> https://e.com/a%5C%5C');
+    expect(paragraph(markdown)).not.toContain('<br>');
+    expect(exported(markdown)).not.toContain('<br>');
   });
 });
