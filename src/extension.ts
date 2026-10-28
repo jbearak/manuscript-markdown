@@ -307,10 +307,12 @@ export function activate(context: vscode.ExtensionContext) {
 	// current view's button, one command for each view, and each opens the
 	// picker. The toggle, from before there were more than two, switches
 	// between no markup and all
+	for (const view of PREVIEW_MARKUP_VIEWS) {
+		context.subscriptions.push(
+			vscode.commands.registerCommand('manuscript-markdown.choosePreviewMarkup.' + view.value, choosePreviewMarkup));
+	}
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manuscript-markdown.choosePreviewMarkup', choosePreviewMarkup),
-		...PREVIEW_MARKUP_VIEWS.map(view =>
-			vscode.commands.registerCommand('manuscript-markdown.choosePreviewMarkup.' + view.value, choosePreviewMarkup)),
 		vscode.commands.registerCommand('manuscript-markdown.togglePreviewMarkup', () =>
 			setPreviewMarkup(getConfiguredPreviewMarkup() === 'none' ? 'all' : 'none')),
 		vscode.workspace.onDidChangeConfiguration(e => {
