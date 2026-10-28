@@ -78,7 +78,14 @@ including empty lines.++}
 
 Blank lines inside additions and deletions separate paragraphs in the preview and Word export. Inline formatting continues across those paragraph boundaries. A single newline stays within the same paragraph.
 
-The preview can show the document as though every change were accepted, like Word's No Markup view: set `manuscriptMarkdown.previewMarkup` to `none`, or click the toggle in the preview's title bar. Deleted text disappears, along with any paragraph, heading or list item that held only deleted text. Added and substituted text reads as plain text. Comments still show: one on an addition or substitution as a comment range over the added text, and one whose text was all deleted, as one on a deletion, as a 💬 indicator where that text was.
+The preview has Word's four markup views. The button in the preview's title bar shows the current view; click it to choose another, or set `manuscriptMarkdown.previewMarkup`:
+
+- **All Markup** (`all`) shows every change as marked.
+- **Simple Markup** (`simple`) shows the document as No Markup does, with a bar in the left margin by each paragraph, heading, list item or table cell that had a change. The bar only marks the change; clicking it does nothing.
+- **No Markup** (`none`) shows the document as though every change were accepted. Deleted text disappears, along with any paragraph, heading or list item that held only deleted text. Added and substituted text reads as plain text. Comments still show: one on an addition or substitution as a comment range over the added text, and one whose text was all deleted, as one on a deletion, as a 💬 indicator where that text was.
+- **Original** (`original`) shows the document as though every change were rejected, the reverse of No Markup: added text disappears, along with any paragraph, heading or list item that held only added text, and deleted and replaced text reads as plain text. A comment on a deletion or substitution is a comment range over the restored text, and one whose text was all added is a 💬 indicator.
+
+A paragraph that Simple Markup drops, because all its text was deleted, has no bar.
 
 A pipe table's cell holds one line, so a change over a line end can't start in one. Its opener there is text, and the table stays a table: in `| a {++ | b |`, the `{++` is text. An opener at the start of a table's first line, before its first cell's text, starts the change before the table, which then takes the table's lines as its text: `{>>a | b`, with `--- | ---` and `c | d<<}` on the lines after, is a comment. So is one in a table whose lines a change before it already takes. Lines in an equation that only look like a table, as between two `$$` lines, are the equation's, and a change over them works as anywhere in an equation.
 

@@ -41,8 +41,31 @@
       },
       {
         "command": "manuscript-markdown.togglePreviewMarkup",
-        "title": "Toggle Tracked Changes in Preview",
+        "title": "Toggle Tracked Changes in Preview"
+      },
+      {
+        "command": "manuscript-markdown.choosePreviewMarkup",
+        "title": "Choose Markup View in Preview"
+      },
+      {
+        "command": "manuscript-markdown.choosePreviewMarkup.all",
+        "title": "Markup: All Markup",
         "icon": "$(diff)"
+      },
+      {
+        "command": "manuscript-markdown.choosePreviewMarkup.simple",
+        "title": "Markup: Simple Markup",
+        "icon": "$(diff-modified)"
+      },
+      {
+        "command": "manuscript-markdown.choosePreviewMarkup.none",
+        "title": "Markup: No Markup",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "manuscript-markdown.choosePreviewMarkup.original",
+        "title": "Markup: Original",
+        "icon": "$(history)"
       },
       {
         "command": "manuscript-markdown.toggleWordCountAcceptChanges",
@@ -530,6 +553,22 @@
         {
           "command": "manuscript-markdown.addBibtexEntry.misc",
           "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i"
+        },
+        {
+          "command": "manuscript-markdown.choosePreviewMarkup.all",
+          "when": "false"
+        },
+        {
+          "command": "manuscript-markdown.choosePreviewMarkup.simple",
+          "when": "false"
+        },
+        {
+          "command": "manuscript-markdown.choosePreviewMarkup.none",
+          "when": "false"
+        },
+        {
+          "command": "manuscript-markdown.choosePreviewMarkup.original",
+          "when": "false"
         }
       ],
       "editor/title": [
@@ -539,8 +578,23 @@
           "group": "navigation@99"
         },
         {
-          "command": "manuscript-markdown.togglePreviewMarkup",
-          "when": "activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'",
+          "command": "manuscript-markdown.choosePreviewMarkup.all",
+          "when": "(activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor') && config.manuscriptMarkdown.previewMarkup != 'simple' && config.manuscriptMarkdown.previewMarkup != 'none' && config.manuscriptMarkdown.previewMarkup != 'original'",
+          "group": "navigation@100"
+        },
+        {
+          "command": "manuscript-markdown.choosePreviewMarkup.simple",
+          "when": "(activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor') && config.manuscriptMarkdown.previewMarkup == 'simple'",
+          "group": "navigation@100"
+        },
+        {
+          "command": "manuscript-markdown.choosePreviewMarkup.none",
+          "when": "(activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor') && config.manuscriptMarkdown.previewMarkup == 'none'",
+          "group": "navigation@100"
+        },
+        {
+          "command": "manuscript-markdown.choosePreviewMarkup.original",
+          "when": "(activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor') && config.manuscriptMarkdown.previewMarkup == 'original'",
           "group": "navigation@100"
         },
         {
@@ -1341,15 +1395,21 @@
           "type": "string",
           "enum": [
             "all",
-            "none"
+            "simple",
+            "none",
+            "original"
           ],
           "enumItemLabels": [
             "All Markup",
-            "No Markup"
+            "Simple Markup",
+            "No Markup",
+            "Original"
           ],
           "enumDescriptions": [
             "Show additions, deletions, and substitutions as marked",
-            "Show the document as though every change were accepted; comments still show"
+            "Show the document as though every change were accepted, with a bar in the margin by each paragraph, heading, list item or table cell that had a change; comments still show",
+            "Show the document as though every change were accepted; comments still show",
+            "Show the document as though every change were rejected; comments still show"
           ],
           "default": "all",
           "description": "How much of the CriticMarkup tracked changes the Markdown preview shows, like Word's markup views"

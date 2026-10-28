@@ -3322,6 +3322,110 @@ describe('No Markup preview', () => {
   });
 });
 
+describe('Original preview', () => {
+  function renderOriginal(input: string): string {
+    const md = createMarkdownItWithPlugin();
+    md.manuscriptPreviewMarkup = 'original';
+    return md.render(input);
+  }
+
+  it('shows each change rejected', () => {
+    const html = renderOriginal('Hello {++big ++}world{--old--}. A {~~cat~>dog~~} ran.');
+    expect(html).toContain('<p>Hello worldold. A cat ran.</p>');
+    expect(html).not.toContain('<ins');
+    expect(html).not.toContain('<del');
+  });
+
+  it('keeps nested formatting in deleted text', () => {
+    expect(renderOriginal('a {--**b**--} c')).toContain('<p>a <strong>b</strong> c</p>');
+  });
+
+  it('drops a paragraph, heading or list item that held only added text', () => {
+    const html = renderOriginal('One\n\n{++New++}\n\n{++# New heading++}\n\n- a\n- {++b++}\n\nTwo');
+    expect(html).toContain('<p>One</p>\n<ul>\n<li>a</li>\n</ul>\n<p>Two</p>');
+    expect(html).not.toContain('<h1');
+  });
+
+  it('keeps a deleted heading a heading', () => {
+    expect(renderOriginal('{--# Old--}\n\nText')).toContain('<h1>Old</h1>');
+  });
+
+  it('keeps comments on changes, a comment on added text as an indicator', () => {
+    const html = renderOriginal('A {~~cat~>dog~~}{>>why<<} and {--gone--}{>>note<<} and {++new++}{>>added<<}.');
+    expect(html).toContain('<span class="manuscript-markdown-comment-range" data-comment="why">cat</span>');
+    expect(html).toContain('<span class="manuscript-markdown-comment-range" data-comment="note">gone</span>');
+    expect(html).toContain('<span class="manuscript-markdown-comment-indicator" data-comment="added"></span>');
+  });
+
+  it('shows a comment on added text as an indicator', () => {
+    expect(renderOriginal('Before {++{#1}new{/1}++} after{#1>>note<<}'))
+      .toContain('<p>Before <span class="manuscript-markdown-comment-indicator" data-comment="note"></span> after</p>');
+  });
+
+  it('shows a comment on an addition over paragraphs once', () => {
+    const html = renderOriginal('{++one\n\ntwo++}{>>a<<}\n\nkept');
+    expect(html.split('data-comment="a"').length - 1).toBe(1);
+  });
+
+  it('rejects changes in an image alt text', () => {
+    expect(renderOriginal('![{~~old~>new~~}](missing.png)')).toContain('alt="old"');
+  });
+
+  it('leaves standalone comments and highlights as they are', () => {
+    const text = 'See {==this==}{>>hm<<} and ==that== here{>>note<<}.';
+    expect(renderOriginal(text)).toBe(renderWithPlugin(text));
+  });
+});
+
+describe('Simple Markup preview', () => {
+  function renderSimple(input: string): string {
+    const md = createMarkdownItWithPlugin();
+    md.manuscriptPreviewMarkup = 'simple';
+    return md.render(input);
+  }
+
+  it('shows the text with every change accepted', () => {
+    const html = renderSimple('Hello {++big ++}world{--old--}. A {~~cat~>dog~~} ran.');
+    expect(html).toContain('>Hello big world. A dog ran.</p>');
+    expect(html).not.toContain('<ins');
+    expect(html).not.toContain('<del');
+  });
+
+  it('marks each block with a change, and no other', () => {
+    const html = renderSimple('Same\n\nA {++b++}\n\n# H {--x--}\n\n| a |\n|---|\n| {~~p~>q~~} |\n\nAlso same');
+    expect(html).toContain('<p>Same</p>');
+    expect(html).toContain('<p class="manuscript-markdown-changed">A b</p>');
+    expect(html).toContain('<h1 class="manuscript-markdown-changed">H </h1>');
+    expect(html).toContain('<td class="manuscript-markdown-changed">q</td>');
+    expect(html).toContain('<p>Also same</p>');
+  });
+
+  it('marks a tight list item, whose paragraph shows no tag', () => {
+    expect(renderSimple('- a\n- {++b++}')).toContain('<li>a</li>\n<li class="manuscript-markdown-changed">b</li>');
+  });
+
+  it('marks each paragraph a change over paragraphs takes', () => {
+    const html = renderSimple('{++one\n\ntwo++}');
+    expect(html).toContain('<p class="manuscript-markdown-changed">one</p>');
+    expect(html).toContain('<p class="manuscript-markdown-changed">two</p>');
+  });
+
+  it('marks the block of a change in an image alt text', () => {
+    expect(renderSimple('![{~~old~>new~~}](missing.png)')).toContain('<p class="manuscript-markdown-changed"><img src="missing.png" alt="new"></p>');
+  });
+
+  it('marks no block for a comment or highlight alone', () => {
+    const text = 'See {==this==}{>>hm<<} and ==that== here{>>note<<}.';
+    expect(renderSimple(text)).toBe(renderWithPlugin(text));
+  });
+
+  it('keeps comments where No Markup puts them', () => {
+    const html = renderSimple('A {~~cat~>dog~~}{>>why<<} and {--gone--}{>>note<<}.');
+    expect(html).toContain('<span class="manuscript-markdown-comment-range" data-comment="why">dog</span>');
+    expect(html).toContain('<span class="manuscript-markdown-comment-indicator" data-comment="note"></span>');
+  });
+});
+
 describe('text over a blank line that is no CriticMarkup span', () => {
   it('keeps the text after the closer on its line', () => {
     // A substitution with no ~> is none, as export reads it: its opener
