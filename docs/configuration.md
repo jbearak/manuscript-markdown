@@ -33,7 +33,7 @@ All settings are under the `manuscriptMarkdown` namespace in VS Code settings.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `previewMarkup` | string | `"all"` | How much of the tracked changes the Markdown preview shows, like Word's markup views. `all` (All Markup) shows additions, deletions, and substitutions as marked. `none` (No Markup) shows the document as though every change were accepted: deleted text and paragraphs disappear and added text reads as plain text. Comments still show. The preview's title bar has a button to toggle between them |
+| `previewMarkup` | string | `"all"` | How much of the tracked changes the Markdown preview shows, like Word's markup views. `all` (All Markup) shows additions, deletions, and substitutions as marked. `simple` (Simple Markup) shows the document as `none` does, with a bar in the margin by each block that had a change. `none` (No Markup) shows the document as though every change were accepted: deleted text and paragraphs disappear and added text reads as plain text. `original` (Original) shows it as though every change were rejected. Comments still show in every view. The preview's title bar has a button that shows the current view and opens a picker to choose another |
 
 ## DOCX Conversion
 

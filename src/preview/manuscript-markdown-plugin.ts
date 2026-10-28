@@ -51,9 +51,19 @@ export interface ManuscriptMarkdownIt extends MarkdownIt {
 }
 
 /** How much of the tracked changes the preview shows, as Word's markup
- *  views do: 'all' shows each change as marked, and 'none' the text as it
- *  reads with every change accepted, with its comments still shown */
-export type PreviewMarkup = 'all' | 'none';
+ *  views do: 'all' shows each change as marked; 'simple' the text as it
+ *  reads with every change accepted, with a bar by each block that had one;
+ *  'none' that text with no bars; and 'original' the text as it reads with
+ *  every change rejected. Each shows its comments */
+export type PreviewMarkup = 'all' | 'simple' | 'none' | 'original';
+
+/** Which way a markup view resolves each change, or undefined where it
+ *  shows each as marked */
+function resolvedChanges(markup: PreviewMarkup | undefined): ChangeResolution | undefined {
+  if (markup === 'simple' || markup === 'none') return ACCEPT_CHANGES;
+  if (markup === 'original') return REJECT_CHANGES;
+  return undefined;
+}
 
 interface PreviewEnvironment {
   /** The words and separator a caption shows, and where it goes (see captions.ts) */
@@ -1786,30 +1796,77 @@ function nestCrossedElements(children: Token[], state: StateCore): Token[] {
   return out;
 }
 
-/** The opens whose element, and everything in it, accepting every change
- *  drops: a deletion, and a substitution's old text */
-const REJECTED_CHANGE_OPENS = new Set([
-  'manuscript_markdown_deletion_open',
-  'manuscript_markdown_substitution_old_open',
-]);
+/** How a markup view resolves each change: `dropped` are the opens whose
+ *  element, and everything in it, it drops, and `unwrapped` the opens and
+ *  closes whose element it unwraps, keeping what's in it */
+interface ChangeResolution {
+  dropped: ReadonlySet<string>;
+  unwrapped: ReadonlySet<string>;
+}
 
-/** The opens and closes whose element accepting every change unwraps,
- *  keeping what's in it: an addition, a substitution, and its new text */
-const ACCEPTED_CHANGE_TYPES = new Set([
+/** Every change accepted: a deletion and a substitution's old text go, and
+ *  an addition and a substitution's new text stay */
+const ACCEPT_CHANGES: ChangeResolution = {
+  dropped: new Set([
+    'manuscript_markdown_deletion_open',
+    'manuscript_markdown_substitution_old_open',
+  ]),
+  unwrapped: new Set([
+    'manuscript_markdown_addition_open',
+    'manuscript_markdown_addition_close',
+    'manuscript_markdown_substitution_open',
+    'manuscript_markdown_substitution_close',
+    'manuscript_markdown_substitution_new_open',
+    'manuscript_markdown_substitution_new_close',
+  ]),
+};
+
+/** Every change rejected: an addition and a substitution's new text go,
+ *  and a deletion and a substitution's old text stay */
+const REJECT_CHANGES: ChangeResolution = {
+  dropped: new Set([
+    'manuscript_markdown_addition_open',
+    'manuscript_markdown_substitution_new_open',
+  ]),
+  unwrapped: new Set([
+    'manuscript_markdown_deletion_open',
+    'manuscript_markdown_deletion_close',
+    'manuscript_markdown_substitution_open',
+    'manuscript_markdown_substitution_close',
+    'manuscript_markdown_substitution_old_open',
+    'manuscript_markdown_substitution_old_close',
+  ]),
+};
+
+/** The opens of a change, which simple markup marks the block of */
+const CHANGE_OPENS = new Set([
   'manuscript_markdown_addition_open',
-  'manuscript_markdown_addition_close',
+  'manuscript_markdown_deletion_open',
   'manuscript_markdown_substitution_open',
-  'manuscript_markdown_substitution_close',
-  'manuscript_markdown_substitution_new_open',
-  'manuscript_markdown_substitution_new_close',
 ]);
 
 /**
- * Core rule that, where the preview shows no markup, gives each element
+ * Core rule that, with simple markup, marks each block whose text has a
+ * change, as Word's bar in the margin does: the block that shows its tag,
+ * which in a tight list is the item, as its paragraph shows none. Runs
+ * before resolveChangesRule takes the changes out.
+ */
+function markChangedBlocks(state: StateCore): void {
+  const tokens = state.tokens;
+  tokens.forEach((token, at) => {
+    if (token.type !== 'inline' || !token.children?.some(child => CHANGE_OPENS.has(child.type))) return;
+    let open = at - 1;
+    while (open >= 0 && (tokens[open].hidden || tokens[open].nesting !== 1)) open--;
+    if (open >= 0) tokens[open].attrJoin('class', 'manuscript-markdown-changed');
+  });
+}
+
+/**
+ * Core rule that, where the preview resolves each change, gives each element
  * with a comment on it, as a change or a highlight, a key of its own,
  * before the rules that split one over paragraphs or a range's span copy
  * its open (see cloneInlineToken), so its comment shows once however many
- * pieces it's in (see commentsOnAcceptedText). Runs after
+ * pieces it's in (see commentsOnResolvedText). Runs after
  * associateCommentsRule puts each comment on its element.
  */
 function keyElementCommentsRule(state: StateCore): void {
@@ -1823,7 +1880,7 @@ function keyElementCommentsRule(state: StateCore): void {
 }
 
 /** A range's span for a comment, keyed by the comment it shows (see
- *  commentsOnAcceptedText) */
+ *  commentsOnResolvedText) */
 function commentSpanOpen(state: StateCore, comment: string, key: unknown): Token {
   const span = new state.Token('manuscript_markdown_comment_range_open', 'span', 1);
   span.attrSet('class', 'manuscript-markdown-comment-range');
@@ -1836,25 +1893,25 @@ function commentSpanClose(state: StateCore): Token {
   return new state.Token('manuscript_markdown_comment_range_close', 'span', -1);
 }
 
-/** Whether a token shows a comment, which a deletion keeps (see acceptChanges) */
+/** Whether a token shows a comment, which a dropped change keeps (see resolveChanges) */
 function isCommentToken(token: Token): boolean {
   return isRangeSpan(token) || token.type === 'manuscript_markdown_comment_indicator';
 }
 
-/** An inline token's children as they read with every change accepted. A
- *  comment on a change is a range's span over the text the change leaves,
- *  none for a deletion, as is a comment on an element or a range's span in
- *  deleted text, which
- *  commentsOnAcceptedText shows as an indicator where all its text went.
- *  An image's alt text reads the same */
-function acceptChanges(children: Token[], state: StateCore): Token[] {
+/** An inline token's children as they read with every change resolved,
+ *  accepted or rejected. A comment on a change is a range's span over the
+ *  text the change leaves, none for a dropped one, as is a comment on an
+ *  element or a range's span in dropped text, which commentsOnResolvedText
+ *  shows as an indicator where all its text went. An image's alt text
+ *  reads the same */
+function resolveChanges(children: Token[], state: StateCore, resolution: ChangeResolution): Token[] {
   const out: Token[] = [];
   // For each unwrapped open still open, by its type, the range span it
   // became, or undefined where it wrote nothing
   const opened = new Map<string, Array<Token | undefined>>();
   for (let i = 0; i < children.length; i++) {
     const token = children[i];
-    if (REJECTED_CHANGE_OPENS.has(token.type)) {
+    if (resolution.dropped.has(token.type)) {
       const comment = token.attrGet('data-comment');
       if (comment) out.push(commentSpanOpen(state, comment, token.meta?.manuscriptCommentKey ?? token));
       const closeType = token.type.slice(0, -'_open'.length) + '_close';
@@ -1864,7 +1921,7 @@ function acceptChanges(children: Token[], state: StateCore): Token[] {
         else if (children[i].type === closeType) depth--;
         else if (isCommentToken(children[i])) out.push(children[i]);
         else if (children[i].nesting === 1 && children[i].attrGet('data-comment')) {
-          // A comment on an element in the deleted text
+          // A comment on an element in the dropped text
           const inner = children[i];
           out.push(commentSpanOpen(state, inner.attrGet('data-comment')!, inner.meta?.manuscriptCommentKey ?? inner), commentSpanClose(state));
         }
@@ -1872,8 +1929,8 @@ function acceptChanges(children: Token[], state: StateCore): Token[] {
       if (comment) out.push(commentSpanClose(state));
       continue;
     }
-    if (!ACCEPTED_CHANGE_TYPES.has(token.type)) {
-      if (token.children) token.children = acceptChanges(token.children, state);
+    if (!resolution.unwrapped.has(token.type)) {
+      if (token.children) token.children = resolveChanges(token.children, state, resolution);
       out.push(token);
       continue;
     }
@@ -1895,18 +1952,18 @@ function acceptChanges(children: Token[], state: StateCore): Token[] {
 }
 
 /** The raw HTML elements that only format the text in them, so show
- *  nothing of their own where it's all deleted */
+ *  nothing of their own where it's all dropped */
 const TEXT_FORMATTING_HTML_TAGS = new Set([
   'a', 'abbr', 'b', 'big', 'cite', 'code', 'del', 'dfn', 'em', 'font', 'i',
   'ins', 'kbd', 'mark', 'q', 's', 'samp', 'small', 'span', 'strike', 'strong',
   'sub', 'sup', 'tt', 'u', 'var',
 ]);
 
-/** Whether a token shows anything once every change is accepted: as
+/** Whether a token shows anything once every change is resolved: as
  *  isVisibleInlineToken, but for an HTML comment, or a raw HTML tag that
  *  only formats text, as <em> or </em>. Another element, as <video>, shows
  *  what it is */
-function isAcceptedTextVisible(token: Token): boolean {
+function isResolvedTextVisible(token: Token): boolean {
   if (!isVisibleInlineToken(token)) return false;
   if (token.type !== 'html_inline') return true;
   if (/^<!--[\s\S]*-->$/.test(token.content)) return false;
@@ -1926,14 +1983,14 @@ function elementClose(children: Token[], open: number): number {
 
 /**
  * A comment whose elements, in every paragraph or piece they're in, hold no
- * text once every change is accepted, as one on a deletion, on text
- * deleted, or on a highlight of deleted text, shows as an indicator where
+ * text once every change is resolved, as one on a dropped change, on text
+ * it drops, or on a highlight of such text, shows as an indicator where
  * its first element was, once. A range's span with no text goes in its
  * place; another element stays, with no comment. An element's key is its
  * comment's ID, for a range's span, or the key of the element the comment
  * is on (see keyElementCommentsRule).
  */
-function commentsOnAcceptedText(inlines: Token[], state: StateCore): void {
+function commentsOnResolvedText(inlines: Token[], state: StateCore): void {
   const keyOf = (open: Token): unknown => open.meta?.manuscriptCommentKey ?? open.meta?.id ?? open;
   const carries = (token: Token): boolean => token.nesting === 1 && !!token.attrGet('data-comment');
   const shown = new Set<unknown>();
@@ -1942,7 +1999,7 @@ function commentsOnAcceptedText(inlines: Token[], state: StateCore): void {
     children.forEach((child, at) => {
       if (!carries(child)) return;
       const inside = children.slice(at + 1, elementClose(children, at));
-      if (inside.some(isAcceptedTextVisible)) shown.add(keyOf(child));
+      if (inside.some(isResolvedTextVisible)) shown.add(keyOf(child));
     });
   }
   const placed = new Set<unknown>();
@@ -1983,20 +2040,20 @@ function commentsOnAcceptedText(inlines: Token[], state: StateCore): void {
 const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list', 'blockquote']);
 
 /**
- * Core rule that, where the preview shows no markup, writes the document as
- * it reads with every change accepted (see acceptChanges), with each
- * comment still shown (see commentsOnAcceptedText). A paragraph or heading
- * that held only deleted text goes, as Word drops a paragraph whose text
- * and mark are deleted, and so does a list item, list or quote that held
- * only such paragraphs.
+ * Core rule that, where the preview resolves each change, writes the
+ * document as it reads with every change accepted or rejected (see
+ * resolveChanges), with each comment still shown (see
+ * commentsOnResolvedText). A paragraph or heading that held only dropped
+ * text goes, as Word drops a paragraph whose text and mark are deleted, and
+ * so does a list item, list or quote that held only such paragraphs.
  */
-function acceptChangesRule(state: StateCore): void {
+function resolveChangesRule(state: StateCore, resolution: ChangeResolution): void {
   const tokens = state.tokens;
   const inlines = tokens.filter(token => token.type === 'inline' && token.children);
-  const hasText = (inline: Token): boolean => inline.children!.some(isAcceptedTextVisible);
+  const hasText = (inline: Token): boolean => inline.children!.some(isResolvedTextVisible);
   const hadContent = new Set(inlines.filter(hasText));
-  for (const inline of inlines) inline.children = acceptChanges(inline.children!, state);
-  commentsOnAcceptedText(inlines, state);
+  for (const inline of inlines) inline.children = resolveChanges(inline.children!, state, resolution);
+  commentsOnResolvedText(inlines, state);
   for (let i = 0; i < tokens.length; i++) {
     const inline = tokens[i];
     if (!hadContent.has(inline) || hasText(inline)) continue;
@@ -2629,7 +2686,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.core.ruler.after('manuscript_markdown_autolink_literals', 'manuscript_markdown_promote_critic_headings', promoteCriticHeadingsRule);
   md.core.ruler.after('manuscript_markdown_promote_critic_headings', 'manuscript_markdown_associate_comments', associateCommentsRule);
   md.core.ruler.after('manuscript_markdown_associate_comments', 'manuscript_markdown_key_element_comments', (state: StateCore) => {
-    if (md.manuscriptPreviewMarkup === 'none') keyElementCommentsRule(state);
+    if (resolvedChanges(md.manuscriptPreviewMarkup)) keyElementCommentsRule(state);
   });
   md.core.ruler.after('manuscript_markdown_key_element_comments', 'manuscript_markdown_split_critic_blocks', splitCriticBlocksRule);
   md.core.ruler.after('manuscript_markdown_split_critic_blocks', 'manuscript_markdown_task_list', taskListRule);
@@ -2676,10 +2733,15 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // Comment ranges' spans, after the rules that split a paragraph
   md.core.ruler.after('manuscript_custom_style_wrap', 'manuscript_markdown_comment_range_spans', commentRangeSpansRule);
-  // With no markup, the text with every change accepted, once each comment
-  // has gone on its element and each range is a span (see acceptChangesRule)
-  md.core.ruler.after('manuscript_markdown_comment_range_spans', 'manuscript_markdown_accept_changes', (state: StateCore) => {
-    if (md.manuscriptPreviewMarkup === 'none') acceptChangesRule(state);
+  // Without markup, the text with every change accepted or rejected, once
+  // each comment has gone on its element and each range is a span (see
+  // resolveChangesRule); with simple markup, each block with a change
+  // marked first, while its changes show
+  md.core.ruler.after('manuscript_markdown_comment_range_spans', 'manuscript_markdown_resolve_changes', (state: StateCore) => {
+    const resolution = resolvedChanges(md.manuscriptPreviewMarkup);
+    if (!resolution) return;
+    if (md.manuscriptPreviewMarkup === 'simple') markChangedBlocks(state);
+    resolveChangesRule(state, resolution);
   });
 
   // Inject a hidden marker element so the preview script can apply the color scheme

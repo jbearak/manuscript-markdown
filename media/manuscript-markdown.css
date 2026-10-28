@@ -43,6 +43,27 @@
   background-color: var(--manuscript-markdown-substitution-bg);
 }
 
+/* Simple Markup — a bar in the margin by each block that had a change, as
+   Word's; a list item's goes left of its marker, and a cell's in the cell */
+.manuscript-markdown-changed {
+  position: relative;
+}
+.manuscript-markdown-changed::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -12px;
+  border-left: 2px solid var(--manuscript-markdown-deletion-color);
+}
+li.manuscript-markdown-changed::before {
+  left: calc(-1em - 16px);
+}
+td.manuscript-markdown-changed::before,
+th.manuscript-markdown-changed::before {
+  left: 0;
+}
+
 /* Comment — hide fallback comment text not associated by the core rule */
 .manuscript-markdown-comment {
   display: none;

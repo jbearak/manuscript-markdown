@@ -9,6 +9,7 @@ import * as changes from './changes';
 import * as formatting from './formatting';
 import * as author from './author';
 import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt, type PreviewMarkup } from './preview/manuscript-markdown-plugin';
+import { PREVIEW_MARKUP_VIEWS, parsePreviewMarkup, previewMarkupPickItems } from './preview-markup';
 import { WordCountController } from './wordcount';
 import { focusGroupCommand, isMarkdownPreviewViewType, isStaticPreviewViewType, labelNamesStaticPreviewFile, pollFor, previewLabelNamesFile } from './preview-source';
 import { convertDocx, CitationKeyFormat } from './converter';
@@ -138,8 +139,34 @@ const embedResolver: EmbedResolver = {
 	},
 };
 function getConfiguredPreviewMarkup(): PreviewMarkup {
-	const value = vscode.workspace.getConfiguration('manuscriptMarkdown').get<string>('previewMarkup');
-	return value === 'none' ? 'none' : 'all';
+	return parsePreviewMarkup(vscode.workspace.getConfiguration('manuscriptMarkdown').get<string>('previewMarkup'));
+}
+
+/** Sets the preview's markup view where the setting is set: the workspace
+ *  if it is set there, else the user's settings */
+async function setPreviewMarkup(value: PreviewMarkup): Promise<void> {
+	const cfg = vscode.workspace.getConfiguration('manuscriptMarkdown');
+	const target = cfg.inspect('previewMarkup')?.workspaceValue !== undefined
+		? vscode.ConfigurationTarget.Workspace
+		: vscode.ConfigurationTarget.Global;
+	await cfg.update('previewMarkup', value, target);
+}
+
+/** Lets the user choose the preview's markup view, the current one checked */
+async function choosePreviewMarkup(): Promise<void> {
+	const current = getConfiguredPreviewMarkup();
+	const items = previewMarkupPickItems(current);
+	const picker = vscode.window.createQuickPick<typeof items[number]>();
+	picker.items = items;
+	picker.activeItems = items.filter(item => item.value === current);
+	picker.placeholder = 'Choose how the preview shows tracked changes';
+	const picked = await new Promise<typeof items[number] | undefined>(resolve => {
+		picker.onDidAccept(() => resolve(picker.selectedItems[0]));
+		picker.onDidHide(() => resolve(undefined));
+		picker.show();
+	});
+	picker.dispose();
+	if (picked && picked.value !== current) await setPreviewMarkup(picked.value);
 }
 
 function syncPreviewColors(scheme: ColorScheme) {
@@ -276,18 +303,16 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('manuscript-markdown.prevChange', () => changes.prev())
 	);
 
-	// Preview markup: all tracked changes marked, or none, as accepted.
-	// The toggle writes where the setting is set, the workspace if it is
-	// set there, else the user's settings
+	// Preview markup, as Word's views. The preview's title bar shows the
+	// current view's button, one command for each view, and each opens the
+	// picker. The toggle, from before there were more than two, switches
+	// between no markup and all
 	context.subscriptions.push(
-		vscode.commands.registerCommand('manuscript-markdown.togglePreviewMarkup', async () => {
-			const cfg = vscode.workspace.getConfiguration('manuscriptMarkdown');
-			const next: PreviewMarkup = getConfiguredPreviewMarkup() === 'none' ? 'all' : 'none';
-			const target = cfg.inspect('previewMarkup')?.workspaceValue !== undefined
-				? vscode.ConfigurationTarget.Workspace
-				: vscode.ConfigurationTarget.Global;
-			await cfg.update('previewMarkup', next, target);
-		}),
+		vscode.commands.registerCommand('manuscript-markdown.choosePreviewMarkup', choosePreviewMarkup),
+		...PREVIEW_MARKUP_VIEWS.map(view =>
+			vscode.commands.registerCommand('manuscript-markdown.choosePreviewMarkup.' + view.value, choosePreviewMarkup)),
+		vscode.commands.registerCommand('manuscript-markdown.togglePreviewMarkup', () =>
+			setPreviewMarkup(getConfiguredPreviewMarkup() === 'none' ? 'all' : 'none')),
 		vscode.workspace.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration('manuscriptMarkdown.previewMarkup') && previewMd) {
 				previewMd.manuscriptPreviewMarkup = getConfiguredPreviewMarkup();
