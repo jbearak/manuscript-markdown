@@ -3410,6 +3410,10 @@ describe('Simple Markup preview', () => {
     expect(html).toContain('<p class="manuscript-markdown-changed">two</p>');
   });
 
+  it('marks the block of a change in an image alt text', () => {
+    expect(renderSimple('![{~~old~>new~~}](missing.png)')).toContain('<p class="manuscript-markdown-changed"><img src="missing.png" alt="new"></p>');
+  });
+
   it('marks no block for a comment or highlight alone', () => {
     const text = 'See {==this==}{>>hm<<} and ==that== here{>>note<<}.';
     expect(renderSimple(text)).toBe(renderWithPlugin(text));

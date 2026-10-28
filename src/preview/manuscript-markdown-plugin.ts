@@ -1849,12 +1849,15 @@ const CHANGE_OPENS = new Set([
  * Core rule that, with simple markup, marks each block whose text has a
  * change, as Word's bar in the margin does: the block that shows its tag,
  * which in a tight list is the item, as its paragraph shows none. Runs
- * before resolveChangesRule takes the changes out.
+ * before resolveChangesRule takes the changes out. A change in an image's
+ * alt text, in the image's children, counts.
  */
 function markChangedBlocks(state: StateCore): void {
   const tokens = state.tokens;
+  const hasChange = (children: Token[]): boolean =>
+    children.some(child => CHANGE_OPENS.has(child.type) || (child.children !== null && hasChange(child.children)));
   tokens.forEach((token, at) => {
-    if (token.type !== 'inline' || !token.children?.some(child => CHANGE_OPENS.has(child.type))) return;
+    if (token.type !== 'inline' || !token.children || !hasChange(token.children)) return;
     let open = at - 1;
     while (open >= 0 && (tokens[open].hidden || tokens[open].nesting !== 1)) open--;
     if (open >= 0) tokens[open].attrJoin('class', 'manuscript-markdown-changed');
