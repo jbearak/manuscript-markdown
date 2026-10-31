@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import JSZip from 'jszip';
+import { MISSING, writeDta } from '@jbearak/dta-parser';
 import { parseDta } from './dta-parser';
 import { convertMdToDocx } from './md-to-docx';
 import type { EmbedResolver } from './embed-preprocess';
@@ -53,6 +54,21 @@ describe('parseDta', () => {
     expect(html).not.toContain('<th>Fruit</th>');
     expect(html).not.toContain('<th>Season</th>');
     expect(html).not.toContain('<th>Color</th>');
+  });
+
+  it('applies display formats and shows unlabelled missing values by code', () => {
+    const data = writeDta({
+      variables: [
+        { name: 'share', format: '%9.2f', values: [0.4567, MISSING['.b']] },
+        { name: 'born', type: 'long', format: '%td', values: [22949, 0] },
+        { name: 'note', type: 'strL', values: ['<b>&', ''] },
+      ],
+    });
+    const html = parseDta(data, { path: 'data.dta' });
+    expect(html).toContain('<td data-mm-kind="number" data-mm-raw="0.4567" data-mm-format="%9.2f">0.46</td>');
+    expect(html).toContain('<span class="mm-missing-value">.b</span>');
+    expect(html).toContain('<td data-mm-kind="date" data-mm-format="%td">2022-10-31</td>');
+    expect(html).toContain('<td>&lt;b&gt;&amp;</td>');
   });
 
   it('rejects files exceeding the size limit', () => {

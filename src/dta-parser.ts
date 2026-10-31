@@ -2,28 +2,12 @@
 // Synchronous .dta parser facade
 //
 // Reads a .dta Uint8Array and returns an HTML <table> string.
-// Calls Sight's internal parser modules directly, bypassing
-// the async DtaFile class, because the embed pipeline is
-// synchronous.
+// @jbearak/dta-parser's reader is synchronous, which the embed
+// pipeline needs.
 // -----------------------------------------------------------
 
-import {
-  apply_display_format,
-  build_gso_index,
-  is_legacy_format,
-  is_missing_value_object,
-  missing_type_to_label_key,
-  parse_legacy_metadata,
-  parse_metadata,
-  parse_value_labels,
-  read_rows_from_buffer,
-  resolve_strl,
-} from '@jbearak/dta-parser';
-import type {
-  DtaMetadata,
-  VariableInfo,
-  RowCell,
-} from '@jbearak/dta-parser';
+import { formatValue, isMissing, openDta } from '@jbearak/dta-parser';
+import type { Cell, ValueLabels, Variable } from '@jbearak/dta-parser';
 import type { EmbedDirective } from './embed-preprocess';
 
 const DEFAULT_MAX_DTA_FILE_SIZE = 10_485_760; // 10 MB
@@ -57,70 +41,21 @@ export function parseDta(
       + ' size (' + limitMb + ' MB)</strong></p>';
   }
 
-  const buffer = data.buffer.slice(
-    data.byteOffset,
-    data.byteOffset + data.byteLength
-  ) as ArrayBuffer;
-
-  // --- Parse metadata ---
-  // Stata format versions 113-115 are legacy
-  const firstByte = data[0];
-  const isLegacy =
-    firstByte === 113
-    || firstByte === 114
-    || firstByte === 115;
-
-  let metadata: DtaMetadata;
-  if (isLegacy) {
-    metadata = parse_legacy_metadata(
-      buffer, data.byteLength
+  // --- Read all observation rows, with value label sets ---
+  const reader = openDta(data);
+  const variables = reader.variables;
+  let rows: Cell[][];
+  let valueLabelTables: (ValueLabels | undefined)[];
+  try {
+    rows = reader.readRows(0, reader.info.nobs);
+    valueLabelTables = variables.map(v =>
+      v.valueLabels ? reader.valueLabels(v.valueLabels) : undefined
     );
-  } else {
-    metadata = parse_metadata(buffer);
+  } finally {
+    reader.close();
   }
-
-  // --- Read all observation rows ---
-  const rows = read_rows_from_buffer(
-    buffer, metadata, 0, metadata.nobs
-  );
-
-  // --- Resolve strL variables ---
-  const hasStrl = metadata.variables.some(
-    v => v.type === 'strL'
-  );
-  if (hasStrl) {
-    const gsoIndex = build_gso_index(buffer, metadata);
-    const dataTagLen =
-      is_legacy_format(metadata.format_version) ? 0 : 6;
-
-    for (let r = 0; r < rows.length; r++) {
-      for (let c = 0; c < metadata.nvar; c++) {
-        const variable = metadata.variables[c];
-        if (variable.type !== 'strL') continue;
-
-        const pointerOffset =
-          metadata.section_offsets.data
-          + dataTagLen
-          + r * metadata.obs_length
-          + variable.byte_offset;
-
-        const resolved = resolve_strl(
-          buffer, metadata, gsoIndex, pointerOffset
-        );
-        if (resolved !== null) {
-          rows[r][c] = resolved;
-        }
-      }
-    }
-  }
-
-  // --- Parse value label tables ---
-  const valueLabelTables = parse_value_labels(
-    buffer, metadata
-  );
 
   // --- Determine header and body rows ---
-  const variables = metadata.variables;
   const headerCount = directive.headers;
 
   let headerRows: FormattedCell[][];
@@ -133,7 +68,7 @@ export function parseDta(
     for (let r = 0; r < limit; r++) {
       headerRows.push(
         rows[r].map((cell, c) =>
-          formatCell(cell, variables[c], valueLabelTables)
+          formatCell(cell, variables[c], valueLabelTables[c])
         )
       );
     }
@@ -151,7 +86,7 @@ export function parseDta(
   for (let r = bodyStartIdx; r < rows.length; r++) {
     bodyRows.push(
       rows[r].map((cell, c) =>
-        formatCell(cell, variables[c], valueLabelTables)
+        formatCell(cell, variables[c], valueLabelTables[c])
       )
     );
   }
@@ -204,26 +139,13 @@ function sourceAttrs(cell: FormattedCell): string {
 }
 
 function formatCell(
-  cell: RowCell,
-  variable: VariableInfo,
-  valueLabelTables: Map<string, Map<number, string>>
+  cell: Cell,
+  variable: Variable,
+  labelTable: ValueLabels | undefined
 ): FormattedCell {
-  const labelTable = variable.value_label_name
-    ? valueLabelTables.get(variable.value_label_name)
-    : undefined;
-
-  // Missing values
-  if (is_missing_value_object(cell)) {
-    let display: string;
-    if (labelTable) {
-      const labelKey = missing_type_to_label_key(
-        cell.missing_type
-      );
-      const label = labelTable.get(labelKey);
-      display = label ?? cell.missing_type;
-    } else {
-      display = cell.missing_type;
-    }
+  // Missing values (formatValue shows the label of a labelled one)
+  if (isMissing(cell)) {
+    const display = formatValue(cell, variable.format, labelTable);
     return { html: '<span class="mm-missing-value">' + escapeHtml(display) + '</span>', kind: 'missing' };
   }
 
@@ -237,10 +159,7 @@ function formatCell(
 
   // Display format
   if (typeof cell === 'number') {
-    const formatted = apply_display_format(
-      cell, variable.format
-    );
-    const display = formatted ?? String(cell);
+    const display = formatValue(cell, variable.format);
     const kind = /^%t/i.test(variable.format) ? (/%tc/i.test(variable.format) ? 'time' : 'date')
       : /e/i.test(variable.format) ? 'scientific' : 'number';
     return {
@@ -251,6 +170,7 @@ function formatCell(
     };
   }
 
-  // String values
-  return { html: escapeHtml(String(cell)), kind: 'text' };
+  // String values; formatValue describes a binary strL by its length
+  const text = typeof cell === 'string' ? cell : formatValue(cell, variable.format);
+  return { html: escapeHtml(text), kind: 'text' };
 }

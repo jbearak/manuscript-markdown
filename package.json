@@ -1464,7 +1464,8 @@
   },
   "private": true,
   "dependencies": {
-    "@jbearak/dta-parser": "^0.1.1",
+    "@e965/xlsx": "^0.20.3",
+    "@jbearak/dta-parser": "^1.0.0",
     "citeproc": "^2.4.63",
     "entities": "^4.5.0",
     "fast-xml-parser": "^5.5.7",
@@ -1472,7 +1473,6 @@
     "markdown-it": "^14.1.1",
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver": "^9.0.1",
-    "vscode-languageserver-textdocument": "^1.0.12",
-    "@e965/xlsx": "^0.20.3"
+    "vscode-languageserver-textdocument": "^1.0.12"
   }
 }

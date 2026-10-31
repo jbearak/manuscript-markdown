@@ -92,7 +92,7 @@ This replaces the variable name header with the first data row (or first N rows 
 
 **File size limit:** To prevent accidentally embedding very large datasets, files larger than 10 MB are rejected by default. Adjust this limit with the `manuscriptMarkdown.embedDtaMaxFileSize` setting (value in bytes).
 
-Supported Stata formats: Stata 8+ (file formats 113–115 and 117–119).
+Supported Stata formats: file formats 104–119.
 
 ## Example
 
