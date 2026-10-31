@@ -6,7 +6,7 @@
       "name": "mdmarkup",
       "dependencies": {
         "@e965/xlsx": "^0.20.3",
-        "@jbearak/dta-parser": "^0.1.1",
+        "@jbearak/dta-parser": "^1.0.0",
         "citeproc": "^2.4.63",
         "entities": "^4.5.0",
         "fast-xml-parser": "^5.5.7",
@@ -111,7 +111,7 @@
 
     "@humanwhocodes/retry": ["@humanwhocodes/retry@0.4.3", "", {}, "sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ=="],
 
-    "@jbearak/dta-parser": ["@jbearak/dta-parser@0.1.1", "", {}, "sha512-BcQ257+HJMfhiSenEA7HVfsIT0ciQrQ86nE2svELtpHx6QTd36qS3OLyJH/evmmyE7LI7kbd4PnSEZx/QtnIAw=="],
+    "@jbearak/dta-parser": ["@jbearak/dta-parser@1.0.0", "", {}, "sha512-EXv1YBVPr0+ILWci1fyKbn48O6+YUH4Sf17H9VE0tfwl4xZS+4MyZmrjdl9kL5+hhWyUngUZ7qLEyp93PX4RlQ=="],
 
     "@types/esrecurse": ["@types/esrecurse@4.3.1", "", {}, "sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw=="],
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import JSZip from 'jszip';
+import { MISSING, writeDta } from '@jbearak/dta-parser';
 import { parseDta } from './dta-parser';
 import { convertMdToDocx } from './md-to-docx';
 import type { EmbedResolver } from './embed-preprocess';
@@ -53,6 +54,29 @@ describe('parseDta', () => {
     expect(html).not.toContain('<th>Fruit</th>');
     expect(html).not.toContain('<th>Season</th>');
     expect(html).not.toContain('<th>Color</th>');
+  });
+
+  it('applies display formats, each variable\'s own value labels, and missing codes', () => {
+    const data = writeDta({
+      valueLabels: {
+        yn: new Map([[1, 'Yes'], [2, 'No']]),
+        agree: new Map<number | typeof MISSING['.'], string>([[1, 'Agree'], [MISSING['.d'], "Don't know"]]),
+      },
+      variables: [
+        { name: 'q1', type: 'byte', valueLabels: 'yn', values: [1, 2] },
+        { name: 'q2', type: 'byte', valueLabels: 'agree', values: [1, MISSING['.d']] },
+        { name: 'share', format: '%9.2f', values: [0.4567, MISSING['.b']] },
+        { name: 'born', type: 'long', format: '%td', values: [22949, 0] },
+        { name: 'note', type: 'strL', values: ['<b>&', ''] },
+      ],
+    });
+    const html = parseDta(data, { path: 'data.dta' });
+    expect(html).toContain('<td data-mm-kind="number" data-mm-raw="0.4567" data-mm-format="%9.2f">0.46</td>');
+    expect(html).toContain('<span class="mm-missing-value">.b</span>');
+    expect(html).toContain('<td data-mm-kind="date" data-mm-format="%td">2022-10-31</td>');
+    expect(html).toContain('<td>&lt;b&gt;&amp;</td>');
+    expect(html).toContain('<tr><td data-mm-kind="label">Yes</td><td data-mm-kind="label">Agree</td>');
+    expect(html).toContain('<tr><td data-mm-kind="label">No</td><td data-mm-kind="missing"><span class="mm-missing-value">Don\'t know</span>');
   });
 
   it('rejects files exceeding the size limit', () => {
