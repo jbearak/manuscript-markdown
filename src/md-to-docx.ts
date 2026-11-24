@@ -3383,8 +3383,9 @@ function titleRunsXml(title: string, rPr: string, state: DocxGenState, options?:
  * in a paragraph of its own, so the comments go back on the title.
  */
 function titleCommentRuns(token: MdToken | undefined): MdRun[] | undefined {
-  // Not one with an indent directive, which the title's paragraph can't take
-  if (token?.type !== 'paragraph' || token.listContinuation || token.indentOverride) return undefined;
+  // Not one with an indent directive, or a tracked paragraph mark, which the
+  // title's paragraph can't take
+  if (token?.type !== 'paragraph' || token.listContinuation || token.indentOverride || token.criticParaMark) return undefined;
   const runs = withoutCommentBodyLines(token.runs);
   const started = new Set<string>();
   const ended = new Set<string>();

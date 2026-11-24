@@ -389,4 +389,9 @@ describe('Title comments, kept in the body', () => {
     expect(paragraphs[0]).not.toContain('<w:commentReference');
     expect(paragraphs[1]).toContain('<w:commentReference');
   });
+
+  it('keeps a first paragraph of comments with a tracked paragraph break after it in a paragraph of its own', async () => {
+    const md = '---\ntitle: T\n---\n\n{>>c<<}{++\n\n++}Body.\n';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
 });
