@@ -306,3 +306,62 @@ describe('Title tracked changes', () => {
     expect(parseFrontmatter(result.markdown).metadata.title).toEqual(['My {++new ++}title {--draft--}', '{~~Old~>New~~} subtitle']);
   });
 });
+
+describe('Title comments', () => {
+  const thread = '{>>@Ann Lee (2024-01-01 10:00) | Which journal?\n  {>>@Ben Ray (2024-01-02 10:00) | A public health one<<}\n<<}';
+
+  /** Export's DOCX of `md`, with the markers of its body's comments moved as
+   *  `move` moves them in document.xml, as Word has them on the title */
+  async function withCommentsMoved(md: string, move: (xml: string, markers: string[]) => string): Promise<Uint8Array> {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const markers = xml.match(/<w:commentRange(?:Start|End) [^>]*\/>|<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference [^>]*\/><\/w:r>/g)!;
+    for (const marker of markers) xml = xml.replace(marker, '');
+    zip.file('word/document.xml', move(xml, markers));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  it('imports a comment thread on the title\'s text as comments right after the frontmatter', async () => {
+    // As Word has a comment and its reply on the title's last word
+    const docx = await withCommentsMoved('---\ntitle: Births from 1965 to 2023\n---\n\n{==Body==}' + thread + ' text.\n', (xml, markers) => {
+      const starts = markers.filter(marker => marker.includes('RangeStart')).join('');
+      const ends = markers.filter(marker => !marker.includes('RangeStart')).join('');
+      return xml.replace('<w:r><w:t>Births from 1965 to 2023</w:t></w:r>',
+        '<w:r><w:t xml:space="preserve">Births from 1965 to </w:t></w:r>' + starts + '<w:r><w:t>2023</w:t></w:r>' + ends);
+    });
+    const { markdown } = await convertDocx(docx);
+    expect(markdown).toBe('---\ntitle: Births from 1965 to 2023\n---\n\n' + thread + '\n\nBody text.\n');
+  });
+
+  it('writes a comment from the title into the body once where its range goes on there', async () => {
+    const docx = await withCommentsMoved('---\ntitle: T\n---\n\n{==Body==}{>>@Ann Lee (2024-01-01 10:00) | c<<} text.\n', (xml, markers) =>
+      xml.replace('<w:t>T</w:t></w:r>', '<w:t>T</w:t></w:r>' + markers[0]).replace('<w:r><w:t>Body</w:t></w:r>', '<w:r><w:t>Body</w:t></w:r>' + markers.slice(1).join('')));
+    const { markdown } = await convertDocx(docx);
+    expect(markdown.match(/\| c<</g)).toHaveLength(1);
+    expect(parseFrontmatter(markdown).metadata.title).toEqual(['T']);
+  });
+
+  it('MD→DOCX writes comments alone right after the title on the title, and back', async () => {
+    const body = thread + '\n\n```r\nx <- 1\n```\n\n- a\n\n- b\n\n> Quoted.\n\nBody text.\n';
+    const md = '---\ntitle: First\ntitle: Second\n---\n\n' + body;
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const paragraphs = xml.match(/<w:p\b(?:(?!<\/w:p>).)*<\/w:p>/gs)!;
+    // On the last title paragraph, with no paragraph of their own
+    expect(paragraphs[1]).toContain('<w:pStyle w:val="Title"/>');
+    expect(paragraphs[1].match(/<w:commentReference /g)).toHaveLength(2);
+    expect(paragraphs[2]).not.toContain('<w:comment');
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  it('MD→DOCX→MD keeps a comment on nothing with replies one after another, in ID syntax, on the title', async () => {
+    const md = '---\ntitle: T\n---\n\n{#1}{/1}\n{#1>>@Ann Lee (2024-01-01 10:00) | c<<}{>>@Ben Ray (2024-01-02 10:00) | r<<}\n\nBody.\n';
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:p\b(?:(?!<\/w:p>).)*<\/w:p>/gs)![0]).toContain('<w:commentReference w:id="1"/>');
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+});

@@ -19434,9 +19434,17 @@ function titleLineMarkdown(runs: TitleRun[]): string {
  * extracted items (para markers and their text runs) from the content array
  * in place, and adds each title paragraph's XML to `paragraphs`, for each
  * line it gives, for the title font style (see titleOwnProperties).
+ *
+ * The comments on a title's text, which the frontmatter can't hold, are
+ * left in a paragraph of their own where the title was, as comments on
+ * nothing, `{>>…<<}`, with their replies, which export writes back at the
+ * title's end (see titleCommentRuns in md-to-docx.ts). Not those whose
+ * range goes on into the body, whose text there holds them.
  */
 export function extractTitleLines(content: ContentItem[], paragraphs: string[] = []): string[] {
   const titles: string[] = [];
+  const commentIds = new Set<string>();
+  let titleAt: number | undefined;
   let i = 0;
 
   while (i < content.length) {
@@ -19448,13 +19456,15 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
     }
     if (item.type !== 'para' || !item.isTitle) break;
     paragraphs.push(item.titleXml ?? '');
+    titleAt ??= i;
 
     // Collect text runs following this title para marker
     const startIdx = i;
     i++;
     const lineRuns: TitleRun[][] = [[]];
     while (i < content.length && content[i].type === 'text') {
-      const { text, revision } = content[i] as { type: 'text'; text: string; revision?: RevisionInfo };
+      const { text, revision, commentIds: ids } = content[i] as Extract<ContentItem, { type: 'text' }>;
+      for (const id of ids) commentIds.add(id);
       if (text === lineBreakText()) lineRuns.push([]);
       else lineRuns[lineRuns.length - 1].push({ text, revision });
       i++;
@@ -19473,6 +19483,10 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
     i = startIdx;
   }
 
+  for (const item of content) if ('commentIds' in item && item.commentIds) for (const id of item.commentIds) commentIds.delete(id);
+  if (titleAt !== undefined && commentIds.size > 0) {
+    content.splice(titleAt, 0, { type: 'para' }, { type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds });
+  }
   return titles;
 }
 
