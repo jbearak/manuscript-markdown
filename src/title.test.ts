@@ -394,4 +394,11 @@ describe('Title comments, kept in the body', () => {
     const md = '---\ntitle: T\n---\n\n{>>c<<}{++\n\n++}Body.\n';
     expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
   });
+
+  it('keeps a first paragraph of comments whose ID\'s range goes on into the body in a paragraph of its own', async () => {
+    const md = '---\ntitle: T\n---\n\n{#1}{/1}{#1>>c<<}\n\n{#1}Body{/1}.\n';
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:p\b(?:(?!<\/w:p>).)*<\/w:p>/gs)![0]).not.toContain('<w:comment');
+  });
 });

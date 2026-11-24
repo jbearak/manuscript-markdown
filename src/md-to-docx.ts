@@ -3392,6 +3392,9 @@ function titleCommentRuns(token: MdToken | undefined): MdRun[] | undefined {
   let comment = false;
   for (const run of runs) {
     if (run.type === 'critic_comment' && !run.text) comment = true;
+    // One inside the range Word gets for its ID's ranges, which goes on
+    // past this paragraph, writes no marker (see prescanCommentIds)
+    else if ((run.type === 'comment_range_start' || run.type === 'comment_range_end') && run.innerRangeMarker) return undefined;
     else if (run.type === 'comment_range_start') { started.add(run.commentId ?? ''); comment = true; }
     // A range that ends here starts here, with nothing in it
     else if (run.type === 'comment_range_end' && started.has(run.commentId ?? '')) ended.add(run.commentId ?? '');
