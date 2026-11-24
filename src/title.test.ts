@@ -400,5 +400,9 @@ describe('Title comments, kept in the body', () => {
     const JSZip = (await import('jszip')).default;
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
     expect(xml.match(/<w:p\b(?:(?!<\/w:p>).)*<\/w:p>/gs)![0]).not.toContain('<w:comment');
+    // Though one whose ranges all end in the paragraph goes on the title
+    const alone = '---\ntitle: T\n---\n\n{#1}{/1}{#1}{/1}{#1>>c<<}\n\nBody.\n';
+    const titled = await (await JSZip.loadAsync((await convertMdToDocx(alone)).docx)).file('word/document.xml')!.async('string');
+    expect(titled.match(/<w:p\b(?:(?!<\/w:p>).)*<\/w:p>/gs)![0]).toContain('<w:commentReference');
   });
 });
