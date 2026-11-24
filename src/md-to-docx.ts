@@ -3374,6 +3374,36 @@ function titleRunsXml(title: string, rPr: string, state: DocxGenState, options?:
   return last < title.length || !xml ? xml + generateRun(title.slice(last), rPr) : xml;
 }
 
+/**
+ * The runs of `token`, where it's a paragraph of comments on nothing alone,
+ * as `{>>…<<}` or `{#1}{/1}` with its body, with their replies: what import
+ * writes for comments on a title's text, which the frontmatter can't hold,
+ * right after it (see extractTitleLines in converter.ts). Export writes the
+ * first block of the body so at the end of the title's last paragraph, not
+ * in a paragraph of its own, so the comments go back on the title.
+ */
+function titleCommentRuns(token: MdToken | undefined): MdRun[] | undefined {
+  // Not one with an indent directive, or a tracked paragraph mark, which the
+  // title's paragraph can't take
+  if (token?.type !== 'paragraph' || token.listContinuation || token.indentOverride || token.criticParaMark) return undefined;
+  const runs = withoutCommentBodyLines(token.runs);
+  const started = new Set<string>();
+  const ended = new Set<string>();
+  let comment = false;
+  for (const run of runs) {
+    if (run.type === 'critic_comment' && !run.text) comment = true;
+    // One inside the range Word gets for its ID's ranges writes no marker
+    // (see prescanCommentIds), so a range that goes on past this paragraph
+    // doesn't end here
+    else if ((run.type === 'comment_range_start' || run.type === 'comment_range_end') && run.innerRangeMarker) continue;
+    else if (run.type === 'comment_range_start') { started.add(run.commentId ?? ''); comment = true; }
+    // A range that ends here starts here, with nothing in it
+    else if (run.type === 'comment_range_end' && started.has(run.commentId ?? '')) ended.add(run.commentId ?? '');
+    else if (run.type !== 'comment_body_with_id') return undefined;
+  }
+  return comment && ended.size === started.size ? runs : undefined;
+}
+
 export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
   tokens = withQuoteCommentBodiesMerged(tokens);
   const omitsCommentBodies = commentBodiesOmitted(tokens);
@@ -3395,7 +3425,9 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
 
   prescanCommentIds(tokens, state);
 
-  // Emit title paragraphs from frontmatter before body content
+  // Emit title paragraphs from frontmatter before body content, with the
+  // comments of a paragraph of them alone right after it at its end
+  const titleComments = frontmatter?.title?.length ? titleCommentRuns(tokens[0]) : undefined;
   if (frontmatter?.title) {
     const fo = resolveFontOverrides(frontmatter);
     for (let i = 0; i < frontmatter.title.length; i++) {
@@ -3433,7 +3465,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       const titleStyleHasCenter = fo?.titleStyles?.[0]?.includes('center');
       // Explicit left override needed when the shared Title style has centering but this paragraph does not
       const jcEl = wantsCenter ? '<w:jc w:val="center"/>' : (titleStyleHasCenter ? '<w:jc w:val="left"/>' : '');
-      body += '<w:p><w:pPr><w:pStyle w:val="Title"/>' + jcEl + '</w:pPr>' + titleRunsXml(frontmatter.title[i], rPr, state, options) + '</w:p>';
+      body += '<w:p><w:pPr><w:pStyle w:val="Title"/>' + jcEl + '</w:pPr>' + titleRunsXml(frontmatter.title[i], rPr, state, options)
+        + (titleComments && i === frontmatter.title.length - 1 ? generateRuns(titleComments, state, options, bibEntries, citeprocEngine) : '') + '</w:p>';
     }
     // Title acts like heading — suppress first-line indent on next paragraph
     state.afterHeading = true;
@@ -3708,6 +3741,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   }
   for (const [ti, token] of tokens.entries()) {
     state.inLastSection = ti > lastSectionStart;
+    // The title's comments, which it has, as if they weren't here
+    if (ti === 0 && titleComments) continue;
     // A paragraph of comment bodies only registers them: Word gets no
     // paragraph, and the blocks around it meet as if it weren't there
     if (omitsCommentBodies(ti, prevToken)) {
