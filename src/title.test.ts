@@ -365,3 +365,28 @@ describe('Title comments', () => {
     expect((await convertDocx(docx)).markdown).toBe(md);
   });
 });
+
+describe('Title comments, kept in the body', () => {
+  it('writes a comment from the title once where its range goes on into a table', async () => {
+    const JSZip = (await import('jszip')).default;
+    const md = '---\ntitle: T\n---\n\n| A | B |\n|---|---|\n| {==x==}{>>note<<} | y |\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const start = xml.match(/<w:commentRangeStart [^>]*\/>/)![0];
+    xml = xml.replace(start, '').replace('<w:t>T</w:t></w:r>', '<w:t>T</w:t></w:r>' + start);
+    zip.file('word/document.xml', xml);
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    // No paragraph of the comment's before the table
+    expect(markdown.split('\n---\n')[1].trimStart()).toStartWith('|');
+    expect(markdown.match(/note<</g)).toHaveLength(1);
+  });
+
+  it('keeps a first paragraph of comments with an indent directive in a paragraph of its own', async () => {
+    const md = '---\ntitle: T\n---\n\n<!-- no-indent -->\n{>>@Ann Lee (2024-01-01 10:00) | c<<}\n\nBody.\n';
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    const paragraphs = xml.match(/<w:p\b(?:(?!<\/w:p>).)*<\/w:p>/gs)!;
+    expect(paragraphs[0]).not.toContain('<w:commentReference');
+    expect(paragraphs[1]).toContain('<w:commentReference');
+  });
+});

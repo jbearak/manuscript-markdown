@@ -19483,7 +19483,14 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
     i = startIdx;
   }
 
-  for (const item of content) if ('commentIds' in item && item.commentIds) for (const id of item.commentIds) commentIds.delete(id);
+  // Not those still on the body's items, in a table's cells too
+  const keepOn = (items: ContentItem[]): void => {
+    for (const item of items) {
+      if (item.type === 'table') for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) keepOn(para);
+      else if ('commentIds' in item && item.commentIds) for (const id of item.commentIds) commentIds.delete(id);
+    }
+  };
+  keepOn(content);
   if (titleAt !== undefined && commentIds.size > 0) {
     content.splice(titleAt, 0, { type: 'para' }, { type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds });
   }
