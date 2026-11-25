@@ -129,6 +129,11 @@ describe('exporting a cross-reference', () => {
     expect(body).toContain('REF tbl_x \\h');
   });
 
+  it('reads a reference after a paragraph break in a substitution, which the preview splits at', () => {
+    const md = 'A {~~x\n\ny~>z~~} see @fig-map.\n\n![m](a.png){#fig-map}\n';
+    expect(scanCrossRefs(md).map(usage => [usage.start, md.slice(usage.start, usage.end)])).toEqual([[md.indexOf('@fig-map'), '@fig-map']]);
+  });
+
   it('reads a key no label can be as text, as Markdown reads it, and the rest of its line so', async () => {
     const md = '@fig-a.b and @fig-map<sup>2</sup> and @fig-caf\u00e9 and [@fig-a.b] and [@fig-a\\_b] and @fig-map.';
     const { body, warnings } = await exported(md + FIGURES);

@@ -553,10 +553,20 @@ interface CriticBreakSource {
 interface CriticHeadingBoundary {
   kind: CriticBreakKind;
   sourceOffset?: number;
-  // For a paragraph break, the open of the innermost addition or deletion it
-  // is in, whose paragraph mark export tracks as that change
+  // For a paragraph break, the open of the innermost addition or deletion,
+  // or substitution's old or new text, it is in, whose paragraph mark export
+  // tracks as that change: as deleted in the old text, inserted in the new
   revision?: string;
 }
+
+/** The opens whose paragraph breaks export tracks as the paragraph mark's
+ *  deletion or insertion (see CriticHeadingBoundary) */
+const TRACKED_MARK_OPENS = new Set([
+  'manuscript_markdown_addition_open',
+  'manuscript_markdown_deletion_open',
+  'manuscript_markdown_substitution_old_open',
+  'manuscript_markdown_substitution_new_open',
+]);
 
 /** Record absolute inline-source offsets so nested payload breaks retain their original positions. */
 function collectProtectedBreaks(content: string, sourceBase: number): CriticBreakSource[] {
@@ -817,8 +827,7 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
       next.meta?.manuscriptCriticBreakSourceOffset === sourceOffset;
     const isLineBreak = token.type === 'softbreak' || (token.type === 'hardbreak' && !isParagraphBreak);
     const revision = openStack.slice().reverse().find(wrapper => wrapper.kind === 'token' &&
-      (wrapper.open.type === 'manuscript_markdown_addition_open' ||
-       wrapper.open.type === 'manuscript_markdown_deletion_open'))?.open.type;
+      TRACKED_MARK_OPENS.has(wrapper.open.type))?.open.type;
     const insideRevision = revision !== undefined;
     const shouldSplit = (isParagraphBreak && (isHeading || insideRevision)) ||
       (splitFirstLineBreak && isLineBreak) ||
@@ -2179,8 +2188,9 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
 
 /**
  * Joins each paragraph to the next where the view drops every paragraph
- * mark between them, as splitCriticBlocksRule records them: a deletion's,
- * accepted, or an addition's, rejected. Export tracks a paragraph break in
+ * mark between them, as splitCriticBlocksRule records them: a deletion's
+ * or a substitution's old text's, accepted, or an addition's or a
+ * substitution's new text's, rejected. Export tracks a paragraph break in
  * a change as the mark of the paragraph before it, so Word joins the two
  * there. A heading's mark stays, as which style Word gives the paragraph
  * it joins is not known. So does the mark before or after a figure or a
@@ -2495,7 +2505,15 @@ function captionsRule(state: StateCore): void {
       inline.children = [label, ...table.children];
       if (options.tblCapLocation === 'top') {
         const paragraph = tokens.splice(i, 3);
+        // Its paragraph's source line the table's first, as scroll sync
+        // reads the blocks' lines in the order shown, as ascending; its
+        // text's, which the language server reads, its own
+        const startsAt = (table: Token): void => {
+          token.map = table.map ? [table.map[0], table.map[0]] : null;
+          token.meta = { ...(token.meta || {}), manuscriptMapIsOriginal: table.meta?.manuscriptMapIsOriginal };
+        };
         if (lastTableLine === undefined) {
+          startsAt(tokens[afterTable!]);
           spliceAll(tokens, afterTable!, 0, paragraph);
         } else {
           // The block's HTML before the table, then the caption, then the
@@ -2509,6 +2527,7 @@ function captionsRule(state: StateCore): void {
             before.map = [block.map[0], split];
             rest.map = [split, block.map[1]];
           }
+          startsAt(rest);
           spliceAll(tokens, afterTable!, 1, [before, ...paragraph, rest]);
           i++;
         }
