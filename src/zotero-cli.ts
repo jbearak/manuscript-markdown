@@ -128,11 +128,11 @@ export function resolveCollection(
   value: string,
   collections: readonly ZoteroCollectionSummary[],
 ): ZoteroCollectionSummary {
-  const exact =
-    collections.find(c => c.key === value) ??
-    collections.find(c => c.path === value);
-  if (exact) return exact;
-  const named = collections.filter(c => c.name === value);
+  const byKey = collections.find(c => c.key === value);
+  if (byKey) return byKey;
+  // Two collections can share a path, and then it names neither.
+  const byPath = collections.filter(c => c.path === value);
+  const named = byPath.length > 0 ? byPath : collections.filter(c => c.name === value);
   if (named.length === 1) return named[0];
   if (named.length > 1) {
     throw new UsageError(
@@ -208,7 +208,7 @@ async function authorize(args: readonly string[], io: ZoteroCliIo): Promise<numb
   // The Server ID names the Zotero the key belongs to; read it first, so
   // the key is never filed under an instance that did not issue it.
   const serverId = await fetchZoteroServerId(api);
-  const { key, remember } = await authorizeZoteroLocalApi(ZOTERO_APP_NAME, api);
+  const { key, remember } = await authorizeZoteroLocalApi(ZOTERO_APP_NAME, serverId, api);
   if (!remember) {
     io.err('That key is good for one write only, so it was not saved. Run this again and choose "Always Allow".');
     return 1;

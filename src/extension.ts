@@ -2261,7 +2261,7 @@ function extensionKeyProvider(secrets: vscode.SecretStorage, serverId: string): 
 				async (_progress, token) => {
 					const controller = new AbortController();
 					token.onCancellationRequested(() => controller.abort());
-					return authorizeZoteroLocalApi(ZOTERO_APP_NAME, { signal: controller.signal });
+					return authorizeZoteroLocalApi(ZOTERO_APP_NAME, serverId, { signal: controller.signal });
 				}
 			);
 			if (granted.remember) {
@@ -2368,6 +2368,10 @@ async function pushBibliographyToZotero(secrets: vscode.SecretStorage): Promise<
 
 		const report = formatZoteroPushReport(prepared.plan, label);
 		const detailLines = report.split('\n').slice(1);
+		// The whole plan, for a push too long for the modal.
+		channel.appendLine('Planned push:');
+		channel.appendLine(report);
+		channel.appendLine('');
 		const choice = await vscode.window.showWarningMessage(
 			'Push to Zotero? ' + formatZoteroPushSummary(prepared.plan, label),
 			{

@@ -65,9 +65,11 @@ export interface ZoteroKeyProvider {
 }
 
 export interface ZoteroPushResult {
-  /** Each write's outcome, by its place in `zoteroPushWrites(plan)`; absent
-   *  for writes never sent. */
-  readonly outcomes: ReadonlyArray<ZoteroWriteOutcome | undefined>;
+  /** Each write's outcome, by its place in `zoteroPushWrites(plan)`;
+   *  `unknown` for a write in a request that failed in a way that leaves
+   *  open whether Zotero made it, as a timeout; absent for writes never
+   *  sent. */
+  readonly outcomes: ReadonlyArray<ZoteroWriteOutcome | 'unknown' | undefined>;
   /** Why writing stopped early, if it did. */
   readonly error?: ZoteroLocalApiError;
 }
@@ -91,7 +93,7 @@ export async function applyZoteroPush(
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroPushResult> {
   const writes = zoteroPushWrites(prepared.plan);
-  const outcomes: Array<ZoteroWriteOutcome | undefined> = writes.map(() => undefined);
+  const outcomes: Array<ZoteroWriteOutcome | 'unknown' | undefined> = writes.map(() => undefined);
   let libraryVersion = prepared.libraryVersion;
   for (let start = 0; start < writes.length; start += BATCH) {
     const batch = writes.slice(start, start + BATCH);
@@ -118,7 +120,13 @@ export async function applyZoteroPush(
           await keys.invalidate();
           continue;
         }
-        if (error instanceof ZoteroLocalApiError) return { outcomes, error };
+        if (error instanceof ZoteroLocalApiError) {
+          // Zotero refused these statuses before writing anything; after
+          // any other failure the batch may have been written.
+          const refused = ['unauthorized', 'write-denied', 'library-changed', 'not-running', 'api-disabled'];
+          if (!refused.includes(error.kind)) batch.forEach((_, i) => (outcomes[start + i] = 'unknown'));
+          return { outcomes, error };
+        }
         throw error;
       }
     }
@@ -139,17 +147,22 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   'other-library': 'linked to an item in another library',
   'identity-disagreement': "its DOI differs from the matched item's",
   'duplicate-target': 'another entry matches the same item',
-  'duplicate-doi': 'another new entry has the same DOI',
+  'duplicate-doi': 'another entry would give the same DOI to an item',
+  'doi-owned-elsewhere': 'another item in the library has its DOI',
   'unsupported-type': 'no Zotero item type for this entry type',
+  'extra-would-migrate':
+    "saving the item would make Zotero move these lines of its Extra field into fields; move them in Zotero first",
 };
 
 const NOT_PUSHED_PROSE: Readonly<Record<ZoteroFieldNotPushedReason, string>> = {
   'no-zotero-field': 'no Zotero field',
   tex: 'TeX left after decoding',
   'date-unreadable': 'date not readable',
-  'zotero-date-unparsed': "Zotero's date is free text",
   'duplicate-zotero-field': 'another field gives the same Zotero field',
   'no-creator-role': 'no such creator role',
+  macro: "a @string macro's name",
+  'incomplete-names': "ends with 'and others' and differs from Zotero's first names",
+  'unreadable-doi': 'not a DOI',
 };
 
 /** One line saying what the plan does. */
@@ -180,6 +193,8 @@ export function formatZoteroPushReport(
         ? ''
         : outcome === undefined
           ? ' [not sent]'
+          : outcome === 'unknown'
+            ? ' [outcome unknown: run the push again to check]'
           : outcome.status === 'failed'
             ? ` [failed: ${outcome.message}]`
             : outcome.status === 'success'
@@ -199,15 +214,19 @@ export function formatZoteroPushReport(
       case 'unchanged':
         break;
     }
-    if (a.kind !== 'skip' && a.kind !== 'unchanged' && a.notPushed.length > 0) {
+    if (a.kind === 'unchanged' && a.notPushed.length > 0) lines.push(`= ${a.entryKey} (${a.itemKey}): unchanged`);
+    if (a.kind !== 'skip' && a.notPushed.length > 0) {
       lines.push('    not pushed: ' + a.notPushed.map(n => `${n.field} (${NOT_PUSHED_PROSE[n.reason]})`).join(', '));
     }
   }
-  if (result?.error) lines.push('Stopped: ' + result.error.message);
+  if (result?.error) lines.push('Stopped: ' + result.error.message + ' Run the push again to finish it; it plans only what is still to do.');
   return lines.join('\n');
 }
 
 /** Whether every write was made. */
 export function zoteroPushSucceeded(result: ZoteroPushResult): boolean {
-  return result.error === undefined && result.outcomes.every(o => o !== undefined && o.status !== 'failed');
+  return (
+    result.error === undefined &&
+    result.outcomes.every(o => o !== undefined && o !== 'unknown' && o.status !== 'failed')
+  );
 }

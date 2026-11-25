@@ -45,6 +45,8 @@ export interface ZoteroItemJson {
   readonly itemType: string;
   /** `meta.parsedDate`: Zotero's reading of `date` as YYYY[-MM[-DD]]. */
   readonly parsedDate?: string;
+  /** The item's identity URI, as the link planner's catalog gives it. */
+  readonly uri?: string;
   readonly [field: string]: unknown;
 }
 
@@ -55,6 +57,14 @@ export interface ZoteroItemSchema {
     readonly fields: ReadonlyArray<{ readonly field: string; readonly baseField?: string }>;
     readonly creatorTypes: ReadonlyArray<{ readonly creatorType: string }>;
   }>;
+  /** Zotero's CSL mappings, which it also reads Extra's lines by. */
+  readonly csl?: {
+    readonly types?: Readonly<Record<string, readonly string[]>>;
+    readonly fields?: {
+      readonly text?: Readonly<Record<string, readonly string[]>>;
+      readonly date?: Readonly<Record<string, string>>;
+    };
+  };
 }
 
 export type ZoteroPushMode = 'add' | 'update';
@@ -74,12 +84,17 @@ export type ZoteroFieldNotPushedReason =
   | 'tex'
   /** The entry's date is not a year, month and day push can read. */
   | 'date-unreadable'
-  /** Zotero's own date is free text, so "the same date" cannot be decided. */
-  | 'zotero-date-unparsed'
   /** Another of the entry's fields already gives this Zotero field. */
   | 'duplicate-zotero-field'
   /** This item type has no such creator role. */
-  | 'no-creator-role';
+  | 'no-creator-role'
+  /** The value is a @string macro's name, not its text. */
+  | 'macro'
+  /** The name list ends `and others`, so it is not the whole list, and
+   *  the names it gives are not the start of Zotero's. */
+  | 'incomplete-names'
+  /** The DOI is not DOI-shaped. */
+  | 'unreadable-doi';
 
 export interface ZoteroFieldNotPushed {
   readonly field: string;
@@ -107,10 +122,16 @@ export type ZoteroPushSkipReason =
   | 'identity-disagreement'
   /** Another entry matched the same item. */
   | 'duplicate-target'
-  /** Another entry to be created has the same DOI. */
+  /** Another entry would give the same DOI to another item. */
   | 'duplicate-doi'
+  /** Another item in the library has the entry's DOI. */
+  | 'doi-owned-elsewhere'
   /** Push has no Zotero item type for this entry type. */
-  | 'unsupported-type';
+  | 'unsupported-type'
+  /** Saving the item through the Local API would make Zotero move lines of
+   *  its Extra field into fields, or change its type by a `Type:` line, so
+   *  even adding it to the collection would change it. */
+  | 'extra-would-migrate';
 
 export type ZoteroPushAction =
   | {
@@ -286,16 +307,30 @@ type Read = { readonly value: string } | { readonly problem: ZoteroFieldNotPushe
 
 const TEX_COMMAND = /\\[A-Za-z@]|\\./;
 
+/** Whether the entry writes the field as a bare word, a @string macro's
+ *  name: neither braced, quoted, nor a number. */
+function isMacro(entry: BibtexEntry, name: string): boolean {
+  const written = entry.writtenFields?.get(name)?.trim();
+  return written !== undefined && written !== '' && !/^[{"]/.test(written) && !/^\d+$/.test(written);
+}
+
+/** An identifier or URL as written, with a \url{} around it and TeX's
+ *  escaped punctuation read. */
+function readVerbatim(raw: string): string {
+  const unwrapped = /^\\url\{(.*)\}$/s.exec(raw.trim())?.[1] ?? raw.trim();
+  return unwrapped.replace(/\\([_&%#$~])/g, '$1').trim();
+}
+
 function readText(entry: BibtexEntry, name: string): Read | undefined {
   const raw = entry.fields.get(name);
   if (raw === undefined) return undefined;
-  if (name === 'url' || name === 'isbn' || name === 'issn') {
-    const value = raw.trim();
-    return value === '' ? undefined : { value };
-  }
-  if (name === 'doi') {
-    const value = raw.trim().replace(/\\([_&%#$])/g, '$1');
-    return value === '' ? undefined : { value };
+  if (isMacro(entry, name)) return { problem: 'macro' };
+  if (name === 'url' || name === 'isbn' || name === 'issn' || name === 'doi') {
+    const value = readVerbatim(raw);
+    if (value === '') return undefined;
+    if (value.includes('\\')) return { problem: 'tex' };
+    if (name === 'doi' && normalizeDoi(value) === undefined) return { problem: 'unreadable-doi' };
+    return { value };
   }
   const plain = (bibtexFieldAsPlainText(entry, name) ?? '').replace(/\s+/g, ' ').trim();
   if (plain === '') return undefined;
@@ -342,11 +377,22 @@ function zoteroDateParts(item: ZoteroItemJson): number[] | undefined {
 }
 
 /** The entry's names in one role as Zotero creators, or why they can't be. */
-function readCreators(entry: BibtexEntry, field: string, creatorType: string): ZoteroCreator[] | 'tex' | undefined {
+interface ReadCreators {
+  readonly creators: ZoteroCreator[];
+  /** The list ended `and others`: these are its first names, not all. */
+  readonly incomplete: boolean;
+}
+
+function readCreators(entry: BibtexEntry, field: string, creatorType: string): ReadCreators | 'tex' | 'macro' | undefined {
   const raw = entry.fields.get(field);
   if (raw === undefined || raw.trim() === '') return undefined;
+  if (isMacro(entry, field)) return 'macro';
   const creators: ZoteroCreator[] = [];
-  for (const name of parseAuthors(raw)) {
+  const names = parseAuthors(raw);
+  const last = names[names.length - 1];
+  const incomplete = last !== undefined && last.family === 'others' && last.given === undefined && last.literal === undefined;
+  if (incomplete) names.pop();
+  for (const name of names) {
     if (name.literal !== undefined) {
       const literal = bibtexNamePartAsPlainText(name.literal).trim();
       if (TEX_COMMAND.test(literal)) return 'tex';
@@ -361,7 +407,7 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): Z
     if (TEX_COMMAND.test(lastName) || TEX_COMMAND.test(firstName)) return 'tex';
     creators.push(firstName ? { creatorType, lastName, firstName } : { creatorType, lastName, firstName: '' });
   }
-  return creators;
+  return { creators, incomplete };
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +432,10 @@ function sameValue(base: string, a: string, b: string): boolean {
       return a.replace(/[\s-]/g, '').toUpperCase() === b.replace(/[\s-]/g, '').toUpperCase();
     case 'url':
       return a.trim() === b.trim();
+    case 'accessDate':
+      // Zotero keeps a timestamp, as 2020-01-01T14:32:02Z; a .bib gives a
+      // day.  The same day is the same date.
+      return a.trim().slice(0, 10) === b.trim().slice(0, 10);
     case 'pages':
       return foldText(a).replace(/[‐-―-]+/g, '-') === foldText(b).replace(/[‐-―-]+/g, '-');
     default:
@@ -448,13 +498,13 @@ interface EntryFields {
   /** Zotero field → value, for the given item type. */
   readonly fields: Map<string, { readonly value: string; readonly base: string; readonly from: string }>;
   readonly date?: readonly number[];
-  readonly creators: Map<string, ZoteroCreator[]>;
+  readonly creators: Map<string, ReadCreators>;
   readonly notPushed: ZoteroFieldNotPushed[];
 }
 
 function entryFields(entry: BibtexEntry, type: SchemaType): EntryFields {
   const fields: EntryFields['fields'] = new Map();
-  const creators = new Map<string, ZoteroCreator[]>();
+  const creators = new Map<string, ReadCreators>();
   const notPushed: ZoteroFieldNotPushed[] = [];
   for (const [name, bases] of FIELD_MAP) {
     const read = readText(entry, name);
@@ -486,7 +536,7 @@ function entryFields(entry: BibtexEntry, type: SchemaType): EntryFields {
     }
   }
   let date: number[] | undefined;
-  const readDateResult = readDate(entry);
+  const readDateResult = isMacro(entry, 'year') || isMacro(entry, 'date') ? { problem: 'macro' as const } : readDate(entry);
   if (readDateResult !== undefined) {
     if ('problem' in readDateResult) notPushed.push({ field: 'year', reason: readDateResult.problem });
     else if (resolveField(type, 'date') === undefined) notPushed.push({ field: 'year', reason: 'no-zotero-field' });
@@ -495,7 +545,7 @@ function entryFields(entry: BibtexEntry, type: SchemaType): EntryFields {
   for (const [field, role] of CREATOR_ROLES) {
     const read = readCreators(entry, field, role);
     if (read === undefined) continue;
-    if (read === 'tex') notPushed.push({ field, reason: 'tex' });
+    if (read === 'tex' || read === 'macro') notPushed.push({ field, reason: read });
     else if (!type.creatorTypes.some(c => c.creatorType === role)) notPushed.push({ field, reason: 'no-creator-role' });
     else creators.set(role, read);
   }
@@ -518,7 +568,9 @@ function createData(
     if (lowerType === 'phdthesis') data[thesisType] = 'PhD Thesis';
     else if (lowerType === 'mastersthesis') data[thesisType] = "Master's Thesis";
   }
-  data.creators = [...(read.creators.get('author') ?? []), ...(read.creators.get('editor') ?? [])];
+  // `and others` stands for names nobody wrote down; the item gets the
+  // ones given.
+  data.creators = [...(read.creators.get('author')?.creators ?? []), ...(read.creators.get('editor')?.creators ?? [])];
   if (type.fields.some(f => f.field === 'citationKey')) data.citationKey = entry.key;
   data.collections = [collectionKey];
   return { data, notPushed: read.notPushed };
@@ -548,9 +600,10 @@ function updateChanges(
     const field = resolveField(type, 'date')!;
     const current = typeof item[field] === 'string' ? (item[field] as string) : '';
     const zParts = zoteroDateParts(item);
-    if (current !== '' && zParts === undefined) {
-      notPushed.push({ field: 'year', reason: 'zotero-date-unparsed' });
-    } else if (zParts === undefined || !read.date.every((p, i) => zParts[i] === p)) {
+    // Equal when the entry's parts agree with Zotero's as far as the entry
+    // goes.  A free-text date Zotero can't read has no parts, so a readable
+    // date from the entry replaces it.
+    if (zParts === undefined || !read.date.every((p, i) => zParts[i] === p)) {
       const to = formatDate(read.date);
       changes.push({ field, from: current, to });
       patch[field] = to;
@@ -558,8 +611,15 @@ function updateChanges(
   }
   const existing = asCreators(item.creators);
   let creators = existing;
-  for (const [role, next] of read.creators) {
+  for (const [role, { creators: next, incomplete }] of read.creators) {
     const current = existing.filter(c => c.creatorType === role);
+    if (incomplete) {
+      // `and others` gives only the start of the list: it agrees when the
+      // names given are Zotero's first ones, and otherwise can't say what
+      // the whole list should be.
+      if (!sameCreators(current.slice(0, next.length), next)) notPushed.push({ field: role, reason: 'incomplete-names' });
+      continue;
+    }
     if (sameCreators(current, next)) continue;
     changes.push({
       field: 'creators:' + role,
@@ -572,6 +632,50 @@ function updateChanges(
   return { changes, patch, notPushed };
 }
 
+/** The item's DOI as the link planner reads it: its DOI field, or a
+ *  `DOI:` line of Extra. */
+function effectiveDoi(item: ZoteroItemJson): string | undefined {
+  return normalizeDoi(typeof item.DOI === 'string' ? item.DOI : undefined) ?? normalizeDoi(extraFields(item).get('doi'));
+}
+
+/** The labels of the Extra lines Zotero would act on when the item is next
+ *  saved through the Local API, which reads items non-strictly
+ *  (`Item.fromJSON`, `extractExtraFields`): a line naming a field, or a CSL
+ *  variable for one, that the item type has and the item leaves empty moves
+ *  into that field, and a `Type:` line naming another item type changes the
+ *  item's type.  Read conservatively: a line this flags that Zotero would
+ *  leave only costs a skipped item. */
+function extraMigrations(item: ZoteroItemJson, type: SchemaType, schema: ZoteroItemSchema): string[] {
+  const extra = typeof item.extra === 'string' ? item.extra : '';
+  if (extra === '') return [];
+  const candidates = new Map<string, string[]>();
+  for (const t of schema.itemTypes) for (const f of t.fields) candidates.set(fold(f.field), [f.field]);
+  for (const [variable, mapped] of Object.entries(schema.csl?.fields?.text ?? {})) {
+    candidates.set(fold(variable), [...(candidates.get(fold(variable)) ?? []), ...mapped]);
+  }
+  for (const [variable, mapped] of Object.entries(schema.csl?.fields?.date ?? {})) {
+    candidates.set(fold(variable), [...(candidates.get(fold(variable)) ?? []), mapped]);
+  }
+  const itemTypes = new Set(schema.itemTypes.map(t => t.itemType));
+  const cslTypes = new Set(Object.values(schema.csl?.types ?? {}).flat());
+  const labels: string[] = [];
+  for (const line of extra.split(/\n/)) {
+    const m = /^([a-z][a-z -_]+):(.+)/i.exec(line);
+    if (!m || m[2].trim() === '') continue;
+    const key = fold(m[1]);
+    const value = m[2].trim();
+    if (key === 'type') {
+      const names = itemTypes.has(value) || cslTypes.has(value);
+      if (names && value !== item.itemType && !['note', 'attachment', 'annotation', 'article'].includes(value)) labels.push(m[1]);
+      continue;
+    }
+    const fields = candidates.get(key) ?? [];
+    const valid = fields.some(f => type.fields.some(tf => tf.field === f) && (typeof item[f] !== 'string' || item[f] === ''));
+    if (valid) labels.push(m[1]);
+  }
+  return labels;
+}
+
 // ---------------------------------------------------------------------------
 // The plan
 // ---------------------------------------------------------------------------
@@ -581,10 +685,22 @@ type Candidate =
   | { readonly kind: 'create'; readonly entryKey: string; readonly entry: BibtexEntry }
   | Extract<ZoteroPushAction, { kind: 'skip' }>;
 
+/** Entry types for a part of a larger work, which shares the work's ISBN. */
+const COMPONENT_TYPES: ReadonlySet<string> = new Set(['incollection', 'inbook', 'inproceedings', 'conference']);
+
 export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   const { parsed } = parseBibtexWithRaw(input.bibText);
   const skip = (entryKey: string, reason: ZoteroPushSkipReason, detail = ''): Candidate =>
     ({ kind: 'skip', entryKey, reason, detail });
+
+  // Which items hold each DOI, so no write gives one to a second item.
+  const doiOwners = new Map<string, string[]>();
+  for (const item of input.items.values()) {
+    const doi = effectiveDoi(item);
+    if (doi !== undefined) doiOwners.set(doi, [...(doiOwners.get(doi) ?? []), item.key]);
+  }
+  const entryDoi = (entry: BibtexEntry): string | undefined =>
+    isMacro(entry, 'doi') ? undefined : normalizeDoi(readVerbatim(entry.fields.get('doi') ?? ''));
 
   // First pass: what each entry is, on its own.
   const candidates: Candidate[] = input.decisions.map((decision): Candidate => {
@@ -595,44 +711,68 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         return skip(entryKey, 'conflict', decision.reason);
       case 'ambiguous':
         return skip(entryKey, 'ambiguous', decision.candidates.map(c => c.key).join(', '));
-      case 'unmatched':
-        return entry === undefined ? skip(entryKey, 'conflict', 'entry-not-editable') : { kind: 'create', entryKey, entry };
+      case 'unmatched': {
+        if (entry === undefined) return skip(entryKey, 'conflict', 'entry-not-editable');
+        const doi = entryDoi(entry);
+        const owners = doi === undefined ? [] : (doiOwners.get(doi) ?? []);
+        if (owners.length > 0) return skip(entryKey, 'doi-owned-elsewhere', owners.join(', '));
+        return { kind: 'create', entryKey, entry };
+      }
       case 'update':
       case 'preserve': {
         if (decision.outcome === 'update' && !STRONG_TIERS.has(decision.tier)) {
           return skip(entryKey, 'weak-match', decision.target.key);
         }
+        // An ISBN names a book, and a chapter or paper in it shares it.
+        if (
+          decision.outcome === 'update' &&
+          decision.tier === 'isbn-pmid' &&
+          !decision.evidence.includes('pmid') &&
+          entry !== undefined &&
+          COMPONENT_TYPES.has(entry.type.toLowerCase())
+        ) {
+          return skip(entryKey, 'weak-match', decision.target.key);
+        }
+        // A stored link names its library as well as its key, and keys are
+        // unique only within a library: the item must be this library's.
         const item = input.items.get(decision.target.key);
-        if (item === undefined) return skip(entryKey, 'other-library', decision.target.key);
+        if (item === undefined || (item.uri !== undefined && item.uri !== decision.target.uri)) {
+          return skip(entryKey, 'other-library', decision.target.uri || decision.target.key);
+        }
         if (entry === undefined) return skip(entryKey, 'conflict', 'entry-not-editable');
-        const entryDoi = normalizeDoi(entry.fields.get('doi'));
-        const itemDoi = normalizeDoi(typeof item.DOI === 'string' ? item.DOI : undefined);
-        if (entryDoi !== undefined && itemDoi !== undefined && entryDoi !== itemDoi) {
+        const doi = entryDoi(entry);
+        const itemDoi = effectiveDoi(item);
+        if (doi !== undefined && itemDoi !== undefined && doi !== itemDoi) {
           return skip(entryKey, 'identity-disagreement', item.key);
         }
+        const elsewhere = doi === undefined ? [] : (doiOwners.get(doi) ?? []).filter(k => k !== item.key);
+        if (elsewhere.length > 0) return skip(entryKey, 'doi-owned-elsewhere', elsewhere.join(', '));
         return { kind: 'match', entryKey, entry, item };
       }
     }
   });
 
-  // Second pass: entries that would collide with each other.
+  // Second pass: entries that would collide with each other.  A DOI is
+  // given to an item by a create, or by an update of an item without one.
   const targets = new Map<string, number>();
-  const createDois = new Map<string, number>();
+  const givenDois = new Map<string, number>();
+  const givesDoi = (c: Candidate): string | undefined =>
+    c.kind === 'create' || (c.kind === 'match' && input.mode === 'update' && effectiveDoi(c.item) === undefined)
+      ? entryDoi(c.entry)
+      : undefined;
   for (const c of candidates) {
     if (c.kind === 'match') targets.set(c.item.key, (targets.get(c.item.key) ?? 0) + 1);
-    if (c.kind === 'create') {
-      const doi = normalizeDoi(c.entry.fields.get('doi'));
-      if (doi !== undefined) createDois.set(doi, (createDois.get(doi) ?? 0) + 1);
-    }
+    const doi = givesDoi(c);
+    if (doi !== undefined) givenDois.set(doi, (givenDois.get(doi) ?? 0) + 1);
   }
 
   const actions: ZoteroPushAction[] = candidates.map((c): ZoteroPushAction => {
     if (c.kind === 'skip') return c;
+    const doi = givesDoi(c);
+    if (doi !== undefined && (givenDois.get(doi) ?? 0) > 1) {
+      return { kind: 'skip', entryKey: c.entryKey, reason: 'duplicate-doi', detail: doi };
+    }
     if (c.kind === 'create') {
-      const doi = normalizeDoi(c.entry.fields.get('doi'));
-      if (doi !== undefined && (createDois.get(doi) ?? 0) > 1) {
-        return { kind: 'skip', entryKey: c.entryKey, reason: 'duplicate-doi', detail: doi };
-      }
       const itemType = ITEM_TYPE_BY_ENTRY_TYPE[c.entry.type.toLowerCase()];
       const type = itemType === undefined ? undefined : schemaType(input.schema, itemType);
       if (itemType === undefined || type === undefined) {
@@ -657,6 +797,11 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     }
     if (!addToCollection && changes.length === 0) {
       return { kind: 'unchanged', entryKey: c.entryKey, itemKey: c.item.key, notPushed };
+    }
+    // Any write to the item would let Zotero rewrite it from its Extra.
+    const migrations = type === undefined ? [] : extraMigrations(c.item, type, input.schema);
+    if (migrations.length > 0) {
+      return { kind: 'skip', entryKey: c.entryKey, reason: 'extra-would-migrate', detail: migrations.join(', ') };
     }
     if (addToCollection) patch.collections = [...collections, input.collectionKey];
     return {

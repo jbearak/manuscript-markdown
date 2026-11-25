@@ -8,7 +8,13 @@ import {
   type ZoteroPushMode,
 } from './zotero-push';
 import { applyZoteroPush, formatZoteroPushReport, type ZoteroKeyProvider } from './zotero-push-run';
-import { writeZoteroItems, ZoteroLocalApiError, type ZoteroFetch } from './zotero-local-api';
+import {
+  authorizeZoteroLocalApi,
+  fetchZoteroLibrarySnapshot,
+  writeZoteroItems,
+  ZoteroLocalApiError,
+  type ZoteroFetch,
+} from './zotero-local-api';
 import { resolveCollection, runZoteroCli } from './zotero-cli';
 
 // A slice of Zotero 10's /api/schema: the types these tests use.
@@ -30,6 +36,16 @@ const SCHEMA: ZoteroItemSchema = {
       creatorTypes: [{ creatorType: 'author' }, { creatorType: 'editor' }],
     },
     {
+      itemType: 'book',
+      fields: ['title', 'date', 'publisher', 'place', 'ISBN', 'url', 'citationKey', 'extra'].map(f => field(f)),
+      creatorTypes: [{ creatorType: 'author' }, { creatorType: 'editor' }],
+    },
+    {
+      itemType: 'bookSection',
+      fields: [field('title'), field('bookTitle', 'publicationTitle'), field('date'), field('ISBN'), field('pages'), field('citationKey'), field('extra')],
+      creatorTypes: [{ creatorType: 'author' }, { creatorType: 'editor' }],
+    },
+    {
       itemType: 'document',
       fields: ['title', 'date', 'publisher', 'place', 'url', 'citationKey', 'extra'].map(f => field(f)),
       creatorTypes: [{ creatorType: 'author' }],
@@ -40,7 +56,15 @@ const SCHEMA: ZoteroItemSchema = {
 const COLLECTION = 'COLL0001';
 
 function item(key: string, data: Record<string, unknown>): ZoteroItemJson {
-  return { key, version: 10, itemType: 'journalArticle', collections: [COLLECTION], creators: [], ...data } as ZoteroItemJson;
+  return {
+    key,
+    version: 10,
+    itemType: 'journalArticle',
+    collections: [COLLECTION],
+    creators: [],
+    uri: 'http://zotero.org/users/1/items/' + key,
+    ...data,
+  } as ZoteroItemJson;
 }
 
 function catalogOf(items: readonly ZoteroItemJson[]): ZoteroCatalogItem[] {
@@ -50,6 +74,7 @@ function catalogOf(items: readonly ZoteroItemJson[]): ZoteroCatalogItem[] {
     title: typeof i.title === 'string' ? i.title : undefined,
     citationKey: typeof i.citationKey === 'string' ? i.citationKey : undefined,
     doi: typeof i.DOI === 'string' ? i.DOI : undefined,
+    isbn: typeof i.ISBN === 'string' ? i.ISBN : undefined,
     year: i.parsedDate,
     containerTitle: typeof i.publicationTitle === 'string' ? i.publicationTitle : undefined,
     author: Array.isArray(i.creators) && i.creators.length > 0 ? (i.creators[0] as { lastName?: string }).lastName : undefined,
@@ -210,6 +235,77 @@ describe('createZoteroPushPlan', () => {
     expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'identity-disagreement' });
   });
 
+  it("leaves an entry linked to another library's item with the same key alone", () => {
+    const bib = FLATO_BIB.replace(
+      'keywords = {/unread},',
+      'zotero-key = {FLATO001},\n  zotero-uri = {http://zotero.org/groups/9/items/FLATO001},\n  keywords = {/unread},',
+    );
+    const p = plan(bib.replace('year = 2018', 'year = 2019'), [FLATO]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'other-library' });
+  });
+
+  it("leaves an item alone that Zotero would rewrite from its Extra on any save", () => {
+    const withExtra = { ...FLATO, collections: [], volume: undefined, extra: 'Volume: 55' };
+    const p = plan(FLATO_BIB, [withExtra as ZoteroItemJson], 'add');
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'extra-would-migrate', detail: 'Volume' });
+    // A line naming a field the type lacks stays in Extra, so it's no bar.
+    const series = { ...FLATO, collections: [], extra: 'Original title: Something' };
+    expect(plan(FLATO_BIB, [series as ZoteroItemJson], 'add').actions[0].kind).toBe('update');
+  });
+
+  it("won't give an item a DOI another item has", () => {
+    const other = item('OTHER001', { title: 'Other', DOI: '10.1/taken', citationKey: 'other2000' });
+    const noDoi = { ...FLATO, DOI: undefined } as unknown as ZoteroItemJson;
+    const p = plan(FLATO_BIB.replace('10.1007/s13524-017-0638-3', '10.1/taken'), [noDoi, other]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'doi-owned-elsewhere', detail: 'OTHER001' });
+  });
+
+  it("reads an item's DOI from Extra too", () => {
+    const extraDoi = { ...FLATO, DOI: undefined, extra: 'DOI: 10.1/real' } as unknown as ZoteroItemJson;
+    const p = plan(FLATO_BIB.replace('10.1007/s13524-017-0638-3', '10.1/other'), [extraDoi]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'identity-disagreement' });
+  });
+
+  it("doesn't take a chapter for its book by their shared ISBN", () => {
+    const book = item('BOOK0001', { itemType: 'book', title: 'The Book', ISBN: '9780306406157', citationKey: 'book2000', creators: [] });
+    const chapter = '@incollection{chapter2000,\n  title = {A Chapter},\n  booktitle = {The Book},\n  isbn = {978-0-306-40615-7}\n}\n';
+    expect(plan(chapter, [book]).actions[0]).toMatchObject({ kind: 'skip', reason: 'weak-match' });
+  });
+
+  it("doesn't write a macro's name for its text", () => {
+    const bib = '@string{dem = {Demography}}\n' + FLATO_BIB.replace('journal = {Demography}', 'journal = dem');
+    expect(plan(bib, [FLATO]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'journal', reason: 'macro' }] });
+  });
+
+  it("reads 'and others' as the start of the list", () => {
+    const two = { ...FLATO, creators: [...(FLATO.creators as unknown[]), { creatorType: 'author', firstName: 'Jane', lastName: 'Smith' }] };
+    const bib = FLATO_BIB.replace('Flat{\\o}, Martin', 'Flat{\\o}, Martin and others');
+    expect(plan(bib, [two as ZoteroItemJson]).changed).toBe(false);
+    const wrong = plan(bib.replace('Flat{\\o}, Martin', 'Doe, Ann'), [two as ZoteroItemJson]);
+    expect(wrong.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'author', reason: 'incomplete-names' }] });
+    const created = plan(bib, []).actions[0];
+    expect(created.kind === 'create' && created.data.creators).toEqual([{ creatorType: 'author', lastName: 'Flatø', firstName: 'Martin' }]);
+  });
+
+  it('reads a \\url{} and escapes, and never writes TeX into an identifier', () => {
+    const withUrl = { ...FLATO, url: 'https://x.org/a_b' };
+    expect(plan(FLATO_BIB.replace('keywords', 'url = {\\url{https://x.org/a\\_b}},\n  keywords'), [withUrl as ZoteroItemJson]).changed).toBe(false);
+    const p = plan(FLATO_BIB.replace('keywords', 'url = {https://x.org/\\foo},\n  keywords'), [FLATO]);
+    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'url', reason: 'tex' }] });
+  });
+
+  it("keeps Zotero's access time on the same day", () => {
+    const accessed = { ...FLATO, accessDate: '2020-01-01T14:32:02Z' };
+    const bib = FLATO_BIB.replace('keywords', 'urldate = {2020-01-01},\n  keywords');
+    expect(plan(bib, [accessed as ZoteroItemJson]).changed).toBe(false);
+  });
+
+  it("replaces a free-text date Zotero can't read", () => {
+    const forthcoming = { ...FLATO, date: 'forthcoming', parsedDate: undefined };
+    const p = plan(FLATO_BIB, [forthcoming as ZoteroItemJson]);
+    expect(p.actions[0].kind === 'update' && p.actions[0].changes).toEqual([{ field: 'date', from: 'forthcoming', to: '2018' }]);
+  });
+
   it('leaves two entries for one item alone', () => {
     const twin = FLATO_BIB.replace('flato2018differential,', 'flatotwin,');
     const p = plan(FLATO_BIB + '\n' + twin, [FLATO]);
@@ -289,6 +385,37 @@ describe('writeZoteroItems', () => {
   });
 });
 
+describe('authorizeZoteroLocalApi', () => {
+  it('names the Zotero it asks, as Zotero requires of every POST', async () => {
+    const { fetchFn, sent } = writeFetch(() => ({ status: 200, body: { key: 'NEWKEY', remember: true } }));
+    expect(await authorizeZoteroLocalApi('App', 'SERVER', { fetchFn })).toEqual({ key: 'NEWKEY', remember: true });
+    expect(sent[0].url).toBe('http://localhost:23119/api/local/authorize');
+    expect(sent[0].headers['Zotero-Server-ID']).toBe('SERVER');
+  });
+});
+
+describe('fetchZoteroLibrarySnapshot', () => {
+  it("lets the matcher see Zotero 10's PMID field", async () => {
+    const row = {
+      key: 'PMID0001',
+      library: { type: 'user', id: 1 },
+      data: { key: 'PMID0001', version: 3, itemType: 'journalArticle', title: 'Paper', PMID: '12345678', creators: [] },
+      meta: {},
+    };
+    const fetchFn: ZoteroFetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [row],
+      headers: { get: (n: string) => (n === 'Last-Modified-Version' ? '7' : n === 'Zotero-Server-ID' ? 'S' : null) },
+    });
+    const snapshot = await fetchZoteroLibrarySnapshot({ type: 'user' }, { fetchFn });
+    const bib = '@article{renamed,\n  title = {A Revised Title},\n  pmid = {12345678}\n}\n';
+    const decision = createZoteroLinkPlan(bib, snapshot.catalog).decisions[0];
+    expect(decision).toMatchObject({ outcome: 'update', tier: 'isbn-pmid', target: { key: 'PMID0001' } });
+    expect(snapshot.libraryVersion).toBe(7);
+  });
+});
+
 describe('applyZoteroPush', () => {
   const many = Array.from({ length: 51 }, (_, i) => `@article{key${i},\n  title = {Title ${i}},\n  year = 2020\n}\n`).join('\n');
   const prepared = { plan: plan(many, []), serverId: 'SERVER', libraryVersion: 5 };
@@ -329,6 +456,16 @@ describe('applyZoteroPush', () => {
     expect(sent.map(s => s.headers['Zotero-API-Key'])).toEqual(['OLD', 'NEW', 'NEW']);
   });
 
+  it("marks a batch whose answer never came as unknown, not unsent", async () => {
+    const fetchFn: ZoteroFetch = async () => {
+      throw new DOMException('timed out', 'TimeoutError');
+    };
+    const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
+    expect(result.error?.kind).toBe('timeout');
+    expect(result.outcomes.slice(0, 50).every(o => o === 'unknown')).toBe(true);
+    expect(result.outcomes[50]).toBeUndefined();
+  });
+
   it('stops at a changed library and sends nothing more', async () => {
     const { fetchFn, sent } = writeFetch(() => ({ status: 412, text: 'Library has been modified' }));
     const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
@@ -350,6 +487,8 @@ describe('zotero CLI', () => {
     expect(resolveCollection('Papers / Drafts', collections).key).toBe('BBBB0001');
     expect(resolveCollection('Papers', collections).key).toBe('AAAA0001');
     expect(() => resolveCollection('Drafts', collections)).toThrow(/Several collections/);
+    const twins = [...collections, { key: 'DDDD0001', name: 'Papers', path: 'Papers', itemCount: 0 }];
+    expect(() => resolveCollection('Papers', twins)).toThrow(/Several collections/);
   });
 
   it('reports a usage error with exit code 2', async () => {

@@ -650,6 +650,11 @@ export async function fetchZoteroLibrarySnapshot(
       'Zotero did not report its library version and server id; writing needs Zotero 10 or later.',
     );
   }
+  // Only the catalog's items, the bibliographic ones, with the identity
+  // URI the catalog gives each, so a stored link to another library's item
+  // with the same key is told apart.
+  const catalog = catalogFromRows(scope, rows);
+  const uris = new Map(catalog.map(c => [c.key, c.uri]));
   const items = new Map<string, import('./zotero-push').ZoteroItemJson>();
   for (const row of rows) {
     const record = asRecord(row);
@@ -657,11 +662,17 @@ export async function fetchZoteroLibrarySnapshot(
     const key = asString(data?.key);
     const itemType = asString(data?.itemType);
     if (data === undefined || key === undefined || itemType === undefined) continue;
-    if (typeof data.version !== 'number') continue;
+    if (typeof data.version !== 'number' || !uris.has(key)) continue;
     const parsedDate = asString(asRecord(record?.meta)?.parsedDate);
-    items.set(key, { ...data, key, itemType, version: data.version, parsedDate });
+    items.set(key, { ...data, key, itemType, version: data.version, parsedDate, uri: uris.get(key) });
   }
-  return { catalog: catalogFromRows(scope, rows), items, libraryVersion, serverId };
+  // Zotero 10 has a PMID field, where the matcher reads PMIDs from Extra
+  // only; give it both, for push alone.
+  const pushCatalog = catalog.map(c => {
+    const pmid = asString(items.get(c.key)?.PMID);
+    return pmid === undefined ? c : { ...c, extra: (c.extra ? c.extra + '\n' : '') + 'PMID: ' + pmid };
+  });
+  return { catalog: pushCatalog, items, libraryVersion, serverId };
 }
 
 /** Zotero's item types, their fields and their creator roles. */
@@ -673,7 +684,10 @@ export async function fetchZoteroSchema(
   if (!Array.isArray(itemTypes)) {
     throw new ZoteroLocalApiError('request-failed', 'Zotero returned an unreadable schema.');
   }
-  return { itemTypes: itemTypes as import('./zotero-push').ZoteroItemSchema['itemTypes'] };
+  return {
+    itemTypes: itemTypes as import('./zotero-push').ZoteroItemSchema['itemTypes'],
+    csl: asRecord(asRecord(body)?.csl) as import('./zotero-push').ZoteroItemSchema['csl'],
+  };
 }
 
 /** How long Zotero's authorization dialog may wait for a person. */
@@ -684,17 +698,21 @@ const AUTHORIZE_TIMEOUT_MS = 5 * 60 * 1000;
  *  for one write request. */
 export async function authorizeZoteroLocalApi(
   appName: string,
+  /** The Zotero the key is for, which Zotero requires on every POST. */
+  serverId: string,
   options: ZoteroLocalApiOptions = {},
 ): Promise<{ key: string; remember: boolean }> {
   const { body } = await requestJson('/local/authorize', AUTHORIZE_TIMEOUT_MS, options, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Zotero-Server-ID': serverId },
     body: JSON.stringify({ appName }),
     statusError: status =>
       status === 403
         ? new ZoteroLocalApiError('authorization-denied', 'Zotero denied access.')
         : status === 404
           ? new ZoteroLocalApiError('request-failed', 'This Zotero cannot grant write access; writing needs Zotero 10 or later.')
+          : status === 412
+            ? new ZoteroLocalApiError('library-changed', 'A different Zotero is answering than the one this command read.')
           : status === 429
             ? new ZoteroLocalApiError('request-failed', 'Zotero is refusing further authorization requests for now. Wait a minute and try again.')
             : undefined,
