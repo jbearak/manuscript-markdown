@@ -188,7 +188,7 @@ async function push(args: readonly string[], io: ZoteroCliIo): Promise<number> {
   const scope = await resolveLibrary(flags.values.get('--library'), api);
   const collection = resolveCollection(collectionValue, await listZoteroCollections(scope, api));
   const mode = flags.switches.has('--update') ? 'update' : 'add';
-  const prepared = await prepareZoteroPush(scope, bibText, collection.key, mode, api);
+  const prepared = await prepareZoteroPush(scope, bibText, collection, mode, api);
   if (prepared === undefined) {
     io.err(`Could not safely parse "${bibPath}". Check it for unbalanced braces or a stray @.`);
     return 1;

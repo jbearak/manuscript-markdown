@@ -10,6 +10,7 @@ import {
   fetchZoteroSchema,
   writeZoteroItems,
   ZoteroLocalApiError,
+  type ZoteroCollectionSummary,
   type ZoteroLibraryScope,
   type ZoteroLocalApiOptions,
   type ZoteroWriteOutcome,
@@ -38,11 +39,19 @@ export interface ZoteroPushPrepared {
 export async function prepareZoteroPush(
   scope: ZoteroLibraryScope,
   bibText: string,
-  collectionKey: string,
+  /** The collection, as listed (whose Zotero the library must be read
+   *  from), or its key. */
+  collection: string | ZoteroCollectionSummary,
   mode: ZoteroPushMode,
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroPushPrepared | undefined> {
   const snapshot = await fetchZoteroLibrarySnapshot(scope, options);
+  // A collection key names a collection in one Zotero: a profile switched
+  // since it was chosen would put the items in another's.
+  const collectionKey = typeof collection === 'string' ? collection : collection.key;
+  if (typeof collection !== 'string' && collection.serverId !== undefined && collection.serverId !== snapshot.serverId) {
+    throw new ZoteroLocalApiError('library-changed', 'A different Zotero is answering than the one the collection was chosen from.');
+  }
   const schema = await fetchZoteroSchema(options);
   const link = createZoteroLinkPlan(bibText, snapshot.catalog);
   if (link.blocked !== undefined) return undefined;
@@ -53,6 +62,8 @@ export async function prepareZoteroPush(
     schema,
     collectionKey,
     mode,
+    keySalt: snapshot.serverId + '\n' + (scope.type === 'user' ? 'user' : 'group ' + scope.groupId),
+    takenKeys: snapshot.takenKeys,
   });
   return { plan, serverId: snapshot.serverId, libraryVersion: snapshot.libraryVersion };
 }
@@ -205,8 +216,9 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   'incomplete-item': "Zotero's answer did not give the whole list that writing would replace",
   'no-citation-key-field':
     'Zotero has no Citation Key field for this item type, so the next push could not find the item and would create it again',
-  'key-in-use':
-    'push created an item for this citation key before, and its citation key has changed in Zotero since; link the entry to it with zotero-key',
+  'key-taken': "Zotero already holds the item key push would create this entry's item under, so push won't create it",
+  'citation-key-moved':
+    'push created an item for this citation key before, and another item has the citation key now, so which one the entry means is unclear; check both in Zotero',
   'unsupported-type': 'no Zotero item type for this entry type',
   'unreadable-identifier': 'an identifier is written with TeX; write it plain',
   'extra-would-migrate':
@@ -260,7 +272,7 @@ export function formatZoteroPushReport(
           : outcome === 'unknown'
             ? ' [outcome unknown: run the push again to check]'
           : outcome.status === 'failed' && a.kind === 'create' && outcome.code === 412
-            ? ` [failed: Zotero already has an item under this key, ${String(a.data.key)}: an earlier push may still be saving it, or it is in Zotero's trash. Run the push again; if this recurs, restore the item from the trash or empty the trash.]`
+            ? ` [failed: Zotero already has an item under this key, ${String(a.data.key)}, which was free when push read the library: an earlier push may have been saving it. Run the push again to see what is there.]`
           : outcome.status === 'failed'
             ? ` [failed: ${outcome.message}]`
             : outcome.status === 'success'

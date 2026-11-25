@@ -376,7 +376,7 @@ Available from the Command Palette, from the toolbar's **Citations & Notes** sub
 6. On **Push**, gets a write key: the one kept in VS Code's secret storage for this Zotero, or a new one, which Zotero asks you to allow in a dialog. A key allowed with **Always Allow** is kept; one allowed with **Allow** is good for one write and isn't kept.
 7. Writes in batches of up to 50 items. Each batch is made against the library version the last one left, so a change made in Zotero meanwhile stops the push.
 
-The per-entry report, with each write's outcome, goes to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details**. A write whose answer never came, or that Zotero's answer doesn't mention, is reported as `outcome unknown`; running the push again is safe, since an item it creates is named by its citation key and Zotero refuses a second copy (see [Pushing a Bibliography to Zotero](zotero-roundtrip.md#pushing-a-bibliography-to-zotero)).
+The per-entry report, with each write's outcome, goes to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details**. A write whose answer never came, or that Zotero's answer doesn't mention, is reported as `outcome unknown`; running the push again is safe, since an item it creates is named by its citation key, in a key no other item has, and Zotero refuses a second copy (see [Pushing a Bibliography to Zotero](zotero-roundtrip.md#pushing-a-bibliography-to-zotero)).
 
 | Scenario | Message |
 |----------|---------|

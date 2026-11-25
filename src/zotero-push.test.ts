@@ -87,7 +87,10 @@ function catalogOf(items: readonly ZoteroItemJson[]): ZoteroCatalogItem[] {
   }));
 }
 
-function plan(bibText: string, items: readonly ZoteroItemJson[], mode: ZoteroPushMode = 'update') {
+// The salt of the libraries libraryApi serves: its server id, user scope.
+const TEST_SALT = 'SERVER\nuser';
+
+function plan(bibText: string, items: readonly ZoteroItemJson[], mode: ZoteroPushMode = 'update', takenElsewhere: readonly string[] = []) {
   const link = createZoteroLinkPlan(bibText, catalogOf(items));
   return createZoteroPushPlan({
     bibText,
@@ -96,6 +99,8 @@ function plan(bibText: string, items: readonly ZoteroItemJson[], mode: ZoteroPus
     schema: SCHEMA,
     collectionKey: COLLECTION,
     mode,
+    keySalt: TEST_SALT,
+    takenKeys: new Set([...items.map(i => i.key), ...takenElsewhere]),
   });
 }
 
@@ -217,7 +222,7 @@ describe('createZoteroPushPlan', () => {
           ],
           citationKey: 'doe2026new',
           collections: [COLLECTION],
-          key: pushItemKey('doe2026new'),
+          key: pushItemKey(TEST_SALT, 'doe2026new'),
           version: 0,
         },
         notPushed: [{ field: 'note', reason: 'no-zotero-field' }],
@@ -593,10 +598,10 @@ describe('fetchZoteroLibrarySnapshot', () => {
       data: { key: 'PMID0001', version: 3, itemType: 'journalArticle', title: 'Paper', PMID: '12345678', extra: 'PMID: 99999999', creators: [] },
       meta: {},
     };
-    const fetchFn: ZoteroFetch = async () => ({
+    const fetchFn: ZoteroFetch = async url => ({
       ok: true,
       status: 200,
-      json: async () => [row],
+      json: async () => (url.includes('format=versions') ? { PMID0001: 3 } : [row]),
       headers: { get: (n: string) => (n === 'Last-Modified-Version' ? '7' : n === 'Zotero-Server-ID' ? 'S' : null) },
     });
     const snapshot = await fetchZoteroLibrarySnapshot({ type: 'user' }, { fetchFn });
@@ -812,7 +817,7 @@ const AUDIT_SCHEMA: ZoteroItemSchema = {
 };
 
 /** A Local API that serves `items` and records what is POSTed. */
-function libraryApi(items: readonly ZoteroItemJson[], schema: ZoteroItemSchema = AUDIT_SCHEMA) {
+function libraryApi(items: readonly ZoteroItemJson[], schema: ZoteroItemSchema = AUDIT_SCHEMA, trashed: readonly string[] = []) {
   const posts: Array<Array<Record<string, unknown>>> = [];
   const rows = items.map(({ uri: _uri, parsedDate, ...data }) => ({
     key: data.key,
@@ -831,7 +836,13 @@ function libraryApi(items: readonly ZoteroItemJson[], schema: ZoteroItemSchema =
       const successful = Object.fromEntries(body.map((o, i) => [String(i), { key: (o.key as string) ?? 'NEW0000' + i, version: 11 }]));
       return { ok: true, status: 200, json: async () => ({ successful }), headers: headers(11) };
     }
-    const body = path.endsWith('/schema') ? schema : path.endsWith('/items/top') ? rows : [];
+    const body = path.endsWith('/schema')
+      ? schema
+      : path.endsWith('/items/top')
+        ? rows
+        : url.includes('format=versions')
+          ? Object.fromEntries([...items.map(i => [i.key, i.version] as const), ...trashed.map(k => [k, 0] as const)])
+          : [];
     return { ok: true, status: 200, json: async () => body, headers: headers(10) };
   };
   return { fetchFn, posts };
@@ -983,7 +994,13 @@ describe('push: never a second copy of a work the library has', () => {
         return { ok: true, status: 200, json: async () => ({ successful, failed }), headers };
       }
       const rows = [...stored.values()].map(data => ({ key: data.key, library: { type: 'user', id: 1 }, data, meta: {} }));
-      const body = path.endsWith('/schema') ? AUDIT_SCHEMA : path.endsWith('/items/top') ? rows : [];
+      const body = path.endsWith('/schema')
+        ? AUDIT_SCHEMA
+        : path.endsWith('/items/top')
+          ? rows
+          : url.includes('format=versions')
+            ? Object.fromEntries([...stored.values()].map(i => [i.key, i.version]))
+            : [];
       return { ok: true, status: 200, json: async () => body, headers };
     };
     const bib = '@article{a,\n  title = {A}\n}\n\n@article{b,\n  title = {B}\n}\n';
@@ -993,8 +1010,8 @@ describe('push: never a second copy of a work the library has', () => {
     };
     const first = await run();
     expect(zoteroPushWrites(first.prepared.plan)).toMatchObject([
-      { citationKey: 'a', key: pushItemKey('a'), version: 0 },
-      { citationKey: 'b', key: pushItemKey('b'), version: 0 },
+      { citationKey: 'a', key: pushItemKey(TEST_SALT, 'a'), version: 0 },
+      { citationKey: 'b', key: pushItemKey(TEST_SALT, 'b'), version: 0 },
     ]);
     expect(first.result.outcomes).toEqual(['unknown', 'unknown']);
     const retry = await run();
@@ -1005,13 +1022,63 @@ describe('push: never a second copy of a work the library has', () => {
 
   it('says what a refused create means', () => {
     const p = plan('@article{a,\n  title = {A}\n}\n', []);
-    const report = formatZoteroPushReport(p, 'Coll', { outcomes: [{ status: 'failed', key: pushItemKey('a'), code: 412, message: 'item version mismatch' }] });
-    expect(report).toContain('Zotero already has an item under this key, ' + pushItemKey('a'));
+    const report = formatZoteroPushReport(p, 'Coll', { outcomes: [{ status: 'failed', key: pushItemKey(TEST_SALT, 'a'), code: 412, message: 'item version mismatch' }] });
+    expect(report).toContain('Zotero already has an item under this key, ' + pushItemKey(TEST_SALT, 'a'));
   });
 
-  it("won't create an item under a key the library already has", () => {
-    const renamed = item(pushItemKey('a'), { title: 'A', citationKey: 'renamed' });
-    expect(plan('@article{a,\n  title = {Another}\n}\n', [renamed]).actions[0]).toMatchObject({ kind: 'skip', reason: 'key-in-use' });
+  it("won't create an item under a key the library holds anywhere, trash included", async () => {
+    // A trashed item at version 0, as every item is in a library never
+    // saved since Zotero's migration: Zotero would take a create there for
+    // an update.
+    const key = pushItemKey(TEST_SALT, 'k');
+    const trashed = await (async () => {
+      const api = libraryApi([], AUDIT_SCHEMA, [key]);
+      return (await prepareZoteroPush({ type: 'user' }, '@article{k,\n  title = {New study}\n}\n', COLLECTION, 'add', api))!.plan;
+    })();
+    expect(trashed.actions[0]).toMatchObject({ kind: 'skip', reason: 'key-taken', detail: key + ", held by an item in Zotero's trash, or a note or attachment" });
+    expect(trashed.changed).toBe(false);
+    // Held by another work, as two citation keys whose item keys collide.
+    const other = item(key, { title: 'A', citationKey: 'paper906599' });
+    const report = formatZoteroPushReport(plan('@article{k,\n  title = {B}\n}\n', [other]), 'Coll');
+    expect(report).toContain('held by the item with citation key paper906599');
+    expect(report).not.toContain('zotero-key');
+  });
+
+  it('gives an entry another item key in another library, or from another Zotero', async () => {
+    const keys = await Promise.all(
+      [{ type: 'user' } as const, { type: 'group', groupId: 6 } as const].map(async scope => {
+        const prepared = await prepareZoteroPush(scope, '@article{smith2020,\n  title = {Lakes}\n}\n', COLLECTION, 'add', libraryApi([]));
+        return zoteroPushWrites(prepared!.plan)[0].key;
+      }),
+    );
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(pushItemKey('A\nuser', 'smith2020')).not.toBe(pushItemKey('B\nuser', 'smith2020'));
+  });
+
+  it('creates neither of two entries whose item keys collide', () => {
+    // Found by search: two citation keys with one item key in this library.
+    expect(pushItemKey(TEST_SALT, 'paper299592')).toBe(pushItemKey(TEST_SALT, 'paper332929'));
+    const p = plan('@article{paper299592,\n  title = {A}\n}\n\n@article{paper332929,\n  title = {B}\n}\n', [], 'add');
+    expect(p.actions).toMatchObject([
+      { kind: 'skip', reason: 'key-taken', detail: pushItemKey(TEST_SALT, 'paper299592') + ', which entry paper332929 would get too' },
+      { kind: 'skip', reason: 'key-taken', detail: pushItemKey(TEST_SALT, 'paper299592') + ', which entry paper299592 would get too' },
+    ]);
+  });
+
+  it("leaves an entry alone when the item push made for its key no longer has it, and another does", () => {
+    // Push created k under its key; k was renamed in Zotero, and another
+    // item was given the citation key k.
+    const made = item(pushItemKey(TEST_SALT, 'k'), { title: 'My study', citationKey: 'renamed' });
+    const theirs = item('BBBB2222', { title: 'Their study', citationKey: 'k' });
+    const p = plan('@article{k,\n  title = {My study}\n}\n', [made, theirs]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'citation-key-moved', detail: made.key + ' and BBBB2222' });
+  });
+
+  it('reads and writes in the Zotero the collection was chosen from', async () => {
+    const chosen = { key: COLLECTION, name: 'Drafts', path: 'Drafts', itemCount: 0, serverId: 'OTHER' };
+    const error = await prepareZoteroPush({ type: 'user' }, '@article{k,\n  title = {T}\n}\n', chosen, 'add', libraryApi([])).catch(e => e);
+    expect(error).toBeInstanceOf(ZoteroLocalApiError);
+    expect((error as ZoteroLocalApiError).kind).toBe('library-changed');
   });
 });
 

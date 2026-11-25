@@ -607,6 +607,8 @@ export interface ZoteroCollectionSummary {
   /** Names from the top-level collection down, joined with " / ". */
   readonly path: string;
   readonly itemCount: number;
+  /** The Zotero that listed it: a push to it must read and write there. */
+  readonly serverId?: string;
 }
 
 /** Every collection in the library, sorted by path. */
@@ -614,7 +616,8 @@ export async function listZoteroCollections(
   scope: ZoteroLibraryScope,
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroCollectionSummary[]> {
-  const rows = await requestArray(libraryPrefix(scope) + '/collections', LIST_TIMEOUT_MS, options);
+  const { rows, headers } = await requestArrayWithHeaders(libraryPrefix(scope) + '/collections', LIST_TIMEOUT_MS, options);
+  const serverId = headers?.get('Zotero-Server-ID') ?? undefined;
   const byKey = new Map<string, { name: string; parent: string | undefined; itemCount: number }>();
   for (const row of rows) {
     const record = asRecord(row);
@@ -636,7 +639,7 @@ export async function listZoteroCollections(
     return pathOf(c.parent, seen) + ' / ' + c.name;
   };
   return [...byKey.entries()]
-    .map(([key, c]) => ({ key, name: c.name, path: pathOf(key), itemCount: c.itemCount }))
+    .map(([key, c]) => ({ key, name: c.name, path: pathOf(key), itemCount: c.itemCount, ...(serverId ? { serverId } : {}) }))
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -648,6 +651,9 @@ export interface ZoteroLibrarySnapshot {
   readonly items: Map<string, import('./zotero-push').ZoteroItemJson>;
   readonly libraryVersion: number;
   readonly serverId: string;
+  /** Every item key the library holds, its trash, notes and attachments
+   *  included, which push may never create an item under. */
+  readonly takenKeys: ReadonlySet<string>;
 }
 
 export async function fetchZoteroLibrarySnapshot(
@@ -671,9 +677,22 @@ export async function fetchZoteroLibrarySnapshot(
   // Both reads must come from one Zotero: a profile switched between them
   // would pair one library's version with another's items, and the version
   // check would then pass a write planned against the wrong library.
-  if (rowHeaders?.get('Zotero-Server-ID') !== serverId) {
+  // Every key, trash and child items too: Zotero takes a create under a
+  // key it has, at the same version, for an update (writeMultipleObjects),
+  // and an item never saved since its migration is at version 0.
+  const { body: versions, headers: keyHeaders } = await requestJson(
+    libraryPrefix(scope) + '/items?format=versions&includeTrashed=1',
+    CATALOG_TIMEOUT_MS,
+    options,
+  );
+  if (rowHeaders?.get('Zotero-Server-ID') !== serverId || keyHeaders?.get('Zotero-Server-ID') !== serverId) {
     throw new ZoteroLocalApiError('library-changed', 'A different Zotero answered while the library was being read.');
   }
+  const versionMap = asRecord(versions);
+  if (versionMap === undefined || Array.isArray(versions)) {
+    throw new ZoteroLocalApiError('request-failed', "Zotero returned an unreadable list of the library's item keys.");
+  }
+  const takenKeys = new Set(Object.keys(versionMap));
   // Only the catalog's items, the bibliographic ones, with the identity
   // URI the catalog gives each, so a stored link to another library's item
   // with the same key is told apart.
@@ -686,7 +705,12 @@ export async function fetchZoteroLibrarySnapshot(
     const key = asString(data?.key);
     const itemType = asString(data?.itemType);
     if (data === undefined || key === undefined || itemType === undefined) continue;
-    if (typeof data.version !== 'number' || !uris.has(key)) continue;
+    if (!uris.has(key)) continue;
+    // An item push can't read whole still answers to its keys and
+    // identifiers, so it can't be left out of the plan.
+    if (typeof data.version !== 'number') {
+      throw new ZoteroLocalApiError('request-failed', 'Zotero returned item ' + key + ' without its version.');
+    }
     const parsedDate = asString(asRecord(record?.meta)?.parsedDate);
     items.set(key, { ...data, key, itemType, version: data.version, parsedDate, uri: uris.get(key) });
   }
@@ -698,7 +722,7 @@ export async function fetchZoteroLibrarySnapshot(
     // field over a stale line of Extra.
     return pmid === undefined ? c : { ...c, extra: 'PMID: ' + pmid + (c.extra ? '\n' + c.extra : '') };
   });
-  return { catalog: pushCatalog, items, libraryVersion, serverId };
+  return { catalog: pushCatalog, items, libraryVersion, serverId, takenKeys };
 }
 
 /** Zotero's item types, their fields and their creator roles. */

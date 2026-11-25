@@ -163,10 +163,13 @@ export type ZoteroPushSkipReason =
   /** The item type has no Citation Key field, so the next push couldn't
    *  find the item it creates, and would create it again. */
   | 'no-citation-key-field'
-  /** The library has an item under the key push gives this entry's item
-   *  (see pushItemKey), but by another citation key: push made it, and its
-   *  key was changed in Zotero since. */
-  | 'key-in-use'
+  /** The library already holds the key push would create this entry's
+   *  item under (see pushItemKey), or another entry's item would get it. */
+  | 'key-taken'
+  /** The item push would have created for this citation key is in the
+   *  library, but another item has the citation key now: which one the
+   *  entry means is unclear. */
+  | 'citation-key-moved'
   /** Push has no Zotero item type for this entry type. */
   | 'unsupported-type'
   /** An identifier is written with TeX the matcher doesn't read. */
@@ -236,6 +239,11 @@ export interface ZoteroPushInput {
   readonly schema: ZoteroItemSchema;
   readonly collectionKey: string;
   readonly mode: ZoteroPushMode;
+  /** Names the library, for the keys push creates items under (see
+   *  pushItemKey): the Zotero's server id and the library's scope. */
+  readonly keySalt: string;
+  /** Every key the library holds, trash, notes and attachments included. */
+  readonly takenKeys: ReadonlySet<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -781,11 +789,15 @@ function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet
 const ITEM_KEY_ALPHABET = '23456789ABCDEFGHIJKLMNPQRSTUVWXYZ';
 
 /** The key push creates an entry's item under: the same for the same
- *  citation key on every run, so a retry names the item the first try may
- *  still be saving.  Zotero creates an item under a key it doesn't have, and
- *  refuses a create (version 0) under one it has. */
-export function pushItemKey(citationKey: string): string {
-  const digest = createHash('sha256').update('manuscript-markdown push\n' + citationKey).digest();
+ *  citation key in the same library on every run, so a retry names the item
+ *  the first try may still be saving, and a different one in another
+ *  library, so a bare key copied between libraries names nothing.  Zotero
+ *  creates an item under a key it doesn't have; under a key it has, it
+ *  refuses a create (version 0) unless that item is at version 0 too, and
+ *  then updates it, so push creates only under a key the library doesn't
+ *  hold at all (see takenKeys). */
+export function pushItemKey(keySalt: string, citationKey: string): string {
+  const digest = createHash('sha256').update('manuscript-markdown push\n' + keySalt + '\n' + citationKey).digest();
   let key = '';
   for (let i = 0; i < 8; i++) key += ITEM_KEY_ALPHABET[digest[i] % ITEM_KEY_ALPHABET.length];
   return key;
@@ -797,6 +809,7 @@ function createData(
   type: SchemaType,
   collectionKey: string,
   repeated: ReadonlySet<string>,
+  itemKey: string,
 ): { data: Record<string, unknown>; notPushed: ZoteroFieldNotPushed[] } {
   const read = entryFields(entry, type, repeated);
   const data: Record<string, unknown> = { itemType };
@@ -813,7 +826,7 @@ function createData(
   data.creators = [...(read.creators.get('author')?.creators ?? []), ...(read.creators.get('editor')?.creators ?? [])];
   data.citationKey = entry.key;
   data.collections = [collectionKey];
-  data.key = pushItemKey(entry.key);
+  data.key = itemKey;
   data.version = 0;
   return { data, notPushed: read.notPushed };
 }
@@ -1121,6 +1134,13 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         if (decision.outcome === 'update' && decision.tier !== 'existing') {
           const keyClaims = (keyOwners.get(entryKey) ?? []).filter(k => k !== item.key);
           if (keyClaims.length > 0) return skip(entryKey, 'citation-key-conflict', [item.key, ...keyClaims].join(', '));
+          // The library holds the key push would have created this entry's
+          // item under, and not on this item: push made that one for the
+          // citation key, which has since moved to this one.
+          const pushed = pushItemKey(input.keySalt, entryKey);
+          if (pushed !== item.key && input.takenKeys.has(pushed)) {
+            return skip(entryKey, 'citation-key-moved', pushed + ' and ' + item.key);
+          }
         }
         // A DOI match is only as good as the DOI: the matcher compares
         // values, shaped like DOIs or not.
@@ -1200,6 +1220,23 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     for (const id of new Set(givesIds(c))) given.set(id, (given.get(id) ?? 0) + 1);
   }
 
+  // The key each create would take, and what holds a key already, for the
+  // report.
+  const createKeys = new Map<string, string[]>();
+  for (const c of candidates) {
+    if (c.kind !== 'create') continue;
+    const key = pushItemKey(input.keySalt, c.entryKey);
+    createKeys.set(key, [...(createKeys.get(key) ?? []), c.entryKey]);
+  }
+  const describeKey = (itemKey: string, sharer?: string): string => {
+    if (sharer !== undefined) return itemKey + ', which entry ' + sharer + ' would get too';
+    const holder = input.items.get(itemKey);
+    if (holder === undefined) return itemKey + ", held by an item in Zotero's trash, or a note or attachment";
+    return typeof holder.citationKey === 'string' && holder.citationKey !== ''
+      ? itemKey + ', held by the item with citation key ' + holder.citationKey
+      : itemKey + ', held by an item with no citation key';
+  };
+
   const actions: ZoteroPushAction[] = candidates.map((c): ZoteroPushAction => {
     if (c.kind === 'skip') return c;
     const shared = givesIds(c).find(id => (given.get(id) ?? 0) > 1);
@@ -1222,10 +1259,14 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
       // A retry after a lost answer, while Zotero may still be saving the
       // first request, must not create the item twice: the item's key comes
       // from the citation key, so both requests name the same item, and
-      // version 0 makes Zotero refuse the second rather than merge it.
-      const itemKey = pushItemKey(c.entryKey);
-      if (input.items.has(itemKey)) return { kind: 'skip', entryKey: c.entryKey, reason: 'key-in-use', detail: itemKey };
-      const { data, notPushed } = createData(c.entry, itemType, type, input.collectionKey, c.repeated);
+      // version 0 makes Zotero refuse the second rather than merge it.  A
+      // key the library holds already, or another entry's, is never used.
+      const itemKey = pushItemKey(input.keySalt, c.entryKey);
+      const sharer = createKeys.get(itemKey)?.find(k => k !== c.entryKey);
+      if (input.takenKeys.has(itemKey) || sharer !== undefined) {
+        return { kind: 'skip', entryKey: c.entryKey, reason: 'key-taken', detail: describeKey(itemKey, sharer) };
+      }
+      const { data, notPushed } = createData(c.entry, itemType, type, input.collectionKey, c.repeated, itemKey);
       return { kind: 'create', entryKey: c.entryKey, itemType, data, notPushed };
     }
     if ((targets.get(c.item.key) ?? 0) > 1) {
