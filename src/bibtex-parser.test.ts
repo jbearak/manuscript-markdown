@@ -1205,12 +1205,20 @@ describe('mergeBibtex', () => {
     ['an entry with a key', '% @book{X,'],
     ['a field\'s value', '% @book{X, note = {open'],
     ['an entry in parentheses', '% @book(X, note = {a}'],
+    // Whose ) is text in the quoted value, which runs to the file's end
+    ['a quoted value of an entry in parentheses', '% @misc(k, n = "a)'],
     ['a declaration', '% @string{'],
   ])('drops text after the last entry that leaves BibTeX in %s, where an entry is added after it', (_name, open) => {
     const existing = book('A', 'Keep') + '\n\n% a note\n' + open + '\n';
     expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + book('B', 'New'));
     // Nothing is added after it: the file is as it was
     expect(mergeBibtex(existing, book('A', 'Keep'))).toBe(existing);
+  });
+
+  it('keeps a file whose @preamble holds an @ before a produced key, as it was', () => {
+    // BibTeX reads the declaration whole, so the @book{B in it is no entry
+    const existing = '@preamble{"@book(foo@book{B,}"}\n\n% a note\n' + book('B', 'New') + '\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(existing);
   });
 
   it('keeps text after the last entry that BibTeX reads no entry in, or one it closes', () => {

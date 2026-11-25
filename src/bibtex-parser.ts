@@ -2398,24 +2398,39 @@ export function mergeBibtex(existing: string, produced: string): string {
     // quotes too
     const staysOpen = (text: string, from: number, opener: '{' | '('): boolean => {
       let depth = opener === '{' ? 1 : 0;
+      // In a quoted value of an entry ( opens, whose ) is text there. One
+      // that runs to the text's end keeps the entry open; after one that
+      // closes, the ) in it counts as a closer, as it did before quotes
+      // were read, where the padding inSkeleton writes serves BibTeX
+      let quoted = false, closedInQuote = false;
       for (let i = from; i < text.length; i++) {
         const c = text[i];
-        if (c === '{') depth++;
+        if (c === '"' && opener === '(' && depth === 0) quoted = !quoted;
+        else if (c === '{') depth++;
         else if (c === '}') {
           // One that closes it, or one too many, which BibTeX reports, and
           // reads on for the next @
           if (--depth <= 0 && (opener === '{' || depth < 0)) return false;
-        } else if (c === ')' && opener === '(' && depth === 0) return false;
+        } else if (c === ')' && opener === '(' && depth === 0) {
+          if (!quoted) return false;
+          closedInQuote = true;
+        }
       }
-      return true;
+      return quoted || !closedInQuote;
     };
     let from = 0;
+    const gapStarts: number[] = [];
     const gaps = existingResult.ranges.map(range => {
+      gapStarts.push(from);
       const gap = existing.slice(from, range.start);
       from = range.end;
       return gap;
     });
+    gapStarts.push(from);
     gaps.push(existing.slice(from));
+    // Where each @string and @preamble the scan read ends, by where it
+    // starts: BibTeX reads it whole, so an @ in its value opens nothing
+    const declarationEnds = new Map(existingResult.strings.map(({ start, end }) => [start, end]));
     return gaps.some((gap, k) => {
       const last = appends && k === gaps.length - 1;
       // An @ that ends the text, as `% email me @`, starts the type BibTeX
@@ -2431,7 +2446,8 @@ export function mergeBibtex(existing: string, produced: string): string {
         // BibTeX reads on past an @comment for the next @, so it opens nothing
         if (last && header.type.toLowerCase() !== 'comment' && staysOpen(gap, header.end, header.opener)) return true;
         if (PSEUDO_ENTRY_TYPES.has(header.type.toLowerCase())) {
-          at = gap.indexOf('@', header.end);
+          const end = declarationEnds.get(gapStarts[k] + at);
+          at = gap.indexOf('@', end === undefined ? header.end : end - gapStarts[k]);
           continue;
         }
         const keyAt = keysAt[header.opener];
