@@ -225,6 +225,7 @@ const NOT_PUSHED_PROSE: Readonly<Record<ZoteroFieldNotPushedReason, string>> = {
   'unreadable-pmid': 'not a PubMed id',
   'unreadable-names': 'a name BibTeX does not read as one',
   math: 'TeX math, which Zotero would not keep as written',
+  'series-editors': "Zotero's export lists its series editors as editors; change them in Zotero",
   'repeated-field': 'given more than once',
 };
 

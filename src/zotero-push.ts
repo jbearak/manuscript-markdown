@@ -105,6 +105,9 @@ export type ZoteroFieldNotPushedReason =
   /** A name in the list is not one BibTeX reads: empty, a stray `and`, or
    *  with more than two commas. */
   | 'unreadable-names'
+  /** Zotero has series editors, which its export lists in `editor` with
+   *  the editors, so the entry's editors can't say which are which. */
+  | 'series-editors'
   /** The value holds TeX math, whose grouping Zotero's text can't keep. */
   | 'math'
   /** The PMID is not a PubMed id the matcher reads, as `pending`. */
@@ -529,6 +532,8 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
   const raw = tiesAsSpaces(asWritten !== undefined && /\\(?:[{}]|~\{\}|textasciitilde)/.test(asWritten) ? asWritten : parsed);
   const list = splitAuthorString(raw);
   if (list.length === 0 || !list.every(readableName)) return 'unreadable';
+  // Math, as in a title (see readText), loses its groups as a name's part.
+  if ((raw.match(/(?<!\\)\$/g) ?? []).length >= 2) return 'tex';
   const creators: ZoteroCreator[] = [];
   const names = parseAuthors(raw);
   const last = names[names.length - 1];
@@ -839,6 +844,11 @@ function updateChanges(
     const inExtra = current === '' ? [field, base, from].map(label => extra.get(fold(label))).find(v => v !== undefined) : undefined;
     const compared = current !== '' ? current : inExtra;
     if (compared !== undefined && sameValue(baseOf(type, field) || base, compared, value)) continue;
+    // Zotero's export can give the abbreviation as `journal`
+    // (useJournalAbbreviation in BibTeX.js), so a lone journal that is
+    // Zotero's abbreviation says nothing new about the full title.
+    const abbreviation = item.journalAbbreviation;
+    if (from === 'journal' && typeof abbreviation === 'string' && abbreviation !== '' && sameValue('journalAbbreviation', abbreviation, value)) continue;
     changes.push({ field, from: current, to: value });
     patch[field] = value;
   }
@@ -867,6 +877,13 @@ function updateChanges(
       continue;
     }
     if (sameCreators(current, next)) continue;
+    // Zotero's export lists series editors in `editor` with the editors, in
+    // their order, so an editor list can't say which are which.
+    if (role === 'editor' && existing.some(c => c.creatorType === 'seriesEditor')) {
+      const exported = existing.filter(c => c.creatorType === 'editor' || c.creatorType === 'seriesEditor');
+      if (!sameCreators(exported, next)) notPushed.push({ field: role, reason: 'series-editors' });
+      continue;
+    }
     changes.push({
       field: 'creators:' + role,
       from: current.map(creatorText).join('; '),
@@ -1014,10 +1031,14 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     if (!list.includes(key)) owners.set(value, [...list, key]);
   };
   for (const item of input.items.values()) {
-    const doi = effectiveDoi(item);
-    if (doi !== undefined) own(doiOwners, doi, item.key);
-    const pmid = effectivePmid(item);
-    if (pmid !== undefined) own(pmidOwners, pmid, item.key);
+    // Every DOI and PMID it holds, in its field and in Extra, though the
+    // field is the one compared.
+    for (const doi of [validDoi(typeof item.DOI === 'string' ? item.DOI : undefined), validDoi(extraFields(item).get('doi'))]) {
+      if (doi !== undefined) own(doiOwners, doi, item.key);
+    }
+    for (const pmid of [normalizePmid(typeof item.PMID === 'string' ? item.PMID : undefined), normalizePmid(extraFields(item).get('pmid'))]) {
+      if (pmid !== undefined) own(pmidOwners, pmid, item.key);
+    }
     if (!COMPONENT_ITEM_TYPES.has(item.itemType)) for (const isbn of isbnsOf(item.ISBN)) own(isbnOwners, isbn, item.key);
     for (const key of claimedKeys(item)) own(keyOwners, key, item.key);
   }
@@ -1162,8 +1183,10 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     if (pmid !== undefined && 'value' in pmid && hasField(itemType, 'PMID') && (c.kind === 'create' || effectivePmid(c.item) === undefined)) {
       ids.push('PMID ' + pmid.value);
     }
-    if (hasField(itemType, 'ISBN') && (c.kind === 'create' || isbnsOf(c.item.ISBN).length === 0)) {
-      for (const isbn of entryIsbns(c.entry)) ids.push('ISBN ' + isbn);
+    if (hasField(itemType, 'ISBN')) {
+      // An update gives an ISBN the item doesn't have, adding or replacing.
+      const has = c.kind === 'create' ? [] : isbnsOf(c.item.ISBN);
+      for (const isbn of entryIsbns(c.entry)) if (!has.includes(isbn)) ids.push('ISBN ' + isbn);
     }
     return ids;
   };

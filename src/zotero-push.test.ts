@@ -1155,3 +1155,45 @@ describe('push: smaller fixes from the release audit', () => {
     expect(formatZoteroPushReport(prepared.plan, 'Coll', result)).toContain('[outcome unknown');
   });
 });
+
+describe('push: review follow-ups', () => {
+  it("counts an ISBN an update would replace against a create's", () => {
+    const book = item('AAAA2222', { itemType: 'book', title: 'Old', citationKey: 'k', ISBN: '9780261103573' });
+    const bib = '@book{k,\n  title = {Old},\n  isbn = {9780306406157}\n}\n\n@book{n,\n  title = {New},\n  isbn = {0306406152}\n}\n';
+    expect(plan(bib, [book]).actions).toMatchObject([
+      { kind: 'skip', reason: 'duplicate-identifier' },
+      { kind: 'skip', reason: 'duplicate-identifier' },
+    ]);
+  });
+
+  it('counts a DOI or PMID in Extra though the field has another', () => {
+    const both = item('AAAA2222', { title: 'A', citationKey: 'a', DOI: '10.1000/one', extra: 'DOI: 10.1000/two\n{:pmid:12345}', PMID: '999' });
+    expect(plan('@article{x,\n  title = {B},\n  doi = {10.1000/two}\n}\n', [both]).actions[0]).toMatchObject({ kind: 'skip', reason: 'doi-owned-elsewhere' });
+    expect(plan('@article{x,\n  title = {B},\n  pmid = {12345}\n}\n', [both]).actions[0]).toMatchObject({ kind: 'skip', reason: 'pmid-disagreement' });
+  });
+
+  it("reads a lone journal that is Zotero's abbreviation as unchanged", async () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', publicationTitle: 'Journal of Biology', journalAbbreviation: 'J. Biol.' });
+    const { plan: p, posts } = await pushThroughApi('@article{k,\n  journal = {J. Biol.}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({ kind: 'unchanged' });
+    expect(posts).toEqual([]);
+  });
+
+  it("reads editor as Zotero's export writes it, series editors among the editors", () => {
+    const creators = [
+      { creatorType: 'seriesEditor', firstName: 'Sam', lastName: 'Series' },
+      { creatorType: 'editor', firstName: 'Ed', lastName: 'Itor' },
+    ];
+    const k = item('AAAA2222', { itemType: 'book', title: 'T', citationKey: 'k', creators });
+    expect(plan('@book{k,\n  editor = {Series, Sam and Itor, Ed}\n}\n', [k]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+    expect(plan('@book{k,\n  editor = {Itor, Edward}\n}\n', [k]).actions[0]).toMatchObject({
+      kind: 'unchanged',
+      notPushed: [{ field: 'editor', reason: 'series-editors' }],
+    });
+  });
+
+  it('never writes math in a name', () => {
+    const p = plan('@article{k,\n  author = {{Group $x^{12}$}}\n}\n', []);
+    expect(p.actions[0]).toMatchObject({ kind: 'create', notPushed: [{ field: 'author', reason: 'tex' }] });
+  });
+});
