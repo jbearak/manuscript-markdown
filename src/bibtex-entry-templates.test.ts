@@ -118,15 +118,17 @@ describe('.bib toolbar contributions in package.json', () => {
     }
   });
 
-  it('contains exactly the sync command plus one add command per template, grouped apart', () => {
+  it('contains exactly the Zotero commands plus one add command per template, grouped apart', () => {
     const entries = pkg.contributes.menus['bibtex.actions'];
     expect(entries.map((m: any) => m.command)).toEqual([
       'manuscript-markdown.syncBibliographyFromZotero',
+      'manuscript-markdown.pushBibliographyToZotero',
       ...BIBTEX_ENTRY_TEMPLATES.map(template => bibtexEntryCommand(template.type)),
     ]);
     expect(entries[0].group).toBe('1_zotero@1');
+    expect(entries[1].group).toBe('1_zotero@2');
     BIBTEX_ENTRY_TEMPLATES.forEach((template, i) => {
-      expect(entries[i + 1].group).toBe('2_add@' + String(i + 1));
+      expect(entries[i + 2].group).toBe('2_add@' + String(i + 1));
     });
   });
 });

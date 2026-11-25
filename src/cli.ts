@@ -147,9 +147,11 @@ export function detectDirection(inputPath: string): 'docx-to-md' | 'md-to-docx' 
 
 function showHelp() {
   console.log(`Usage: manuscript-markdown <input> [options]
+       manuscript-markdown zotero <push|collections|authorize> [options]
 
 Convert between Manuscript Markdown and DOCX.
 Conversion direction is determined by input file extension.
+"manuscript-markdown zotero --help" describes pushing a bibliography to Zotero.
 
 Options:
   --help                          Show this help message
@@ -364,6 +366,18 @@ async function runMdToDocx(options: CliOptions) {
 }
 
 export async function main() {
+  // `zotero …` commands have their own arguments, so they're dispatched
+  // before the conversion's flags are read.
+  if (process.argv[2] === 'zotero') {
+    const { runZoteroCli } = await import('./zotero-cli');
+    process.exitCode = await runZoteroCli(process.argv.slice(3), {
+      out: line => console.log(line),
+      err: line => console.error(line),
+      env: process.env,
+    });
+    return;
+  }
+
   const options = parseArgs(process.argv);
 
   if (options.help) {
