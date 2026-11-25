@@ -690,21 +690,42 @@ export async function fetchZoteroSchema(
   options: ZoteroLocalApiOptions = {},
 ): Promise<import('./zotero-push').ZoteroItemSchema> {
   const { body } = await requestJson('/schema', LIST_TIMEOUT_MS, options);
-  const listed = asRecord(body)?.itemTypes;
-  // Only types whose fields and roles are lists, which the planner reads.
+  // The planner reads every type (their names find `Type:` lines in Extra)
+  // and the CSL mappings, so one malformed part makes the schema unreadable
+  // rather than quietly smaller.
+  const unreadable = () => new ZoteroLocalApiError('request-failed', 'Zotero returned an unreadable schema.');
+  const isString = (v: unknown) => typeof v === 'string';
+  const isStringList = (v: unknown) => Array.isArray(v) && v.every(isString);
   const isFieldList = (v: unknown) =>
     Array.isArray(v) &&
-    v.every(f => typeof asRecord(f)?.field === 'string' && (asRecord(f)?.baseField === undefined || typeof asRecord(f)?.baseField === 'string'));
-  const isRoleList = (v: unknown) => Array.isArray(v) && v.every(c => typeof asRecord(c)?.creatorType === 'string');
-  const itemTypes = Array.isArray(listed)
-    ? listed.filter(t => typeof asRecord(t)?.itemType === 'string' && isFieldList(asRecord(t)?.fields) && isRoleList(asRecord(t)?.creatorTypes))
-    : undefined;
-  if (itemTypes === undefined || itemTypes.length === 0) {
-    throw new ZoteroLocalApiError('request-failed', 'Zotero returned an unreadable schema.');
+    v.every(f => isString(asRecord(f)?.field) && (asRecord(f)?.baseField === undefined || isString(asRecord(f)?.baseField)));
+  const isRoleList = (v: unknown) => Array.isArray(v) && v.every(c => isString(asRecord(c)?.creatorType));
+  const isMap = (v: unknown, valueOk: (x: unknown) => boolean) =>
+    v === undefined || (asRecord(v) !== undefined && Object.values(asRecord(v)!).every(valueOk));
+  const itemTypes = asRecord(body)?.itemTypes;
+  if (
+    !Array.isArray(itemTypes) ||
+    itemTypes.length === 0 ||
+    !itemTypes.every(t => isString(asRecord(t)?.itemType) && isFieldList(asRecord(t)?.fields) && isRoleList(asRecord(t)?.creatorTypes))
+  ) {
+    throw unreadable();
+  }
+  const csl = asRecord(body)?.csl;
+  const cslRecord = asRecord(csl);
+  const cslFields = asRecord(cslRecord?.fields);
+  if (
+    csl !== undefined &&
+    (cslRecord === undefined ||
+      !isMap(cslRecord.types, isStringList) ||
+      !isMap(cslRecord.names, isString) ||
+      (cslRecord.fields !== undefined &&
+        (cslFields === undefined || !isMap(cslFields.text, isStringList) || !isMap(cslFields.date, isString))))
+  ) {
+    throw unreadable();
   }
   return {
     itemTypes: itemTypes as import('./zotero-push').ZoteroItemSchema['itemTypes'],
-    csl: asRecord(asRecord(body)?.csl) as import('./zotero-push').ZoteroItemSchema['csl'],
+    csl: cslRecord as import('./zotero-push').ZoteroItemSchema['csl'],
   };
 }
 

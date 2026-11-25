@@ -11,6 +11,7 @@ import { applyZoteroPush, formatZoteroPushReport, type ZoteroKeyProvider } from 
 import {
   authorizeZoteroLocalApi,
   fetchZoteroLibrarySnapshot,
+  fetchZoteroSchema,
   writeZoteroItems,
   ZoteroLocalApiError,
   type ZoteroFetch,
@@ -555,6 +556,25 @@ describe('authorizeZoteroLocalApi', () => {
     expect(await authorizeZoteroLocalApi('App', 'SERVER', { fetchFn })).toEqual({ key: 'NEWKEY', remember: true });
     expect(sent[0].url).toBe('http://localhost:23119/api/local/authorize');
     expect(sent[0].headers['Zotero-Server-ID']).toBe('SERVER');
+  });
+});
+
+describe('fetchZoteroSchema', () => {
+  const schemaFetch = (body: unknown): ZoteroFetch => async () => ({ ok: true, status: 200, json: async () => body });
+  const good = { itemType: 'report', fields: [{ field: 'title' }], creatorTypes: [{ creatorType: 'author' }] };
+  it('reads a whole schema', async () => {
+    const schema = await fetchZoteroSchema({ fetchFn: schemaFetch({ itemTypes: [good], csl: { types: { report: ['report'] }, names: {}, fields: { text: {}, date: {} } } }) });
+    expect(schema.itemTypes.map(t => t.itemType)).toEqual(['report']);
+  });
+  it('refuses one with a malformed type or CSL mapping, rather than reading less of it', async () => {
+    const bad = [
+      { itemTypes: [good, { itemType: 'book', fields: [null], creatorTypes: [] }] },
+      { itemTypes: [good], csl: { fields: { text: { title: null } } } },
+      { itemTypes: [good], csl: { types: { chapter: 'bookSection' } } },
+    ];
+    for (const body of bad) {
+      expect(await fetchZoteroSchema({ fetchFn: schemaFetch(body) }).catch((e: ZoteroLocalApiError) => e.kind)).toBe('request-failed');
+    }
   });
 });
 
