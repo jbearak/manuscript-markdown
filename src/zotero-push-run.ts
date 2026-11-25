@@ -70,7 +70,7 @@ export interface ZoteroPushResult {
    *  `unknown` for a write in a request that failed in a way that leaves
    *  open whether Zotero made it, as a timeout; absent for writes never
    *  sent. */
-  readonly outcomes: ReadonlyArray<ZoteroWriteOutcome | 'unknown' | undefined>;
+  readonly outcomes: ReadonlyArray<Exclude<ZoteroWriteOutcome, { status: 'unreported' }> | 'unknown' | undefined>;
   /** Why writing stopped early, if it did. */
   readonly error?: ZoteroLocalApiError;
 }
@@ -101,7 +101,7 @@ export async function applyZoteroPush(
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroPushResult> {
   const writes = zoteroPushWrites(prepared.plan);
-  const outcomes: Array<ZoteroWriteOutcome | 'unknown' | undefined> = writes.map(() => undefined);
+  const outcomes: Array<Exclude<ZoteroWriteOutcome, { status: 'unreported' }> | 'unknown' | undefined> = writes.map(() => undefined);
   let libraryVersion = prepared.libraryVersion;
   // The items this push has written, with the version each write left.
   const written = new Map<string, number>();
@@ -166,7 +166,7 @@ export async function applyZoteroPush(
         throw error;
       }
     }
-    result.outcomes.forEach((o, i) => (outcomes[start + i] = o));
+    result.outcomes.forEach((o, i) => (outcomes[start + i] = o.status === 'unreported' ? 'unknown' : o));
     for (const o of result.outcomes) if (o.status === 'success') written.set(o.key, o.version);
     lastSent = libraryVersion;
     if (result.libraryVersion === undefined) {

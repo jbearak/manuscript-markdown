@@ -127,7 +127,7 @@ See [UI reference](ui.md#sync-bibliography-from-zotero) for the full flow and me
 
 ### Pushing a Bibliography to Zotero
 
-**Push Bibliography to Zotero** goes the other way: the `.bib` file is what you and your collaborators edit, and Zotero follows it. It needs Zotero 10 or later, whose local API takes writes. It has two modes:
+**Push Bibliography to Zotero** goes the other way: the `.bib` file is what you and your collaborators edit, and Zotero follows it. It needs Zotero 10 or later, whose local API takes writes. My Library works without a Zotero account too; its items then have no address other applications can resolve, so an entry linked by `zotero-uri` is left alone. It has two modes:
 
 - **Add** puts every entry in a collection you choose. An entry whose item is elsewhere in the library is added to the collection; an entry Zotero lacks is created there, with the entry's citation key in Zotero's Citation Key field, so the next push finds it. An item type with no Citation Key field in your Zotero isn't created, since the next push couldn't find the item and would create it again. No existing item's fields change.
 - **Add and Update** also makes each matched item say what the entry says: a field whose value differs in Zotero is replaced with the entry's. A field the entry lacks is left alone, because a `.bib` exported from Zotero leaves out fields Zotero keeps.
@@ -138,6 +138,7 @@ What counts as a difference:
 - Titles and other title-like fields (journal and book titles, series, short titles, and report and thesis types) are compared without regard to case, because BibTeX exports title-case them: `What Is a 'Planned' Pregnancy? {{Empirical}} Data` is Zotero's "What is a 'planned' pregnancy? Empirical data". A change of capitalization alone is not pushed. When a title does change, Zotero gets the entry's capitalization.
 - A date matches when the entry's parts agree with Zotero's as far as the entry goes, so `year = 2014` leaves Zotero's 2014-06-01 alone.
 - A value Zotero keeps as a line of its Extra field, such as `Series: …`, counts as that field.
+- A book's `pages` is its number of pages (`pagetotal` too), and its `number` its number in a series, as Zotero's BibTeX import reads them.
 - With both `journal` and `fjournal`, `fjournal` is the journal's full title and `journal` its abbreviation, Zotero's Journal Abbr field, as Zotero's BibTeX import reads them.
 - Authors and editors are compared in order, read as BibTeX reads names: `and` separates names in any case, a `~` is a space, and an escaped brace, as in `{Research \{EU\} Council}`, is a brace. When they differ, that role's names are replaced and Zotero's other creators, such as translators, stay where they were; when the number of names is the same, each name takes the place of the one it replaces, so a translator between two authors stays between them.
 

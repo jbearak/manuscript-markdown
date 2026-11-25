@@ -273,8 +273,11 @@ const FIELD_MAP: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['journaltitle', ['publicationTitle']],
   ['booktitle', ['publicationTitle']],
   ['volume', ['volume']],
-  ['number', ['issue', 'number']],
-  ['pages', ['pages']],
+  // A book's number is its series number, and its pages its page count,
+  // as Zotero's BibTeX import reads them.
+  ['number', ['issue', 'number', 'seriesNumber']],
+  ['pages', ['pages', 'numPages']],
+  ['pagetotal', ['numPages']],
   ['chapter', ['section']],
   ['doi', ['DOI']],
   ['url', ['url']],
@@ -452,7 +455,8 @@ function readDate(entry: BibtexEntry): { parts: number[] } | { problem: ZoteroFi
 }
 
 function formatDate(parts: readonly number[]): string {
-  return parts.map((p, i) => (i === 0 ? String(p) : String(p).padStart(2, '0'))).join('-');
+  // The year as the entry gives it, four digits: 0044, not 44.
+  return parts.map((p, i) => String(p).padStart(i === 0 ? 4 : 2, '0')).join('-');
 }
 
 /** Zotero's parsed date as parts, with Zotero's 00 for "no month" dropped. */

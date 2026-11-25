@@ -455,7 +455,14 @@ function libraryPrefix(scope: ZoteroLibraryScope): string {
 }
 
 /** The catalog from the rows of `/items/top`. */
-function catalogFromRows(scope: ZoteroLibraryScope, rows: readonly unknown[]): ZoteroCatalogItem[] {
+function catalogFromRows(
+  scope: ZoteroLibraryScope,
+  rows: readonly unknown[],
+  /** Push's reading: a personal library with no account id still has
+   *  items push can write, by key; their URIs are empty, so an entry
+   *  linked by a stored URI is never taken for one of them. */
+  withoutAccount = false,
+): ZoteroCatalogItem[] {
   const read = [];
   for (const row of rows) {
     const item = readItemRow(row);
@@ -482,6 +489,9 @@ function catalogFromRows(scope: ZoteroLibraryScope, rows: readonly unknown[]): Z
       );
     }
     const id = ids.values().next().value;
+    if (read.length > 0 && id === undefined && withoutAccount) {
+      return read.map(({ userLibraryId: _id, ...item }) => ({ ...item, uri: '' }));
+    }
     if (read.length > 0 && id === undefined) {
       throw new ZoteroLocalApiError(
         'user-id-unavailable',
@@ -667,7 +677,7 @@ export async function fetchZoteroLibrarySnapshot(
   // Only the catalog's items, the bibliographic ones, with the identity
   // URI the catalog gives each, so a stored link to another library's item
   // with the same key is told apart.
-  const catalog = catalogFromRows(scope, rows);
+  const catalog = catalogFromRows(scope, rows, true);
   const uris = new Map(catalog.map(c => [c.key, c.uri]));
   const items = new Map<string, import('./zotero-push').ZoteroItemJson>();
   for (const row of rows) {
@@ -774,7 +784,10 @@ export async function authorizeZoteroLocalApi(
 export type ZoteroWriteOutcome =
   | { readonly status: 'success'; readonly key: string; readonly version: number }
   | { readonly status: 'unchanged'; readonly key: string }
-  | { readonly status: 'failed'; readonly key?: string; readonly code: number; readonly message: string };
+  | { readonly status: 'failed'; readonly key?: string; readonly code: number; readonly message: string }
+  /** Zotero's answer didn't mention the object, so whether it was written
+   *  is unknown, as when an answer is lost. */
+  | { readonly status: 'unreported' };
 
 /** Up to 50 item objects in one request.  Throws only when the request as a
  *  whole was refused; each object's own outcome is in the result. */
@@ -813,11 +826,8 @@ export async function writeZoteroItems(
             : undefined,
   });
   const results = asRecord(body);
-  const outcomes: ZoteroWriteOutcome[] = objects.map(() => ({
-    status: 'failed',
-    code: 0,
-    message: 'Zotero reported no outcome for this object.',
-  }));
+  // An object the answer doesn't mention may have been written or not.
+  const outcomes: ZoteroWriteOutcome[] = objects.map(() => ({ status: 'unreported' }));
   for (const [index, value] of Object.entries(asRecord(results?.successful) ?? {})) {
     const record = asRecord(value);
     const key = asString(record?.key);

@@ -755,6 +755,15 @@ describe('zotero CLI', () => {
     expect(() => resolveCollection('Papers', twins)).toThrow(/Several collections/);
   });
 
+  it("won't pick a top-level collection by a name one inside another shares", () => {
+    const nested = [
+      { key: 'ROOT0001', name: 'Drafts', path: 'Drafts', itemCount: 0 },
+      { key: 'CHLD0001', name: 'Drafts', path: 'Papers / Drafts', itemCount: 0 },
+    ];
+    expect(() => resolveCollection('Drafts', nested)).toThrow(/Several collections[^]*ROOT0001[^]*CHLD0001/);
+    expect(resolveCollection('Papers / Drafts', nested).key).toBe('CHLD0001');
+  });
+
   it("refuses a .bib that isn't UTF-8", async () => {
     const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'zcli-'));
     const file = require('path').join(dir, 'latin1.bib');
@@ -1099,5 +1108,41 @@ describe('fetchZoteroLibrarySnapshot, read from one Zotero', () => {
     const error = await fetchZoteroLibrarySnapshot({ type: 'user' }, { fetchFn }).catch((e: ZoteroLocalApiError) => e);
     expect(error).toBeInstanceOf(ZoteroLocalApiError);
     expect((error as ZoteroLocalApiError).kind).toBe('library-changed');
+  });
+});
+
+describe('push: smaller fixes from the release audit', () => {
+  it("puts a book's pages and number in its page count and series number", async () => {
+    const { posts } = await pushThroughApi('@book{k,\n  pages = {250},\n  number = {3},\n  series = {Library series}\n}\n', []);
+    expect(posts[0][0]).toMatchObject({ numPages: '250', seriesNumber: '3', series: 'Library series' });
+  });
+
+  it('writes a year before 1000 with its four digits', () => {
+    expect(plan('@article{k,\n  date = {0044-03-15}\n}\n', []).actions[0]).toMatchObject({ kind: 'create', data: { date: '0044-03-15' } });
+  });
+
+  it('writes to a personal library with no Zotero account, leaving entries linked by URI alone', async () => {
+    const local = { ...item('AAAA2222', { title: 'A study', citationKey: 'old' }) };
+    const api = libraryApi([local]);
+    const fetchFn: ZoteroFetch = async (url, init) => {
+      const r = await api.fetchFn(url, init);
+      if (!url.includes('/items/top') || url.includes('limit=1')) return r;
+      const rows = (await r.json()) as Array<Record<string, unknown>>;
+      return { ...r, json: async () => rows.map(row => ({ ...row, library: { type: 'user', id: 0 } })) };
+    };
+    const bib = '@article{new,\n  title = {Another study}\n}\n\n@article{old,\n  title = {A study},\n  zotero-uri = {http://zotero.org/users/5/items/AAAA2222}\n}\n';
+    const prepared = await prepareZoteroPush({ type: 'user' }, bib, COLLECTION, 'add', { fetchFn });
+    expect(prepared?.plan.actions).toMatchObject([
+      { kind: 'create', entryKey: 'new' },
+      { kind: 'skip', entryKey: 'old', reason: 'other-library' },
+    ]);
+  });
+
+  it("reports an object Zotero's answer left out as unknown, not failed", async () => {
+    const { fetchFn } = writeFetch(() => ({ status: 200, version: 2, body: { successful: {} } }));
+    const prepared = { plan: plan('@article{a,\n  title = {A}\n}\n', []), serverId: 'S', libraryVersion: 1 };
+    const result = await applyZoteroPush({ type: 'user' }, prepared, { get: async () => 'K', invalidate: async () => {} }, { fetchFn });
+    expect(result.outcomes).toEqual(['unknown']);
+    expect(formatZoteroPushReport(prepared.plan, 'Coll', result)).toContain('[outcome unknown');
   });
 });
