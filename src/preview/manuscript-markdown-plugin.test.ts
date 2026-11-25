@@ -3276,6 +3276,9 @@ describe('No Markup preview', () => {
     expect(renderNoMarkup('| H | I |\n|---|---|\n| <br> | &nbsp; |\n| k | l |')).toContain('<td><br></td>');
     expect(renderNoMarkup('| H | I |\n|---|---|\n| {--x--} | <wbr> |\n| k | l |')).toContain('<td><wbr></td>');
     expect(renderNoMarkup('| H | I |\n|---|---|\n| {--x--} | \\* |\n| k | l |')).toContain('<td>*</td>');
+    // A deletion of a break alone tracks no row in export, which shows nothing
+    expect(renderNoMarkup('| H |\n|---|\n| {--<br>--} |\n| k |')).toContain('<td></td>');
+    expect(renderNoMarkup('| H |\n|---|\n| {--&nbsp;--} |\n| k |')).toContain('<td></td>');
   });
 
   it('drops many rows in one pass over the tokens', () => {
