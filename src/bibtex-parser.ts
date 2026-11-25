@@ -1349,6 +1349,13 @@ export function readEntryHeader(text: string, at: number, sameLine = false):
  *  ;, ] or backtick in it (see isCitableKey). */
 const ENTRY_KEY_AT = { '}': /\s*([^\s,@}]+)\s*([,}])/y, ')': /\s*([^\s,@)]+)\s*([,)])/y };
 
+/** A key as BibTeX reads it, which it takes for an entry's before it reads
+ *  what follows: after white space, to white space, a comma or, in a brace
+ *  entry, the } (bibtex.web's scan2_white(comma, right_brace); in a paren
+ *  entry, scan1_white(comma)), an @ or a ) in it too. Only mergeBibtex
+ *  reads keys so, to find the entries BibTeX reads between the parser's. */
+const BIBTEX_KEY_AT = { '{': /\s*([^\s,}]+)/y, '(': /\s*([^\s,]+)/y };
+
 /** The key of the entry whose opener is just before `at` in `text`, and
  *  where it starts, and where the entry's body does: just past the comma
  *  after the key, or at the closer, for an entry with no fields; or
@@ -2162,7 +2169,9 @@ export function spliceFieldsIntoEntry(
  *  - Everything between the existing file's entries — `%` comments,
  *    `@comment`, `@preamble` and `@string` declarations, blank lines — stays
  *    as written, so a file that round-trips through Word comes back as it
- *    was, unless the file repeats a key or the scan loses its place in it.
+ *    was, unless the file repeats a key, the scan loses its place in it, or
+ *    that text holds an entry BibTeX reads, as `% @book{B,`, whose key the
+ *    produced file gives too.
  *  - Produced-only entries are appended at the end.
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
@@ -2303,12 +2312,52 @@ export function mergeBibtex(existing: string, produced: string): string {
     return same ? out : undefined;
   };
 
-  if (existingResult.rangesTrusted && findDuplicateBibtexKeys(existingResult.ranges).size === 0) {
+  /** True if the text between the existing file's entries holds an entry
+   *  BibTeX reads whose key the produced file also gives. The scan reads a
+   *  `%` line as a comment, and skips an `@comment`'s body; BibTeX does
+   *  neither: it reads every `@type{key,` outside an entry, so `% @book{B,`
+   *  is an entry B to it. Copied with the produced B, BibTeX reads B twice,
+   *  reports a repeated entry and keeps the stale one. Keys are compared
+   *  without case, as BibTeX compares them. An `@` in a `@string` or
+   *  `@preamble` value can match too, which only costs the skeleton. */
+  const betweenEntriesRepeatsProducedKey = (): boolean => {
+    const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
+    let from = 0;
+    const gaps = existingResult.ranges.map(range => {
+      const gap = existing.slice(from, range.start);
+      from = range.end;
+      return gap;
+    });
+    gaps.push(existing.slice(from));
+    return gaps.some(gap => {
+      for (let at = gap.indexOf('@'); at !== -1;) {
+        const header = readEntryHeader(gap, at);
+        if (!('type' in header)) {
+          at = gap.indexOf('@', header.resume);
+          continue;
+        }
+        if (PSEUDO_ENTRY_TYPES.has(header.type.toLowerCase())) {
+          at = gap.indexOf('@', header.end);
+          continue;
+        }
+        const keyAt = BIBTEX_KEY_AT[header.opener];
+        keyAt.lastIndex = header.end;
+        const key = keyAt.exec(gap);
+        if (key && producedKeys.has(key[1].toLowerCase())) return true;
+        // On after the key, as BibTeX reads on, so each @ is read once
+        at = gap.indexOf('@', header.end + (key?.[0].length ?? 0));
+      }
+      return false;
+    });
+  };
+
+  if (existingResult.rangesTrusted && findDuplicateBibtexKeys(existingResult.ranges).size === 0 && !betweenEntriesRepeatsProducedKey()) {
     const out = inSkeleton();
     if (out !== undefined) return out;
   }
 
-  // A file the scan lost its place in, that repeats a key, or whose
+  // A file the scan lost its place in, that repeats a key, whose text
+  // between entries gives BibTeX a key the produced file does, or whose
   // skeleton reads otherwise: its entries and @string declarations alone,
   // as the parser read them, since the text between them may be part of an
   // entry
