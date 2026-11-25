@@ -1162,6 +1162,8 @@ describe('Custom Styles — List items', () => {
     ['an empty block of another style and a block of its style', itemQuote + '<!-- style: note -->\n<!-- /style -->\n\n<!-- style: box -->\n\n' + sameBlock, itemQuote.replace('  <!-- style: box -->\n\n', '') + sameBlock],
     ['a quote and a block of its style, after a heading between its paragraphs', '<!-- style: box -->\n\np0\n\n## h\n\n- i0\n\n  <!-- style: box -->\n\n  > i1\n\n> q\n\n<!-- style: box -->\n\n' + sameBlock,
       '<!-- style: box -->\n\np0\n\n## h\n\n- i0\n\n  > i1\n\n> q\n\n' + sameBlock],
+    ['a quote and a block of its style that starts with an item, after a heading between its paragraphs', '<!-- style: box -->\n\np0\n\n## h\n\n- i0\n\n  <!-- style: box -->\n\n  > i1\n\n> q\n\n<!-- style: box -->\n\n- i2\n<!-- /style -->\n\np3\n',
+      '<!-- style: box -->\n\np0\n\n## h\n\n- i0\n\n  > i1\n\n> q\n\n- i2\n<!-- /style -->\n\np3\n'],
   ])('writes no fence after a style block a block in a list item of only a quote closes, before %s, which import reads as the same', async (_name, md, expected) => {
     // Word has nothing between the blocks' paragraphs, or only blocks it
     // can't give their style, as between a block's paragraphs, so import
