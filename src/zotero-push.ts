@@ -675,10 +675,11 @@ function effectiveDoi(item: ZoteroItemJson): string | undefined {
 
 /** The labels of the Extra lines Zotero would act on when the item is next
  *  saved through the Local API, which reads items non-strictly
- *  (`Item.fromJSON`, `extractExtraFields`): a line naming a field, or a CSL
- *  variable for one, that the item type has and the item leaves empty moves
- *  into that field, and a `Type:` line naming another item type changes the
- *  item's type.  Read conservatively: a line this flags that Zotero would
+ *  (`Item.fromJSON`, `extractExtraFields`): a line naming one of the type's
+ *  fields, or a CSL variable for one, moves into it when the item leaves it
+ *  empty; a line reaching a field through a base field is flagged whatever
+ *  the field holds (see `migrates`); and a `Type:` line naming a type
+ *  changes the item's type or is dropped.  Read conservatively: a line this flags that Zotero would
  *  leave only costs a skipped item. */
 function extraMigrations(item: ZoteroItemJson, type: SchemaType, schema: ZoteroItemSchema): string[] {
   const extra = typeof item.extra === 'string' ? item.extra : '';
@@ -732,7 +733,7 @@ type Candidate =
  *  item types for a part of one, which shares the work's ISBN. */
 const WHOLE_WORK_TYPES: ReadonlySet<string> = new Set([
   'book', 'booklet', 'manual', 'proceedings', 'mvbook', 'collection', 'mvcollection',
-  'techreport', 'report', 'phdthesis', 'mastersthesis', 'thesis',
+  'techreport', 'report', 'phdthesis', 'mastersthesis', 'thesis', 'reference', 'mvreference', 'periodical',
 ]);
 const COMPONENT_ITEM_TYPES: ReadonlySet<string> = new Set(['bookSection', 'conferencePaper', 'encyclopediaArticle', 'dictionaryEntry']);
 
@@ -765,7 +766,7 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     // As written: the parser reads some TeX away, as \url{} around a PMID,
     // which the matcher doesn't.
     const texIdentifier = MATCHED_IDENTIFIERS.find(name =>
-      /\\[A-Za-z]/.test(entry?.writtenFields?.get(name) ?? entry?.fields.get(name) ?? ''),
+      [entry?.writtenFields?.get(name), entry?.fields.get(name)].some(v => /\\[A-Za-z]/.test(v ?? '')),
     );
     if (texIdentifier !== undefined && decision.outcome !== 'conflict') {
       return skip(entryKey, 'unreadable-identifier', texIdentifier);
@@ -794,22 +795,22 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         if (item === undefined || (item.uri !== undefined && !sameUri(item.uri, decision.target.uri))) {
           return skip(entryKey, 'other-library', decision.target.uri || decision.target.key);
         }
+        if (entry === undefined) return skip(entryKey, 'conflict', 'entry-not-editable');
         // An ISBN names a book, and a chapter or paper in it shares it, so
         // it identifies only a whole work, on both sides.
         if (
           decision.outcome === 'update' &&
           decision.tier === 'isbn-pmid' &&
           !decision.evidence.includes('pmid') &&
-          (entry === undefined || !WHOLE_WORK_TYPES.has(entry.type.toLowerCase()) || COMPONENT_ITEM_TYPES.has(item.itemType))
+          (!WHOLE_WORK_TYPES.has(entry.type.toLowerCase()) || COMPONENT_ITEM_TYPES.has(item.itemType))
         ) {
           return skip(entryKey, 'weak-match', decision.target.key + ', by ISBN only');
         }
         // A DOI match is only as good as the DOI: the matcher compares
         // values, shaped like DOIs or not.
-        if (decision.outcome === 'update' && decision.tier === 'doi' && (entry === undefined || entryDoi(entry) === undefined)) {
+        if (decision.outcome === 'update' && decision.tier === 'doi' && entryDoi(entry) === undefined) {
           return skip(entryKey, 'weak-match', decision.target.key + ', by a value that is not a DOI');
         }
-        if (entry === undefined) return skip(entryKey, 'conflict', 'entry-not-editable');
         const doi = entryDoi(entry);
         const itemDoi = effectiveDoi(item);
         if (doi !== undefined && itemDoi !== undefined && doi !== itemDoi) {
