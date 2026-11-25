@@ -3179,6 +3179,20 @@ describe('frontmatter for VS Code\'s preview table', () => {
     expect(frontmatterYamlForPreview('title: Purpose:\nauthor: Jane Smith')).toBe('title: "Purpose:"\nauthor: Jane Smith');
   });
 
+  it('leaves a title with a colon only in its comment as it is, as YAML reads it', () => {
+    for (const yaml of ['title: Fieldwork # draft: private\nauthor: Jane', 'title: # editor: remember\nauthor: Jane',
+      'title: Fieldwork # draft:\nauthor: Jane', 'title: "Purpose: methods" # c: d\nauthor: Jane']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('quotes a title with a colon in it without the comment after it, which YAML reads without', () => {
+    expect(frontmatterYamlForPreview('title: Example: notes # draft\nauthor: Jane')).toBe('title: "Example: notes"\nauthor: Jane');
+    expect(frontmatterYamlForPreview('title: Example: notes # draft: x\nauthor: Jane')).toBe('title: "Example: notes"\nauthor: Jane');
+    // A # with no space before it is the title's
+    expect(frontmatterYamlForPreview('title: a: b#c\nauthor: Jane')).toBe('title: "a: b#c"\nauthor: Jane');
+  });
+
   it('leaves a title with a colon YAML reads as part of it as it is', () => {
     for (const yaml of ['title: At 07:53\nfont: X', 'title: https://example.org/a\nfont: X', 'title: "A: b"\nfont: X',
       'title: "A: \\"B\\""\nfont: X', 'title: ["A: B", "C"]\nfont: X',
