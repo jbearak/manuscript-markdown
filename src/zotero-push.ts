@@ -345,7 +345,8 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
   if (name === 'urldate') {
     // Zotero drops an access date it can't read, and with it the one it had.
     const value = raw.trim();
-    const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ]([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?Z?)?$/.exec(value);
+    // A day, or Zotero's own form, an ISO time in UTC.
+    const m = /^(\d{4})-(\d{2})-(\d{2})(?:T([01]\d|2[0-3]):[0-5]\d:[0-5]\dZ)?$/.exec(value);
     const day = m ? new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) : undefined;
     const real = day !== undefined && day.getUTCMonth() === Number(m![2]) - 1 && day.getUTCDate() === Number(m![3]);
     return real ? { value } : { problem: 'date-unreadable' };
@@ -851,7 +852,12 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   };
   const givesDoi = (c: Candidate): string | undefined =>
     (c.kind === 'create' && creatable(c.entry) && hasDoiField(ITEM_TYPE_BY_ENTRY_TYPE[c.entry.type.toLowerCase()])) ||
-    (c.kind === 'match' && input.mode === 'update' && effectiveDoi(c.item) === undefined && hasDoiField(c.item.itemType))
+    (c.kind === 'match' &&
+      input.mode === 'update' &&
+      effectiveDoi(c.item) === undefined &&
+      hasDoiField(c.item.itemType) &&
+      // An item skipped for its Extra is never written.
+      extraMigrations(c.item, schemaType(input.schema, c.item.itemType)!, input.schema).length === 0)
       ? entryDoi(c.entry)
       : undefined;
   for (const c of candidates) {

@@ -399,7 +399,7 @@ describe('createZoteroPushPlan', () => {
     const other = plan(bib.replace('2020-01-01', '2020-01-02'), [accessed as ZoteroItemJson]).actions[0];
     expect(other.kind === 'update' && other.patch.accessDate).toBe('2020-01-02');
     // Zotero would drop an access date it can't read, and the one it had.
-    for (const bad of ['not recorded', '2020-01-02T:', '2020-02-30', '2020-01-02T25:00']) {
+    for (const bad of ['not recorded', '2020-01-02T:', '2020-02-30', '2020-01-02T25:00:00Z', '2020-01-02 10:30:00']) {
       const unreadable = plan(bib.replace('2020-01-01', bad), [accessed as ZoteroItemJson]).actions[0];
       expect([bad, unreadable]).toMatchObject([bad, { kind: 'unchanged', notPushed: [{ field: 'urldate', reason: 'date-unreadable' }] }]);
     }
@@ -411,6 +411,12 @@ describe('createZoteroPushPlan', () => {
     const smith = { ...FLATO, creators: [{ creatorType: 'author', lastName: 'Smith', firstName: 'Jane' }] };
     const p = plan(FLATO_BIB.replace('Flat{\\o}, Martin', '{Smith, Jane}'), [smith as ZoteroItemJson]);
     expect(p.actions[0].kind === 'update' && p.actions[0].patch.creators).toEqual([{ creatorType: 'author', name: 'Smith, Jane' }]);
+  });
+
+  it("doesn't count a DOI for an item it won't write", () => {
+    const blocked = item('BLOCK001', { title: 'A', citationKey: 'a2000', extra: 'Type: book' });
+    const bib = '@article{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n@article{b2000,\n  title = {B},\n  doi = {10.1234/a}\n}\n';
+    expect(plan(bib, [blocked]).actions.map(a => (a.kind === 'skip' ? a.reason : a.kind))).toEqual(['extra-would-migrate', 'create']);
   });
 
   it("doesn't count a DOI that the item type can't hold", () => {
@@ -608,8 +614,11 @@ describe('applyZoteroPush', () => {
   });
 
   it('stops before a batch when another writer changed an item the push just wrote', async () => {
+    // The other writer's edit lands while the batch saves, so the batch's
+    // own library version (7) already includes it and the next batch's
+    // version check alone would pass; only the item's version tells.
     const { fetchFn, sent } = writeFetch(
-      s => ({ status: 200, version: 6, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'MINE' + String(i).padStart(4, '0'), version: 6 }])) } }),
+      s => ({ status: 200, version: 7, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'MINE' + String(i).padStart(4, '0'), version: 6 }])) } }),
       () => [{ key: 'MINE0000', version: 7 }],
     );
     const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
