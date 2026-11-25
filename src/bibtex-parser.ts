@@ -2173,6 +2173,10 @@ interface BibtexCommandRead {
   opener: number;
   end: number;
   open: boolean;
+  /** For an entry whose key was read before, which BibTeX reads only to
+   *  its key if the document cites it: where it would read on for the next
+   *  @ if it doesn't, the text's end where it would still be reading */
+  whole?: number;
 }
 
 // White space as BibTeX reads it: a space, a tab, and a line's end
@@ -2195,12 +2199,15 @@ const BIBTEX_ID_AT = new RegExp('(?![0-9])' + BIBTEX_ID_CHAR + '+', 'y');
  *  reports an error and reads on for the next @ from there; at the text's
  *  end in a command, it stops. Each character is read once.
  *
- *  BibTeX reads a key it reads again, if the document cites it, to its
- *  end only, and reads on from there, and stops after the command it ends
- *  on the file's last line; this reads neither, so it may read an entry
- *  BibTeX doesn't. `stopAt`: read no command that starts at or after it. */
-function readCommandsAsBibtex(text: string, stopAt = text.length): BibtexCommandRead[] {
+ *  An entry whose key BibTeX read before (`seen`, or earlier in `text`),
+ *  without case, it reads, if the document cites the key, to its key, and
+ *  reads on from there, so an entry in its fields is one; this reads it so,
+ *  as if every key is cited, and says where it would end if not (`whole`).
+ *  BibTeX stops after the command it ends on the file's last line, which
+ *  this doesn't. `stopAt`: read no command that starts at or after it. */
+function readCommandsAsBibtex(text: string, stopAt = text.length, seen: ReadonlySet<string> = new Set()): BibtexCommandRead[] {
   const commands: BibtexCommandRead[] = [];
+  const read = new Set<string>();
   const n = text.length;
   let i = 0;
   // Past white space, and whether there's more
@@ -2248,27 +2255,8 @@ function readCommandsAsBibtex(text: string, stopAt = text.length): BibtexCommand
       if (!white()) return 'end';
     }
   };
-  // The body after the opener; 'ok' with i past the closer
-  const body = (command: BibtexCommandRead, closer: '}' | ')'): 'ok' | 'error' | 'end' => {
-    if (!white()) return 'end';
-    if (command.kind === 'string') {
-      if (identifier('=') === undefined) return 'error';
-      if (!white()) return 'end';
-      if (text[i] !== '=') return 'error';
-      i++;
-    }
-    if (command.kind !== 'entry') {
-      if (!white()) return 'end';
-      const read = value(closer);
-      if (read !== 'ok') return read;
-      if (text[i] !== closer) return 'error';
-      i++;
-      return 'ok';
-    }
-    // The key, to white space, a comma or, in a brace entry, the }
-    const keyStart = i;
-    while (i < n && !isBibtexWhite(text[i]) && text[i] !== ',' && (closer === ')' || text[i] !== '}')) i++;
-    command.key = text.slice(keyStart, i);
+  // An entry's fields, after its key; 'ok' with i past the closer
+  const fields = (closer: '}' | ')'): 'ok' | 'error' | 'end' => {
     for (;;) {
       if (!white()) return 'end';
       if (text[i] === closer) {
@@ -2287,9 +2275,40 @@ function readCommandsAsBibtex(text: string, stopAt = text.length): BibtexCommand
       if (text[i] !== '=') return 'error';
       i++;
       if (!white()) return 'end';
-      const read = value(closer);
-      if (read !== 'ok') return read;
+      const valueRead = value(closer);
+      if (valueRead !== 'ok') return valueRead;
     }
+  };
+  // The body after the opener; 'ok' with i past the closer
+  const body = (command: BibtexCommandRead, closer: '}' | ')'): 'ok' | 'error' | 'end' => {
+    if (!white()) return 'end';
+    if (command.kind === 'string') {
+      if (identifier('=') === undefined) return 'error';
+      if (!white()) return 'end';
+      if (text[i] !== '=') return 'error';
+      i++;
+    }
+    if (command.kind !== 'entry') {
+      if (!white()) return 'end';
+      const valueRead = value(closer);
+      if (valueRead !== 'ok') return valueRead;
+      if (text[i] !== closer) return 'error';
+      i++;
+      return 'ok';
+    }
+    // The key, to white space, a comma or, in a brace entry, the }
+    const keyStart = i;
+    while (i < n && !isBibtexWhite(text[i]) && text[i] !== ',' && (closer === ')' || text[i] !== '}')) i++;
+    command.key = text.slice(keyStart, i);
+    const lower = command.key.toLowerCase();
+    if (seen.has(lower) || read.has(lower)) {
+      const keyEnd = i;
+      command.whole = fields(closer) === 'end' ? n : i;
+      i = keyEnd;
+      return 'error';
+    }
+    read.add(lower);
+    return fields(closer);
   };
   for (;;) {
     const at = text.indexOf('@', i);
@@ -2305,14 +2324,27 @@ function readCommandsAsBibtex(text: string, stopAt = text.length): BibtexCommand
     const command: BibtexCommandRead = { kind, start: at, opener: i, end: n, open: false };
     commands.push(command);
     i++;
-    const read = body(command, closer);
-    if (read === 'end') {
+    if (body(command, closer) === 'end') {
       command.open = true;
       return commands;
     }
     command.end = i;
   }
 }
+
+/** `cuts`, ranges of text, in order, each joined with any it overlaps or
+ *  touches */
+function joinCuts(cuts: Array<[number, number]>): Array<[number, number]> {
+  const joined: Array<[number, number]> = [];
+  for (const cut of cuts.sort((x, y) => x[0] - y[0])) {
+    const last = joined[joined.length - 1];
+    if (last && cut[0] <= last[1]) last[1] = Math.max(last[1], cut[1]);
+    else joined.push([cut[0], cut[1]]);
+  }
+  return joined;
+}
+
+const isEol = (c: string | undefined) => c === '\n' || c === '\r';
 
 /** Merge an existing .bib (from disk) with a produced .bib (from conversion).
  *  - Existing-only entries are preserved verbatim.
@@ -2411,24 +2443,15 @@ export function mergeBibtex(existing: string, produced: string): string {
     .map(key => ({ key, text: producedRaw.get(key) }))
     .filter((entry): entry is { key: string; text: string } => entry.text !== undefined);
 
-  const isEol = (c: string | undefined) => c === '\n' || c === '\r';
-  // Past the line end at `at`, \r\n, \n or \r, or `at` where there's none
-  const pastEol = (at: number) => (existing[at] === '\r' && existing[at + 1] === '\n' ? at + 2 : isEol(existing[at]) ? at + 1 : at);
-  // True if the line before the one that starts at `at` is blank, or `at`
-  // starts the file
-  const blankBefore = (at: number) => {
-    if (at === 0) return true;
-    let i = at - 1;
-    if (existing[i] === '\n' && existing[i - 1] === '\r') i--;
-    i--;
-    while (i >= 0 && (existing[i] === ' ' || existing[i] === '\t')) i--;
-    return i < 0 || isEol(existing[i]);
-  };
   const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
-
-  // The first @string declaration that may end after the text cutsBetween
-  // reads, which reads the file's text from its start on
+  // The first @string declaration that may end in or after the text
+  // cutsBetween reads, which reads the file's text from its start on
   let stringAt = 0;
+  // The keys BibTeX reads before the text cutsBetween reads, without case
+  const seen = new Set<string>();
+  // How many times cutsBetween reads the text between two entries, at most
+  const MAX_READS = 16;
+
   /** What of the text between entries from `from` to `to` to drop: each
    *  command BibTeX reads there that would give it a key the produced file
    *  gives, as `% @book{B,` (BibTeX has no % comments) or an entry in an
@@ -2437,89 +2460,160 @@ export function mergeBibtex(existing: string, produced: string): string {
    *  which it would read into that one, as `% @book{`, and on, maybe to
    *  the end: `next` is given where an entry the produced file gives comes
    *  after. Keys are compared without case, as BibTeX compares them.
-   *  Each goes from its @ to where BibTeX reads on for the next @, but not
-   *  into an @string declaration the parser reads, so that BibTeX reads the
-   *  rest of the file as it did, without it; and with the lines it fills
-   *  where it fills them, to its brace-matched end, if there's no @ to
-   *  there, so `% @book{B,`, `%   title = {old},` and `% }` all go, and the
-   *  blank line after them, or before them at the file's end.
-   *  Undefined where one starts in a declaration the parser reads, which
-   *  BibTeX reads otherwise. */
+   *
+   *  One that ends there goes from its @ to where BibTeX reads on for the
+   *  next @, so BibTeX reads what follows as it did, without it; and with
+   *  the lines it fills where it fills them (see cutLines). One that BibTeX
+   *  reads on past, into the entry after or an @string declaration the
+   *  parser reads, goes to the end of the line its @ is on, or to that
+   *  declaration. The text is read again without what's cut, from its
+   *  start, after a cut of that kind, or one that takes the character a
+   *  command before it ended at, where BibTeX then reads that one on, until
+   *  nothing more is to go, at most MAX_READS times. Undefined where one
+   *  starts in a declaration the parser reads, which BibTeX reads
+   *  otherwise, or past that many reads. */
   const cutsBetween = (from: number, to: number, next?: string, nextAt = 0): Array<[number, number]> | undefined => {
     const firstAt = existing.indexOf('@', from);
     if (firstAt === -1 || firstAt >= to) return [];
-    const followAt = to - from + nextAt;
-    const commands = readCommandsAsBibtex(existing.slice(from, to) + (next ?? ''), followAt);
-    const cuts: Array<[number, number]> = [];
-    for (const command of commands) {
-      const collides = command.key !== undefined && producedKeys.has(command.key.toLowerCase());
-      if (!collides && !(next !== undefined && command.end > followAt)) continue;
-      const start = from + command.start;
-      while (stringAt < existingResult.strings.length && existingResult.strings[stringAt].end <= start) stringAt++;
-      const string = existingResult.strings[stringAt];
-      if (string && string.start < start) return undefined;
-      const cap = string && string.start < to ? string.start : to;
-      const end = Math.min(from + command.end, cap);
-      // To the delimiter that pairs with its opener, if there's no @ to it
-      const open = existing[from + command.opener];
-      const close = open === '{' ? '}' : ')';
-      let fill = end;
-      for (let i = from + command.opener, depth = 0; i < cap; i++) {
-        if (i >= end && existing[i] === '@') break;
-        if (existing[i] === open) depth++;
-        else if (existing[i] === close && --depth === 0) {
-          fill = Math.max(end, i + 1);
+    while (stringAt < existingResult.strings.length && existingResult.strings[stringAt].end <= from) stringAt++;
+    let cuts: Array<[number, number]> = [];
+    for (let reads = 0; ; reads++) {
+      if (reads === MAX_READS) return undefined;
+      // The text without what's cut, in pieces of the file's
+      const pieces: Array<[number, number]> = [];
+      let p = from;
+      for (const [a, b] of cuts) {
+        if (a > p) pieces.push([p, a]);
+        p = b;
+      }
+      if (p < to) pieces.push([p, to]);
+      const starts: number[] = [];
+      let text = '';
+      for (const [a, b] of pieces) {
+        starts.push(text.length);
+        text += existing.slice(a, b);
+      }
+      // Where in the file what's at `t` in the text is, looked up from the
+      // last piece looked at, as most are near it
+      let piece = 0;
+      const inFile = (t: number): number => {
+        while (piece > 0 && starts[piece] > t) piece--;
+        while (piece + 1 < pieces.length && starts[piece + 1] <= t) piece++;
+        return pieces.length === 0 ? to : Math.min(pieces[piece][0] + t - starts[piece], to);
+      };
+      let string = stringAt;
+      const followAt = text.length + nextAt;
+      const added: Array<[number, number]> = [];
+      let again = false;
+      // Where the last command not cut ends
+      let kept = -1;
+      const commands = readCommandsAsBibtex(text + (next ?? ''), followAt, seen);
+      for (const command of commands) {
+        const collides = command.key !== undefined && producedKeys.has(command.key.toLowerCase());
+        const readsInto = next !== undefined && Math.max(command.end, command.whole ?? 0) > followAt;
+        if (!collides && !readsInto) {
+          kept = command.end;
+          continue;
+        }
+        const startInFile = inFile(command.start);
+        while (string < existingResult.strings.length && existingResult.strings[string].end <= startInFile) string++;
+        const declaration = existingResult.strings[string];
+        if (declaration && declaration.start < startInFile) return undefined;
+        // Where a declaration the parser reads starts, in the text
+        const cap = declaration && declaration.start < to ? command.start + (declaration.start - startInFile) : text.length;
+        const readsPast = readsInto || command.end > cap;
+        let end = Math.min(command.end, cap);
+        let fill = end;
+        if (readsPast) {
+          // To the end of its @'s line
+          end = command.start;
+          while (end < cap && !isEol(text[end])) end++;
+          fill = end;
+        } else {
+          // To the delimiter that pairs with its opener, if there's no @ to it
+          const open = text[command.opener];
+          const close = open === '{' ? '}' : ')';
+          for (let i = command.opener, depth = 0; i < cap; i++) {
+            if (i >= end && text[i] === '@') break;
+            if (text[i] === open) depth++;
+            else if (text[i] === close && --depth === 0) {
+              fill = Math.max(end, i + 1);
+              break;
+            }
+          }
+        }
+        const [cutStart, cutEnd] = cutLines(text, from === 0, to === existing.length, command.start, end, fill);
+        added.push([inFile(cutStart), cutEnd >= text.length ? to : inFile(cutEnd)]);
+        if (readsPast || cutStart <= kept) {
+          again = true;
           break;
         }
       }
-      let lineStart = start;
-      while (lineStart > from && (existing[lineStart - 1] === ' ' || existing[lineStart - 1] === '\t' || existing[lineStart - 1] === '%')) lineStart--;
-      let lineEnd = fill;
-      if (!isEol(existing[fill - 1])) {
-        while (lineEnd < to && (existing[lineEnd] === ' ' || existing[lineEnd] === '\t')) lineEnd++;
+      // In order, each joined with any it overlaps
+      cuts = joinCuts(cuts.concat(added));
+      if (!again) {
+        for (const command of commands) if (command.key !== undefined) seen.add(command.key.toLowerCase());
+        return cuts;
       }
-      const ownLines = (lineStart === 0 || isEol(existing[lineStart - 1])) && (isEol(existing[fill - 1]) || lineEnd === to || isEol(existing[lineEnd]));
-      if (!ownLines) {
-        // Its text alone, and the spaces before it where only spaces follow
-        let cutStart = start;
-        if (lineEnd === to || isEol(existing[lineEnd])) {
-          while (cutStart > from && (existing[cutStart - 1] === ' ' || existing[cutStart - 1] === '\t')) cutStart--;
-        }
-        cuts.push([cutStart, end]);
-        continue;
-      }
-      let cutStart = lineStart;
-      let cutEnd = isEol(existing[fill - 1]) ? fill : pastEol(lineEnd);
-      if (blankBefore(cutStart)) {
-        for (;;) {
-          let i = cutEnd;
-          while (i < to && (existing[i] === ' ' || existing[i] === '\t')) i++;
-          if (i >= to || !isEol(existing[i])) break;
-          cutEnd = pastEol(i);
-        }
-      }
-      if (cutEnd === existing.length) {
-        // The file's last lines: the blank lines before them too, so the
-        // file ends as the text before them does
-        while (cutStart > from && blankBefore(cutStart)) {
-          let i = cutStart - 1;
-          if (existing[i] === '\n' && existing[i - 1] === '\r') i--;
-          let lineFrom = i;
-          while (lineFrom > 0 && !isEol(existing[lineFrom - 1])) lineFrom--;
-          if (lineFrom < from) break;
-          cutStart = lineFrom;
-        }
-      }
-      cuts.push([cutStart, cutEnd]);
     }
-    // In order, each joined with any it overlaps
-    const joined: Array<[number, number]> = [];
-    for (const cut of cuts.sort((x, y) => x[0] - y[0])) {
-      const last = joined[joined.length - 1];
-      if (last && cut[0] <= last[1]) last[1] = Math.max(last[1], cut[1]);
-      else joined.push([cut[0], cut[1]]);
+  };
+
+  /** The text to cut of a command in `text`, the text between two entries
+   *  (`fileStart`: at the file's start; `fileEnd`: at its end), from
+   *  `start` to `end`, to `fill` where it fills its lines: those lines
+   *  whole, and the blank lines after them where a blank line or the file's
+   *  start is before them, and before them too where they end the file; or,
+   *  where they hold other text, from `start` to `end`, and the spaces
+   *  before it where only spaces follow */
+  const cutLines = (text: string, fileStart: boolean, fileEnd: boolean, start: number, end: number, fill: number): [number, number] => {
+    const space = (c: string | undefined) => c === ' ' || c === '\t';
+    // An entry's closer is before the text, unless the file's start is
+    const lineStartAt = (at: number) => (at === 0 ? fileStart : isEol(text[at - 1]));
+    // Past the line end at `at`, \r\n, \n or \r
+    const pastEol = (at: number) => (text[at] === '\r' && text[at + 1] === '\n' ? at + 2 : isEol(text[at]) ? at + 1 : at);
+    // Where the line before the one that starts at `at` starts, if it's
+    // blank, or 0 at the file's start, or -1
+    const blankLineBefore = (at: number): number => {
+      if (at === 0) return fileStart ? 0 : -1;
+      let i = at - 1;
+      if (text[i] === '\n' && text[i - 1] === '\r') i--;
+      i--;
+      while (i >= 0 && space(text[i])) i--;
+      if (i >= 0 && !isEol(text[i])) return -1;
+      return i < 0 && !fileStart ? -1 : i + 1;
+    };
+    let lineStart = start;
+    while (lineStart > 0 && (space(text[lineStart - 1]) || text[lineStart - 1] === '%')) lineStart--;
+    let lineEnd = fill;
+    if (!isEol(text[fill - 1])) {
+      while (lineEnd < text.length && space(text[lineEnd])) lineEnd++;
     }
-    return joined;
+    const ownLines = lineStartAt(lineStart) && (isEol(text[fill - 1]) || lineEnd === text.length || isEol(text[lineEnd]));
+    if (!ownLines) {
+      let cutStart = start;
+      if (lineEnd === text.length || isEol(text[lineEnd])) {
+        while (cutStart > 0 && space(text[cutStart - 1])) cutStart--;
+      }
+      return [cutStart, end];
+    }
+    let cutStart = lineStart;
+    let cutEnd = isEol(text[fill - 1]) ? fill : pastEol(lineEnd);
+    if (blankLineBefore(cutStart) >= 0) {
+      for (;;) {
+        let i = cutEnd;
+        while (i < text.length && space(text[i])) i++;
+        if (i >= text.length || !isEol(text[i])) break;
+        cutEnd = pastEol(i);
+      }
+    }
+    if (fileEnd && cutEnd === text.length) {
+      // The file's last lines: the blank lines before them too, so the
+      // file ends as the text before them does
+      for (let before = blankLineBefore(cutStart); before >= 0 && before < cutStart; before = blankLineBefore(cutStart)) {
+        cutStart = before;
+      }
+    }
+    return [cutStart, cutEnd];
   };
 
   /** The existing file as the skeleton: each entry's text replaced by the
@@ -2551,7 +2645,9 @@ export function mergeBibtex(existing: string, produced: string): string {
       const between = cutsBetween(from, to, next, range ? 0 : blank.length);
       if (between === undefined) return undefined;
       pushAll(cuts, between);
-      if (range) from = range.end;
+      if (!range) break;
+      seen.add(range.key.toLowerCase());
+      from = range.end;
     }
     // Where each entry and declaration should be in the result
     const entries: Array<{ key: string; start: number; end: number }> = [];

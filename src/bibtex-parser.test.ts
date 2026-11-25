@@ -1274,6 +1274,35 @@ describe('mergeBibtex', () => {
     expect(mergeBibtex(existing, newB)).toBe(book('A', 'Keep') + '\n\n% a note\n' + book('C', 'Keep') + '\n\n' + newB);
   });
 
+  // Only its own line: after that BibTeX reads at the top level again, so
+  // the comments and declarations after it stay
+  it('keeps what follows the line of text that leaves BibTeX in an entry', () => {
+    const tail = '% keep this note\n@preamble{"\\def\\x{X}"}\n% @book{Y, note = {open again\n% and this\n';
+    const existing = book('A', 'Keep') + '\n% @book{X, note = {open\n' + tail;
+    const merged = mergeBibtex(existing, newB);
+    expect(merged).toBe(book('A', 'Keep') + '\n% keep this note\n@preamble{"\\def\\x{X}"}\n% and this\n\n' + newB);
+    expect(mergeBibtex(merged, newB)).toBe(merged);
+  });
+
+  // Which cut the second line alone, where BibTeX had ended the first entry
+  // with an error, so it then read the first on into the entry after, and
+  // a second merge cut the first line too
+  it.each([['LF', '\n'], ['CR', '\r'], ['CRLF', '\r\n']])('reads the text again without what it cuts, in a %s file', (_name, eol) => {
+    const existing = ['% @book{X,', '% @book{X, note = {open', book('A', 'Keep'), ''].join(eol);
+    const merged = mergeBibtex(existing, newB);
+    // A file of lone CRs gets LF blank lines, as any merge gives it
+    const blank = eol === '\r' ? '\n\n' : eol + eol;
+    expect(merged).toBe(book('A', 'Keep') + blank + newB.replace(/\n$/, eol));
+    expect(mergeBibtex(merged, newB)).toBe(merged);
+  });
+
+  // BibTeX reads an entry whose key it read before, if the document cites
+  // it, to its key, and reads on from there, so an entry in its fields is one
+  it('drops an entry in the fields of a commented-out copy of an entry before it', () => {
+    const existing = book('X', 'Keep') + '\n% @book{X, note = {@book{B, title={Old}}}}\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('X', 'Keep') + '\n% @book{X, note = {}}\n\n' + book('B', 'New') + '\n');
+  });
+
   it('keeps an opener at the end of the file, with nothing appended after it', () => {
     const existing = book('A', 'Keep') + '\n% @book{';
     expect(mergeBibtex(existing, book('A', 'New'))).toBe(book('A', 'New') + '\n% @book{');
