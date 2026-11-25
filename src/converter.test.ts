@@ -21224,6 +21224,32 @@ describe('A section break on the last paragraph of its section', () => {
   });
 });
 
+describe('A comment on an empty section break carrier that writes no fence', () => {
+  // A continuous break that keeps the page's orientation, between the two
+  // paragraphs, which holds the markers of the first's comment
+  const BREAK = '<w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr>';
+  const imported = async (range: 'empty' | 'into after') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Para {==word==}{>>@a (2024-01-01 10:00) | c<<}.\n\nAfter.\n')).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const start = '<w:commentRangeStart w:id="0"/>', end = '<w:commentRangeEnd w:id="0"/>';
+    const ref = '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="0"/></w:r>';
+    xml = xml.replace(start, '').replace(end, '').replace(ref, '');
+    const after = xml.match(/<w:p [^>]*><w:r><w:t>After\.<\/w:t><\/w:r><\/w:p>/)![0];
+    xml = xml.replace(after, range === 'empty' ? '<w:p>' + BREAK + start + end + ref + '</w:p>' + after
+      : '<w:p>' + BREAK + start + '</w:p>' + after.replace('</w:p>', end + ref + '</w:p>'));
+    zip.file('word/document.xml', xml);
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test('keeps one on no text, after the paragraph before, as a fence\'s carrier does', async () => {
+    expect(await imported('empty')).toBe('Para word.{>>@a (2024-01-01 10:00) | c<<}\n\nAfter.\n');
+  });
+
+  test('keeps the range of one that starts there', async () => {
+    expect(await imported('into after')).toBe('Para word.\n\n{==After.==}{>>@a (2024-01-01 10:00) | c<<}\n');
+  });
+});
+
 describe('Portrait section round-trip', () => {
   test('fence-based portrait round-trips through MD→DOCX→MD', async () => {
     const md = 'Before\n\n<!-- portrait -->\n\nTable title\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\nTable note\n\n<!-- /portrait -->\n\nAfter';
