@@ -39,7 +39,7 @@ import {
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
 import { buildItemData } from './md-to-docx-citations';
-import { fastestRun, fastestRunAsync } from './test-timing';
+import { fastestRun, fastestRunAsync, growthOverSixteenfold, growthOverSixteenfoldAsync, GROWTH_LIMIT } from './test-timing';
 import { annotateHtmlCommentIndices, convertMdToDocx, directiveRest, exportReads, holdsDirective, noteNumberText, parseMd, templateStyleIds } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
@@ -22842,10 +22842,7 @@ describe('Highlights across runs', () => {
       return fastest;
     };
     expect(buildMarkdown(items(size), new Map())).toEndWith(end);
-    // About 4 in linear time, and 16 in time in the square of the
-    // deletions. The smaller list takes about 20 ms, so the timer's noise
-    // on a slower runner doesn't decide the ratio
-    expect(time(4 * size) / time(size)).toBeLessThan(8);
+    expect(growthOverSixteenfold(time, size / 4)).toBeLessThan(GROWTH_LIMIT);
   }, 30000);
 
   test('keeps a substitution from after an equation and an empty run before struck text resolving writes as <s>', () => {
@@ -22882,8 +22879,7 @@ describe('Highlights across runs', () => {
       return fastest;
     };
     expect(buildMarkdown(items(2), new Map())).toBe(end);
-    // About 2 in linear time, and 4 in time in the square of the deletions
-    expect(time(2000) / time(1000)).toBeLessThan(3);
+    expect(growthOverSixteenfold(time, 125)).toBeLessThan(GROWTH_LIMIT);
   }, 60000);
 
   test('writes many deletions before an empty one and struck text that starts with > before an insertion in linear time', () => {
@@ -22905,8 +22901,7 @@ describe('Highlights across runs', () => {
       return fastest;
     };
     expect(buildMarkdown(items(2), new Map())).toBe('{--d--}{--**d**--}{--d--}{--**d**--}{----}{--~~>a~~--}{++new++}');
-    // About 2 in linear time, and 4 in time in the square of the deletions
-    expect(time(2000) / time(1000)).toBeLessThan(3);
+    expect(growthOverSixteenfold(time, 125)).toBeLessThan(GROWTH_LIMIT);
   }, 120000);
 
   test.each([
@@ -22925,8 +22920,7 @@ describe('Highlights across runs', () => {
     ['text', [['new', {}]], '{++new++}'],
   ] as const)('writes many deletions that end in a ~> before an insertion of %s in linear time', (_name, added, md) => {
     // The ~>, which would split the substitution, kept each start in the
-    // deletions from one, and each built its sides again. Four times the
-    // deletions take about four times as long, not sixteen.
+    // deletions from one, and each built its sides again.
     const item = (text: string, revision: 'addition' | 'deletion', formatting: Partial<RunFormatting> = {}) => (
       { type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision: { type: revision, author: 'A', date: '' } });
     const time = (n: number) => {
@@ -22936,8 +22930,7 @@ describe('Highlights across runs', () => {
       ];
       return fastestRun(() => expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith('{--x~>--}' + md));
     };
-    const small = time(1000);
-    expect(time(4000) / small).toBeLessThan(8);
+    expect(growthOverSixteenfold(time, 250)).toBeLessThan(GROWTH_LIMIT);
   }, 30000);
 
   test.each([
@@ -23126,8 +23119,7 @@ describe('Highlights across runs', () => {
       }
       return fastest;
     };
-    const small = time(400);
-    expect(time(800) / small).toBeLessThan(3);
+    expect(growthOverSixteenfold(time, 50)).toBeLessThan(GROWTH_LIMIT);
   });
 
   test.each([[' after a note reference', true], ['', false]])('writes the = that ends a highlight%s and many backslashes in linear time', (_name, withNote) => {
@@ -23147,10 +23139,8 @@ describe('Highlights across runs', () => {
       }
       return fastest;
     };
-    const small = time(4000);
-    expect(time(8000) / small).toBeLessThan(3);
-    // Where the regex gave up
-    time(16000);
+    // Which times 16,000 backslashes, past where the regex gave up
+    expect(growthOverSixteenfold(time, 1000)).toBeLessThan(GROWTH_LIMIT);
   });
 
   test('reads a highlighted run of many line breaks in linear time', async () => {
@@ -23188,15 +23178,13 @@ describe('Highlights across runs', () => {
 
   test('reads many runs in one tracked change in linear time', async () => {
     // The escape after a highlight read the Markdown before each run, which
-    // copied all of it. Four times the runs take about four times as long,
-    // not sixteen, however fast the machine is.
+    // copied all of it.
     const time = async (runs: number) => {
       const md = '{++' + Array.from({ length: runs }, () => 'a *b* ').join('').trimEnd() + '++}\n';
       const docx = (await convertMdToDocx(md)).docx;
       return await fastestRunAsync(async () => expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md));
     };
-    const small = await time(10000);
-    expect(await time(40000) / small).toBeLessThan(8);
+    expect(await growthOverSixteenfoldAsync(time, 2500)).toBeLessThan(GROWTH_LIMIT);
   }, 30000);
 
   test('writes a paragraph of many comments in linear time', () => {
