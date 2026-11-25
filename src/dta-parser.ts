@@ -7,7 +7,7 @@
 // -----------------------------------------------------------
 
 import { formatValue, isMissing, openDta } from '@jbearak/dta-parser';
-import type { Cell, ValueLabels, Variable } from '@jbearak/dta-parser';
+import type { Cell, EncodingName, ValueLabels, Variable } from '@jbearak/dta-parser';
 import type { EmbedDirective } from './embed-preprocess';
 
 const DEFAULT_MAX_DTA_FILE_SIZE = 10_485_760; // 10 MB
@@ -42,18 +42,7 @@ export function parseDta(
   }
 
   // --- Read all observation rows, with value label sets ---
-  const reader = openDta(data);
-  const variables = reader.variables;
-  let rows: Cell[][];
-  let valueLabelTables: (ValueLabels | undefined)[];
-  try {
-    rows = reader.readRows(0, reader.info.nobs);
-    valueLabelTables = variables.map(v =>
-      v.valueLabels ? reader.valueLabels(v.valueLabels) : undefined
-    );
-  } finally {
-    reader.close();
-  }
+  const { variables, rows, valueLabelTables } = readTable(data);
 
   // --- Determine header and body rows ---
   const headerCount = directive.headers;
@@ -121,6 +110,60 @@ export function parseDta(
 
   parts.push('</table>');
   return parts.join('');
+}
+
+interface DtaTable {
+  release: number;
+  variables: Variable[];
+  rows: Cell[][];
+  valueLabelTables: (ValueLabels | undefined)[];
+}
+
+function readTableAs(data: Uint8Array, encoding?: EncodingName): DtaTable {
+  const reader = openDta(data, encoding ? { encoding } : undefined);
+  try {
+    const variables = reader.variables;
+    return {
+      release: reader.info.release,
+      variables,
+      rows: reader.readRows(0, reader.info.nobs),
+      valueLabelTables: variables.map(v =>
+        v.valueLabels ? reader.valueLabels(v.valueLabels) : undefined
+      ),
+    };
+  } finally {
+    reader.close();
+  }
+}
+
+/** Every piece of text the table shows or could show. */
+function tableText(table: DtaTable): string[] {
+  const text: string[] = [];
+  for (const v of table.variables) text.push(v.name, v.label);
+  for (const labels of table.valueLabelTables) {
+    if (labels) text.push(...labels.values());
+  }
+  for (const row of table.rows) {
+    for (const cell of row) if (typeof cell === 'string') text.push(cell);
+  }
+  return text;
+}
+
+/**
+ * Read a .dta file, choosing how to decode text in files before
+ * release 118. Those files name no encoding: Stata 13 and earlier wrote
+ * the platform's code page, while R's foreign::write.dta and other tools
+ * write UTF-8. The library decodes them as windows-1252 unless told
+ * otherwise, so where that read has non-ASCII text, read again as UTF-8
+ * and keep that read when all its text was valid UTF-8 (no U+FFFD).
+ * Release 118 and later declare UTF-8 and are read once, as is.
+ */
+function readTable(data: Uint8Array): DtaTable {
+  const table = readTableAs(data);
+  if (table.release >= 118) return table;
+  if (!tableText(table).some(t => /[^\x00-\x7f]/.test(t))) return table;
+  const utf8 = readTableAs(data, 'utf-8');
+  return tableText(utf8).some(t => t.includes('\ufffd')) ? table : utf8;
 }
 
 interface FormattedCell {
