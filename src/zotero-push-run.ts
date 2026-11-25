@@ -191,13 +191,16 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   conflict: 'the entry cannot be read safely',
   ambiguous: 'several Zotero items match',
   'weak-match':
-    'matched only by URL, by title, author and year, or by an ISBN a book shares with its parts; link it with a citation key or DOI',
+    'matched only by URL, by title, author and year, or by an ISBN a book shares with its parts or with another kind of item; link it with a citation key or DOI',
   'other-library': 'linked to an item in another library',
   'identity-disagreement': "its DOI differs from the matched item's",
   'duplicate-target': 'another entry matches the same item',
   'duplicate-doi': 'another entry would give the same DOI to an item',
   'doi-owned-elsewhere': 'another item in the library has its DOI',
   'pmid-disagreement': "its PMID is another item's, or its matched item has another",
+  'citation-key-conflict':
+    'more than one Zotero item answers to its citation key, in the Citation Key field or a "Citation Key:" line of Extra; link it with zotero-key',
+  'isbn-owned-elsewhere': "its ISBN is another item's",
   'unsupported-type': 'no Zotero item type for this entry type',
   'unreadable-identifier': 'an identifier is written with TeX; write it plain',
   'extra-would-migrate':
@@ -213,6 +216,8 @@ const NOT_PUSHED_PROSE: Readonly<Record<ZoteroFieldNotPushedReason, string>> = {
   macro: "a @string macro's name",
   'incomplete-names': "ends with 'and others' and differs from Zotero's first names",
   'unreadable-doi': 'not a DOI',
+  'unreadable-pmid': 'not a PubMed id',
+  'repeated-field': 'given more than once',
 };
 
 /** One line saying what the plan does. */

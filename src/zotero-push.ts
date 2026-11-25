@@ -12,6 +12,9 @@
  *    citation key, a DOI, an ISBN or PMID.  A URL or metadata match only
  *    links a citation in Word; here it could overwrite the wrong record in a
  *    synced library, which git cannot revert, so it is reported for review.
+ *    Strong evidence must also be unopposed: an entry whose citation key,
+ *    DOI, PMID or whole-work ISBN another item also answers to is left
+ *    alone, and so is a create that would copy an item the library has.
  *  - Values are compared against the item's own JSON, field by field, only
  *    for fields the entry has.  A field only Zotero has is left alone: the
  *    .bib may be an export that omits it.  Text is compared after TeX is
@@ -36,7 +39,7 @@ import {
 } from './bibtex-parser';
 import { pushAll } from './arrays';
 import { parseAuthors } from './md-to-docx-citations';
-import { normalizeDoi, type ZoteroLinkDecision } from './zotero-link';
+import { normalizeDoi, normalizeIsbns, normalizePmid, type ZoteroLinkDecision } from './zotero-link';
 
 /** An item as the Local API returns its `data`, with `meta.parsedDate`. */
 export interface ZoteroItemJson {
@@ -96,7 +99,12 @@ export type ZoteroFieldNotPushedReason =
    *  the names it gives are not the start of Zotero's. */
   | 'incomplete-names'
   /** The DOI is not DOI-shaped. */
-  | 'unreadable-doi';
+  | 'unreadable-doi'
+  /** The PMID is not a PubMed id the matcher reads, as `pending`. */
+  | 'unreadable-pmid'
+  /** The entry gives the field more than once: BibTeX reads the first,
+   *  biber and this parser the last. */
+  | 'repeated-field';
 
 export interface ZoteroFieldNotPushed {
   readonly field: string;
@@ -131,6 +139,12 @@ export type ZoteroPushSkipReason =
   /** The entry's PMID is its matched item's no more: the item has another,
    *  or another item has it. */
   | 'pmid-disagreement'
+  /** Another item claims the entry's citation key, in its Citation Key
+   *  field or a `Citation Key:` line of Extra, which Zotero's BibTeX export
+   *  prefers: two items answer to the key, so it names neither for sure. */
+  | 'citation-key-conflict'
+  /** Another whole work in the library, as a book, has the entry's ISBN. */
+  | 'isbn-owned-elsewhere'
   /** Push has no Zotero item type for this entry type. */
   | 'unsupported-type'
   /** An identifier is written with TeX the matcher doesn't read. */
@@ -354,6 +368,13 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
     const real = day !== undefined && day.getUTCMonth() === Number(m![2]) - 1 && day.getUTCDate() === Number(m![3]);
     return real ? { value } : { problem: 'date-unreadable' };
   }
+  if (name === 'pmid') {
+    // Read as the matcher reads it, so `PMID: 222` is 222, and one it can't
+    // read, as `pending`, is never written over a real one.
+    if (readVerbatim(raw) === '') return undefined;
+    const pmid = normalizePmid(raw);
+    return pmid === undefined ? { problem: 'unreadable-pmid' } : { value: pmid };
+  }
   if (name === 'url' || name === 'isbn' || name === 'issn' || name === 'doi') {
     const value = readVerbatim(raw);
     if (value === '') return undefined;
@@ -477,6 +498,8 @@ function sameValue(base: string, a: string, b: string): boolean {
     case 'ISBN':
     case 'ISSN':
       return a.replace(/[\s-]/g, '').toUpperCase() === b.replace(/[\s-]/g, '').toUpperCase();
+    case 'PMID':
+      return (normalizePmid(a) ?? a.trim()) === (normalizePmid(b) ?? b.trim());
     case 'url':
       return a.trim() === b.trim();
     case 'accessDate':
@@ -554,13 +577,19 @@ interface EntryFields {
   readonly notPushed: ZoteroFieldNotPushed[];
 }
 
-function entryFields(entry: BibtexEntry, type: SchemaType): EntryFields {
+/** `repeated`: the fields the entry gives more than once, which are never
+ *  written, since BibTeX and biber read different ones of them. */
+function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet<string>): EntryFields {
   const fields: EntryFields['fields'] = new Map();
   const creators = new Map<string, ReadCreators>();
   const notPushed: ZoteroFieldNotPushed[] = [];
   for (const [name, bases] of FIELD_MAP) {
     const read = readText(entry, name);
     if (read === undefined) continue;
+    if (repeated.has(name)) {
+      notPushed.push({ field: name, reason: 'repeated-field' });
+      continue;
+    }
     if ('problem' in read) {
       notPushed.push({ field: name, reason: read.problem });
       continue;
@@ -589,15 +618,18 @@ function entryFields(entry: BibtexEntry, type: SchemaType): EntryFields {
   }
   let date: number[] | undefined;
   const readDateResult = readDate(entry);
+  const repeatedDate = ['date', 'year', 'month'].find(name => repeated.has(name));
   if (readDateResult !== undefined) {
-    if ('problem' in readDateResult) notPushed.push({ field: 'year', reason: readDateResult.problem });
+    if (repeatedDate !== undefined) notPushed.push({ field: repeatedDate, reason: 'repeated-field' });
+    else if ('problem' in readDateResult) notPushed.push({ field: 'year', reason: readDateResult.problem });
     else if (resolveField(type, 'date') === undefined) notPushed.push({ field: 'year', reason: 'no-zotero-field' });
     else date = readDateResult.parts;
   }
   for (const [field, role] of CREATOR_ROLES) {
     const read = readCreators(entry, field, role);
     if (read === undefined) continue;
-    if (read === 'tex' || read === 'macro') notPushed.push({ field, reason: read });
+    if (repeated.has(field)) notPushed.push({ field, reason: 'repeated-field' });
+    else if (read === 'tex' || read === 'macro') notPushed.push({ field, reason: read });
     else if (!type.creatorTypes.some(c => c.creatorType === role)) notPushed.push({ field, reason: 'no-creator-role' });
     else creators.set(role, read);
   }
@@ -609,8 +641,9 @@ function createData(
   itemType: string,
   type: SchemaType,
   collectionKey: string,
+  repeated: ReadonlySet<string>,
 ): { data: Record<string, unknown>; notPushed: ZoteroFieldNotPushed[] } {
-  const read = entryFields(entry, type);
+  const read = entryFields(entry, type, repeated);
   const data: Record<string, unknown> = { itemType };
   for (const [field, { value }] of read.fields) data[field] = value;
   if (read.date !== undefined) data[resolveField(type, 'date')!] = formatDate(read.date);
@@ -632,8 +665,9 @@ function updateChanges(
   entry: BibtexEntry,
   item: ZoteroItemJson,
   type: SchemaType,
+  repeated: ReadonlySet<string>,
 ): { changes: ZoteroFieldChange[]; patch: Record<string, unknown>; notPushed: ZoteroFieldNotPushed[] } {
-  const read = entryFields(entry, type);
+  const read = entryFields(entry, type, repeated);
   const changes: ZoteroFieldChange[] = [];
   const patch: Record<string, unknown> = {};
   const notPushed = [...read.notPushed];
@@ -684,19 +718,36 @@ function updateChanges(
   return { changes, patch, notPushed };
 }
 
+/** The item's PMID, as the matcher reads one: its PMID field, or a `PMID:`
+ *  line of Extra. */
+function effectivePmid(item: ZoteroItemJson): string | undefined {
+  return normalizePmid(typeof item.PMID === 'string' ? item.PMID : undefined) ?? normalizePmid(extraFields(item).get('pmid'));
+}
+
+/** An ISBN as its ISBN-13, so an ISBN-10 and the ISBN-13 of the same
+ *  edition compare equal.  (The matcher compares them as written; see
+ *  normalizeIsbns.) */
+function isbn13(compact: string): string {
+  if (compact.length !== 10) return compact;
+  const body = '978' + compact.slice(0, 9);
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += Number(body[i]) * (i % 2 === 0 ? 1 : 3);
+  return body + String((10 - (sum % 10)) % 10);
+}
+
+function isbnsOf(value: unknown): string[] {
+  return typeof value === 'string' ? normalizeIsbns(value).map(isbn13) : [];
+}
+
+/** The citation keys an item answers to: its Citation Key field, and a
+ *  `Citation Key:` line of Extra, which Zotero's BibTeX export prefers. */
+function claimedKeys(item: ZoteroItemJson): string[] {
+  const keys = [typeof item.citationKey === 'string' ? item.citationKey.trim() : '', extraFields(item).get('citationkey') ?? ''];
+  return [...new Set(keys.filter(k => k !== ''))];
+}
+
 /** The item's DOI as the link planner reads it: its DOI field, or a
  *  `DOI:` line of Extra. */
-/** A PMID: digits. */
-function validPmid(value: string | undefined): string | undefined {
-  const pmid = value?.trim();
-  return pmid !== undefined && /^\d+$/.test(pmid) ? pmid : undefined;
-}
-
-/** The item's PMID: its PMID field, or a `PMID:` line of Extra. */
-function effectivePmid(item: ZoteroItemJson): string | undefined {
-  return validPmid(typeof item.PMID === 'string' ? item.PMID : undefined) ?? validPmid(extraFields(item).get('pmid'));
-}
-
 function effectiveDoi(item: ZoteroItemJson): string | undefined {
   return validDoi(typeof item.DOI === 'string' ? item.DOI : undefined) ?? validDoi(extraFields(item).get('doi'));
 }
@@ -753,8 +804,14 @@ function extraMigrations(item: ZoteroItemJson, type: SchemaType, schema: ZoteroI
 // ---------------------------------------------------------------------------
 
 type Candidate =
-  | { readonly kind: 'match'; readonly entryKey: string; readonly entry: BibtexEntry; readonly item: ZoteroItemJson }
-  | { readonly kind: 'create'; readonly entryKey: string; readonly entry: BibtexEntry }
+  | {
+      readonly kind: 'match';
+      readonly entryKey: string;
+      readonly entry: BibtexEntry;
+      readonly item: ZoteroItemJson;
+      readonly repeated: ReadonlySet<string>;
+    }
+  | { readonly kind: 'create'; readonly entryKey: string; readonly entry: BibtexEntry; readonly repeated: ReadonlySet<string> }
   | Extract<ZoteroPushAction, { kind: 'skip' }>;
 
 /** Entry types for a whole work, which an ISBN can identify, and Zotero
@@ -770,20 +827,46 @@ const COMPONENT_ITEM_TYPES: ReadonlySet<string> = new Set(['bookSection', 'confe
  *  values, so the entry is left alone. */
 const MATCHED_IDENTIFIERS: ReadonlyArray<string> = ['doi', 'isbn', 'pmid', 'url'];
 
+/** The Zotero item type an entry type stands for, where an ISBN is
+ *  compared: a book's for the whole-work types push has no type of its own
+ *  for, as @mvbook. */
+function isbnItemType(entryType: string): string {
+  return ITEM_TYPE_BY_ENTRY_TYPE[entryType.toLowerCase()] ?? 'book';
+}
+
 export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
-  const { parsed } = parseBibtexWithRaw(input.bibText);
+  const { parsed, ranges } = parseBibtexWithRaw(input.bibText);
+  // The fields each entry gives more than once.  (A key given twice is the
+  // link planner's conflict, so the last range for a key is the entry's.)
+  const repeatedByKey = new Map(ranges.map(r => [r.key, new Set(r.repeatedFields ?? [])]));
   const skip = (entryKey: string, reason: ZoteroPushSkipReason, detail = ''): Candidate =>
     ({ kind: 'skip', entryKey, reason, detail });
 
   // Which items hold each DOI, so no write gives one to a second item.
   const doiOwners = new Map<string, string[]>();
   const pmidOwners = new Map<string, string[]>();
+  // …and each whole work's ISBN (a chapter shares its book's), and each
+  // citation key, from either place an item keeps one.
+  const isbnOwners = new Map<string, string[]>();
+  const keyOwners = new Map<string, string[]>();
+  const own = (owners: Map<string, string[]>, value: string, key: string) => {
+    const list = owners.get(value) ?? [];
+    if (!list.includes(key)) owners.set(value, [...list, key]);
+  };
   for (const item of input.items.values()) {
     const doi = effectiveDoi(item);
-    if (doi !== undefined) doiOwners.set(doi, [...(doiOwners.get(doi) ?? []), item.key]);
+    if (doi !== undefined) own(doiOwners, doi, item.key);
     const pmid = effectivePmid(item);
-    if (pmid !== undefined) pmidOwners.set(pmid, [...(pmidOwners.get(pmid) ?? []), item.key]);
+    if (pmid !== undefined) own(pmidOwners, pmid, item.key);
+    if (!COMPONENT_ITEM_TYPES.has(item.itemType)) for (const isbn of isbnsOf(item.ISBN)) own(isbnOwners, isbn, item.key);
+    for (const key of claimedKeys(item)) own(keyOwners, key, item.key);
   }
+  // The whole-work ISBNs the entry gives, as ISBN-13s.
+  const entryIsbns = (entry: BibtexEntry): string[] =>
+    WHOLE_WORK_TYPES.has(entry.type.toLowerCase()) && readText(entry, 'isbn') !== undefined ? isbnsOf(entry.fields.get('isbn')) : [];
+  const isbnElsewhere = (entry: BibtexEntry, itemKey?: string): string[] => [
+    ...new Set(entryIsbns(entry).flatMap(isbn => (isbnOwners.get(isbn) ?? []).filter(k => k !== itemKey))),
+  ];
   // The DOI the entry would write, read as its field is.
   const entryDoi = (entry: BibtexEntry): string | undefined => {
     const read = readText(entry, 'doi');
@@ -812,7 +895,17 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         const doi = entryDoi(entry);
         const owners = doi === undefined ? [] : (doiOwners.get(doi) ?? []);
         if (owners.length > 0) return skip(entryKey, 'doi-owned-elsewhere', owners.join(', '));
-        return { kind: 'create', entryKey, entry };
+        // An identifier the matcher doesn't find, as a `Citation Key:` line
+        // of Extra behind another key, or the ISBN-10 of an ISBN-13, still
+        // names an item the library has, so creating one would copy it.
+        const keyClaims = keyOwners.get(entryKey) ?? [];
+        if (keyClaims.length > 0) return skip(entryKey, 'citation-key-conflict', keyClaims.join(', '));
+        const isbnClaims = isbnElsewhere(entry);
+        if (isbnClaims.length > 0) return skip(entryKey, 'isbn-owned-elsewhere', isbnClaims.join(', '));
+        const pmidRead = readText(entry, 'pmid');
+        const pmidClaims = pmidRead !== undefined && 'value' in pmidRead ? (pmidOwners.get(pmidRead.value) ?? []) : [];
+        if (pmidClaims.length > 0) return skip(entryKey, 'pmid-disagreement', pmidClaims.join(', '));
+        return { kind: 'create', entryKey, entry, repeated: repeatedByKey.get(entryKey) ?? new Set() };
       }
       case 'update':
       case 'preserve': {
@@ -829,13 +922,24 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         if (entry === undefined) return skip(entryKey, 'conflict', 'entry-not-editable');
         // An ISBN names a book, and a chapter or paper in it shares it, so
         // it identifies only a whole work, on both sides.
+        // And it names one kind of work: a book's ISBN on an audio
+        // recording is the recording's, not the book's.
         if (
           decision.outcome === 'update' &&
           decision.tier === 'isbn-pmid' &&
           !decision.evidence.includes('pmid') &&
-          (!WHOLE_WORK_TYPES.has(entry.type.toLowerCase()) || COMPONENT_ITEM_TYPES.has(item.itemType))
+          (!WHOLE_WORK_TYPES.has(entry.type.toLowerCase()) ||
+            COMPONENT_ITEM_TYPES.has(item.itemType) ||
+            item.itemType !== isbnItemType(entry.type))
         ) {
           return skip(entryKey, 'weak-match', decision.target.key + ', by ISBN only');
+        }
+        // A citation key that another item claims too, as Zotero's export
+        // gives an item the key in its Extra over its own field, names
+        // neither for sure.  (A stored identity names its item outright.)
+        if (decision.outcome === 'update' && decision.tier !== 'existing') {
+          const keyClaims = (keyOwners.get(entryKey) ?? []).filter(k => k !== item.key);
+          if (keyClaims.length > 0) return skip(entryKey, 'citation-key-conflict', [item.key, ...keyClaims].join(', '));
         }
         // A DOI match is only as good as the DOI: the matcher compares
         // values, shaped like DOIs or not.
@@ -851,13 +955,16 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         if (elsewhere.length > 0) return skip(entryKey, 'doi-owned-elsewhere', elsewhere.join(', '));
         // The same for a PMID, which the matcher reads after a citation key.
         const pmidRead = readText(entry, 'pmid');
-        const pmid = pmidRead !== undefined && 'value' in pmidRead ? validPmid(pmidRead.value) : undefined;
+        const pmid = pmidRead !== undefined && 'value' in pmidRead ? pmidRead.value : undefined;
         const itemPmid = effectivePmid(item);
         const pmidElsewhere = pmid === undefined ? [] : (pmidOwners.get(pmid) ?? []).filter(k => k !== item.key);
         if (pmid !== undefined && ((itemPmid !== undefined && itemPmid !== pmid) || pmidElsewhere.length > 0)) {
           return skip(entryKey, 'pmid-disagreement', [item.key, ...pmidElsewhere].join(', '));
         }
-        return { kind: 'match', entryKey, entry, item };
+        // …and for a whole work's ISBN.
+        const isbnClaims = isbnElsewhere(entry, item.key);
+        if (isbnClaims.length > 0) return skip(entryKey, 'isbn-owned-elsewhere', isbnClaims.join(', '));
+        return { kind: 'match', entryKey, entry, item, repeated: repeatedByKey.get(entryKey) ?? new Set() };
       }
     }
   });
@@ -909,7 +1016,7 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
       if (itemType === undefined || type === undefined) {
         return { kind: 'skip', entryKey: c.entryKey, reason: 'unsupported-type', detail: c.entry.type };
       }
-      const { data, notPushed } = createData(c.entry, itemType, type, input.collectionKey);
+      const { data, notPushed } = createData(c.entry, itemType, type, input.collectionKey, c.repeated);
       return { kind: 'create', entryKey: c.entryKey, itemType, data, notPushed };
     }
     if ((targets.get(c.item.key) ?? 0) > 1) {
@@ -924,7 +1031,7 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     let patch: Record<string, unknown> = {};
     let notPushed: ZoteroFieldNotPushed[] = [];
     if (input.mode === 'update' && type !== undefined) {
-      ({ changes, patch, notPushed } = updateChanges(c.entry, c.item, type));
+      ({ changes, patch, notPushed } = updateChanges(c.entry, c.item, type, c.repeated));
     }
     if (!addToCollection && changes.length === 0) {
       return { kind: 'unchanged', entryKey: c.entryKey, itemKey: c.item.key, notPushed };

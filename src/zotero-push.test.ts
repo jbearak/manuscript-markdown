@@ -7,7 +7,7 @@ import {
   type ZoteroItemSchema,
   type ZoteroPushMode,
 } from './zotero-push';
-import { applyZoteroPush, formatZoteroPushReport, type ZoteroKeyProvider } from './zotero-push-run';
+import { applyZoteroPush, formatZoteroPushReport, prepareZoteroPush, type ZoteroKeyProvider } from './zotero-push-run';
 import {
   authorizeZoteroLocalApi,
   fetchZoteroLibrarySnapshot,
@@ -769,5 +769,127 @@ describe('zotero CLI', () => {
     const code = await runZoteroCli(['push', 'refs.bib'], { out: () => {}, err: line => err.push(line) });
     expect(code).toBe(2);
     expect(err[0]).toBe('--collection is required.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The release audit's cases, run through the Local API adapter as a push
+// runs them: the snapshot gives the matcher Extra, as the plan helper's
+// catalog doesn't.
+// ---------------------------------------------------------------------------
+
+const AUDIT_SCHEMA: ZoteroItemSchema = {
+  csl: SCHEMA.csl,
+  itemTypes: [
+    ...SCHEMA.itemTypes.map(t =>
+      t.itemType === 'journalArticle'
+        ? { ...t, fields: [...t.fields, field('PMID'), field('journalAbbreviation')] }
+        : t.itemType === 'book'
+          ? { ...t, fields: [...t.fields, field('numPages'), field('series'), field('seriesNumber')] }
+          : t,
+    ),
+    {
+      itemType: 'audioRecording',
+      fields: ['title', 'date', 'ISBN', 'url', 'citationKey', 'extra'].map(f => field(f)),
+      creatorTypes: [{ creatorType: 'performer' }],
+    },
+  ],
+};
+
+/** A Local API that serves `items` and records what is POSTed. */
+function libraryApi(items: readonly ZoteroItemJson[], schema: ZoteroItemSchema = AUDIT_SCHEMA) {
+  const posts: Array<Array<Record<string, unknown>>> = [];
+  const rows = items.map(({ uri: _uri, parsedDate, ...data }) => ({
+    key: data.key,
+    library: { type: 'user', id: 1 },
+    data,
+    meta: parsedDate === undefined ? {} : { parsedDate },
+  }));
+  const headers = (version: number) => ({
+    get: (n: string) => (n === 'Last-Modified-Version' ? String(version) : n === 'Zotero-Server-ID' ? 'SERVER' : null),
+  });
+  const fetchFn: ZoteroFetch = async (url, init) => {
+    const path = new URL(url).pathname;
+    if (init?.method === 'POST') {
+      const body = JSON.parse(init.body ?? '[]') as Array<Record<string, unknown>>;
+      posts.push(body);
+      const successful = Object.fromEntries(body.map((o, i) => [String(i), { key: (o.key as string) ?? 'NEW0000' + i, version: 11 }]));
+      return { ok: true, status: 200, json: async () => ({ successful }), headers: headers(11) };
+    }
+    const body = path.endsWith('/schema') ? schema : path.endsWith('/items/top') ? rows : [];
+    return { ok: true, status: 200, json: async () => body, headers: headers(10) };
+  };
+  return { fetchFn, posts };
+}
+
+async function pushThroughApi(bib: string, items: readonly ZoteroItemJson[], mode: ZoteroPushMode = 'update') {
+  const api = libraryApi(items);
+  const prepared = await prepareZoteroPush({ type: 'user' }, bib, COLLECTION, mode, api);
+  if (prepared === undefined) throw new Error('blocked');
+  await applyZoteroPush({ type: 'user' }, prepared, { get: async () => 'KEY', invalidate: async () => {} }, api);
+  return { plan: prepared.plan, posts: api.posts, report: formatZoteroPushReport(prepared.plan, 'Coll') };
+}
+
+describe('push: an entry writes only the item it clearly owns', () => {
+  // Zotero's BibTeX export gives an item the key in a `Citation Key:` line
+  // of its Extra over the one in its field (buildCiteKey in BibTeX.js), so
+  // A exports as cite-A, the key in B's field.
+  const A = item('AAAA2222', { title: 'Title A', citationKey: 'old-A', extra: 'Citation Key: cite-A' });
+  const B = item('BBBB2222', { title: 'Title B', citationKey: 'cite-A', extra: 'Citation Key: cite-B' });
+
+  it('leaves alone an entry whose citation key two items answer to', async () => {
+    const { plan: p, posts } = await pushThroughApi('@article{cite-A,\n  title = {Title A edited}\n}\n', [A, B]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'citation-key-conflict', detail: 'BBBB2222, AAAA2222' });
+    expect(posts).toEqual([]);
+  });
+
+  it("doesn't create an item for a key another item's Extra gives it", async () => {
+    // The matcher reads B by the key in its field, so cite-B finds nothing.
+    const { plan: p, posts } = await pushThroughApi('@article{cite-B,\n  title = {Title B}\n}\n', [A, B]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'citation-key-conflict', detail: 'BBBB2222' });
+    expect(posts).toEqual([]);
+  });
+
+  it("doesn't count an item's key in its field and its Extra as two claims", async () => {
+    const same = item('SAME0001', { title: 'Same', citationKey: 'same', extra: 'Citation Key: same' });
+    const { plan: p } = await pushThroughApi('@article{same,\n  title = {Same edited}\n}\n', [same]);
+    expect(p.actions[0]).toMatchObject({ kind: 'update', changes: [{ field: 'title', to: 'Same edited' }] });
+  });
+
+  it('reads a PMID as the matcher does, for whose it is and what is written', async () => {
+    const k = item('AAAA2222', { title: 'Original', citationKey: 'k', PMID: '111' });
+    const other = item('BBBB2222', { title: 'Other', citationKey: 'b', PMID: '222' });
+    const prefixed = await pushThroughApi('@article{k,\n  title = {Other paper},\n  pmid = {PMID: 222}\n}\n', [k, other]);
+    expect(prefixed.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'pmid-disagreement' });
+    expect(prefixed.posts).toEqual([]);
+    // Its own PMID, prefixed, is the same PMID.
+    const own = await pushThroughApi('@article{k,\n  title = {Original},\n  pmid = {PMID: 111}\n}\n', [k, other]);
+    expect(own.plan.actions[0]).toMatchObject({ kind: 'unchanged' });
+    // One it can't read never replaces a real one.
+    const pending = await pushThroughApi('@article{k,\n  pmid = {pending}\n}\n', [k]);
+    expect(pending.plan.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'pmid', reason: 'unreadable-pmid' }] });
+    expect(pending.posts).toEqual([]);
+  });
+
+  it("won't give a book another book's ISBN", async () => {
+    const k = item('AAAA2222', { itemType: 'book', title: 'Original', citationKey: 'k', ISBN: '9780261103573' });
+    const clrs = item('BBBB2222', { itemType: 'book', title: 'Introduction to Algorithms', citationKey: 'b', ISBN: '9780262033848' });
+    const { plan: p, posts } = await pushThroughApi('@book{k,\n  title = {Introduction to Algorithms},\n  isbn = {9780262033848}\n}\n', [k, clrs]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'isbn-owned-elsewhere', detail: 'BBBB2222' });
+    expect(posts).toEqual([]);
+  });
+
+  it("doesn't take another kind of item for a book by the ISBN they share", async () => {
+    const audio = item('AAAA2222', { itemType: 'audioRecording', title: 'Music accompanying Jane', citationKey: 'audio', ISBN: '9780262033848' });
+    const { plan: p, posts } = await pushThroughApi('@book{book,\n  title = {Jane: a biography},\n  isbn = {9780262033848}\n}\n', [audio]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'weak-match' });
+    expect(posts).toEqual([]);
+  });
+
+  it('never writes a field the entry gives twice', async () => {
+    const k = item('AAAA2222', { title: 'Original record', citationKey: 'k' });
+    const { plan: p, posts } = await pushThroughApi('@article{k,\n  title = {First},\n  title = {Second}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'title', reason: 'repeated-field' }] });
+    expect(posts).toEqual([]);
   });
 });
