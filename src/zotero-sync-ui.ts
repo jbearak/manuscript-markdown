@@ -109,7 +109,7 @@ export function describeZoteroLocalApiError(
     case 'unauthorized':
       return 'Zotero refused the write key. Run the command again and allow access in Zotero.';
     case 'authorization-denied':
-      return 'Access was denied in Zotero. The push stopped; the output channel says what was written.';
+      return 'Access was denied in Zotero.';
     case 'write-denied':
       return 'Zotero does not let you edit this library. Choose a library you can edit.';
     case 'library-changed':

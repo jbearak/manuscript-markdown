@@ -128,6 +128,9 @@ export type ZoteroPushSkipReason =
   | 'duplicate-doi'
   /** Another item in the library has the entry's DOI. */
   | 'doi-owned-elsewhere'
+  /** The entry's PMID is its matched item's no more: the item has another,
+   *  or another item has it. */
+  | 'pmid-disagreement'
   /** Push has no Zotero item type for this entry type. */
   | 'unsupported-type'
   /** An identifier is written with TeX the matcher doesn't read. */
@@ -477,9 +480,10 @@ function sameValue(base: string, a: string, b: string): boolean {
     case 'url':
       return a.trim() === b.trim();
     case 'accessDate':
-      // Zotero keeps a timestamp, as 2020-01-01T14:32:02Z; a .bib gives a
-      // day.  The same day is the same date.
-      return a.trim().slice(0, 10) === b.trim().slice(0, 10);
+      // Zotero keeps a timestamp, as 2020-01-01T14:32:02Z.  A .bib that
+      // gives a day means that day, so the same day is the same date; one
+      // that gives a time means that time.
+      return b.trim().length === 10 ? a.trim().slice(0, 10) === b.trim() : a.trim() === b.trim();
     case 'pages':
       return foldText(a).replace(/[‐-―-]+/g, '-') === foldText(b).replace(/[‐-―-]+/g, '-');
     default:
@@ -682,6 +686,17 @@ function updateChanges(
 
 /** The item's DOI as the link planner reads it: its DOI field, or a
  *  `DOI:` line of Extra. */
+/** A PMID: digits. */
+function validPmid(value: string | undefined): string | undefined {
+  const pmid = value?.trim();
+  return pmid !== undefined && /^\d+$/.test(pmid) ? pmid : undefined;
+}
+
+/** The item's PMID: its PMID field, or a `PMID:` line of Extra. */
+function effectivePmid(item: ZoteroItemJson): string | undefined {
+  return validPmid(typeof item.PMID === 'string' ? item.PMID : undefined) ?? validPmid(extraFields(item).get('pmid'));
+}
+
 function effectiveDoi(item: ZoteroItemJson): string | undefined {
   return validDoi(typeof item.DOI === 'string' ? item.DOI : undefined) ?? validDoi(extraFields(item).get('doi'));
 }
@@ -762,9 +777,12 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
 
   // Which items hold each DOI, so no write gives one to a second item.
   const doiOwners = new Map<string, string[]>();
+  const pmidOwners = new Map<string, string[]>();
   for (const item of input.items.values()) {
     const doi = effectiveDoi(item);
     if (doi !== undefined) doiOwners.set(doi, [...(doiOwners.get(doi) ?? []), item.key]);
+    const pmid = effectivePmid(item);
+    if (pmid !== undefined) pmidOwners.set(pmid, [...(pmidOwners.get(pmid) ?? []), item.key]);
   }
   // The DOI the entry would write, read as its field is.
   const entryDoi = (entry: BibtexEntry): string | undefined => {
@@ -831,6 +849,14 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         }
         const elsewhere = doi === undefined ? [] : (doiOwners.get(doi) ?? []).filter(k => k !== item.key);
         if (elsewhere.length > 0) return skip(entryKey, 'doi-owned-elsewhere', elsewhere.join(', '));
+        // The same for a PMID, which the matcher reads after a citation key.
+        const pmidRead = readText(entry, 'pmid');
+        const pmid = pmidRead !== undefined && 'value' in pmidRead ? validPmid(pmidRead.value) : undefined;
+        const itemPmid = effectivePmid(item);
+        const pmidElsewhere = pmid === undefined ? [] : (pmidOwners.get(pmid) ?? []).filter(k => k !== item.key);
+        if (pmid !== undefined && ((itemPmid !== undefined && itemPmid !== pmid) || pmidElsewhere.length > 0)) {
+          return skip(entryKey, 'pmid-disagreement', [item.key, ...pmidElsewhere].join(', '));
+        }
         return { kind: 'match', entryKey, entry, item };
       }
     }

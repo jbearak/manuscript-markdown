@@ -77,6 +77,13 @@ export interface ZoteroPushResult {
 
 const BATCH = 50;
 
+/** An error from outside the adapter, as a key store's, as the adapter's. */
+function asApiError(error: unknown): ZoteroLocalApiError {
+  return error instanceof ZoteroLocalApiError
+    ? error
+    : new ZoteroLocalApiError('request-failed', 'Getting a key to write with failed: ' + (error instanceof Error ? error.message : String(error)));
+}
+
 function writeToken(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
@@ -128,8 +135,8 @@ export async function applyZoteroPush(
       try {
         apiKey = await keys.get();
       } catch (error) {
-        if (error instanceof ZoteroLocalApiError) return { outcomes, error };
-        throw error;
+        // Whatever failed, the writes already made stay in the result.
+        return { outcomes, error: asApiError(error) };
       }
       try {
         result = await writeZoteroItems(
@@ -140,7 +147,11 @@ export async function applyZoteroPush(
         );
       } catch (error) {
         if (error instanceof ZoteroLocalApiError && error.kind === 'unauthorized' && attempt === 0) {
-          await keys.invalidate();
+          try {
+            await keys.invalidate();
+          } catch (invalidateError) {
+            return { outcomes, error: asApiError(invalidateError) };
+          }
           continue;
         }
         if (error instanceof ZoteroLocalApiError) {
@@ -186,6 +197,7 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   'duplicate-target': 'another entry matches the same item',
   'duplicate-doi': 'another entry would give the same DOI to an item',
   'doi-owned-elsewhere': 'another item in the library has its DOI',
+  'pmid-disagreement': "its PMID is another item's, or its matched item has another",
   'unsupported-type': 'no Zotero item type for this entry type',
   'unreadable-identifier': 'an identifier is written with TeX; write it plain',
   'extra-would-migrate':

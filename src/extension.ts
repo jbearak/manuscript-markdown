@@ -2350,9 +2350,13 @@ async function pushBibliographyToZotero(secrets: vscode.SecretStorage): Promise<
 		}
 		// The pickers above wait on the user, who may have edited the file
 		// meanwhile; this checks it before planning, and again before writing.
-		const bibliographyChanged = async (): Promise<boolean> =>
-			vscode.workspace.textDocuments.find(d => d.uri.toString() === bibUri.toString())?.isDirty === true ||
-			!bytesEqual(await vscode.workspace.fs.readFile(bibUri), bibBytes);
+		const bibliographyChanged = async (): Promise<boolean> => {
+			const current = await vscode.workspace.fs.readFile(bibUri);
+			// The dirty flag is read after the file, with no wait between it
+			// and the answer.
+			const dirty = vscode.workspace.textDocuments.find(d => d.uri.toString() === bibUri.toString())?.isDirty === true;
+			return dirty || !bytesEqual(current, bibBytes);
+		};
 		if (await bibliographyChanged()) {
 			vscode.window.showErrorMessage(`"${bibName}" has unsaved changes. Save it, then run this command again.`);
 			return;
@@ -2417,7 +2421,9 @@ async function pushBibliographyToZotero(secrets: vscode.SecretStorage): Promise<
 		if (zoteroPushSucceeded(result)) {
 			await showZoteroLinkResult('Pushed to Zotero. ' + formatZoteroPushSummary(prepared.plan, label));
 		} else {
-			const why = result.error ? ' ' + describeZoteroLocalApiErrorOrMessage(result.error) : '';
+			const why = result.error
+				? ' ' + describeZoteroLocalApiErrorOrMessage(result.error) + ' The output channel says what was written.'
+				: '';
 			const action = await vscode.window.showErrorMessage(
 				'Some changes were not pushed to Zotero.' + why,
 				'Show Details'

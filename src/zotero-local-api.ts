@@ -692,8 +692,12 @@ export async function fetchZoteroSchema(
   const { body } = await requestJson('/schema', LIST_TIMEOUT_MS, options);
   const listed = asRecord(body)?.itemTypes;
   // Only types whose fields and roles are lists, which the planner reads.
+  const isFieldList = (v: unknown) =>
+    Array.isArray(v) &&
+    v.every(f => typeof asRecord(f)?.field === 'string' && (asRecord(f)?.baseField === undefined || typeof asRecord(f)?.baseField === 'string'));
+  const isRoleList = (v: unknown) => Array.isArray(v) && v.every(c => typeof asRecord(c)?.creatorType === 'string');
   const itemTypes = Array.isArray(listed)
-    ? listed.filter(t => typeof asRecord(t)?.itemType === 'string' && Array.isArray(asRecord(t)?.fields) && Array.isArray(asRecord(t)?.creatorTypes))
+    ? listed.filter(t => typeof asRecord(t)?.itemType === 'string' && isFieldList(asRecord(t)?.fields) && isRoleList(asRecord(t)?.creatorTypes))
     : undefined;
   if (itemTypes === undefined || itemTypes.length === 0) {
     throw new ZoteroLocalApiError('request-failed', 'Zotero returned an unreadable schema.');
@@ -834,6 +838,9 @@ export async function fetchZoteroItemVersionsSince(
     const record = asRecord(row);
     const key = asString(record?.key) ?? asString(asRecord(record?.data)?.key);
     const version = record?.version ?? asRecord(record?.data)?.version;
+    // Since 0, Zotero lists every item, and one never saved since its
+    // migration is at 0: unchanged, not another writer's.
+    if (since === 0 && version === 0) continue;
     if (key !== undefined) versions.set(key, typeof version === 'number' ? version : undefined);
   }
   return versions;

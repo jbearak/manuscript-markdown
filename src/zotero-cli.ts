@@ -175,7 +175,13 @@ async function push(args: readonly string[], io: ZoteroCliIo): Promise<number> {
   const collectionValue = flags.values.get('--collection');
   if (collectionValue === undefined) throw new UsageError('--collection is required.');
   const api = io.api ?? {};
-  const bibText = fs.readFileSync(bibPath, 'utf8');
+  const bibBytes = fs.readFileSync(bibPath);
+  const bibText = new TextDecoder().decode(bibBytes);
+  // A byte that isn't UTF-8 would be read as U+FFFD and pushed as text.
+  if (!Buffer.from(bibText, 'utf8').equals(bibBytes)) {
+    io.err(`"${bibPath}" is not plain UTF-8 (it has a byte-order mark or bytes in another encoding). Save it as UTF-8; nothing was pushed.`);
+    return 1;
+  }
   const scope = await resolveLibrary(flags.values.get('--library'), api);
   const collection = resolveCollection(collectionValue, await listZoteroCollections(scope, api));
   const mode = flags.switches.has('--update') ? 'update' : 'add';

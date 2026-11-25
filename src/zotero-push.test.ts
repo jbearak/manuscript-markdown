@@ -361,6 +361,15 @@ describe('createZoteroPushPlan', () => {
     expect(plan(bib, []).actions.map(a => a.kind)).toEqual(['create', 'create']);
   });
 
+  it("won't give an item a PMID it doesn't have, or another item's", () => {
+    const withPmid = { ...FLATO, PMID: '11111111' };
+    const other = item('OTHER002', { title: 'Other', PMID: '22222222', citationKey: 'other2001' });
+    const bib = FLATO_BIB.replace(/ {2}doi = .*\n/, '').replace('keywords', 'pmid = {22222222},\n  keywords');
+    expect(plan(bib, [withPmid as ZoteroItemJson, other]).actions[0]).toMatchObject({ kind: 'skip', reason: 'pmid-disagreement' });
+    const noPmid = plan(bib, [FLATO, other]).actions[0];
+    expect(noPmid).toMatchObject({ kind: 'skip', reason: 'pmid-disagreement', detail: 'FLATO001, OTHER002' });
+  });
+
   it("doesn't take a book for a chapter of it by their shared ISBN", () => {
     const chapter = item('CHAP0001', { itemType: 'bookSection', title: 'A Chapter', ISBN: '9780306406157', citationKey: 'chap2000' });
     const book = '@book{book2000,\n  title = {The Book},\n  isbn = {978-0-306-40615-7}\n}\n';
@@ -405,6 +414,9 @@ describe('createZoteroPushPlan', () => {
     }
     const timed = plan(bib.replace('2020-01-01', '2020-01-02T10:30:00Z'), [accessed as ZoteroItemJson]).actions[0];
     expect(timed.kind === 'update' && timed.patch.accessDate).toBe('2020-01-02T10:30:00Z');
+    // A time on the same day is still a different time.
+    const sameDay = plan(bib.replace('2020-01-01', '2020-01-01T09:00:00Z'), [accessed as ZoteroItemJson]).actions[0];
+    expect(sameDay.kind === 'update' && sameDay.patch.accessDate).toBe('2020-01-01T09:00:00Z');
   });
 
   it("tells an organization's one-field name from a person's", () => {
@@ -569,6 +581,30 @@ describe('fetchZoteroLibrarySnapshot', () => {
   });
 });
 
+describe('applyZoteroPush, when the key store fails', () => {
+  it('keeps the writes already made', async () => {
+    const many = Array.from({ length: 51 }, (_, i) => `@article{key${i},\n  title = {Title ${i}},\n  year = 2020\n}\n`).join('\n');
+    const prepared = { plan: plan(many, []), serverId: 'S', libraryVersion: 1 };
+    let calls = 0;
+    const provider: ZoteroKeyProvider = {
+      async get() {
+        if (++calls > 1) throw new Error('keychain locked');
+        return 'KEY';
+      },
+      async invalidate() {},
+    };
+    const { fetchFn } = writeFetch(
+      s => ({ status: 200, version: 2, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'W' + String(i).padStart(7, '0'), version: 2 }])) } }),
+      () => [],
+    );
+    const result = await applyZoteroPush({ type: 'user' }, prepared, provider, { fetchFn });
+    expect(result.error?.message).toContain('keychain locked');
+    expect(result.outcomes.slice(0, 50).every(o => o !== undefined && o !== 'unknown' && o.status === 'success')).toBe(true);
+    expect(result.outcomes.slice(0, 50).length).toBe(50);
+    expect(result.outcomes[50]).toBeUndefined();
+  });
+});
+
 describe('applyZoteroPush', () => {
   const many = Array.from({ length: 51 }, (_, i) => `@article{key${i},\n  title = {Title ${i}},\n  year = 2020\n}\n`).join('\n');
   const prepared = { plan: plan(many, []), serverId: 'SERVER', libraryVersion: 5 };
@@ -656,7 +692,7 @@ describe('applyZoteroPush', () => {
     };
     const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
     expect(result.error?.kind).toBe('timeout');
-    expect(result.outcomes.slice(0, 50).every(o => o === 'unknown')).toBe(true);
+    expect(result.outcomes.slice(0, 50)).toEqual(Array.from({ length: 50 }, () => 'unknown'));
     expect(result.outcomes[50]).toBeUndefined();
   });
 
@@ -691,6 +727,21 @@ describe('zotero CLI', () => {
     expect(() => resolveCollection('Drafts', collections)).toThrow(/Several collections/);
     const twins = [...collections, { key: 'DDDD0001', name: 'Papers', path: 'Papers', itemCount: 0 }];
     expect(() => resolveCollection('Papers', twins)).toThrow(/Several collections/);
+  });
+
+  it("refuses a .bib that isn't UTF-8", async () => {
+    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'zcli-'));
+    const file = require('path').join(dir, 'latin1.bib');
+    require('fs').writeFileSync(file, Buffer.from([0x40, 0x61, 0x7b, 0x63, 0x61, 0x66, 0xe9, 0x2c, 0x7d]));
+    const err: string[] = [];
+    const groups: ZoteroFetch = async url => ({
+      ok: true,
+      status: 200,
+      json: async () => (url.includes('/collections') ? [{ data: { key: 'AAAA0001', name: 'Papers' }, meta: { numItems: 0 } }] : []),
+    });
+    const code = await runZoteroCli(['push', file, '--collection', 'Papers'], { out: () => {}, err: l => err.push(l), api: { fetchFn: groups } });
+    expect(code).toBe(1);
+    expect(err[0]).toContain('not plain UTF-8');
   });
 
   it('reports a usage error with exit code 2', async () => {
