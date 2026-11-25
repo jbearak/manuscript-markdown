@@ -883,6 +883,25 @@ describe('BibTeX field whitespace', () => {
 });
 
 describe('mergeBibtex line endings', () => {
+  // A file that repeats a key isn't merged on its own skeleton, so these
+  // take the path that writes the entries alone, a blank line between each two
+  const dup = (eol: string) => ['@book{A,', '  title={One}', '}', '', '@book{A,', '  title={Again}', '}', '', '@book{C,', '  title={Two}', '}', ''].join(eol);
+
+  it('separates the entries of an LF file it writes alone with LF blank lines', () => {
+    expect(mergeBibtex(dup('\n'), '@book{D,\n  title={New}\n}'))
+      .toBe('@book{A,\n  title={Again}\n}\n\n@book{C,\n  title={Two}\n}\n\n@book{D,\n  title={New}\n}');
+  });
+
+  it('separates the entries of a CRLF file it writes alone with CRLF blank lines', () => {
+    expect(mergeBibtex(dup('\r\n'), '@book{D,\r\n  title={New}\r\n}'))
+      .toBe('@book{A,\r\n  title={Again}\r\n}\r\n\r\n@book{C,\r\n  title={Two}\r\n}\r\n\r\n@book{D,\r\n  title={New}\r\n}');
+  });
+
+  it('separates by the existing file\'s line ends, and keeps each entry as it is', () => {
+    expect(mergeBibtex(dup('\r\n'), '@book{D,\n  title={New}\n}'))
+      .toBe('@book{A,\r\n  title={Again}\r\n}\r\n\r\n@book{C,\r\n  title={Two}\r\n}\r\n\r\n@book{D,\n  title={New}\n}');
+  });
+
   it('splices each entry using its own line ending, not the file majority', () => {
     // A mixed-ending file must not have its minority-convention entries
     // rewritten to the majority one: `k` is all-LF and must stay that way
@@ -1870,6 +1889,31 @@ describe('entries inside % comments', () => {
     const { ranges } = parseBibtexWithRaw('@comment{% @a{fake, t={1}}}\n@book{real, t = {R}}');
     expect(ranges.map((r) => r.key)).toEqual(['real']);
   });
+
+  // A % comment ends at the end of its line, whichever line end the file
+  // uses: \n, \r\n, or a \r alone, as in a classic Mac file.
+  const crBook = (key: string, title: string) => '@book{' + key + ',\r  title={' + title + '}\r}';
+
+  it('ends a comment at a lone CR', () => {
+    const cr = '% my library\r' + crBook('A', 'One') + '\r\r' + crBook('C', 'Two') + '\r';
+    expect([...parseBibtex(cr).keys()]).toEqual(['A', 'C']);
+    expect([...parseBibtex(cr.replace(/\r/g, '\n')).keys()]).toEqual(['A', 'C']);
+  });
+
+  it('skips a commented-out entry only to the lone CR ending its line', () => {
+    expect([...parseBibtex('% @book{X,\r' + crBook('A', 'One') + '\r').keys()]).toEqual(['A']);
+  });
+
+  it('reads a commented-out entry in a CRLF file as before', () => {
+    const { ranges } = parseBibtexWithRaw('% @book{X,\r\n@book{A,\r\n  title={One}\r\n}\r\n');
+    expect(ranges).toEqual([{ key: 'A', start: 12, end: 38, keyStart: 18, keyEnd: 19, trusted: true }]);
+  });
+
+  it('merges an entry of a lone-CR file in place, keeping its comment and line ends', () => {
+    const cr = '% my library\r' + crBook('A', 'One') + '\r\r' + crBook('C', 'Two') + '\r';
+    expect(mergeBibtex(cr, crBook('A', 'Changed')))
+      .toBe('% my library\r' + crBook('A', 'Changed') + '\r\r' + crBook('C', 'Two') + '\r');
+  });
 });
 
 describe('parseBibtexWithRaw constructEnds', () => {
@@ -1921,6 +1965,14 @@ describe('detectBibtexEol tie boundary', () => {
   // following one and reports its interior ending as the document's.
   it('samples the gap after an entry, not the next entry interior', () => {
     const text = '@article{a,\r\n  note = {x\ny}\r\n}\r\n\r\n@book{b,\r\n  title = {T}\r\n}';
+    expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+
+  it('reads past a % comment that a lone CR ends', () => {
+    // The gap after `a` holds a comment whose line a \r alone ends, so `b` is
+    // a construct, and the walk stops there rather than reading its interior
+    // \n; the gap after `b` decides.
+    const text = '@book{A,title={x}} % c\r@book{B,title={p\nq}}\r\n@book{C,title={y}}';
     expect(detectBibtexEol(text)).toBe('\r\n');
   });
 
