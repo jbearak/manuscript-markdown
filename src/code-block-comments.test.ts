@@ -152,4 +152,20 @@ describe('comments on a code block', () => {
     expect(markdown).toBe(md);
     expect(warnings).toEqual([]);
   });
+
+  test('one from the block into the first cell of a table right after it, with no paragraph between, keeps its range on the cell', async () => {
+    // As Word writes them; export puts an empty paragraph between the two
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Para {==word==}{>>' + ALICE + 'on code<<}.\n\n' + CODE + '\n\n| cell | b |\n| --- | --- |\n| c | d |\n')).docx);
+    let xml = await zip.file(DOC)!.async('string');
+    const { start, end, ref } = markers(xml, 0);
+    xml = putAt(xml.replace(start, ''), '<- 2', start, false);
+    xml = putAt(xml.replace(end, '').replace(ref, ''), 'cell', end + ref, true);
+    const between = /<w:p(?: [^>]*)?><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p>(?=<w:tbl>)/;
+    expect(xml).toMatch(between);
+    zip.file(DOC, xml.replace(between, ''));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toBe('Para word.\n\n' + CODE + '\n\n| {==cell==}{>>' + ALICE.replace('|', '\\|') + 'on code<<} | b |\n| --- | --- |\n| c | d |\n');
+    expect(warnings).toEqual([]);
+    expect(await again(markdown)).toBe(markdown);
+  });
 });

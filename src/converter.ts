@@ -14586,8 +14586,10 @@ function commentsOnlyInCode(content: ContentItem[]): Set<string> {
     for (const item of items) {
       if (item.type === 'para') inCodeBlock = !inTable && !!item.isCodeBlock;
       else if (item.type === 'table') {
-        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true);
+        // A table ends a block before it, so its cells' text, which has no
+        // paragraph item of its own here, isn't the block's
         inCodeBlock = false;
+        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true);
       } else {
         // An item but text ends the block's fence (see codeBlockFence)
         if (item.type !== 'text') inCodeBlock = false;
