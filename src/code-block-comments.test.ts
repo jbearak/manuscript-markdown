@@ -39,7 +39,7 @@ type Move = { id: number; from?: string; to?: string };
 /** The Markdown import gives `md` exported, with each comment's markers
  *  moved: its range from before `from` to after `to`, where given, and its
  *  reference after its range's end */
-async function importMoved(md: string, moves: Move[]): Promise<{ markdown: string; warnings: string[] }> {
+async function importMoved(md: string, moves: Move[], ids = false): Promise<{ markdown: string; warnings: string[] }> {
   const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
   let xml = await zip.file(DOC)!.async('string');
   for (const { id, from, to } of moves) {
@@ -48,13 +48,13 @@ async function importMoved(md: string, moves: Move[]): Promise<{ markdown: strin
     if (to !== undefined) xml = putAt(xml.replace(end, '').replace(ref, ''), to, end + ref, true);
   }
   zip.file(DOC, xml);
-  const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+  const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }), undefined, { alwaysUseCommentIds: ids });
   return { markdown, warnings };
 }
 
 /** The Markdown after another round trip of `md` */
-async function again(md: string): Promise<string> {
-  return (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+async function again(md: string, ids = false): Promise<string> {
+  return (await convertDocx((await convertMdToDocx(md)).docx, undefined, { alwaysUseCommentIds: ids })).markdown;
 }
 
 const CODE = '```r\nx <- 1\ny <- 2\n```';
@@ -84,10 +84,31 @@ describe('comments on a code block', () => {
     expect(await again(markdown)).toBe(markdown);
   });
 
-  test('one with a reply keeps it, inside it, which a comment on no text needs', async () => {
-    const { markdown } = await importMoved('Para {==word==}{>>' + ALICE + 'on code<<}{>>' + BOB + 'reply<<}.\n\n' + CODE + '\n\nAfter.\n',
+  test('one with a reply written inside it keeps it there', async () => {
+    const { markdown } = await importMoved('Para {==word==}{>>' + ALICE + 'on code\n  {>>' + BOB + 'reply<<}\n<<}.\n\n' + CODE + '\n\nAfter.\n',
       [{ id: 0, from: 'x', to: '1' }, { id: 1, from: 'x', to: '1' }]);
     expect(markdown).toBe('Para word.\n\n' + CODE + '\n\n{>>' + ALICE + 'on code\n  {>>' + BOB + 'reply<<}\n<<}\n\nAfter.\n');
+    expect(await again(markdown)).toBe(markdown);
+  });
+
+  test('one with a reply written after it keeps it after, in ID syntax, as a comment on no text takes', async () => {
+    const { markdown } = await importMoved('Para {==word==}{>>' + ALICE + 'on code<<}{>>' + BOB + 'reply<<}.\n\n' + CODE + '\n\nAfter.\n',
+      [{ id: 0, from: 'x', to: '1' }, { id: 1, from: 'x', to: '1' }]);
+    expect(markdown).toBe('Para word.\n\n' + CODE + '\n\n{#1}{/1}\n{#1>>' + ALICE + 'on code<<}{>>' + BOB + 'reply<<}\n\nAfter.\n');
+    expect(await again(markdown)).toBe(markdown);
+  });
+
+  test('one in ID syntax, where every comment takes it, stays so', async () => {
+    const { markdown } = await importMoved('Para {==word==}{>>' + ALICE + 'on code<<}.\n\n' + CODE + '\n\nAfter.\n',
+      [{ id: 0, from: '<- 1', to: '<- 1' }], true);
+    expect(markdown).toBe('Para word.\n\n' + CODE + '\n\n{#1}{/1}\n{#1>>' + ALICE + 'on code<<}\n\nAfter.\n');
+    expect(await again(markdown, true)).toBe(markdown);
+  });
+
+  test('one on the first of two blocks in a row goes between them', async () => {
+    const { markdown } = await importMoved('Para {==word==}{>>' + ALICE + 'on code<<}.\n\n' + CODE + '\n\n```\nz\n```\n',
+      [{ id: 0, from: 'x', to: 'x' }]);
+    expect(markdown).toBe('Para word.\n\n' + CODE + '\n\n{>>' + ALICE + 'on code<<}\n\n```\nz\n```\n');
     expect(await again(markdown)).toBe(markdown);
   });
 

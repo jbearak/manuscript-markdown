@@ -14598,13 +14598,42 @@ function commentsOnlyInCode(content: ContentItem[]): Set<string> {
   return inCode;
 }
 
-/** The warning for the comments import moves after their code blocks (see
- *  commentsOnlyInCode), or undefined for none */
-function codeCommentsWarning(content: ContentItem[]): string | undefined {
-  const count = commentsOnlyInCode(content).size;
-  if (count === 0) return undefined;
-  const one = count === 1;
-  return 'Moved ' + count + ' comment' + (one ? '' : 's') + ' on code to after ' + (one ? 'its code block' : 'their code blocks')
+/** Moves the comments on code alone (see commentsOnlyInCode) off the
+ *  code's text, into a paragraph after the first block each is on, as
+ *  comments on no text, a space between two, which is what import reads
+ *  of the Markdown it writes for them exported, so each trip writes them
+ *  the same, in whatever syntax the paragraph's comments take. Returns the
+ *  warning for them, or undefined for none */
+function moveCodeComments(content: ContentItem[]): string | undefined {
+  const moved = commentsOnlyInCode(content);
+  if (moved.size === 0) return undefined;
+  const pending = new Set(moved);
+  for (let i = 0; i < content.length; i++) {
+    const first = content[i];
+    if (first.type !== 'para' || !first.isCodeBlock) continue;
+    // To what ends the block, as for codeBlockFence
+    let end = i + 1;
+    for (let next = content[end]; next && (next.type === 'text' || next.type === 'para' && next.isCodeBlock); next = content[++end]);
+    const ids: string[] = [];
+    for (let k = i + 1; k < end; k++) {
+      const item = content[k];
+      if (item.type !== 'text' || ![...item.commentIds].some(id => moved.has(id))) continue;
+      for (const id of item.commentIds) if (pending.delete(id)) ids.push(id);
+      content[k] = { ...item, commentIds: new Set([...item.commentIds].filter(id => !moved.has(id))) };
+    }
+    if (ids.length > 0) {
+      const para: ContentItem[] = [{ type: 'para' }];
+      ids.forEach((id, n) => {
+        if (n > 0) para.push({ type: 'text', text: ' ', formatting: DEFAULT_FORMATTING, commentIds: new Set(), href: undefined });
+        para.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set([id]), href: undefined });
+      });
+      content.splice(end, 0, ...para);
+      end += para.length;
+    }
+    i = end - 1;
+  }
+  const one = moved.size === 1;
+  return 'Moved ' + moved.size + ' comment' + (one ? '' : 's') + ' on code to after ' + (one ? 'its code block' : 'their code blocks')
     + ', as a code block can\'t hold a comment\'s range; ' + (one ? 'it' : 'they') + ' now mark' + (one ? 's' : '') + ' no text.';
 }
 
@@ -16559,7 +16588,6 @@ function buildMarkdownOnce(
     : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup, takesNoRanges)));
   // The block edges before each item, which key its paragraph, and the
   // paragraphs that may take the forms buildMarkdown reads back
-  const onlyInCode = commentsOnlyInCode(mergedContent);
   const formsKeys = edgesBefore(mergedContent);
   const plain = plainParagraphs(mergedContent);
 
@@ -17595,22 +17623,8 @@ function buildMarkdownOnce(
 
         const lang = codeBlockLangs?.get(String(codeBlockGroupIndex)) || '';
         const code = codeBlockFence(mergedContent, i, lang);
-        // The comments on its text alone go after it, on no text, each with
-        // its replies inside it, as {>>a<<}{>>r<<} reads as two comments
-        // (see commentsOnlyInCode)
-        const codeComments: string[] = [];
-        for (let k = i; k < code.end; k++) {
-          const line = mergedContent[k];
-          if (line.type !== 'text') continue;
-          for (const id of line.commentIds) {
-            const comment = comments.get(id);
-            if (!comment || !onlyInCode.has(id)) continue;
-            onlyInCode.delete(id);
-            codeComments.push(formatCommentBody(id, { ...comment, consecutiveReplies: false }, options?.timezone));
-          }
-        }
         i = code.end;
-        output.push(code.block + (codeComments.length > 0 ? '\n\n' + codeComments.join(' ') : ''));
+        output.push(code.block);
         codeBlockGroupIndex++;
         // Skip a plain separator para that was inserted during export between
         // consecutive code-block groups or before a blockquote group.  Only
@@ -21005,6 +21019,7 @@ export async function convertDocx(
     derivedBlockquotePreContentBlankLines,
     derivedBlockquotePostContentBlankLines,
   } = structureBody(docContent, blockquotePlaces);
+  const codeComments = moveCodeComments(docContent);
   // The quote group export wrote that each one import read is, where Word
   // added one or took one out, which moves the index of those after it,
   // that export's records of them are by (see readQuoteGroups)
@@ -21167,7 +21182,6 @@ export async function convertDocx(
   // tableTextDefaultFont), which a table whose text takes them from the
   // table paragraph style takes no directive for
   const documentFonts = resolveFontOverrides(fontFields);
-  const codeComments = codeCommentsWarning(docContent);
   let markdown = buildMarkdown(docContent, comments, {
     crossRefLabels,
     tableSizeHp: documentFonts.tableSizeHp,
