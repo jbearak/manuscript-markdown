@@ -19491,8 +19491,11 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
     }
   };
   keepOn(content);
+  // An empty item for each, in the order the title starts them, as the body
+  // reads comments on nothing, so they stay apart: one item with all their
+  // IDs would make them overlap
   if (titleAt !== undefined && commentIds.size > 0) {
-    content.splice(titleAt, 0, { type: 'para' }, { type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds });
+    spliceAll(content, titleAt, 0, [{ type: 'para' }, ...[...commentIds].map((id): ContentItem => ({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set([id]) }))]);
   }
   return titles;
 }
