@@ -1867,8 +1867,14 @@ function markChangedBlocks(state: StateCore): void {
     children.some(child => CHANGE_OPENS.has(child.type) || (child.children !== null && hasChange(child.children)));
   tokens.forEach((token, at) => {
     if (token.type !== 'inline' || !token.children || !hasChange(token.children)) return;
+    // The nearest open that holds the inline token and shows, past the
+    // blocks before it, as a heading before an item's paragraph
     let open = at - 1;
-    while (open >= 0 && (tokens[open].hidden || tokens[open].nesting !== 1)) open--;
+    for (let depth = 0; open >= 0; open--) {
+      depth -= tokens[open].nesting;
+      if (depth < 0 && !tokens[open].hidden) break;
+      depth = Math.max(depth, 0);
+    }
     if (open >= 0) tokens[open].attrJoin('class', 'manuscript-markdown-changed');
   });
 }

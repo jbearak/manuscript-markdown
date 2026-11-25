@@ -3459,6 +3459,12 @@ describe('Simple Markup preview', () => {
     expect(renderSimple('- a\n- {++b++}')).toContain('<li>a</li>\n<li class="manuscript-markdown-changed">b</li>');
   });
 
+  it('marks the item, not a heading before its paragraph, in a tight list', () => {
+    expect(renderSimple('- # h\n  {++x++}')).toContain('<li class="manuscript-markdown-changed">\n<h1>h</h1>\nx</li>');
+    expect(renderSimple('- a\n\n- {++b++}')).toContain('<li>\n<p class="manuscript-markdown-changed">b</p>\n</li>');
+    expect(renderSimple('> q {++b++}')).toContain('<blockquote>\n<p class="manuscript-markdown-changed">q b</p>');
+  });
+
   it('marks each paragraph a change over paragraphs takes', () => {
     const html = renderSimple('{++one\n\ntwo++}');
     expect(html).toContain('<p class="manuscript-markdown-changed">one</p>');
