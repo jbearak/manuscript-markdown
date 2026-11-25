@@ -3307,6 +3307,9 @@ describe('No Markup preview', () => {
   it('keeps a table row with a cell that shows text or a comment', () => {
     expect(renderNoMarkup('| a | b |\n|---|---|\n| {--x--} | y |')).toContain('<td></td>\n<td>y</td>');
     expect(renderNoMarkup('| a |\n|---|\n| {--x--}{>>c<<} |')).toContain('data-comment="c"');
+    // A comment on the line break or space the cell is left with
+    expect(renderNoMarkup('| a |\n|---|\n| {=={--x--}<br>==}{>>c<<} |')).toContain('data-comment="c"><br></mark></td>');
+    expect(renderNoMarkup('| a |\n|---|\n| {#n}{--x--}&nbsp;{/n}{#n>>c<<} |')).toContain('data-comment="c"');
     expect(renderNoMarkup('| a |\n|---|\n|  |\n| k |')).toContain('<td></td>');
   });
 
@@ -3428,6 +3431,8 @@ describe('Original preview', () => {
       expect(renderOriginal('| H | I |\n|---|---|\n| {++x++} | ' + blank + ' |\n| k | l |'))
         .toContain('<tbody>\n<tr>\n<td>k</td>\n<td>l</td>\n</tr>\n</tbody>');
     }
+    // But not with a comment on the break, which every view shows
+    expect(renderOriginal('| a |\n|---|\n| {=={++x++}<br>==}{>>c<<} |')).toContain('data-comment="c"><br></mark></td>');
   });
 
   it('keeps a change in deleted text, which export deletes with it', () => {

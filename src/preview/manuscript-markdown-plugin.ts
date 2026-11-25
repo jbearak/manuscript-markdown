@@ -2108,14 +2108,18 @@ const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list'
  * text goes, as Word drops a paragraph whose text and mark are deleted, and
  * so does a list item, list or quote that held only such paragraphs. So
  * does a table row whose cells held only dropped text, but for line
- * breaks and whitespace (see isResolvedCellTextVisible), as export tracks
+ * breaks and whitespace (see isResolvedCellTextVisible) with no comment
+ * on them, as export tracks
  * the row's insertion or deletion (see rowRevision in md-to-docx.ts), the
  * header row too, and a table with no rows left.
  */
 function resolveChangesRule(state: StateCore, resolution: ChangeResolution): void {
   const inlines = state.tokens.filter(token => token.type === 'inline' && token.children);
   const hasText = (inline: Token): boolean => inline.children!.some(isResolvedTextVisible);
-  const cellHasText = (inline: Token): boolean => inline.children!.some(isResolvedCellTextVisible);
+  // A comment on what a cell still holds, a line break say, keeps the row
+  // too, as every view shows a comment
+  const cellHasText = (inline: Token): boolean =>
+    inline.children!.some(child => isResolvedCellTextVisible(child) || (child.nesting === 1 && !!child.attrGet('data-comment')));
   const hadContent = new Set(inlines.filter(hasText));
   const cellHadContent = new Set(inlines.filter(cellHasText));
   for (const inline of inlines) inline.children = resolveChanges(inline.children!, state, resolution);
