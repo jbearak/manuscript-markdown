@@ -79,6 +79,35 @@ describe('parseDta', () => {
     expect(html).toContain('<tr><td data-mm-kind="label">No</td><td data-mm-kind="missing"><span class="mm-missing-value">Don\'t know</span>');
   });
 
+  it('shows %tc values by their mask', () => {
+    const t = Date.UTC(2010, 0, 20, 15, 15, 30, 987) - Date.UTC(1960, 0, 1);
+    const masks = [
+      '%tcHH:MM:SS.sss', '%tcCCYY.NN.DD_HH:MM', '%tcMonth_dd,_CCYY_hh:MM_am', '%tCDay_Mon_DD_HH:MM:SS_CCYY',
+      '%tc+hh+:+MM+A.M.', '%tcDAYNAME|', '%tcJJJ!h_q_WW_.s_.ss', '%-tcyy/nn/dd\\hH:mm:ss', '%tcHH:MM_Q',
+    ];
+    const data = writeDta({
+      variables: [
+        { name: 'tiny', type: 'double', format: masks[0], values: [1, 2, -1] },
+        ...masks.slice(1).map((format, i) => ({ name: 'v' + i, type: 'double' as const, format, values: [t, t, t] })),
+      ],
+    });
+    const html = parseDta(data, { path: 'clock.dta' });
+    const cell = (format: string, display: string) =>
+      '<td data-mm-kind="time" data-mm-format="' + format + '">' + display + '</td>';
+    expect(html).toContain(cell(masks[0], '00:00:00.001') + cell(masks[1], '2010.01.20 15:15'));
+    expect(html).toContain(cell(masks[0], '00:00:00.002'));
+    // Truncated, not rounded, as Stata shows times.
+    expect(html).toContain(cell(masks[0], '23:59:59.999'));
+    expect(html).toContain(cell(masks[2], 'January 20, 2010 3:15 pm'));
+    expect(html).toContain(cell(masks[3], 'Wed Jan 20 15:15:30 2010'));
+    expect(html).toContain(cell(masks[4], '3:15P.M.'));
+    // Not a mask code: the whole value shows as the library shows it.
+    expect(html).toContain(cell(masks[5], '2010-01-20 15:15:30'));
+    expect(html).toContain(cell(masks[6], '020h 1 03 .9 .98'));
+    expect(html).toContain(cell(masks[7], '10/1/20\\15:15:30'));
+    expect(html).toContain(cell(masks[8], '2010-01-20 15:15:30'));
+  });
+
   // Format-114 files name no encoding. R's foreign::write.dta writes
   // UTF-8 bytes; pandas to_stata(version=114) writes Latin-1.
   it('reads UTF-8 text in a pre-118 file as UTF-8', () => {

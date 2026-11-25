@@ -292,8 +292,8 @@ function formatCell(
 
   // Display format
   if (typeof cell === 'number') {
-    const display = formatValue(cell, variable.format);
-    const kind = /^%t/i.test(variable.format) ? (/%tc/i.test(variable.format) ? 'time' : 'date')
+    const display = formatClock(cell, variable.format) ?? formatValue(cell, variable.format);
+    const kind = /^%-?t/i.test(variable.format) ? (/^%-?tc/i.test(variable.format) ? 'time' : 'date')
       : /e/i.test(variable.format) ? 'scientific' : 'number';
     return {
       html: escapeHtml(display),
@@ -306,4 +306,96 @@ function formatCell(
   // String values; formatValue describes a binary strL by its length
   const text = typeof cell === 'string' ? cell : formatValue(cell, variable.format);
   return { html: escapeHtml(text), kind: 'text' };
+}
+
+// -----------------------------------------------------------
+// %tc and %tC masks
+//
+// The library shows %tc and %tC values as 2022-10-31 13:05:09 whatever
+// their mask, so 1 and 2 under %tcHH:MM:SS.sss both read 00:00:00.
+// formatClock follows the mask instead, with every code in Stata's
+// "Datetime display formats" manual entry. As there, times are
+// truncated, not rounded. Leap seconds in %tC are not counted, as the
+// library doesn't. A mask with a character that isn't a code, a year
+// outside 0 to 9999 or a value past JavaScript's dates leaves the whole
+// value to the library. %td masks, and all other formats, are the
+// library's.
+// -----------------------------------------------------------
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+  'September', 'October', 'November', 'December'];
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const STATA_EPOCH = Date.UTC(1960, 0, 1);
+// Longest first, so DAYNAME isn't read as Da, nor .sss as .s.
+const CLOCK_CODE = /^(?:DAYNAME|Dayname|Month|month|A\.M\.|a\.m\.|\.sss|JJJ|jjj|Mon|mon|Day|day|\.ss|CC|cc|YY|yy|NN|nn|DD|dd|Da|da|WW|ww|HH|Hh|hH|hh|MM|mm|SS|ss|\.s|am|AM|![^]|[hq.,:\-_/\\+])/;
+
+/** A %tc or %tC value shown by its mask; undefined to leave it to the library. */
+function formatClock(value: number, format: string): string | undefined {
+  const mask = /^%-?t[cC](.+)$/.exec(format)?.[1];
+  if (mask === undefined) return undefined;
+  const ms = Math.floor(value);
+  const date = new Date(STATA_EPOCH + ms);
+  const year = date.getUTCFullYear();
+  if (Number.isNaN(year) || year < 0 || year > 9999) return undefined;
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+  const hour = date.getUTCHours();
+  const dayOfYear = (Date.UTC(year, month, day) - Date.UTC(year, 0, 1)) / 86_400_000 + 1;
+  const milli = date.getUTCMilliseconds();
+  const two = (n: number) => String(n).padStart(2, '0');
+  const pm = hour >= 12;
+  let out = '';
+  for (let rest = mask; rest.length > 0;) {
+    const code = CLOCK_CODE.exec(rest)?.[0];
+    if (code === undefined) return undefined;
+    rest = rest.slice(code.length);
+    switch (code) {
+      case 'CC': out += two(Math.floor(year / 100)); break;
+      case 'cc': out += Math.floor(year / 100); break;
+      case 'YY': out += two(year % 100); break;
+      case 'yy': out += year % 100; break;
+      case 'JJJ': out += String(dayOfYear).padStart(3, '0'); break;
+      case 'jjj': out += dayOfYear; break;
+      case 'Mon': out += MONTH_NAMES[month].slice(0, 3); break;
+      case 'mon': out += MONTH_NAMES[month].slice(0, 3).toLowerCase(); break;
+      case 'Month': out += MONTH_NAMES[month]; break;
+      case 'month': out += MONTH_NAMES[month].toLowerCase(); break;
+      case 'NN': out += two(month + 1); break;
+      case 'nn': out += month + 1; break;
+      case 'DD': out += two(day); break;
+      case 'dd': out += day; break;
+      // Aligned: padded to the longest name, Wednesday.
+      case 'DAYNAME': out += DAY_NAMES[date.getUTCDay()].padEnd(9); break;
+      case 'Dayname': out += DAY_NAMES[date.getUTCDay()]; break;
+      case 'Day': out += DAY_NAMES[date.getUTCDay()].slice(0, 3); break;
+      case 'Da': out += DAY_NAMES[date.getUTCDay()].slice(0, 2); break;
+      case 'day': out += DAY_NAMES[date.getUTCDay()].slice(0, 3).toLowerCase(); break;
+      case 'da': out += DAY_NAMES[date.getUTCDay()].slice(0, 2).toLowerCase(); break;
+      case 'h': out += month < 6 ? 1 : 2; break;
+      case 'q': out += Math.floor(month / 3) + 1; break;
+      // Stata's weeks: 52 a year, the last one 8 or 9 days long.
+      case 'WW': out += two(Math.min(52, Math.floor((dayOfYear - 1) / 7) + 1)); break;
+      case 'ww': out += Math.min(52, Math.floor((dayOfYear - 1) / 7) + 1); break;
+      case 'HH': out += two(hour); break;
+      case 'hH': out += hour; break;
+      // 12-hour clock, 0 to 12 as the manual lists it.
+      case 'Hh': out += two(hour > 12 ? hour - 12 : hour); break;
+      case 'hh': out += hour > 12 ? hour - 12 : hour; break;
+      case 'MM': out += two(date.getUTCMinutes()); break;
+      case 'mm': out += date.getUTCMinutes(); break;
+      case 'SS': out += two(date.getUTCSeconds()); break;
+      case 'ss': out += date.getUTCSeconds(); break;
+      case '.s': out += '.' + Math.floor(milli / 100); break;
+      case '.ss': out += '.' + two(Math.floor(milli / 10)); break;
+      case '.sss': out += '.' + String(milli).padStart(3, '0'); break;
+      case 'am': out += pm ? 'pm' : 'am'; break;
+      case 'a.m.': out += pm ? 'p.m.' : 'a.m.'; break;
+      case 'AM': out += pm ? 'PM' : 'AM'; break;
+      case 'A.M.': out += pm ? 'P.M.' : 'A.M.'; break;
+      case '_': out += ' '; break;
+      case '+': break;
+      default: out += code.startsWith('!') ? code.slice(1) : code;
+    }
+  }
+  return out;
 }
