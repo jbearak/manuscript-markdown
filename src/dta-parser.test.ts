@@ -79,6 +79,54 @@ describe('parseDta', () => {
     expect(html).toContain('<tr><td data-mm-kind="label">No</td><td data-mm-kind="missing"><span class="mm-missing-value">Don\'t know</span>');
   });
 
+  it('shows %tc values by their mask', () => {
+    const t = Date.UTC(2010, 0, 20, 15, 15, 30, 987) - Date.UTC(1960, 0, 1);
+    const masks = [
+      '%tcHH:MM:SS.sss', '%tcCCYY.NN.DD_HH:MM', '%tcMonth_dd,_CCYY_hh:MM_am', '%tcDay_Mon_DD_HH:MM:SS_CCYY',
+      '%tc+hh+:+MM+A.M.', '%tcDAYNAME|', '%tcJJJ!h_q_WW_.s_.ss', '%-tcyy/nn/dd\\hH:mm:ss', '%tcHH:MM_Q', '%tCHH:MM',
+    ];
+    const data = writeDta({
+      variables: [
+        { name: 'tiny', type: 'double', format: masks[0], values: [1, 2, -1] },
+        ...masks.slice(1).map((format, i) => ({ name: 'v' + i, type: 'double' as const, format, values: [t, t, t] })),
+      ],
+    });
+    const html = parseDta(data, { path: 'clock.dta' });
+    const cell = (format: string, display: string) =>
+      '<td data-mm-kind="time" data-mm-format="' + format + '">' + display + '</td>';
+    expect(html).toContain(cell(masks[0], '00:00:00.001') + cell(masks[1], '2010.01.20 15:15'));
+    expect(html).toContain(cell(masks[0], '00:00:00.002'));
+    // Truncated, not rounded, as Stata shows times.
+    expect(html).toContain(cell(masks[0], '23:59:59.999'));
+    expect(html).toContain(cell(masks[2], 'January 20, 2010 3:15 pm'));
+    expect(html).toContain(cell(masks[3], 'Wed Jan 20 15:15:30 2010'));
+    expect(html).toContain(cell(masks[4], '3:15P.M.'));
+    // Not a mask code: the whole value shows as the library shows it.
+    expect(html).toContain(cell(masks[5], '2010-01-20 15:15:30'));
+    expect(html).toContain(cell(masks[6], '020h 1 03 .9 .98'));
+    expect(html).toContain(cell(masks[7], '10/1/20\\15:15:30'));
+    expect(html).toContain(cell(masks[8], '2010-01-20 15:15:30'));
+    // %tC counts leap seconds, which a mask read as %tc would put some
+    // seconds off, so it stays the library's.
+    expect(html).toContain(cell(masks[9], '2010-01-20 15:15:30'));
+  });
+
+  // The manual lists hh as 0 to 12: midnight's hour is 0, noon's 12.
+  it('shows the 12-hour clock as 0 to 12', () => {
+    const hour = (h: number) => Date.UTC(2010, 0, 20, h, 5) - Date.UTC(1960, 0, 1);
+    const data = writeDta({
+      variables: [
+        { name: 't', type: 'double', format: '%tchh:MM_am', values: [hour(0), hour(12), hour(13)] },
+        { name: 'd', type: 'long', format: '%-td', values: [0, 0, 0] },
+      ],
+    });
+    const html = parseDta(data, { path: 'clock.dta' });
+    expect(html).toContain('>0:05 am</td>');
+    expect(html).toContain('>12:05 pm</td>');
+    expect(html).toContain('>1:05 pm</td>');
+    expect(html).toContain('<td data-mm-kind="date" data-mm-format="%-td">1960-01-01</td>');
+  });
+
   // Format-114 files name no encoding. R's foreign::write.dta writes
   // UTF-8 bytes; pandas to_stata(version=114) writes Latin-1.
   it('reads UTF-8 text in a pre-118 file as UTF-8', () => {
@@ -121,6 +169,58 @@ describe('parseDta', () => {
   it('reads a pre-118 file whose characteristics are damaged', () => {
     const data = Uint8Array.from(Buffer.from('cgIBAAEAAQAAAFdyaXR0ZW4gYnkgUi4gICAgICAgICAgICAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdjaXR5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJTdzAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGNpdHkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAABRdcOpYmVj', 'base64'));
     expect(parseDta(data, { path: 'short.dta' })).toContain('<td>Québec</td>');
+  });
+
+  // A format-114 file with one strN variable `s` whose values are the
+  // bytes given, each cut or NUL-padded to the width.
+  function dta114(width: number, values: (string | number[])[]): Uint8Array {
+    const bytes: number[] = [114, 2, 1, 0, 1, 0, values.length & 255, values.length >> 8, 0, 0];
+    const field = (value: string | number[], length: number) => {
+      const b = typeof value === 'string' ? [...Buffer.from(value, 'utf8')] : value;
+      for (let i = 0; i < length; i++) bytes.push(i < b.length ? b[i] : 0);
+    };
+    field('', 81); field('', 18); // data label, timestamp
+    bytes.push(width); field('s', 33); field('', 4); field('%' + width + 's', 49); field('', 33); field('', 81);
+    field('', 5); // no characteristics
+    for (const value of values) field(value, width);
+    return Uint8Array.from(bytes);
+  }
+
+  // A writer that sizes str6 for "Montré" in characters but cuts its
+  // bytes leaves the value ending in the first byte of é.
+  it('reads a pre-118 UTF-8 file with a string cut mid-character as UTF-8', () => {
+    const html = parseDta(dta114(6, ['Québec', 'Montréal']), { path: 'cut.dta' });
+    expect(html).toContain('<td>Québe</td>');
+    expect(html).toContain('<td>Montr</td>');
+  });
+
+  it('reads pre-118 UTF-8 strings cut inside 3- and 4-byte characters as UTF-8', () => {
+    expect(parseDta(dta114(4, ['é', 'ab€']), { path: 'cut.dta' })).toContain('<td>ab</td>');
+    expect(parseDta(dta114(5, ['é', 'ab\u{1F600}']), { path: 'cut.dta' })).toContain('<td>ab</td>');
+  });
+
+  it('keeps a U+FFFD the file holds next to a string cut mid-character', () => {
+    const html = parseDta(dta114(6, ['Qu�b', 'Montréal']), { path: 'cut.dta' });
+    expect(html).toContain('<td>Qu�b</td>');
+    expect(html).toContain('<td>Montr</td>');
+  });
+
+  // Latin-1 "Café" fills its str4 and ends in E9, the start of a 3-byte
+  // UTF-8 character: no whole UTF-8 character says the file is UTF-8.
+  it('reads a pre-118 file whose only non-ASCII byte ends a full string as windows-1252', () => {
+    expect(parseDta(dta114(4, [[0x43, 0x61, 0x66, 0xe9]]), { path: 'cafe.dta' })).toContain('<td>Café</td>');
+  });
+
+  it('reads a pre-118 file with a cut string and a byte UTF-8 can\'t read as windows-1252', () => {
+    const html = parseDta(dta114(6, ['Québec', 'Montréal', [0x5a, 0xfc, 0x72, 0x69, 0x63, 0x68]]), { path: 'cut.dta' });
+    expect(html).toContain('<td>Zürich</td>');
+  });
+
+  // Only a value that fills its width can have been cut.
+  it('reads a pre-118 file with a lone lead byte ending a short string as windows-1252', () => {
+    const html = parseDta(dta114(8, ['Québec', [0x4d, 0x6f, 0x6e, 0x74, 0x72, 0xc3]]), { path: 'short.dta' });
+    expect(html).toContain('<td>QuÃ©bec</td>');
+    expect(html).toContain('<td>MontrÃ</td>');
   });
 
   it('rejects files exceeding the size limit', () => {
