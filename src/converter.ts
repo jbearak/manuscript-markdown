@@ -14588,8 +14588,10 @@ function commentsOnlyInCode(content: ContentItem[]): Set<string> {
       else if (item.type === 'table') {
         for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true);
         inCodeBlock = false;
-      } else if ('commentIds' in item) {
-        for (const id of item.commentIds ?? []) (inCodeBlock && item.type === 'text' ? inCode : outside).add(id);
+      } else {
+        // An item but text ends the block's fence (see codeBlockFence)
+        if (item.type !== 'text') inCodeBlock = false;
+        if ('commentIds' in item) for (const id of item.commentIds ?? []) (inCodeBlock ? inCode : outside).add(id);
       }
     }
   };
@@ -21019,7 +21021,6 @@ export async function convertDocx(
     derivedBlockquotePreContentBlankLines,
     derivedBlockquotePostContentBlankLines,
   } = structureBody(docContent, blockquotePlaces);
-  const codeComments = moveCodeComments(docContent);
   // The quote group export wrote that each one import read is, where Word
   // added one or took one out, which moves the index of those after it,
   // that export's records of them are by (see readQuoteGroups)
@@ -21182,6 +21183,8 @@ export async function convertDocx(
   // tableTextDefaultFont), which a table whose text takes them from the
   // table paragraph style takes no directive for
   const documentFonts = resolveFontOverrides(fontFields);
+  // Last, as paragraphs' indexes key what's read before (see moveCodeComments)
+  const codeComments = moveCodeComments(docContent);
   let markdown = buildMarkdown(docContent, comments, {
     crossRefLabels,
     tableSizeHp: documentFonts.tableSizeHp,
