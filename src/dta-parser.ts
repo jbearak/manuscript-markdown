@@ -9,6 +9,7 @@
 import { formatValue, isMissing, openDta } from '@jbearak/dta-parser';
 import type { Cell, EncodingName, ValueLabels, Variable } from '@jbearak/dta-parser';
 import type { EmbedDirective } from './embed-preprocess';
+import { pushAll } from './arrays';
 
 const DEFAULT_MAX_DTA_FILE_SIZE = 10_485_760; // 10 MB
 
@@ -117,30 +118,48 @@ interface DtaTable {
   variables: readonly Variable[];
   rows: Cell[][];
   valueLabelTables: (ValueLabels | undefined)[];
+  /**
+   * Text the file holds that the table doesn't show: the data label,
+   * timestamp, sort order and characteristics (which include the notes).
+   * Read only before release 118, where it is evidence of the encoding.
+   */
+  otherText: string[];
 }
 
 function readTableAs(data: Uint8Array, encoding?: EncodingName): DtaTable {
   const reader = openDta(data, encoding ? { encoding } : undefined);
   try {
-    const variables = reader.variables;
+    const { info, variables } = reader;
+    // One lookup per set, so variables sharing a set share its object.
+    const sets = new Map<string, ValueLabels | undefined>();
+    const labelsOf = (name: string): ValueLabels | undefined => {
+      if (!sets.has(name)) sets.set(name, reader.valueLabels(name));
+      return sets.get(name);
+    };
+    const otherText: string[] = [];
+    if (info.release < 118) {
+      otherText.push(info.label, info.timestamp);
+      pushAll(otherText, info.sortedBy);
+      for (const c of reader.characteristics()) otherText.push(c.variable, c.name, c.value);
+    }
     return {
-      release: reader.info.release,
+      release: info.release,
       variables,
-      rows: reader.readRows(0, reader.info.nobs),
-      valueLabelTables: variables.map(v =>
-        v.valueLabels ? reader.valueLabels(v.valueLabels) : undefined
-      ),
+      rows: reader.readRows(0, info.nobs),
+      valueLabelTables: variables.map(v => (v.valueLabels ? labelsOf(v.valueLabels) : undefined)),
+      otherText,
     };
   } finally {
     reader.close();
   }
 }
 
-/** Every piece of text the reader decoded, but the data label. */
+/** Every piece of text the reader decoded. */
 function tableText(table: DtaTable): string[] {
-  const text: string[] = [];
+  const text: string[] = [...table.otherText];
   for (const v of table.variables) text.push(v.name, v.label, v.format, v.valueLabels);
-  for (const labels of table.valueLabelTables) {
+  // Visit each value label set once: wide files share one across many variables.
+  for (const labels of new Set(table.valueLabelTables)) {
     if (labels) for (const label of labels.values()) text.push(label);
   }
   for (const row of table.rows) {
@@ -156,6 +175,9 @@ function tableText(table: DtaTable): string[] {
  * write UTF-8. The library decodes them as windows-1252 unless told
  * otherwise, so where that read has non-ASCII text, read again as UTF-8
  * and keep that read when all its text was valid UTF-8 (no U+FFFD).
+ * All the file's text counts, shown in the table or not: one string
+ * UTF-8 can't read proves the file isn't UTF-8. Where every string reads
+ * as UTF-8, nothing settles the question and the UTF-8 read wins.
  * Release 118 and later declare UTF-8 and are read once, as is.
  */
 function readTable(data: Uint8Array): DtaTable {
