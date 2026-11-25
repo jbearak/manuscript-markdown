@@ -3181,6 +3181,7 @@ describe('frontmatter for VS Code\'s preview table', () => {
 
   it('leaves a title with a colon YAML reads as part of it as it is', () => {
     for (const yaml of ['title: At 07:53\nfont: X', 'title: https://example.org/a\nfont: X', 'title: "A: b"\nfont: X',
+      'title: "A: \\"B\\""\nfont: X', 'title: ["A: B", "C"]\nfont: X',
       'title:\n  - One\n  - Two: three\nfont: X']) {
       expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
     }
