@@ -14761,15 +14761,18 @@ function commentsOnlyInCode(content: ContentItem[]): Set<string> {
  * the text would read as Word's, a \ and a line end (see codeBlockFence).
  * Export writes it back as the code's text, so each trip after the first
  * writes the same. Without this the equation ended the fence, and the next
- * import took the text after it into a code block.
+ * import took the text after it into a code block. Returns the warning for
+ * them, as export writes them back as text, or undefined for none.
  */
-function codeMathAsText(content: ContentItem[]): void {
+function codeMathAsText(content: ContentItem[]): string | undefined {
   let inCode = false;
+  let count = 0;
   let rebuilt: ContentItem[] | undefined;
   content.forEach((item, at) => {
     if (item.type === 'para') inCode = !!item.isCodeBlock;
     else if (item.type === 'math' && inCode) {
       rebuilt ??= content.slice(0, at);
+      count++;
       const delimiter = item.display ? '$' + '$' : '$';
       (delimiter + item.latex + delimiter).split('\n').forEach((line, n) => {
         if (n > 0) rebuilt!.push({ type: 'para', isCodeBlock: true });
@@ -14781,10 +14784,12 @@ function codeMathAsText(content: ContentItem[]): void {
     } else if (item.type !== 'text') inCode = false;
     rebuilt?.push(item);
   });
-  if (rebuilt) {
-    content.length = 0;
-    pushAll(content, rebuilt);
-  }
+  if (!rebuilt) return undefined;
+  content.length = 0;
+  pushAll(content, rebuilt);
+  const one = count === 1;
+  return 'Wrote ' + count + ' equation' + (one ? '' : 's') + ' in code as ' + (one ? 'its' : 'their') + ' LaTeX, as a code block can\'t hold an equation; '
+    + (one ? 'it' : 'they') + ' ' + (one ? 'is' : 'are') + ' now code text.';
 }
 
 /** Moves the comments on code alone (see commentsOnlyInCode) off the
@@ -21420,7 +21425,7 @@ export async function convertDocx(
   // Last, as paragraphs' indexes key what's read before (see
   // moveCodeComments), and equations in code first, as text, whose
   // comments are on code
-  codeMathAsText(docContent);
+  const codeMath = codeMathAsText(docContent);
   const codeComments = moveCodeComments(docContent);
   let markdown = buildMarkdown(docContent, comments, {
     crossRefLabels,
@@ -21715,7 +21720,7 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...(codeComments === undefined ? [] : [codeComments]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles),
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...(codeMath === undefined ? [] : [codeMath]), ...(codeComments === undefined ? [] : [codeComments]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles),
     ...[...await commentCustomStyles(zip, styleLayouts, contentOptions)].map(name => 'Custom style "' + name + '" is on a comment\'s paragraph, '
       + 'which a comment can\'t keep, as it holds no style directive; import drops it there.')] };
 }

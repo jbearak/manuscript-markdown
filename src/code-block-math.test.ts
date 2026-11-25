@@ -16,6 +16,11 @@ const DOLLARS = '$' + '$';
  *  markers too, taken out of it, which is dropped, and put into the code run
  *  holding `line`, between `before` and `after`, which it's replaced by */
 async function importMoved(md: string, tag: string, line: string, before: string, after = line.slice(before.length)): Promise<string> {
+  return (await importMovedWarning(md, tag, line, before, after)).markdown;
+}
+
+/** As importMoved, with import's warnings */
+async function importMovedWarning(md: string, tag: string, line: string, before: string, after: string): Promise<{ markdown: string; warnings: string[] }> {
   const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
   let xml = await zip.file(DOC)!.async('string');
   const math = xml.match(new RegExp('<' + tag + '[ >]'))![0];
@@ -34,7 +39,7 @@ async function importMoved(md: string, tag: string, line: string, before: string
   const piece = (t: string) => t ? '<w:r>' + rPr + '<w:t xml:space="preserve">' + escaped(t) + '</w:t></w:r>' : '';
   xml = xml.replace(run, piece(before) + content + piece(after));
   zip.file(DOC, xml);
-  return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  return convertDocx(await zip.generateAsync({ type: 'uint8array' }));
 }
 
 /** The Markdown after another round trip of `md` */
@@ -56,6 +61,11 @@ describe('an equation in a code block', () => {
       expect(await again(out)).toBe(out);
     });
   }
+
+  test('with a warning, as export writes it back as code text', async () => {
+    const { warnings } = await importMovedWarning('$x^2$\n\n' + CODE + '\n', 'm:oMath', 'x <- 1', 'x <- 1', '');
+    expect(warnings).toEqual(['Wrote 1 equation in code as its LaTeX, as a code block can\'t hold an equation; it is now code text.']);
+  });
 
   test('alone on a line', async () => {
     const out = await importMoved('$x^2$\n\n```r\nx <- 1\nLINE\ny <- 2\n```\n\nAfter.\n', 'm:oMath', 'LINE', '', '');

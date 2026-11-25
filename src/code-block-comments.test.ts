@@ -132,6 +132,20 @@ describe('comments on a code block', () => {
     expect(warnings).toEqual([]);
   });
 
+  test('moves one on text after an equation, which the code holds as its LaTeX, as any on code', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Para {==word==}{>>' + ALICE + 'on code<<}.\n\n' + CODE + '\n')).docx);
+    let xml = await zip.file(DOC)!.async('string');
+    const { start, end, ref } = markers(xml, 0);
+    xml = putAt(putAt(xml.replace(start, '').replace(end, '').replace(ref, ''), 'x <- 1', start, false), 'x <- 1', end + ref, true);
+    zip.file(DOC, xml.replace(start, '<m:oMath><m:r><m:t>a</m:t></m:r></m:oMath>' + start));
+    const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toBe('Para word.\n\n```r\n$a$x <- 1\ny <- 2\n```\n\n{>>' + ALICE + 'on code<<}\n');
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toStartWith('Wrote 1 equation in code');
+    expect(warnings[1]).toStartWith('Moved 1 comment on code');
+    expect(await again(markdown)).toBe(markdown);
+  });
+
   test('one from the paragraph before into the block keeps its range on the text', async () => {
     const { markdown, warnings } = await importMoved('Para {==word==}{>>' + ALICE + 'into code<<}.\n\n' + CODE + '\n\nAfter.\n',
       [{ id: 0, to: '<- 1' }]);
