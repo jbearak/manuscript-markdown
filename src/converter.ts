@@ -8337,7 +8337,8 @@ export async function extractDocumentContent(
                   const markBefore = precedingMark?.target === target && precedingMark.end === target.length ? precedingMark.revision : undefined;
                   const breakRevision = fence || rule ? markBefore : undefined;
                   if (rule || breakRevision) target.push({ type: 'para', ...(rule ? { horizontalRule: true } : {}), ...(breakRevision ? { breakRevision } : {}) });
-                  if (fence || rule) walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+                  // Or where it holds a comment's range, which would be lost
+                  if (fence || rule || holdsCommentRange(paraChildren)) walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
                   endSection(target, fence);
                   if (!fence && !rule) markBeforeSection = markBefore;
                   isSectionBreakHandled = true;
@@ -14366,6 +14367,12 @@ const PARAGRAPH_CONTENT_ELEMENTS = new Set([
   'w:footnoteReference', 'w:endnoteReference', 'w:fldChar', 'w:fldSimple',
 ]);
 const PARAGRAPH_TEXT_ELEMENTS = new Set(['w:t', 'w:delText', 'w:instrText']);
+
+/** Whether a paragraph's children hold a comment's range marker */
+function holdsCommentRange(children: XmlNode[]): boolean {
+  return children.some(child => Object.keys(child).some(key => key === 'w:commentRangeStart' || key === 'w:commentRangeEnd'
+    || key !== ':@' && Array.isArray(child[key]) && holdsCommentRange(asXmlNodes(child[key]))));
+}
 
 /** Whether a paragraph holds anything besides its properties and markers */
 function paragraphCarriesContent(children: XmlNode[]): boolean {
