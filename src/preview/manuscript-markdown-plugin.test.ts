@@ -3547,6 +3547,26 @@ describe('a paragraph mark a change tracks, in the resolved previews', () => {
     expect(render('simple', input).replace(' class="manuscript-markdown-changed"', '')).toBe(render('none', input));
   });
 
+  it('gives the joined paragraph its source lines, to the end of a paragraph of the document\'s own', () => {
+    // The paragraph after the change is in the lines of the text as
+    // preprocessed, where the change's blank line is no line
+    const md = createMarkdownItWithPlugin();
+    md.manuscriptPreviewMarkup = 'original';
+    const tokens = md.parse('A{++\n\n++}\n\nB\n\nC', {});
+    expect(tokens.filter(token => token.type === 'paragraph_open').map(token => token.map)).toEqual([[0, 5], [6, 7]]);
+    expect(tokens.filter(token => token.type === 'inline').map(token => token.map)).toEqual([[0, 5], [6, 7]]);
+  });
+
+  it('joins many paragraphs in a row in linear time', () => {
+    const time = (marks: number) => {
+      const text = 'w{--\n\n--}'.repeat(marks) + 'end';
+      return fastestRun(() => render('none', text));
+    };
+    time(8_000);
+    const small = time(8_000);
+    expect(time(32_000) / small).toBeLessThan(8);
+  }, 60000);
+
   it('shows a comment on the change, or on text either side, once', () => {
     const accepted = render('none', 'A{++x\n\ny++}{>>c<<}B');
     expect(accepted).toBe('<p>A<span class="manuscript-markdown-comment-range" data-comment="c">x</span></p>\n<p><span class="manuscript-markdown-comment-range" data-comment="c">y</span>B</p>');

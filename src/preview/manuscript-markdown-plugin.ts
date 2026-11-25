@@ -2117,7 +2117,7 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
       if (!captionHasText(children.slice(at + 1, close < 0 ? children.length : close))) label.content = label.meta.captionLabel;
     });
   }
-  joinParagraphsAtDroppedMarks(tokens, resolution);
+  joinParagraphsAtDroppedMarks(state, resolution);
   // Takes the tokens from start to end, then each container left empty
   const remove = (start: number, end: number): number => {
     while (
@@ -2157,24 +2157,53 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
  * there. A heading's mark stays, as which style Word gives the paragraph
  * it joins is not known.
  */
-function joinParagraphsAtDroppedMarks(tokens: Token[], resolution: ChangeResolution): void {
-  for (let i = 1; i + 3 < tokens.length; i++) {
-    const marks: Array<string | undefined> | undefined = tokens[i].meta?.manuscriptParagraphMarks;
-    if (tokens[i].type !== 'paragraph_close' || !marks?.length ||
+function joinParagraphsAtDroppedMarks(state: StateCore, resolution: ChangeResolution): void {
+  const tokens = state.tokens;
+  const lineMap = getPreviewEnvironment(state).lineMap;
+  // A token's source line as the source has it, which the map of a
+  // paragraph splitCriticBlocksRule made is in already
+  const sourceLine = (token: Token, line: number): number =>
+    token.meta?.manuscriptMapIsOriginal || !lineMap ? line : lineMap.remap(line);
+  const out: Token[] = [];
+  // The paragraph the last join went into, and the children and content of
+  // each paragraph joined to it, which it takes together once no more join
+  // it, so a run of joins reads each paragraph once
+  let joined: { inline: Token; children: Token[][]; content: string[] } | undefined;
+  const endJoined = (): void => {
+    if (!joined) return;
+    joined.inline.children = withLevels(joined.children.flat());
+    joined.inline.content = joined.content.join('');
+    joined = undefined;
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    const close = tokens[i];
+    const marks: Array<string | undefined> | undefined = close.meta?.manuscriptParagraphMarks;
+    const first = out[out.length - 1];
+    const second = tokens[i + 2];
+    if (close.type !== 'paragraph_close' || !marks?.length ||
         !marks.every(mark => mark !== undefined && resolution.dropped.has(mark)) ||
-        tokens[i - 1].type !== 'inline' || tokens[i + 1].type !== 'paragraph_open' ||
-        tokens[i + 2].type !== 'inline' || tokens[i + 3].type !== 'paragraph_close') continue;
-    const [first, second] = [tokens[i - 1], tokens[i + 2]];
-    first.children = withLevels((first.children ?? []).concat(second.children ?? []));
-    first.content += second.content;
-    const open = tokens[i - 2];
-    for (const token of [open, first]) {
-      if (token?.map && second.map) token.map = [token.map[0], second.map[1]];
+        first?.type !== 'inline' || tokens[i + 1]?.type !== 'paragraph_open' ||
+        second?.type !== 'inline' || tokens[i + 3]?.type !== 'paragraph_close') {
+      out.push(close);
+      continue;
+    }
+    if (joined?.inline !== first) {
+      endJoined();
+      joined = { inline: first, children: [first.children ?? []], content: [first.content] };
+    }
+    joined.children.push(second.children ?? []);
+    joined.content.push(second.content);
+    // From the first's start to the second's end, in the source's lines,
+    // which the second's, a paragraph of the document's own, aren't in yet
+    for (const token of [out[out.length - 2], first]) {
+      if (token?.map && second.map) setOriginalTokenMap(token, [sourceLine(token, token.map[0]), sourceLine(second, second.map[1])]);
     }
     // The second paragraph's close, with the marks after it, ends the two
-    tokens.splice(i, 3);
-    i--;
+    i += 2;
   }
+  endJoined();
+  tokens.length = 0;
+  for (const token of out) tokens.push(token);
 }
 
 /** Inline rule that converts the paragraph placeholder back into line breaks in the token stream. */
