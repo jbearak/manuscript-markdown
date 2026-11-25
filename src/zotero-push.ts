@@ -408,8 +408,10 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
   const plain = (bibtexFieldAsPlainText(entry, name) ?? '').replace(/\s+/g, ' ').trim();
   if (plain === '') return undefined;
   // Math, as $x^{12}$, whose groups the text loses: $x^12$ is another
-  // formula.  (An escaped dollar sign, \$, is text.)
-  if (/(?:^|[^\\])\$/.test(entry.texFields?.get(name) ?? entry.fields.get(name) ?? '')) return { problem: 'math' };
+  // formula.  It takes two dollar signs; an escaped one, \$, is text, and
+  // so, here, is one alone, as in a title's $100.
+  const unescapedDollars = (entry.texFields?.get(name) ?? entry.fields.get(name) ?? '').match(/(?<!\\)\$/g) ?? [];
+  if (unescapedDollars.length >= 2) return { problem: 'math' };
   if (TEX_COMMAND.test(plain)) return { problem: 'tex' };
   return { value: plain };
 }
@@ -518,11 +520,13 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
   if (parsed === undefined || parsed.trim() === '') return undefined;
   if (isMacro(entry, field)) return 'macro';
   // The parsed value reads an escaped brace as a brace, which splitting a
-  // name then drops as a group's, and an escaped tilde as a tilde, which is
-  // a tie; where the entry has either, its names are read as written.
+  // name then drops as a group's, and a literal tilde (\~{} or
+  // \textasciitilde) as a tilde, which is a tie; where the entry has
+  // either, its names are read as written, its spaces run together as the
+  // parser runs them.  (An accent, as \~n, the parser reads already.)
   const written = entry.writtenFields?.get(field)?.trim();
-  const asWritten = written !== undefined && /^\{.*\}$|^".*"$/s.test(written) ? written.slice(1, -1) : undefined;
-  const raw = tiesAsSpaces(asWritten !== undefined && /\\(?:[{}~]|textasciitilde)/.test(asWritten) ? asWritten : parsed);
+  const asWritten = written !== undefined && /^\{.*\}$|^".*"$/s.test(written) ? written.slice(1, -1).replace(/\s+/g, ' ').trim() : undefined;
+  const raw = tiesAsSpaces(asWritten !== undefined && /\\(?:[{}]|~\{\}|textasciitilde)/.test(asWritten) ? asWritten : parsed);
   const list = splitAuthorString(raw);
   if (list.length === 0 || !list.every(readableName)) return 'unreadable';
   const creators: ZoteroCreator[] = [];

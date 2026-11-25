@@ -199,7 +199,7 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   'doi-owned-elsewhere': 'another item in the library has its DOI',
   'pmid-disagreement': "its PMID is another item's, or its matched item has another",
   'citation-key-conflict':
-    'more than one Zotero item answers to its citation key, in the Citation Key field or a "Citation Key:" line of Extra; link it with zotero-key',
+    'another Zotero item answers to its citation key, in its Citation Key field or a "Citation Key:" line of Extra; link the entry with zotero-key',
   'isbn-owned-elsewhere': "its ISBN is another item's",
   'duplicate-identifier': 'another entry would give the same identifier to an item',
   'incomplete-item': "Zotero's answer did not give the whole list that writing would replace",

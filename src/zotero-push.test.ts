@@ -1037,6 +1037,13 @@ describe("push: an unchanged export never damages Zotero's metadata", () => {
     });
     const council = item('AAAA2222', { title: 'T', citationKey: 'k', creators: [{ creatorType: 'author', name: 'Research {EU} Council' }] });
     expect(plan('@article{k,\n  author = {{Research \\{EU\\} Council}}\n}\n', [council]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+    // Read as written, a list wrapped over lines is still split at its ands,
+    // and an accent is still read.
+    const wrapped = plan("@article{k,\n  author = {{Research \\{EU\\} Council} and\n    Mu\\~noz, Jos\\'e}\n}\n", []).actions[0];
+    expect(wrapped).toMatchObject({
+      kind: 'create',
+      data: { creators: [{ creatorType: 'author', name: 'Research {EU} Council' }, { creatorType: 'author', lastName: 'Muñoz', firstName: 'José' }] },
+    });
     // An escaped tilde is a tilde, not a tie.
     const tilde = plan('@article{k,\n  author = {Doe\\textasciitilde{}Roe, Jane}\n}\n', []).actions[0];
     expect(tilde).toMatchObject({ kind: 'create', data: { creators: [{ creatorType: 'author', lastName: 'Doe~Roe', firstName: 'Jane' }] } });
@@ -1074,6 +1081,8 @@ describe("push: an unchanged export never damages Zotero's metadata", () => {
       const p = plan(`@article{k,\n  title = {${entry}}\n}\n`, [item('AAAA2222', { title: zotero, citationKey: 'k' })]);
       expect([entry, p.actions[0]]).toMatchObject([entry, { kind: 'unchanged', notPushed: [] }]);
     }
+    // One dollar sign alone is text.
+    expect(plan('@article{k,\n  title = {The $100 Startup}\n}\n', []).actions[0]).toMatchObject({ kind: 'create', data: { title: 'The $100 Startup' } });
     // Other math is left out, not written without its groups.
     const other = plan('@article{k,\n  title = {Average $x^{13}$}\n}\n', [item('AAAA2222', { title: 'Average $x^{12}$', citationKey: 'k' })]);
     expect(other.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'title', reason: 'math' }] });
