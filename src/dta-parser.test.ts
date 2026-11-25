@@ -108,6 +108,22 @@ describe('parseDta', () => {
     expect(html).toContain(cell(masks[8], '2010-01-20 15:15:30'));
   });
 
+  // The manual lists hh as 0 to 12: midnight's hour is 0, noon's 12.
+  it('shows the 12-hour clock as 0 to 12', () => {
+    const hour = (h: number) => Date.UTC(2010, 0, 20, h, 5) - Date.UTC(1960, 0, 1);
+    const data = writeDta({
+      variables: [
+        { name: 't', type: 'double', format: '%tchh:MM_am', values: [hour(0), hour(12), hour(13)] },
+        { name: 'd', type: 'long', format: '%-td', values: [0, 0, 0] },
+      ],
+    });
+    const html = parseDta(data, { path: 'clock.dta' });
+    expect(html).toContain('>0:05 am</td>');
+    expect(html).toContain('>12:05 pm</td>');
+    expect(html).toContain('>1:05 pm</td>');
+    expect(html).toContain('<td data-mm-kind="date" data-mm-format="%-td">1960-01-01</td>');
+  });
+
   // Format-114 files name no encoding. R's foreign::write.dta writes
   // UTF-8 bytes; pandas to_stata(version=114) writes Latin-1.
   it('reads UTF-8 text in a pre-118 file as UTF-8', () => {
@@ -173,6 +189,11 @@ describe('parseDta', () => {
     const html = parseDta(dta114(6, ['Québec', 'Montréal']), { path: 'cut.dta' });
     expect(html).toContain('<td>Québe</td>');
     expect(html).toContain('<td>Montr</td>');
+  });
+
+  it('reads pre-118 UTF-8 strings cut inside 3- and 4-byte characters as UTF-8', () => {
+    expect(parseDta(dta114(4, ['é', 'ab€']), { path: 'cut.dta' })).toContain('<td>ab</td>');
+    expect(parseDta(dta114(5, ['é', 'ab\u{1F600}']), { path: 'cut.dta' })).toContain('<td>ab</td>');
   });
 
   it('keeps a U+FFFD the file holds next to a string cut mid-character', () => {

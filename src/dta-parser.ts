@@ -317,7 +317,8 @@ function formatCell(
 // "Datetime display formats" manual entry. As there, times are
 // truncated, not rounded. Leap seconds in %tC are not counted, as the
 // library doesn't. A mask with a character that isn't a code, a year
-// outside 0 to 9999 or a value past JavaScript's dates leaves the whole
+// outside 100 to 9999 (Stata's own range; JavaScript reads years below
+// 100 as 19xx) or a value past JavaScript's dates leaves the whole
 // value to the library. %td masks, and all other formats, are the
 // library's.
 // -----------------------------------------------------------
@@ -336,7 +337,7 @@ function formatClock(value: number, format: string): string | undefined {
   const ms = Math.floor(value);
   const date = new Date(STATA_EPOCH + ms);
   const year = date.getUTCFullYear();
-  if (Number.isNaN(year) || year < 0 || year > 9999) return undefined;
+  if (Number.isNaN(year) || year < 100 || year > 9999) return undefined;
   const month = date.getUTCMonth();
   const day = date.getUTCDate();
   const hour = date.getUTCHours();
