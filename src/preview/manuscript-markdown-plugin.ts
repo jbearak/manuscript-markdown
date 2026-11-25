@@ -2659,10 +2659,24 @@ function withoutComment(value: string): string {
 /** A title key's line's value, `line` past `title:`, without the comment
  *  after it where YAML reads it without quotes, as `Fieldwork` of
  *  `title: Fieldwork # draft {x}`, but as it is where it starts with a
- *  quote or a collection's opener, which quotableTitleValue reads */
+ *  quote or a collection's opener, which quotableTitleValue reads. Only
+ *  where the colon needs quoting (see colonRepair) */
 function titleValue(line: string): string {
   const value = line.replace(/^title\s*:/, '');
   return /^\s*["'[{]/.test(value) ? value.trim() : withoutComment(value);
+}
+
+/** Whether a title key's line, `line`, holds a colon before a space or the
+ *  line's end in its value, not quoted nor an inline array, as in
+ *  `title: Purpose: methods`, which YAML reads as a mapping in a mapping's
+ *  value, and fails on, so quoting it reads it as export does. Not one in a
+ *  comment after it, as in `title: Fieldwork # draft: private`, which YAML
+ *  reads as `Fieldwork`, nor so one in a comment alone, `title: # a: b`,
+ *  which it reads as no title. Only where the key is `title`, its colon
+ *  before a space or the line's end, not `title:chapter: Methods`, whose
+ *  key YAML reads as `title:chapter` */
+function colonRepair(line: string): boolean {
+  return /^title:(?:[ \t]|$)/.test(line) && /^[^\s"'[].*:(?:[ \t]|$)/.test(titleValue(line));
 }
 
 export function frontmatterYamlForPreview(content: string): string {
@@ -2684,7 +2698,7 @@ export function frontmatterYamlForPreview(content: string): string {
     const list = blockListAfter(lines, k);
     if (list) {
       if (list.items.some(item => item.more.length > 0 || !quotableTitleValue(item.text))) return content;
-    } else if (!quotableTitleValue(titleValue(lines[k]))) return content;
+    } else if (!quotableTitleValue(colonRepair(lines[k]) ? titleValue(lines[k]) : lines[k].replace(/^title\s*:/, '').trim())) return content;
     const end = list ? list.last + 1 : k + 1;
     // Not a value YAML reads over more lines: the line after it, past blank
     // lines and comments, is another key's, or there's none, not one
@@ -2695,20 +2709,15 @@ export function frontmatterYamlForPreview(content: string): string {
     k = end - 1;
   }
   // A brace anywhere in the title, which YAML can read as a mapping's, in a
-  // value, a list's item or an inline array's: in the key's line, in its
-  // value, not its comment, as YAML reads none in `title: A # {b}`
-  const holdsBrace = entries.some(({ start, end }) => titleValue(lines[start]).includes('{')
+  // value, a list's item or an inline array's: in the key's line where the
+  // colon needs quoting, in its value, not its comment, which a brace or a
+  // bracket in it would otherwise quote with it, or keep from quoting, as
+  // in `title: A: b # {c}`, and otherwise in all of it, as before the colon
+  // was quoted, so `title: A # {b}` shows `A # {b}`, as export writes it
+  const holdsBrace = entries.some(({ start, end }) =>
+    (colonRepair(lines[start]) ? titleValue(lines[start]) : lines[start]).includes('{')
     || lines.slice(start + 1, end).some(line => line.includes('{')));
-  // Or a colon before a space or the line's end in the key's own value, not
-  // quoted nor an inline array, as in `title: Purpose: methods`, which YAML
-  // reads as a mapping in a mapping's value, and fails on. Not one in a
-  // comment after it, as in `title: Fieldwork # draft: private`, which YAML
-  // reads as `Fieldwork`, nor so one in a comment alone, `title: # a: b`,
-  // which it reads as no title. Only where the key is `title`, its colon
-  // before a space or the line's end, not `title:chapter: Methods`, whose
-  // key YAML reads as `title:chapter`
-  const holdsColon = entries.some(({ start }) => /^title:(?:[ \t]|$)/.test(lines[start])
-    && /^[^\s"'[].*:(?:[ \t]|$)/.test(titleValue(lines[start])));
+  const holdsColon = entries.some(({ start }) => colonRepair(lines[start]));
   if (entries.length < 2 && !holdsBrace && !holdsColon) return content;
   // The title lines its entries give, which must be those export reads from
   // the whole frontmatter: not where it reads others, as from a `title:`

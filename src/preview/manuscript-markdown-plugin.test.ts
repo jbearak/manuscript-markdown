@@ -3196,9 +3196,12 @@ describe('frontmatter for VS Code\'s preview table', () => {
   it('reads no brace or bracket in a title\'s comment, which YAML reads none in', () => {
     expect(frontmatterYamlForPreview('title: Example: notes # draft {private}\nauthor: Jane')).toBe('title: "Example: notes"\nauthor: Jane');
     expect(frontmatterYamlForPreview('title: Example: notes # draft [x\nauthor: Jane')).toBe('title: "Example: notes"\nauthor: Jane');
-    expect(frontmatterYamlForPreview('title: Fieldwork # {x}\nauthor: Jane')).toBe('title: Fieldwork # {x}\nauthor: Jane');
+    // Where the colon needs no quoting, a brace in the comment quotes it
+    // with the title, as export writes it, as before the colon was quoted
+    expect(frontmatterYamlForPreview('title: Fieldwork # {x}\nauthor: Jane')).toBe('title: "Fieldwork # {x}"\nauthor: Jane');
     // A brace in the value quotes it with its comment, as export reads it
     expect(frontmatterYamlForPreview('title: Plain {--old--} title # c\nfont: X')).toBe('title: "Plain {--old--} title # c"\nfont: X');
+    expect(frontmatterYamlForPreview('title: A {x}: b # c\nfont: X')).toBe('title: "A {x}: b # c"\nfont: X');
   });
 
   it('quotes no colon in the value of a key that only starts with title:, which YAML reads as another key', () => {
