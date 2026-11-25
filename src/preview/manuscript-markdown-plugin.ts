@@ -1838,6 +1838,15 @@ const REJECT_CHANGES: ChangeResolution = {
   ]),
 };
 
+/** The opens and closes of an addition and a substitution's new text,
+ *  which in deleted text export deletes with the rest (see resolveChanges) */
+const ADDED_TEXT_TOKENS = new Set([
+  'manuscript_markdown_addition_open',
+  'manuscript_markdown_addition_close',
+  'manuscript_markdown_substitution_new_open',
+  'manuscript_markdown_substitution_new_close',
+]);
+
 /** The opens of a change, which simple markup marks the block of */
 const CHANGE_OPENS = new Set([
   'manuscript_markdown_addition_open',
@@ -1858,8 +1867,14 @@ function markChangedBlocks(state: StateCore): void {
     children.some(child => CHANGE_OPENS.has(child.type) || (child.children !== null && hasChange(child.children)));
   tokens.forEach((token, at) => {
     if (token.type !== 'inline' || !token.children || !hasChange(token.children)) return;
+    // The nearest open that holds the inline token and shows, past the
+    // blocks before it, as a heading before an item's paragraph
     let open = at - 1;
-    while (open >= 0 && (tokens[open].hidden || tokens[open].nesting !== 1)) open--;
+    for (let depth = 0; open >= 0; open--) {
+      depth -= tokens[open].nesting;
+      if (depth < 0 && !tokens[open].hidden) break;
+      depth = Math.max(depth, 0);
+    }
     if (open >= 0) tokens[open].attrJoin('class', 'manuscript-markdown-changed');
   });
 }
@@ -1906,15 +1921,21 @@ function isCommentToken(token: Token): boolean {
  *  text the change leaves, none for a dropped one, as is a comment on an
  *  element or a range's span in dropped text, which commentsOnResolvedText
  *  shows as an indicator where all its text went. An image's alt text
- *  reads the same */
+ *  reads the same. Added text in a deletion or a substitution's old text,
+ *  as `{--a {++b++}--}`'s, is
+ *  deleted text, as export writes all of it in the deletion, so it stays
+ *  where the deletion does */
 function resolveChanges(children: Token[], state: StateCore, resolution: ChangeResolution): Token[] {
   const out: Token[] = [];
   // For each unwrapped open still open, by its type, the range span it
   // became, or undefined where it wrote nothing
   const opened = new Map<string, Array<Token | undefined>>();
+  const inDeletion = (): boolean => ['manuscript_markdown_deletion', 'manuscript_markdown_substitution_old']
+    .some(kind => (opened.get(kind)?.length ?? 0) > 0);
   for (let i = 0; i < children.length; i++) {
     const token = children[i];
-    if (resolution.dropped.has(token.type)) {
+    const deleted = ADDED_TEXT_TOKENS.has(token.type) && inDeletion();
+    if (resolution.dropped.has(token.type) && !deleted) {
       const comment = token.attrGet('data-comment');
       if (comment) out.push(commentSpanOpen(state, comment, token.meta?.manuscriptCommentKey ?? token));
       const closeType = token.type.slice(0, -'_open'.length) + '_close';
@@ -1932,7 +1953,7 @@ function resolveChanges(children: Token[], state: StateCore, resolution: ChangeR
       if (comment) out.push(commentSpanClose(state));
       continue;
     }
-    if (!resolution.unwrapped.has(token.type)) {
+    if (!resolution.unwrapped.has(token.type) && !deleted) {
       if (token.children) token.children = resolveChanges(token.children, state, resolution);
       out.push(token);
       continue;
@@ -2039,8 +2060,9 @@ function commentsOnResolvedText(inlines: Token[], state: StateCore): void {
   }
 }
 
-/** The containers a paragraph's removal can leave with nothing in them */
-const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list', 'blockquote']);
+/** The containers a paragraph's or table row's removal can leave with
+ *  nothing in them */
+const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list', 'blockquote', 'thead', 'tbody', 'table']);
 
 /**
  * Core rule that, where the preview resolves each change, writes the
@@ -2048,7 +2070,10 @@ const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list'
  * resolveChanges), with each comment still shown (see
  * commentsOnResolvedText). A paragraph or heading that held only dropped
  * text goes, as Word drops a paragraph whose text and mark are deleted, and
- * so does a list item, list or quote that held only such paragraphs.
+ * so does a list item, list or quote that held only such paragraphs. So
+ * does a table row whose cells held only dropped text, as export tracks
+ * the row's insertion or deletion (see rowRevision in md-to-docx.ts), the
+ * header row too, and a table with no rows left.
  */
 function resolveChangesRule(state: StateCore, resolution: ChangeResolution): void {
   const tokens = state.tokens;
@@ -2057,14 +2082,19 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
   const hadContent = new Set(inlines.filter(hasText));
   for (const inline of inlines) inline.children = resolveChanges(inline.children!, state, resolution);
   commentsOnResolvedText(inlines, state);
-  for (let i = 0; i < tokens.length; i++) {
-    const inline = tokens[i];
-    if (!hadContent.has(inline) || hasText(inline)) continue;
-    const open = tokens[i - 1];
-    if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
-    // The paragraph's open, inline and close, then each container left empty
-    let start = i - 1;
-    let end = i + 2;
+  // A caption's label, its delimiter only where it still has text to show
+  // (see captionsRule): the text after the label, to the figure's caption's
+  // close or the table's caption's end
+  for (const inline of inlines) {
+    const children = inline.children!;
+    children.forEach((label, at) => {
+      if (label.meta?.captionLabel === undefined) return;
+      const close = children.findIndex((child, after) => after > at && child.type === 'manuscript_figcaption_close');
+      if (!captionHasText(children.slice(at + 1, close < 0 ? children.length : close))) label.content = label.meta.captionLabel;
+    });
+  }
+  // Takes the tokens from start to end, then each container left empty
+  const remove = (start: number, end: number): number => {
     while (
       start > 0 && end < tokens.length &&
       tokens[start - 1].nesting === 1 && tokens[end].nesting === -1 &&
@@ -2075,7 +2105,22 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
       end++;
     }
     tokens.splice(start, end - start);
-    i = start - 1;
+    return start;
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].type === 'tr_open') {
+      let close = i + 1;
+      while (tokens[close].type !== 'tr_close') close++;
+      const cells = tokens.slice(i, close).filter(token => token.type === 'inline' && token.children);
+      if (cells.some(cell => hadContent.has(cell)) && !cells.some(hasText)) i = remove(i, close + 1) - 1;
+      continue;
+    }
+    const inline = tokens[i];
+    if (!hadContent.has(inline) || hasText(inline)) continue;
+    const open = tokens[i - 1];
+    if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
+    // The paragraph's open, inline and close
+    i = remove(i - 1, i + 2) - 1;
   }
 }
 
@@ -2330,6 +2375,7 @@ function captionsRule(state: StateCore): void {
       token.attrJoin('class', 'manuscript-markdown-table-caption');
       const label = new state.Token('text', '', 0);
       label.content = captionLabelText(options.tblTitle, tableNumber) + captionSeparator(options.titleDelim, captionHasText(table.children));
+      label.meta = { captionLabel: captionLabelText(options.tblTitle, tableNumber) };
       inline.children = [label, ...table.children];
       if (options.tblCapLocation === 'top') {
         const paragraph = tokens.splice(i, 3);
@@ -2369,6 +2415,7 @@ function captionsRule(state: StateCore): void {
     const label = new state.Token('text', '', 0);
     // Its delimiter only where it has text to show
     label.content = captionLabelText(options.figTitle, number) + captionSeparator(options.titleDelim, captionHasText(children));
+    label.meta = { captionLabel: captionLabelText(options.figTitle, number) };
     caption.push(open, label);
     for (const child of children) caption.push(Object.assign(new state.Token(child.type, child.tag, child.nesting), child));
     caption.push(new state.Token('manuscript_figcaption_close', 'figcaption', -1));
