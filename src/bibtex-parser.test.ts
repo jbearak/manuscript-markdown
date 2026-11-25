@@ -883,6 +883,25 @@ describe('BibTeX field whitespace', () => {
 });
 
 describe('mergeBibtex line endings', () => {
+  // A file that repeats a key isn't merged on its own skeleton, so these
+  // take the path that writes the entries alone, a blank line between each two
+  const dup = (eol: string) => ['@book{A,', '  title={One}', '}', '', '@book{A,', '  title={Again}', '}', '', '@book{C,', '  title={Two}', '}', ''].join(eol);
+
+  it('separates the entries of an LF file it writes alone with LF blank lines', () => {
+    expect(mergeBibtex(dup('\n'), '@book{D,\n  title={New}\n}'))
+      .toBe('@book{A,\n  title={Again}\n}\n\n@book{C,\n  title={Two}\n}\n\n@book{D,\n  title={New}\n}');
+  });
+
+  it('separates the entries of a CRLF file it writes alone with CRLF blank lines', () => {
+    expect(mergeBibtex(dup('\r\n'), '@book{D,\r\n  title={New}\r\n}'))
+      .toBe('@book{A,\r\n  title={Again}\r\n}\r\n\r\n@book{C,\r\n  title={Two}\r\n}\r\n\r\n@book{D,\r\n  title={New}\r\n}');
+  });
+
+  it('separates by the existing file\'s line ends, and keeps each entry as it is', () => {
+    expect(mergeBibtex(dup('\r\n'), '@book{D,\n  title={New}\n}'))
+      .toBe('@book{A,\r\n  title={Again}\r\n}\r\n\r\n@book{C,\r\n  title={Two}\r\n}\r\n\r\n@book{D,\n  title={New}\n}');
+  });
+
   it('splices each entry using its own line ending, not the file majority', () => {
     // A mixed-ending file must not have its minority-convention entries
     // rewritten to the majority one: `k` is all-LF and must stay that way

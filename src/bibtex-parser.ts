@@ -2391,5 +2391,7 @@ export function mergeBibtex(existing: string, produced: string): string {
 
   declareBefore(existing.length);
   for (const entry of producedOnly()) result.push(entry.text);
-  return result.join('\n\n');
+  // A blank line between each two, in the existing file's line ends, as
+  // inSkeleton puts between the entries it adds
+  return result.join(detectBibtexEol(existing).repeat(2));
 }
