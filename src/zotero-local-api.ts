@@ -580,8 +580,10 @@ export async function fetchZoteroBibtex(
 //   without a key is created.  Each object's outcome is reported by its
 //   index, so one failing object does not fail the request.
 // - If-Unmodified-Since-Version on the request fails the whole batch with
-//   412 when anything in the library changed since that version, which
-//   guards creates: no other write can slip in between plan and write.
+//   412 when anything in the library changed since that version.  Zotero
+//   checks it once, before saving the batch's objects one by one, so it
+//   catches a change made between plan and write, not one made while the
+//   batch is being saved.
 
 /** One collection, with its place in the tree spelled out. */
 export interface ZoteroCollectionSummary {
