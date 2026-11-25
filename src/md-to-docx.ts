@@ -3698,6 +3698,23 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // isImplicitStyleClose), while the blocks after it are paragraphs and
   // quotes in list items with no custom style, which import reads in it
   let unfenced: number | undefined;
+  /** Whether import reads the blocks Word can't style from `at` in the
+   *  block of `style` closed before them, one with such blocks between its
+   *  paragraphs: where the first paragraph at the top level or list item
+   *  past them is in `style`, so it keeps the block open across them with
+   *  no fence (see planRun in convertDocx). Before anything else, as a
+   *  quote, it closes the block with a fence before them */
+  const runGoesOnInBlock = (at: number, style: string): boolean => {
+    let open = state.activeCustomStyle;
+    for (let k = at; k < tokens.length; k++) {
+      const token = tokens[k];
+      // Comment bodies Word gets no paragraph of, as the loop below skips
+      if (omitsCommentBodies(k, tokens[k - 1])) continue;
+      if (isStyleDirective(token)) open = token.customStyleOpen;
+      else if (!unstyledInStyleBlock(token)) return (token.type === 'paragraph' && !token.listContinuation || token.type === 'list_item') && open === style;
+    }
+    return false;
+  };
   // Whether a block Word has a paragraph of has closed where one of
   // another style opened at the top level, with no fence, while that one
   // has no paragraph in its style yet
@@ -3771,7 +3788,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     } else if (unfenced !== undefined && !(token.listContinuation && (token.type === 'blockquote' || listContinuationStyleId(token, state) === 'ManuscriptListContinuation'))) {
       const fenced = token.type === 'paragraph' && !token.listContinuation && !isStyleDirective(token) && !marksSectionOrBibliography(token)
         || token.type === 'list_item' && (token.level ?? 1) === 1
-        || unstyledInStyleBlock(token) && !styleBlockEdges['csi' + unfenced];
+        || unstyledInStyleBlock(token) && !(styleBlockEdges['csi' + unfenced] && closedBlock?.index === unfenced && runGoesOnInBlock(ti, closedBlock.style));
       unfenced = undefined;
       if (fenced) placeUnfencedClose(token);
     }

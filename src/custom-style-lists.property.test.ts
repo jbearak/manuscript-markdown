@@ -398,6 +398,12 @@ describe('Style blocks around lists and in their items', () => {
     }), {
       numRuns: 100,
       examples: [
+        // A quote right after one in an item a style block's opening closes
+        // the block before, with code between its paragraphs, where import
+        // writes the block's closing fence between the quotes
+        [[{ kind: 'open', style: 'box', tight: false }, { kind: 'para' }, { kind: 'unit', unit: 'code' }, { kind: 'list', list: { ordered: false, items: [{ children: [
+          { kind: 'open', style: 'box', tight: false }, { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }, { kind: 'dropped', html: false }] }] } },
+        { kind: 'quote', list: { ordered: false, items: [{ children: [] }] } }]],
         // A <div> right before a closing fence that is tight, which a blank
         // line parts, as the fence would be the <div>'s HTML
         [[{ kind: 'open', style: 'box', tight: false }, { kind: 'unit', unit: 'div' }, { kind: 'close', tight: true }, { kind: 'para' }]],
