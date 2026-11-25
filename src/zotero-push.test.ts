@@ -20,6 +20,10 @@ import { resolveCollection, runZoteroCli } from './zotero-cli';
 // A slice of Zotero 10's /api/schema: the types these tests use.
 const field = (name: string, baseField?: string) => (baseField ? { field: name, baseField } : { field: name });
 const SCHEMA: ZoteroItemSchema = {
+  csl: {
+    types: { 'article-journal': ['journalArticle'], chapter: ['bookSection'], report: ['report'] },
+    names: { author: 'author', editor: 'editor', translator: 'translator' },
+  },
   itemTypes: [
     {
       itemType: 'journalArticle',
@@ -287,11 +291,71 @@ describe('createZoteroPushPlan', () => {
     expect(created.kind === 'create' && created.data.creators).toEqual([{ creatorType: 'author', lastName: 'Flatø', firstName: 'Martin' }]);
   });
 
-  it('reads a \\url{} and escapes, and never writes TeX into an identifier', () => {
-    const withUrl = { ...FLATO, url: 'https://x.org/a_b' };
-    expect(plan(FLATO_BIB.replace('keywords', 'url = {\\url{https://x.org/a\\_b}},\n  keywords'), [withUrl as ZoteroItemJson]).changed).toBe(false);
-    const p = plan(FLATO_BIB.replace('keywords', 'url = {https://x.org/\\foo},\n  keywords'), [FLATO]);
-    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'url', reason: 'tex' }] });
+  it('leaves alone an entry whose identifier is written with TeX the matcher reads otherwise', () => {
+    const p = plan(FLATO_BIB.replace('keywords', 'url = {\\url{https://x.org/a\\_b}},\n  keywords'), [FLATO]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'unreadable-identifier', detail: 'url' });
+  });
+
+  it("reads escaped punctuation in an ISSN but won't write braces", () => {
+    const withIssn = { ...FLATO, ISSN: '0070-3370' };
+    expect(plan(FLATO_BIB.replace('keywords', 'issn = {0070-3370},\n  keywords'), [withIssn as ZoteroItemJson]).changed).toBe(false);
+    const braced = plan(FLATO_BIB.replace('keywords', 'issn = {0070{-}3371},\n  keywords'), [withIssn as ZoteroItemJson]);
+    expect(braced.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'issn', reason: 'tex' }] });
+  });
+
+  it('only takes a DOI-shaped DOI', () => {
+    const noDoi = { ...FLATO, DOI: undefined } as unknown as ZoteroItemJson;
+    const p = plan(FLATO_BIB.replace('10.1007/s13524-017-0638-3', '10.x/'), [noDoi]);
+    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'doi', reason: 'unreadable-doi' }] });
+  });
+
+  it('reads Type: lines by CSL names too, and legacy {:field:value} lines', () => {
+    const cases: Array<[string, boolean]> = [
+      ['Type: chapter', true],
+      ['Type: article-journal', true],
+      ['type: JournalArticle', true],
+      ['{:volume:13}', true],
+      ['Type: article', false],
+      ['Original title: Something', false],
+    ];
+    for (const [extra, skipped] of cases) {
+      const it = { ...FLATO, collections: [], volume: undefined, extra };
+      const action = plan(FLATO_BIB.replace(/ {2}volume = .*\n/, ''), [it as ZoteroItemJson], 'add').actions[0];
+      expect([extra, action.kind === 'skip' && action.reason]).toEqual([extra, skipped ? 'extra-would-migrate' : false]);
+    }
+  });
+
+  it("reads a base field's label as the type's own field", () => {
+    const report = item('REPORT02', { itemType: 'report', title: 'R', citationKey: 'r2000', collections: [], extra: 'Publisher: NCHS' });
+    const action = plan('@techreport{r2000,\n  title = {R}\n}\n', [report], 'add').actions[0];
+    expect(action).toMatchObject({ kind: 'skip', reason: 'extra-would-migrate', detail: 'Publisher' });
+  });
+
+  it("doesn't take a book for a chapter of it by their shared ISBN", () => {
+    const chapter = item('CHAP0001', { itemType: 'bookSection', title: 'A Chapter', ISBN: '9780306406157', citationKey: 'chap2000' });
+    const book = '@book{book2000,\n  title = {The Book},\n  isbn = {978-0-306-40615-7}\n}\n';
+    expect(plan(book, [chapter]).actions[0]).toMatchObject({ kind: 'skip', reason: 'weak-match' });
+  });
+
+  it('takes an https link for the same item', () => {
+    const bib = FLATO_BIB.replace(
+      'keywords = {/unread},',
+      'zotero-key = {FLATO001},\n  zotero-uri = {https://zotero.org/users/1/items/FLATO001},\n  keywords = {/unread},',
+    );
+    expect(plan(bib, [FLATO]).actions[0].kind).toBe('unchanged');
+  });
+
+  it('reads only real dates and standard month names', () => {
+    const forthcoming = { ...FLATO, date: 'forthcoming', parsedDate: undefined } as ZoteroItemJson;
+    const impossible = plan(FLATO_BIB.replace('year = 2018', 'date = {2024-99-99}'), [forthcoming]);
+    expect(impossible.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'year', reason: 'date-unreadable' }] });
+    const custom = plan('@string{janissue = {August}}\n' + FLATO_BIB.replace('year = 2018', 'year = 2018,\n  month = janissue'), [FLATO]);
+    expect(custom.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'year', reason: 'macro' }] });
+    const named = plan(FLATO_BIB.replace('year = 2018', 'year = 2018,\n  month = {February}'), [FLATO]);
+    expect(named.changed).toBe(false);
+    // A date field is read before year, so a year macro beside it is no bar.
+    const both = plan('@string{yr = {2018}}\n' + FLATO_BIB.replace('year = 2018', 'year = yr,\n  date = {2018-02-01}'), [FLATO]);
+    expect(both.changed).toBe(false);
   });
 
   it("keeps Zotero's access time on the same day", () => {
@@ -399,7 +463,8 @@ describe('fetchZoteroLibrarySnapshot', () => {
     const row = {
       key: 'PMID0001',
       library: { type: 'user', id: 1 },
-      data: { key: 'PMID0001', version: 3, itemType: 'journalArticle', title: 'Paper', PMID: '12345678', creators: [] },
+      // The field, not a stale line of Extra, is the one to match on.
+      data: { key: 'PMID0001', version: 3, itemType: 'journalArticle', title: 'Paper', PMID: '12345678', extra: 'PMID: 99999999', creators: [] },
       meta: {},
     };
     const fetchFn: ZoteroFetch = async () => ({
@@ -464,6 +529,14 @@ describe('applyZoteroPush', () => {
     expect(result.error?.kind).toBe('timeout');
     expect(result.outcomes.slice(0, 50).every(o => o === 'unknown')).toBe(true);
     expect(result.outcomes[50]).toBeUndefined();
+  });
+
+  it('marks a batch as unknown when the connection drops, which may be after sending', async () => {
+    const fetchFn: ZoteroFetch = async () => {
+      throw new TypeError('socket hang up');
+    };
+    const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
+    expect(result.outcomes[0]).toBe('unknown');
   });
 
   it('stops at a changed library and sends nothing more', async () => {

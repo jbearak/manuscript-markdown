@@ -123,7 +123,9 @@ export async function applyZoteroPush(
         if (error instanceof ZoteroLocalApiError) {
           // Zotero refused these statuses before writing anything; after
           // any other failure the batch may have been written.
-          const refused = ['unauthorized', 'write-denied', 'library-changed', 'not-running', 'api-disabled'];
+          // (A dropped connection reads as not-running, but the batch may
+          // have been sent, so it is unknown.)
+          const refused = ['unauthorized', 'write-denied', 'library-changed', 'api-disabled'];
           if (!refused.includes(error.kind)) batch.forEach((_, i) => (outcomes[start + i] = 'unknown'));
           return { outcomes, error };
         }
@@ -143,13 +145,15 @@ export async function applyZoteroPush(
 const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   conflict: 'the entry cannot be read safely',
   ambiguous: 'several Zotero items match',
-  'weak-match': 'matched only by URL or title, author and year; link it with a citation key or DOI',
+  'weak-match':
+    'matched only by URL, by title, author and year, or by an ISBN a book shares with its parts; link it with a citation key or DOI',
   'other-library': 'linked to an item in another library',
   'identity-disagreement': "its DOI differs from the matched item's",
   'duplicate-target': 'another entry matches the same item',
   'duplicate-doi': 'another entry would give the same DOI to an item',
   'doi-owned-elsewhere': 'another item in the library has its DOI',
   'unsupported-type': 'no Zotero item type for this entry type',
+  'unreadable-identifier': 'an identifier is written with TeX; write it plain',
   'extra-would-migrate':
     "saving the item would make Zotero move these lines of its Extra field into fields; move them in Zotero first",
 };

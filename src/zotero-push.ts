@@ -60,6 +60,8 @@ export interface ZoteroItemSchema {
   /** Zotero's CSL mappings, which it also reads Extra's lines by. */
   readonly csl?: {
     readonly types?: Readonly<Record<string, readonly string[]>>;
+    /** Zotero creator role → CSL name variable. */
+    readonly names?: Readonly<Record<string, string>>;
     readonly fields?: {
       readonly text?: Readonly<Record<string, readonly string[]>>;
       readonly date?: Readonly<Record<string, string>>;
@@ -128,6 +130,8 @@ export type ZoteroPushSkipReason =
   | 'doi-owned-elsewhere'
   /** Push has no Zotero item type for this entry type. */
   | 'unsupported-type'
+  /** An identifier is written with TeX the matcher doesn't read. */
+  | 'unreadable-identifier'
   /** Saving the item through the Local API would make Zotero move lines of
    *  its Extra field into fields, or change its type by a `Type:` line, so
    *  even adding it to the collection would change it. */
@@ -279,6 +283,11 @@ const MONTHS: ReadonlyArray<string> = [
   'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
 ];
 
+const MONTH_NAMES: ReadonlyArray<string> = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
 const STRONG_TIERS: ReadonlySet<string> = new Set(['existing', 'citation-key', 'doi', 'isbn-pmid']);
 
 type SchemaType = ZoteroItemSchema['itemTypes'][number];
@@ -314,6 +323,13 @@ function isMacro(entry: BibtexEntry, name: string): boolean {
   return written !== undefined && written !== '' && !/^[{"]/.test(written) && !/^\d+$/.test(written);
 }
 
+/** A DOI in its bare lowercase form, if it has a DOI's shape: 10., a
+ *  numeric registrant, a slash and a suffix. */
+function validDoi(value: string | undefined): string | undefined {
+  const doi = normalizeDoi(value);
+  return doi !== undefined && /^10\.\d+(?:\.\d+)*\/\S+$/.test(doi) ? doi : undefined;
+}
+
 /** An identifier or URL as written, with a \url{} around it and TeX's
  *  escaped punctuation read. */
 function readVerbatim(raw: string): string {
@@ -328,8 +344,8 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
   if (name === 'url' || name === 'isbn' || name === 'issn' || name === 'doi') {
     const value = readVerbatim(raw);
     if (value === '') return undefined;
-    if (value.includes('\\')) return { problem: 'tex' };
-    if (name === 'doi' && normalizeDoi(value) === undefined) return { problem: 'unreadable-doi' };
+    if (/[\\{}]/.test(value)) return { problem: 'tex' };
+    if (name === 'doi' && validDoi(value) === undefined) return { problem: 'unreadable-doi' };
     return { value };
   }
   const plain = (bibtexFieldAsPlainText(entry, name) ?? '').replace(/\s+/g, ' ').trim();
@@ -340,24 +356,41 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
 
 /** The entry's date as [year, month?, day?], from biblatex's `date` or from
  *  `year` and `month`. */
+/** A month as BibTeX writes one: its standard macro (`sep`), its English
+ *  name, or its number. */
+function readMonth(entry: BibtexEntry): number | 'macro' | undefined {
+  const month = entry.fields.get('month')?.trim().toLowerCase();
+  if (!month) return undefined;
+  if (/^\d{1,2}$/.test(month)) return Number(month);
+  const macro = MONTHS.indexOf(month) + 1;
+  if (macro > 0) return macro;
+  if (isMacro(entry, 'month')) return 'macro';
+  const named = MONTH_NAMES.indexOf(month) + 1;
+  return named > 0 ? named : undefined;
+}
+
+/** The entry's date as [year, month?, day?], from biblatex's `date` or,
+ *  without one, from `year` and `month`. */
 function readDate(entry: BibtexEntry): { parts: number[] } | { problem: ZoteroFieldNotPushedReason } | undefined {
+  const valid = (parts: number[]): boolean =>
+    (parts[1] === undefined || (parts[1] >= 1 && parts[1] <= 12)) && (parts[2] === undefined || (parts[2] >= 1 && parts[2] <= 31));
   const date = entry.fields.get('date')?.trim();
   if (date) {
+    if (isMacro(entry, 'date')) return { problem: 'macro' };
     const m = /^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$/.exec(date);
-    if (!m) return { problem: 'date-unreadable' };
-    return { parts: [m[1], m[2], m[3]].filter((p): p is string => p !== undefined).map(Number) };
+    const parts = m ? [m[1], m[2], m[3]].filter((p): p is string => p !== undefined).map(Number) : [];
+    return m && valid(parts) ? { parts } : { problem: 'date-unreadable' };
   }
   const year = entry.fields.get('year')?.trim();
   if (!year) return undefined;
+  if (isMacro(entry, 'year')) return { problem: 'macro' };
   if (!/^\d{4}$/.test(year)) return { problem: 'date-unreadable' };
   const parts = [Number(year)];
-  const month = entry.fields.get('month')?.trim().toLowerCase();
-  if (month) {
-    const n = /^\d{1,2}$/.test(month) ? Number(month) : MONTHS.indexOf(month.slice(0, 3)) + 1;
-    if (!(n >= 1 && n <= 12)) return { problem: 'date-unreadable' };
-    parts.push(n);
-  }
-  return { parts };
+  const month = readMonth(entry);
+  if (month === 'macro') return { problem: 'macro' };
+  if (entry.fields.get('month')?.trim() && month === undefined) return { problem: 'date-unreadable' };
+  if (month !== undefined) parts.push(month);
+  return valid(parts) ? { parts } : { problem: 'date-unreadable' };
 }
 
 function formatDate(parts: readonly number[]): string {
@@ -536,7 +569,7 @@ function entryFields(entry: BibtexEntry, type: SchemaType): EntryFields {
     }
   }
   let date: number[] | undefined;
-  const readDateResult = isMacro(entry, 'year') || isMacro(entry, 'date') ? { problem: 'macro' as const } : readDate(entry);
+  const readDateResult = readDate(entry);
   if (readDateResult !== undefined) {
     if ('problem' in readDateResult) notPushed.push({ field: 'year', reason: readDateResult.problem });
     else if (resolveField(type, 'date') === undefined) notPushed.push({ field: 'year', reason: 'no-zotero-field' });
@@ -635,7 +668,7 @@ function updateChanges(
 /** The item's DOI as the link planner reads it: its DOI field, or a
  *  `DOI:` line of Extra. */
 function effectiveDoi(item: ZoteroItemJson): string | undefined {
-  return normalizeDoi(typeof item.DOI === 'string' ? item.DOI : undefined) ?? normalizeDoi(extraFields(item).get('doi'));
+  return validDoi(typeof item.DOI === 'string' ? item.DOI : undefined) ?? validDoi(extraFields(item).get('doi'));
 }
 
 /** The labels of the Extra lines Zotero would act on when the item is next
@@ -649,29 +682,38 @@ function extraMigrations(item: ZoteroItemJson, type: SchemaType, schema: ZoteroI
   const extra = typeof item.extra === 'string' ? item.extra : '';
   if (extra === '') return [];
   const candidates = new Map<string, string[]>();
-  for (const t of schema.itemTypes) for (const f of t.fields) candidates.set(fold(f.field), [f.field]);
-  for (const [variable, mapped] of Object.entries(schema.csl?.fields?.text ?? {})) {
-    candidates.set(fold(variable), [...(candidates.get(fold(variable)) ?? []), ...mapped]);
-  }
-  for (const [variable, mapped] of Object.entries(schema.csl?.fields?.date ?? {})) {
-    candidates.set(fold(variable), [...(candidates.get(fold(variable)) ?? []), mapped]);
-  }
-  const itemTypes = new Set(schema.itemTypes.map(t => t.itemType));
-  const cslTypes = new Set(Object.values(schema.csl?.types ?? {}).flat());
+  const add = (label: string, fields: readonly string[]) =>
+    candidates.set(fold(label), [...(candidates.get(fold(label)) ?? []), ...fields]);
+  for (const t of schema.itemTypes) for (const f of t.fields) add(f.field, [f.field]);
+  for (const [variable, mapped] of Object.entries(schema.csl?.fields?.text ?? {})) add(variable, mapped);
+  for (const [variable, mapped] of Object.entries(schema.csl?.fields?.date ?? {})) add(variable, [mapped]);
+  // Creator lines, as `original-author: …`, become creators.
+  const creatorLabels = new Set<string>([
+    ...schema.itemTypes.flatMap(t => t.creatorTypes.map(c => fold(c.creatorType))),
+    ...Object.values(schema.csl?.names ?? {}).map(fold),
+  ]);
+  // A field the type has, or one the label's field is the base of, as a
+  // report's institution for `Publisher:`, and which the item leaves empty.
+  const fillsEmptyField = (field: string) =>
+    type.fields.some(tf => (tf.field === field || tf.baseField === field) && (typeof item[tf.field] !== 'string' || item[tf.field] === ''));
+  const typeNames = new Set([
+    ...schema.itemTypes.map(t => t.itemType.toLowerCase()),
+    ...Object.keys(schema.csl?.types ?? {}).map(t => t.toLowerCase()),
+  ]);
   const labels: string[] = [];
   for (const line of extra.split(/\n/)) {
-    const m = /^([a-z][a-z -_]+):(.+)/i.exec(line);
+    // Zotero reads both `Label: value` and citeproc's old `{:label:value}`.
+    const m = /^([a-z][a-z -_]+):(.+)/i.exec(line) ?? /^{:([a-z -_]+):(.+)}/i.exec(line);
     if (!m || m[2].trim() === '') continue;
     const key = fold(m[1]);
-    const value = m[2].trim();
+    const value = m[2].trim().toLowerCase();
     if (key === 'type') {
-      const names = itemTypes.has(value) || cslTypes.has(value);
-      if (names && value !== item.itemType && !['note', 'attachment', 'annotation', 'article'].includes(value)) labels.push(m[1]);
+      // Zotero acts on any line naming a type, its own included: it
+      // changes the item to it, or drops the line.
+      if (typeNames.has(value) && !['note', 'attachment', 'annotation', 'article'].includes(value)) labels.push(m[1]);
       continue;
     }
-    const fields = candidates.get(key) ?? [];
-    const valid = fields.some(f => type.fields.some(tf => tf.field === f) && (typeof item[f] !== 'string' || item[f] === ''));
-    if (valid) labels.push(m[1]);
+    if (creatorLabels.has(key) || (candidates.get(key) ?? []).some(fillsEmptyField)) labels.push(m[1]);
   }
   return labels;
 }
@@ -687,6 +729,12 @@ type Candidate =
 
 /** Entry types for a part of a larger work, which shares the work's ISBN. */
 const COMPONENT_TYPES: ReadonlySet<string> = new Set(['incollection', 'inbook', 'inproceedings', 'conference']);
+const COMPONENT_ITEM_TYPES: ReadonlySet<string> = new Set(['bookSection', 'conferencePaper', 'encyclopediaArticle', 'dictionaryEntry']);
+
+/** Identifier fields the link planner matches on.  Written with TeX it
+ *  doesn't read, as \url{…}, the planner and push would read different
+ *  values, so the entry is left alone. */
+const MATCHED_IDENTIFIERS: ReadonlyArray<string> = ['doi', 'isbn', 'pmid', 'url'];
 
 export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   const { parsed } = parseBibtexWithRaw(input.bibText);
@@ -700,12 +748,16 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     if (doi !== undefined) doiOwners.set(doi, [...(doiOwners.get(doi) ?? []), item.key]);
   }
   const entryDoi = (entry: BibtexEntry): string | undefined =>
-    isMacro(entry, 'doi') ? undefined : normalizeDoi(readVerbatim(entry.fields.get('doi') ?? ''));
+    isMacro(entry, 'doi') ? undefined : validDoi(readVerbatim(entry.fields.get('doi') ?? ''));
 
   // First pass: what each entry is, on its own.
   const candidates: Candidate[] = input.decisions.map((decision): Candidate => {
     const entryKey = decision.entry.key;
     const entry = parsed.get(entryKey);
+    const texIdentifier = MATCHED_IDENTIFIERS.find(name => /\\[A-Za-z]/.test(entry?.fields.get(name) ?? ''));
+    if (texIdentifier !== undefined && decision.outcome !== 'conflict') {
+      return skip(entryKey, 'unreadable-identifier', texIdentifier);
+    }
     switch (decision.outcome) {
       case 'conflict':
         return skip(entryKey, 'conflict', decision.reason);
@@ -723,21 +775,22 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         if (decision.outcome === 'update' && !STRONG_TIERS.has(decision.tier)) {
           return skip(entryKey, 'weak-match', decision.target.key);
         }
-        // An ISBN names a book, and a chapter or paper in it shares it.
+        // A stored link names its library as well as its key, and keys are
+        // unique only within a library: the item must be this library's.
+        const item = input.items.get(decision.target.key);
+        const sameUri = (a: string, b: string) => a.replace(/^https?:\/\//, '') === b.replace(/^https?:\/\//, '');
+        if (item === undefined || (item.uri !== undefined && !sameUri(item.uri, decision.target.uri))) {
+          return skip(entryKey, 'other-library', decision.target.uri || decision.target.key);
+        }
+        // An ISBN names a book, and a chapter or paper in it shares it, so
+        // it can't tell a part from its whole either way round.
         if (
           decision.outcome === 'update' &&
           decision.tier === 'isbn-pmid' &&
           !decision.evidence.includes('pmid') &&
-          entry !== undefined &&
-          COMPONENT_TYPES.has(entry.type.toLowerCase())
+          ((entry !== undefined && COMPONENT_TYPES.has(entry.type.toLowerCase())) || COMPONENT_ITEM_TYPES.has(item.itemType))
         ) {
-          return skip(entryKey, 'weak-match', decision.target.key);
-        }
-        // A stored link names its library as well as its key, and keys are
-        // unique only within a library: the item must be this library's.
-        const item = input.items.get(decision.target.key);
-        if (item === undefined || (item.uri !== undefined && item.uri !== decision.target.uri)) {
-          return skip(entryKey, 'other-library', decision.target.uri || decision.target.key);
+          return skip(entryKey, 'weak-match', decision.target.key + ', by ISBN only');
         }
         if (entry === undefined) return skip(entryKey, 'conflict', 'entry-not-editable');
         const doi = entryDoi(entry);

@@ -672,7 +672,9 @@ export async function fetchZoteroLibrarySnapshot(
   // only; give it both, for push alone.
   const pushCatalog = catalog.map(c => {
     const pmid = asString(items.get(c.key)?.PMID);
-    return pmid === undefined ? c : { ...c, extra: (c.extra ? c.extra + '\n' : '') + 'PMID: ' + pmid };
+    // First, so the matcher, which takes the first PMID line, reads the
+    // field over a stale line of Extra.
+    return pmid === undefined ? c : { ...c, extra: 'PMID: ' + pmid + (c.extra ? '\n' + c.extra : '') };
   });
   return { catalog: pushCatalog, items, libraryVersion, serverId };
 }
