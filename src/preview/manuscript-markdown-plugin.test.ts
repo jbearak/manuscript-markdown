@@ -3487,6 +3487,68 @@ describe('Simple Markup preview', () => {
   });
 });
 
+describe('a paragraph mark a change tracks, in the resolved previews', () => {
+  // Export tracks a paragraph break in an addition or deletion as the first
+  // paragraph's mark, so Word joins the two where the view drops the mark
+  function render(view: 'all' | 'none' | 'simple' | 'original', input: string): string {
+    const md = createMarkdownItWithPlugin();
+    md.manuscriptPreviewMarkup = view;
+    return md.render(input).split('</style>\n').pop()!.trim();
+  }
+
+  it('joins the paragraphs a dropped mark separated', () => {
+    expect(render('none', 'A{--\n\n--}B')).toBe('<p>AB</p>');
+    expect(render('original', 'A{++\n\n++}B')).toBe('<p>AB</p>');
+    expect(render('none', 'A {--gone\n\nalso gone--} B')).toBe('<p>A  B</p>');
+    expect(render('original', 'A {++new\n\nmore++} B')).toBe('<p>A  B</p>');
+  });
+
+  it('keeps the paragraphs apart where the mark stays', () => {
+    expect(render('original', 'A{--\n\n--}B')).toBe('<p>A</p>\n<p>B</p>');
+    expect(render('none', 'A{++\n\n++}B')).toBe('<p>A</p>\n<p>B</p>');
+    expect(render('all', 'A{--\n\n--}B')).toBe('<p>A<del class="manuscript-markdown-deletion"></del></p>\n<p><del class="manuscript-markdown-deletion"></del>B</p>');
+  });
+
+  it('joins at each mark of a change over several paragraphs', () => {
+    expect(render('none', 'A{--x\n\ny\n\nz--}B')).toBe('<p>AB</p>');
+    expect(render('none', 'A{--x\n\ny\n\n--}B')).toBe('<p>AB</p>');
+    // A blank line's worth more is no other mark
+    expect(render('none', 'A{--\n\n\n--}B')).toBe('<p>AB</p>');
+    expect(render('none', 'A{--\n\n\n\n--}B')).toBe('<p>AB</p>');
+  });
+
+  it('joins only at the marks the view drops', () => {
+    expect(render('none', 'A{--\n\n--}B{++\n\n++}C')).toBe('<p>AB</p>\n<p>C</p>');
+    expect(render('original', 'A{--\n\n--}B{++\n\n++}C')).toBe('<p>A</p>\n<p>BC</p>');
+  });
+
+  it('tracks a mark as the innermost change, as export does', () => {
+    expect(render('none', '{++a{--\n\n--}b++}')).toBe('<p>ab</p>');
+    expect(render('original', 'x {--a{++\n\n++}b--} y')).toBe('<p>x ab y</p>');
+  });
+
+  it('joins paragraphs in a list item or a quote', () => {
+    expect(render('none', '- a{--\n\n--}b\n')).toBe('<ul>\n<li>\n<p>ab</p>\n</li>\n</ul>');
+    expect(render('none', '> a{--\n\n--}b\n')).toBe('<blockquote>\n<p>ab</p>\n</blockquote>');
+  });
+
+  it('marks the joined block in Simple Markup, which otherwise reads as No Markup', () => {
+    const input = 'One\n\nA {--gone\n\nalso gone--} B\n\nTwo';
+    expect(render('simple', input)).toBe('<p>One</p>\n<p class="manuscript-markdown-changed">A  B</p>\n<p>Two</p>');
+    expect(render('simple', input).replace(' class="manuscript-markdown-changed"', '')).toBe(render('none', input));
+  });
+
+  it('shows a comment on the change, or on text either side, once', () => {
+    const accepted = render('none', 'A{++x\n\ny++}{>>c<<}B');
+    expect(accepted).toBe('<p>A<span class="manuscript-markdown-comment-range" data-comment="c">x</span></p>\n<p><span class="manuscript-markdown-comment-range" data-comment="c">y</span>B</p>');
+    const rejected = render('original', 'A{++x\n\ny++}{>>c<<}B');
+    expect(rejected).toBe('<p>A<span class="manuscript-markdown-comment-indicator" data-comment="c"></span>B</p>');
+    const deleted = render('none', '{==A==}{>>a<<}{--x\n\ny--}{>>d<<}{==B==}{>>b<<}');
+    expect(deleted.match(/<p>/g)).toHaveLength(1);
+    for (const comment of ['a', 'd', 'b']) expect(deleted.split('data-comment="' + comment + '"').length - 1).toBe(1);
+  });
+});
+
 describe('text over a blank line that is no CriticMarkup span', () => {
   it('keeps the text after the closer on its line', () => {
     // A substitution with no ~> is none, as export reads it: its opener

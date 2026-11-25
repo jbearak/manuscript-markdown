@@ -553,6 +553,9 @@ interface CriticBreakSource {
 interface CriticHeadingBoundary {
   kind: CriticBreakKind;
   sourceOffset?: number;
+  // For a paragraph break, the open of the innermost addition or deletion it
+  // is in, whose paragraph mark export tracks as that change
+  revision?: string;
 }
 
 /** Record absolute inline-source offsets so nested payload breaks retain their original positions. */
@@ -813,9 +816,10 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
       next?.type === token.type && typeof sourceOffset === 'number' &&
       next.meta?.manuscriptCriticBreakSourceOffset === sourceOffset;
     const isLineBreak = token.type === 'softbreak' || (token.type === 'hardbreak' && !isParagraphBreak);
-    const insideRevision = openStack.some(wrapper => wrapper.kind === 'token' &&
+    const revision = openStack.slice().reverse().find(wrapper => wrapper.kind === 'token' &&
       (wrapper.open.type === 'manuscript_markdown_addition_open' ||
-       wrapper.open.type === 'manuscript_markdown_deletion_open'));
+       wrapper.open.type === 'manuscript_markdown_deletion_open'))?.open.type;
+    const insideRevision = revision !== undefined;
     const shouldSplit = (isParagraphBreak && (isHeading || insideRevision)) ||
       (splitFirstLineBreak && isLineBreak) ||
       (afterParagraphBreak && isLineBreak && typeof sourceOffset === 'number');
@@ -829,6 +833,7 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
       boundaries.push({
         kind: isParagraphBreak ? 'paragraph' : 'line',
         sourceOffset: typeof sourceOffset === 'number' ? sourceOffset : undefined,
+        revision: isParagraphBreak ? revision : undefined,
       });
       splitFirstLineBreak = false;
       // Extra blank lines form empty segments, which are omitted below. Keep
@@ -982,6 +987,8 @@ function splitCriticBlocksRule(state: StateCore): void {
     const originalStart = inline.map ? (lineMap?.remap(inline.map[0]) ?? inline.map[0]) : 0;
     const headingTokens: [Token, Token, Token] = [headingOpen, inline, headingClose];
     keepRangeMarkers(childSegments, childSegments.map((children, segmentIndex) => (isHeading && segmentIndex === 0) || hasVisibleInlineContent(children)), childSplit.reopened);
+    // The last paragraph kept, and where it ends
+    let kept: { close: Token; index: number } | undefined;
     for (let segmentIndex = 0; segmentIndex < childSegments.length; segmentIndex++) {
       const segment = createCriticBlockSegment(
         state,
@@ -991,8 +998,21 @@ function splitCriticBlocksRule(state: StateCore): void {
         originalStart,
         isHeading && segmentIndex === 0,
       );
+      if (!segment) continue;
+      // The marks from the paragraph before to this block, for
+      // joinParagraphsAtDroppedMarks: as export writes them, those of the
+      // paragraph breaks between, the ones omitted with their empty
+      // paragraphs too
+      if (kept) {
+        kept.close.meta = {
+          ...(kept.close.meta || {}),
+          manuscriptParagraphMarks: childSplit.boundaries.slice(kept.index, segmentIndex)
+            .filter(boundary => boundary.kind === 'paragraph').map(boundary => boundary.revision),
+        };
+      }
+      kept = segment[0].type === 'paragraph_open' ? { close: segment[2], index: segmentIndex } : undefined;
       // eslint-disable-next-line no-restricted-syntax -- a segment's three tokens
-      if (segment) rewritten.push(...segment);
+      rewritten.push(...segment);
     }
     index += 2;
   }
@@ -2093,6 +2113,7 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
       if (!captionHasText(children.slice(at + 1, close < 0 ? children.length : close))) label.content = label.meta.captionLabel;
     });
   }
+  joinParagraphsAtDroppedMarks(tokens, resolution);
   // Takes the tokens from start to end, then each container left empty
   const remove = (start: number, end: number): number => {
     while (
@@ -2121,6 +2142,34 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
     if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
     // The paragraph's open, inline and close
     i = remove(i - 1, i + 2) - 1;
+  }
+}
+
+/**
+ * Joins each paragraph to the next where the view drops every paragraph
+ * mark between them, as splitCriticBlocksRule records them: a deletion's,
+ * accepted, or an addition's, rejected. Export tracks a paragraph break in
+ * a change as the mark of the paragraph before it, so Word joins the two
+ * there. A heading's mark stays, as which style Word gives the paragraph
+ * it joins is not known.
+ */
+function joinParagraphsAtDroppedMarks(tokens: Token[], resolution: ChangeResolution): void {
+  for (let i = 1; i + 3 < tokens.length; i++) {
+    const marks: Array<string | undefined> | undefined = tokens[i].meta?.manuscriptParagraphMarks;
+    if (tokens[i].type !== 'paragraph_close' || !marks?.length ||
+        !marks.every(mark => mark !== undefined && resolution.dropped.has(mark)) ||
+        tokens[i - 1].type !== 'inline' || tokens[i + 1].type !== 'paragraph_open' ||
+        tokens[i + 2].type !== 'inline' || tokens[i + 3].type !== 'paragraph_close') continue;
+    const [first, second] = [tokens[i - 1], tokens[i + 2]];
+    first.children = withLevels((first.children ?? []).concat(second.children ?? []));
+    first.content += second.content;
+    const open = tokens[i - 2];
+    for (const token of [open, first]) {
+      if (token?.map && second.map) token.map = [token.map[0], second.map[1]];
+    }
+    // The second paragraph's close, with the marks after it, ends the two
+    tokens.splice(i, 3);
+    i--;
   }
 }
 
