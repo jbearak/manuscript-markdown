@@ -527,9 +527,12 @@ describe('CriticMarkup\'s markers in a pipe table\'s cells', () => {
   it('reads many openers in a table\'s cells before a later closer in linear time', () => {
     const time = (rows: number) => {
       const text = '| a | b |\n|---|---|\n' + '| {++ | x |\n'.repeat(rows) + '\nz ++}\n';
-      return fastestRun(() => preprocessCriticMarkup(text));
+      return fastestRun(() => preprocessCriticMarkup(text), 5);
     };
-    expect(time(80_000) / time(20_000)).toBeLessThan(8);
+    // Sixteen times the rows: 16 times the time where it's linear, 256 where
+    // it's quadratic. A run of a few milliseconds is too short to tell a
+    // ratio of 4 from one of 8 on a busy machine, as CI's runners are
+    expect(time(160_000) / time(10_000)).toBeLessThan(64);
   }, 30000);
 
   it('reads many comments with one in them in a table\'s cells before later closers in linear time', () => {
