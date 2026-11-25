@@ -356,6 +356,27 @@ describe('Title comments', () => {
     expect((await convertDocx(docx)).markdown).toBe(md);
   });
 
+  it('MD→DOCX→MD keeps separate comments on nothing after the title apart and in order, pass after pass', async () => {
+    for (const n of [2, 11]) {
+      const md = '---\ntitle: T\n---\n\n' + Array.from({ length: n }, (_, i) => '{>>c' + i + '<<}').join('') + '\n\nBody.\n';
+      let out = md;
+      for (let pass = 0; pass < 3; pass++) {
+        out = (await convertDocx((await convertMdToDocx(out)).docx)).markdown;
+        expect(out).toBe(md);
+      }
+    }
+  });
+
+  it('imports comments on different words of a Title paragraph as separate comments in order, and keeps them so', async () => {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx('{==My==}{>>a<<} {==Title==}{>>b<<}\n\nBody.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:p\b[^>]*>(?:<w:pPr>)?/, p => p.endsWith('<w:pPr>') ? p + '<w:pStyle w:val="Title"/>' : p + '<w:pPr><w:pStyle w:val="Title"/></w:pPr>'));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toBe('---\ntitle: My Title\n---\n\n{>>a<<}{>>b<<}\n\nBody.\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
   it('MD→DOCX→MD keeps a comment on nothing with replies one after another, in ID syntax, on the title', async () => {
     const md = '---\ntitle: T\n---\n\n{#1}{/1}\n{#1>>@Ann Lee (2024-01-01 10:00) | c<<}{>>@Ben Ray (2024-01-02 10:00) | r<<}\n\nBody.\n';
     const { docx } = await convertMdToDocx(md);
