@@ -19642,13 +19642,17 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
       continue;
     }
     if (item.type !== 'para' || !item.isTitle) break;
-    // A title paragraph with more than text in it, as an equation, a note's
-    // reference or a picture, stays in the body, whole: a title line holds
-    // text alone, so its text up to that would be the title and the rest a
-    // paragraph of the body
-    let textEnd = i + 1;
-    while (textEnd < content.length && content[textEnd].type === 'text') textEnd++;
-    if (textEnd < content.length && TITLE_BREAKING_ITEMS.has(content[textEnd].type)) break;
+    // After comments before it, a title paragraph with more than text in
+    // it, as an equation, a note's reference or a picture, stays in the
+    // body, whole, with the comments where they were, as it did before they
+    // went on the title: a title line holds text alone, so its text up to
+    // that would be the title and the rest a paragraph of the body. With no
+    // comment before it, it is read so, as it has been
+    if (titles.length === 0 && before.length > 0) {
+      let textEnd = i + 1;
+      while (textEnd < content.length && content[textEnd].type === 'text') textEnd++;
+      if (textEnd < content.length && TITLE_BREAKING_ITEMS.has(content[textEnd].type)) break;
+    }
     // They go on the title, first, as the title's own do, where else they'd
     // make it body text, the frontmatter being the document's start
     if (titles.length === 0 && before.length > 0) {

@@ -483,20 +483,30 @@ describe('A paragraph of comments before the title', () => {
     expect(body).toStartWith('\n{>>@Ann Lee (2024-01-01 10:00) | first\n  {>>@Ben Ray');
   });
 
-  it('leaves a Title paragraph with an equation or a note in it in the body, whole, with the comment before it', async () => {
+  /** The Markdown of a document whose Title paragraph's runs are `runs`,
+   *  after a first paragraph `first` */
+  async function withTitleRuns(runs: string, first: string): Promise<string> {
     const title = /<w:r><w:t>TITLE<\/w:t><\/w:r>/;
-    const math = '<w:r><w:t xml:space="preserve">A </w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath><w:r><w:t xml:space="preserve"> theorem</w:t></w:r>';
     const JSZip = (await import('jszip')).default;
-    for (const first of ['<w:p>' + point(0) + '</w:p>', '']) {
-      const zip = await JSZip.loadAsync(await withFirstParagraph('---\ntitle: TITLE\n---\n\nBODY\n\n{==x==}{>>note<<}\n', first));
-      const xml = await zip.file('word/document.xml')!.async('string');
-      expect(xml).toMatch(title);
-      zip.file('word/document.xml', xml.replace(title, math));
-      // Not `title: A ` with the rest a paragraph of the body
-      const markdown = await stableImport(await zip.generateAsync({ type: 'uint8array' }));
-      expect(parseFrontmatter(markdown).metadata.title).toBeUndefined();
-      expect(markdown).toBe((first ? '{>>note<<}\n\n' : '') + 'A $x$ theorem\n\nBODY\n\nx\n');
-    }
+    const zip = await JSZip.loadAsync(await withFirstParagraph('---\ntitle: TITLE\n---\n\nBODY[^1]\n\n{==x==}{>>note<<}\n\n[^1]: Foot.\n', first));
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toMatch(title);
+    zip.file('word/document.xml', xml.replace(title, runs));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  }
+  const MATH_TITLE = '<w:r><w:t xml:space="preserve">A </w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath><w:r><w:t xml:space="preserve"> theorem</w:t></w:r>';
+  const NOTE_TITLE = '<w:r><w:t>A</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>';
+
+  it('leaves a Title paragraph with an equation or a note in it in the body, whole, with the comment before it', async () => {
+    // Not `title: A ` with the rest a paragraph of the body, beside the comment
+    expect(await withTitleRuns(MATH_TITLE, '<w:p>' + point(0) + '</w:p>')).toStartWith('{>>note<<}\n\nA $x$ theorem\n\nBODY');
+    expect(await withTitleRuns(NOTE_TITLE, '<w:p>' + point(0) + '</w:p>')).toStartWith('{>>note<<}\n\nA[^1]\n\nBODY');
+  });
+
+  it('reads such a Title paragraph with no comment before it as a title still, as before', async () => {
+    // A title that ends in a note, as a paper's with its thanks, is a title
+    expect(parseFrontmatter(await withTitleRuns(NOTE_TITLE, '')).metadata.title).toEqual(['A']);
+    expect(parseFrontmatter(await withTitleRuns(MATH_TITLE, '')).metadata.title).toEqual(['A']);
   });
 
   it('still reads a first paragraph with text before a Title paragraph as body text', async () => {
