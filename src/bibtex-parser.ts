@@ -1349,6 +1349,13 @@ export function readEntryHeader(text: string, at: number, sameLine = false):
  *  ;, ] or backtick in it (see isCitableKey). */
 const ENTRY_KEY_AT = { '}': /\s*([^\s,@}]+)\s*([,}])/y, ')': /\s*([^\s,@)]+)\s*([,)])/y };
 
+/** A key as BibTeX reads it, which it takes for an entry's before it reads
+ *  what follows: after white space, to white space, a comma or, in a brace
+ *  entry, the } (bibtex.web's scan2_white(comma, right_brace); in a paren
+ *  entry, scan1_white(comma)), an @ or a ) in it too. Only mergeBibtex
+ *  reads keys so, to find the entries BibTeX reads between the parser's. */
+const BIBTEX_KEY_AT = { '{': /\s*([^\s,}]+)/y, '(': /\s*([^\s,]+)/y };
+
 /** The key of the entry whose opener is just before `at` in `text`, and
  *  where it starts, and where the entry's body does: just past the comma
  *  after the key, or at the closer, for an entry with no fields; or
@@ -2323,11 +2330,22 @@ export function mergeBibtex(existing: string, produced: string): string {
     });
     gaps.push(existing.slice(from));
     return gaps.some(gap => {
-      for (let at = gap.indexOf('@'); at !== -1; at = gap.indexOf('@', at + 1)) {
+      for (let at = gap.indexOf('@'); at !== -1;) {
         const header = readEntryHeader(gap, at);
-        if (!('type' in header) || PSEUDO_ENTRY_TYPES.has(header.type.toLowerCase())) continue;
-        const key = readEntryKey(gap, header.end, header.opener === '{' ? '}' : ')')?.key;
-        if (key !== undefined && producedKeys.has(key.toLowerCase())) return true;
+        if (!('type' in header)) {
+          at = gap.indexOf('@', header.resume);
+          continue;
+        }
+        if (PSEUDO_ENTRY_TYPES.has(header.type.toLowerCase())) {
+          at = gap.indexOf('@', header.end);
+          continue;
+        }
+        const keyAt = BIBTEX_KEY_AT[header.opener];
+        keyAt.lastIndex = header.end;
+        const key = keyAt.exec(gap);
+        if (key && producedKeys.has(key[1].toLowerCase())) return true;
+        // On after the key, as BibTeX reads on, so each @ is read once
+        at = gap.indexOf('@', header.end + (key?.[0].length ?? 0));
       }
       return false;
     });

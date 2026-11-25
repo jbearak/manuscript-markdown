@@ -1164,6 +1164,8 @@ describe('mergeBibtex', () => {
     ['before another entry', '% ' + book('B', 'Old') + '\n\n' + book('C', 'Keep') + '\n', book('C', 'Keep') + '\n\n' + book('B', 'New')],
     ['in another case', '% ' + book('b', 'Old') + '\n', book('B', 'New')],
     ['in an @comment', '@comment{' + book('B', 'Old') + '}\n', book('B', 'New')],
+    // BibTeX takes the key before it reads what follows
+    ['with no comma after its key', '% @book{B title={Old}}\n', book('B', 'New')],
   ])('drops a commented-out entry whose key the produced file gives, %s', (_name, existing, merged) => {
     expect(mergeBibtex(existing, book('B', 'New'))).toBe(merged);
   });
