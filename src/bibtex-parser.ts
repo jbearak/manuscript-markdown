@@ -2436,13 +2436,13 @@ export function mergeBibtex(existing: string, produced: string): string {
    *  the entry the merge writes after it (`next`, from `nextAt` in it),
    *  which it would read into that one, as `% @book{`, and on, maybe to
    *  the end: `next` is given where an entry the produced file gives comes
-   *  after. Keys are compared without case, as BibTeX
-   *  compares them. Each goes from its @ to where BibTeX reads on for the
-   *  next @, but not into an @string declaration the parser reads, so that
-   *  BibTeX reads the rest of the file as it did, without it; and with the
-   *  lines it fills where it fills them, to its brace-matched end, if there's
-   *  no @ to there, so `% @book{B,`, `%   title = {old},` and `% }` all
-   *  go, and the blank line after them, or before them at the file's end.
+   *  after. Keys are compared without case, as BibTeX compares them.
+   *  Each goes from its @ to where BibTeX reads on for the next @, but not
+   *  into an @string declaration the parser reads, so that BibTeX reads the
+   *  rest of the file as it did, without it; and with the lines it fills
+   *  where it fills them, to its brace-matched end, if there's no @ to
+   *  there, so `% @book{B,`, `%   title = {old},` and `% }` all go, and the
+   *  blank line after them, or before them at the file's end.
    *  Undefined where one starts in a declaration the parser reads, which
    *  BibTeX reads otherwise. */
   const cutsBetween = (from: number, to: number, next?: string, nextAt = 0): Array<[number, number]> | undefined => {
