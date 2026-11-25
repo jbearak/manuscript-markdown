@@ -330,8 +330,9 @@ function validDoi(value: string | undefined): string | undefined {
   return doi !== undefined && /^10\.\d+(?:\.\d+)*\/\S+$/.test(doi) ? doi : undefined;
 }
 
-/** An identifier or URL as written, with a \url{} around it and TeX's
- *  escaped punctuation read. */
+/** An identifier or URL as written, with TeX's escaped punctuation read
+ *  (and a \url{} around it, though an entry whose matched identifiers
+ *  hold TeX is left alone before this is reached; see MATCHED_IDENTIFIERS). */
 function readVerbatim(raw: string): string {
   const unwrapped = /^\\url\{(.*)\}$/s.exec(raw.trim())?.[1] ?? raw.trim();
   return unwrapped.replace(/\\([_&%#$~])/g, '$1').trim();
@@ -354,8 +355,6 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
   return { value: plain };
 }
 
-/** The entry's date as [year, month?, day?], from biblatex's `date` or from
- *  `year` and `month`. */
 /** A month as BibTeX writes one: its standard macro (`sep`), its English
  *  name, or its number. */
 function readMonth(entry: BibtexEntry): number | 'macro' | undefined {
@@ -372,8 +371,11 @@ function readMonth(entry: BibtexEntry): number | 'macro' | undefined {
 /** The entry's date as [year, month?, day?], from biblatex's `date` or,
  *  without one, from `year` and `month`. */
 function readDate(entry: BibtexEntry): { parts: number[] } | { problem: ZoteroFieldNotPushedReason } | undefined {
-  const valid = (parts: number[]): boolean =>
-    (parts[1] === undefined || (parts[1] >= 1 && parts[1] <= 12)) && (parts[2] === undefined || (parts[2] >= 1 && parts[2] <= 31));
+  // A month 1 to 12, and a day the month has, as 29 February only in a
+  // leap year.
+  const valid = ([year, month, day]: number[]): boolean =>
+    (month === undefined || (month >= 1 && month <= 12)) &&
+    (day === undefined || (day >= 1 && day <= new Date(Date.UTC(year, month!, 0)).getUTCDate()));
   const date = entry.fields.get('date')?.trim();
   if (date) {
     if (isMacro(entry, 'date')) return { problem: 'macro' };
@@ -687,33 +689,34 @@ function extraMigrations(item: ZoteroItemJson, type: SchemaType, schema: ZoteroI
   for (const t of schema.itemTypes) for (const f of t.fields) add(f.field, [f.field]);
   for (const [variable, mapped] of Object.entries(schema.csl?.fields?.text ?? {})) add(variable, mapped);
   for (const [variable, mapped] of Object.entries(schema.csl?.fields?.date ?? {})) add(variable, [mapped]);
-  // Creator lines, as `original-author: …`, become creators.
-  const creatorLabels = new Set<string>([
-    ...schema.itemTypes.flatMap(t => t.creatorTypes.map(c => fold(c.creatorType))),
-    ...Object.values(schema.csl?.names ?? {}).map(fold),
-  ]);
-  // A field the type has, or one the label's field is the base of, as a
-  // report's institution for `Publisher:`, and which the item leaves empty.
-  const fillsEmptyField = (field: string) =>
-    type.fields.some(tf => (tf.field === field || tf.baseField === field) && (typeof item[tf.field] !== 'string' || item[tf.field] === ''));
-  const typeNames = new Set([
-    ...schema.itemTypes.map(t => t.itemType.toLowerCase()),
-    ...Object.keys(schema.csl?.types ?? {}).map(t => t.toLowerCase()),
-  ]);
+  // (Creator lines stay: Zotero's save excludes them from the move.)
+  // A label that is the type's own field moves only into it when it's
+  // empty; one that reaches a type's field through a base field or a CSL
+  // variable, as `Publisher:` a report's institution, is matched by Zotero
+  // against fields the item may not list under that name, so it counts
+  // whatever the item holds.
+  const migrates = (label: string, field: string) =>
+    type.fields.some(tf =>
+      tf.field === field
+        ? fold(field) !== label || typeof item[tf.field] !== 'string' || item[tf.field] === ''
+        : tf.baseField === field,
+    );
+  // Zotero looks type names up as written.
+  const typeNames = new Set([...schema.itemTypes.map(t => t.itemType), ...Object.keys(schema.csl?.types ?? {})]);
   const labels: string[] = [];
   for (const line of extra.split(/\n/)) {
     // Zotero reads both `Label: value` and citeproc's old `{:label:value}`.
     const m = /^([a-z][a-z -_]+):(.+)/i.exec(line) ?? /^{:([a-z -_]+):(.+)}/i.exec(line);
     if (!m || m[2].trim() === '') continue;
     const key = fold(m[1]);
-    const value = m[2].trim().toLowerCase();
+    const value = m[2].trim();
     if (key === 'type') {
       // Zotero acts on any line naming a type, its own included: it
       // changes the item to it, or drops the line.
       if (typeNames.has(value) && !['note', 'attachment', 'annotation', 'article'].includes(value)) labels.push(m[1]);
       continue;
     }
-    if (creatorLabels.has(key) || (candidates.get(key) ?? []).some(fillsEmptyField)) labels.push(m[1]);
+    if ((candidates.get(key) ?? []).some(field => migrates(key, field))) labels.push(m[1]);
   }
   return labels;
 }
@@ -727,8 +730,12 @@ type Candidate =
   | { readonly kind: 'create'; readonly entryKey: string; readonly entry: BibtexEntry }
   | Extract<ZoteroPushAction, { kind: 'skip' }>;
 
-/** Entry types for a part of a larger work, which shares the work's ISBN. */
-const COMPONENT_TYPES: ReadonlySet<string> = new Set(['incollection', 'inbook', 'inproceedings', 'conference']);
+/** Entry types for a whole work, which an ISBN can identify, and Zotero
+ *  item types for a part of one, which shares the work's ISBN. */
+const WHOLE_WORK_TYPES: ReadonlySet<string> = new Set([
+  'book', 'booklet', 'manual', 'proceedings', 'mvbook', 'collection', 'mvcollection',
+  'techreport', 'report', 'phdthesis', 'mastersthesis', 'thesis',
+]);
 const COMPONENT_ITEM_TYPES: ReadonlySet<string> = new Set(['bookSection', 'conferencePaper', 'encyclopediaArticle', 'dictionaryEntry']);
 
 /** Identifier fields the link planner matches on.  Written with TeX it
@@ -747,14 +754,21 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     const doi = effectiveDoi(item);
     if (doi !== undefined) doiOwners.set(doi, [...(doiOwners.get(doi) ?? []), item.key]);
   }
-  const entryDoi = (entry: BibtexEntry): string | undefined =>
-    isMacro(entry, 'doi') ? undefined : validDoi(readVerbatim(entry.fields.get('doi') ?? ''));
+  // The DOI the entry would write, read as its field is.
+  const entryDoi = (entry: BibtexEntry): string | undefined => {
+    const read = readText(entry, 'doi');
+    return read !== undefined && 'value' in read ? validDoi(read.value) : undefined;
+  };
 
   // First pass: what each entry is, on its own.
   const candidates: Candidate[] = input.decisions.map((decision): Candidate => {
     const entryKey = decision.entry.key;
     const entry = parsed.get(entryKey);
-    const texIdentifier = MATCHED_IDENTIFIERS.find(name => /\\[A-Za-z]/.test(entry?.fields.get(name) ?? ''));
+    // As written: the parser reads some TeX away, as \url{} around a PMID,
+    // which the matcher doesn't.
+    const texIdentifier = MATCHED_IDENTIFIERS.find(name =>
+      /\\[A-Za-z]/.test(entry?.writtenFields?.get(name) ?? entry?.fields.get(name) ?? ''),
+    );
     if (texIdentifier !== undefined && decision.outcome !== 'conflict') {
       return skip(entryKey, 'unreadable-identifier', texIdentifier);
     }
@@ -783,14 +797,19 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
           return skip(entryKey, 'other-library', decision.target.uri || decision.target.key);
         }
         // An ISBN names a book, and a chapter or paper in it shares it, so
-        // it can't tell a part from its whole either way round.
+        // it identifies only a whole work, on both sides.
         if (
           decision.outcome === 'update' &&
           decision.tier === 'isbn-pmid' &&
           !decision.evidence.includes('pmid') &&
-          ((entry !== undefined && COMPONENT_TYPES.has(entry.type.toLowerCase())) || COMPONENT_ITEM_TYPES.has(item.itemType))
+          (entry === undefined || !WHOLE_WORK_TYPES.has(entry.type.toLowerCase()) || COMPONENT_ITEM_TYPES.has(item.itemType))
         ) {
           return skip(entryKey, 'weak-match', decision.target.key + ', by ISBN only');
+        }
+        // A DOI match is only as good as the DOI: the matcher compares
+        // values, shaped like DOIs or not.
+        if (decision.outcome === 'update' && decision.tier === 'doi' && (entry === undefined || entryDoi(entry) === undefined)) {
+          return skip(entryKey, 'weak-match', decision.target.key + ', by a value that is not a DOI');
         }
         if (entry === undefined) return skip(entryKey, 'conflict', 'entry-not-editable');
         const doi = entryDoi(entry);

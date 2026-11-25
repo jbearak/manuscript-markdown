@@ -313,7 +313,9 @@ describe('createZoteroPushPlan', () => {
     const cases: Array<[string, boolean]> = [
       ['Type: chapter', true],
       ['Type: article-journal', true],
-      ['type: JournalArticle', true],
+      ['Type: journalArticle', true],
+      ['type: JournalArticle', false],
+      ['Original author: Smith, Ann', false],
       ['{:volume:13}', true],
       ['Type: article', false],
       ['Original title: Something', false],
@@ -329,6 +331,33 @@ describe('createZoteroPushPlan', () => {
     const report = item('REPORT02', { itemType: 'report', title: 'R', citationKey: 'r2000', collections: [], extra: 'Publisher: NCHS' });
     const action = plan('@techreport{r2000,\n  title = {R}\n}\n', [report], 'add').actions[0];
     expect(action).toMatchObject({ kind: 'skip', reason: 'extra-would-migrate', detail: 'Publisher' });
+  });
+
+  it("reads a base field's label whatever the type's own field holds", () => {
+    const report = item('REPORT03', { itemType: 'report', title: 'R', citationKey: 'r2001', collections: [], institution: 'A', extra: 'Publisher: B' });
+    expect(plan('@techreport{r2001,\n  title = {R}\n}\n', [report], 'add').actions[0]).toMatchObject({ reason: 'extra-would-migrate' });
+  });
+
+  it('takes an ISBN only for a whole work', () => {
+    const dictionary = item('DICT0001', { itemType: 'book', title: 'The Dictionary', ISBN: '9780306406157', citationKey: 'dict2000' });
+    const entry = '@inreference{word2000,\n  title = {A Word},\n  isbn = {978-0-306-40615-7}\n}\n';
+    expect(plan(entry, [dictionary]).actions[0]).toMatchObject({ kind: 'skip', reason: 'weak-match' });
+  });
+
+  it("doesn't take a match by a value that isn't a DOI", () => {
+    const odd = item('ODD00001', { title: 'Other', DOI: '10.x/', citationKey: 'odd2000' });
+    const bib = FLATO_BIB.replace('flato2018differential,', 'someone2018,').replace('10.1007/s13524-017-0638-3', '10.x/');
+    expect(plan(bib, [odd]).actions[0]).toMatchObject({ kind: 'skip', reason: 'weak-match' });
+  });
+
+  it('reads identifiers as written, before the parser reads TeX away', () => {
+    const bib = '@article{x2000,\n  title = {X},\n  pmid = {\\url{12345678}}\n}\n';
+    expect(plan(bib, []).actions[0]).toMatchObject({ kind: 'skip', reason: 'unreadable-identifier', detail: 'pmid' });
+  });
+
+  it("counts only the DOIs it would write in collisions", () => {
+    const bib = '@article{a2000,\n  title = {A},\n  doi = {{10.1234/a}}\n}\n\n@article{b2000,\n  title = {B},\n  doi = {10.1234/a}\n}\n';
+    expect(plan(bib, []).actions.map(a => a.kind)).toEqual(['create', 'create']);
   });
 
   it("doesn't take a book for a chapter of it by their shared ISBN", () => {
@@ -347,8 +376,11 @@ describe('createZoteroPushPlan', () => {
 
   it('reads only real dates and standard month names', () => {
     const forthcoming = { ...FLATO, date: 'forthcoming', parsedDate: undefined } as ZoteroItemJson;
-    const impossible = plan(FLATO_BIB.replace('year = 2018', 'date = {2024-99-99}'), [forthcoming]);
-    expect(impossible.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'year', reason: 'date-unreadable' }] });
+    for (const date of ['2024-99-99', '2023-02-29']) {
+      const impossible = plan(FLATO_BIB.replace('year = 2018', `date = {${date}}`), [forthcoming]);
+      expect(impossible.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'year', reason: 'date-unreadable' }] });
+    }
+    expect(plan(FLATO_BIB.replace('year = 2018', 'date = {2024-02-29}'), [forthcoming]).actions[0].kind).toBe('update');
     const custom = plan('@string{janissue = {August}}\n' + FLATO_BIB.replace('year = 2018', 'year = 2018,\n  month = janissue'), [FLATO]);
     expect(custom.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'year', reason: 'macro' }] });
     const named = plan(FLATO_BIB.replace('year = 2018', 'year = 2018,\n  month = {February}'), [FLATO]);
