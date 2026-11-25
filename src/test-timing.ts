@@ -33,10 +33,11 @@ export async function fastestRunAsync(work: () => Promise<unknown>, samples = 3)
  * fastest of a few runs. Work that takes linear time takes about 16 times as
  * long, or less where a fixed cost counts at the smaller size, and work that
  * takes time in the square of the size about 256 times. Tests want under
- * GROWTH_LIMIT, which is four times either way: a busy machine can slow
- * the larger runs some, but not four times over, as it did to tests that
- * timed four times the size and wanted under 8, the geometric middle of 4
- * and 16, or twice the size and wanted under 3. The first call warms up
+ * GROWTH_LIMIT, four times the linear ratio and a fourth of the quadratic
+ * one. That leaves a busy machine's slower larger runs room the earlier
+ * tests didn't, which timed four times the size and wanted under 8, the
+ * geometric middle of 4 and 16, or twice the size and wanted under 3. The
+ * first call warms up
  */
 export function growthOverSixteenfold(time: (size: number) => number, size: number): number {
   time(size);
