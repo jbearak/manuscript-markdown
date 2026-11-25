@@ -2399,9 +2399,10 @@ export function mergeBibtex(existing: string, produced: string): string {
     const staysOpen = (text: string, from: number, opener: '{' | '('): boolean => {
       let depth = opener === '{' ? 1 : 0;
       // In a quoted value of an entry ( opens, whose ) is text there. One
-      // that runs to the text's end keeps the entry open; after one that
-      // closes, the ) in it counts as a closer, as it did before quotes
-      // were read, where the padding inSkeleton writes serves BibTeX
+      // that runs to the text's end, or a brace still open there, keeps the
+      // entry open; otherwise a ) in a quote counts as a closer, as it did
+      // before quotes were read, where the padding inSkeleton writes serves
+      // BibTeX
       let quoted = false, closedInQuote = false;
       for (let i = from; i < text.length; i++) {
         const c = text[i];
@@ -2416,7 +2417,7 @@ export function mergeBibtex(existing: string, produced: string): string {
           closedInQuote = true;
         }
       }
-      return quoted || !closedInQuote;
+      return quoted || depth > 0 || !closedInQuote;
     };
     let from = 0;
     const gapStarts: number[] = [];

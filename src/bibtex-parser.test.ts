@@ -1207,6 +1207,7 @@ describe('mergeBibtex', () => {
     ['an entry in parentheses', '% @book(X, note = {a}'],
     // Whose ) is text in the quoted value, which runs to the file's end
     ['a quoted value of an entry in parentheses', '% @misc(k, n = "a)'],
+    ['a braced value after a quoted one with a )', '% @misc(k, title = "a)", note = {open'],
     ['a declaration', '% @string{'],
   ])('drops text after the last entry that leaves BibTeX in %s, where an entry is added after it', (_name, open) => {
     const existing = book('A', 'Keep') + '\n\n% a note\n' + open + '\n';
