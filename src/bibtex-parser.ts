@@ -252,6 +252,14 @@ export function bibtexFieldAsPlainText(entry: BibtexEntry, fieldName: string): s
   return tex.replace(/\\([{}\\$])|[{}]/g, (_brace, escaped: string | undefined) => escaped ?? '');
 }
 
+/** A part of a name as plain text, as Zotero stores it: every command the
+ *  parser reads in other fields read too, as \o in Flat{\o}, which it leaves
+ *  in names (see decodeBibtexText), and then its groups' braces dropped and
+ *  its escaped braces, backslashes and dollar signs as the characters. */
+export function bibtexNamePartAsPlainText(part: string): string {
+  return decodeBibtexText(part).replace(/\\([{}\\$])|[{}]/g, (_brace, escaped: string | undefined) => escaped ?? '');
+}
+
 /** A field's value as TeX (see BibtexEntry.texFields) as text, as citeproc
  *  reads it: its escaped braces, backslashes and dollar signs as the
  *  characters */

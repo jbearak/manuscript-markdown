@@ -106,6 +106,14 @@ export function describeZoteroLocalApiError(
         'other applications can resolve. Log in to your Zotero account in Zotero, ' +
         'or choose a group library instead.'
       );
+    case 'unauthorized':
+      return 'Zotero refused the write key. Run the command again and allow access in Zotero.';
+    case 'authorization-denied':
+      return 'Access was denied in Zotero, so nothing was written.';
+    case 'write-denied':
+      return 'Zotero does not let you edit this library. Choose a library you can edit.';
+    case 'library-changed':
+      return 'The Zotero library changed while the command was running. Run it again.';
     case 'request-failed':
       return 'The request to Zotero failed unexpectedly. See the output channel for details.';
   }

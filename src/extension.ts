@@ -67,7 +67,18 @@ import {
 } from './bibtex-entry-templates';
 import { createZoteroSyncPlan, zoteroSyncKeys } from './zotero-sync';
 import {
+	applyZoteroPush,
+	formatZoteroPushReport,
+	formatZoteroPushSummary,
+	prepareZoteroPush,
+	zoteroPushSucceeded,
+	type ZoteroKeyProvider,
+	ZOTERO_APP_NAME,
+} from './zotero-push-run';
+import {
 	listZoteroGroups,
+	listZoteroCollections,
+	authorizeZoteroLocalApi,
 	fetchZoteroBibtex,
 	fetchZoteroCatalog,
 	ZoteroLocalApiError,
@@ -454,6 +465,13 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manuscript-markdown.syncBibliographyFromZotero', () =>
 			syncBibliographyFromZotero()
+		)
+	);
+
+	// Register Push Bibliography to Zotero command
+	context.subscriptions.push(
+		vscode.commands.registerCommand('manuscript-markdown.pushBibliographyToZotero', () =>
+			pushBibliographyToZotero(context.secrets)
 		)
 	);
 
@@ -2215,6 +2233,180 @@ async function showZoteroLinkResult(message: string, unmatchedUri?: vscode.Uri):
 	} else if (action === 'Open Unmatched' && unmatchedUri) {
 		await vscode.commands.executeCommand('vscode.open', unmatchedUri);
 	}
+}
+
+// --- Push Bibliography to Zotero ---
+
+/** Where a remembered write key for one Zotero instance is kept. */
+function zoteroKeySecret(serverId: string): string {
+	return 'manuscript-markdown.zotero-local-api-key.' + serverId;
+}
+
+/** Write keys from VS Code's secret storage, asking Zotero for one when
+ *  there is none.  A key granted with Allow rather than Always Allow is good
+ *  for one write request, so it is used once and never stored. */
+function extensionKeyProvider(secrets: vscode.SecretStorage, serverId: string): ZoteroKeyProvider {
+	return {
+		async get() {
+			const stored = await secrets.get(zoteroKeySecret(serverId));
+			if (stored) {
+				return stored;
+			}
+			const granted = await vscode.window.withProgress(
+				{
+					location: vscode.ProgressLocation.Notification,
+					title: 'Allow Manuscript Markdown to edit your library in the Zotero window (choose "Always Allow" to not be asked again)…',
+					cancellable: true,
+				},
+				async (_progress, token) => {
+					const controller = new AbortController();
+					token.onCancellationRequested(() => controller.abort());
+					return authorizeZoteroLocalApi(ZOTERO_APP_NAME, { signal: controller.signal });
+				}
+			);
+			if (granted.remember) {
+				await secrets.store(zoteroKeySecret(serverId), granted.key);
+			}
+			return granted.key;
+		},
+		async invalidate() {
+			await secrets.delete(zoteroKeySecret(serverId));
+		},
+	};
+}
+
+async function pushBibliographyToZotero(secrets: vscode.SecretStorage): Promise<void> {
+	// As for the pull: "localhost" in a remote workspace is not the desktop.
+	if (vscode.env.remoteName !== undefined) {
+		vscode.window.showErrorMessage(
+			'Push Bibliography to Zotero needs Zotero running on the same machine as this window. ' +
+			'Open the bibliography in a local window to push it.'
+		);
+		return;
+	}
+	const bibUri = await resolveZoteroLinkBibliography();
+	if (!bibUri) {
+		return;
+	}
+	const bibName = path.basename(bibUri.fsPath);
+	// The push reads the file on disk, so unsaved edits would be left out.
+	if (vscode.workspace.textDocuments.find(d => d.uri.toString() === bibUri.toString())?.isDirty) {
+		vscode.window.showErrorMessage(`"${bibName}" has unsaved changes. Save it, then run this command again.`);
+		return;
+	}
+
+	const mode = await vscode.window.showQuickPick(
+		[
+			{
+				label: 'Add',
+				description: 'Put every entry in the collection',
+				detail: 'Entries Zotero has elsewhere are added to the collection; the rest are created there. No existing item is edited.',
+				mode: 'add' as const,
+			},
+			{
+				label: 'Add and Update',
+				description: 'Also make matched items say what the bibliography says',
+				detail: 'Fields that differ in Zotero are replaced with the bibliography\'s. Fields the bibliography lacks are left alone.',
+				mode: 'update' as const,
+			},
+		],
+		{ title: 'Push Bibliography to Zotero', placeHolder: 'What should the push do?' }
+	);
+	if (!mode) {
+		return;
+	}
+
+	try {
+		const groups = await listZoteroGroups();
+		const library = await vscode.window.showQuickPick(buildZoteroLibraryPickItems(groups), {
+			title: 'Push Bibliography to Zotero',
+			placeHolder: 'Select the Zotero library to push to',
+		});
+		if (!library) {
+			return;
+		}
+		const collections = await listZoteroCollections(library.scope);
+		if (collections.length === 0) {
+			vscode.window.showErrorMessage(`"${library.label}" has no collections. Create one in Zotero, then run this command again.`);
+			return;
+		}
+		const collection = await vscode.window.showQuickPick(
+			collections.map(c => ({ label: c.path, description: c.key, collection: c })),
+			{ title: 'Push Bibliography to Zotero', placeHolder: 'Select the collection to push to', matchOnDescription: true }
+		);
+		if (!collection) {
+			return;
+		}
+
+		const bibText = new TextDecoder().decode(await vscode.workspace.fs.readFile(bibUri));
+		const prepared = await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: `Reading "${library.label}" from Zotero…`,
+				cancellable: true,
+			},
+			async (_progress, token) => {
+				const controller = new AbortController();
+				token.onCancellationRequested(() => controller.abort());
+				return prepareZoteroPush(library.scope, bibText, collection.collection.key, mode.mode, { signal: controller.signal });
+			}
+		);
+		if (prepared === undefined) {
+			vscode.window.showErrorMessage(
+				`Could not safely parse "${bibName}", so nothing was pushed. Check the file for unbalanced braces or a stray @.`
+			);
+			return;
+		}
+		const channel = getZoteroLinkOutputChannel();
+		const label = collection.collection.path;
+		if (!prepared.plan.changed) {
+			channel.appendLine(formatZoteroPushReport(prepared.plan, label));
+			channel.appendLine('');
+			await showZoteroLinkResult('Nothing to push. ' + formatZoteroPushSummary(prepared.plan, label));
+			return;
+		}
+
+		const report = formatZoteroPushReport(prepared.plan, label);
+		const detailLines = report.split('\n').slice(1);
+		const choice = await vscode.window.showWarningMessage(
+			'Push to Zotero? ' + formatZoteroPushSummary(prepared.plan, label),
+			{
+				modal: true,
+				detail:
+					(detailLines.length > 40 ? [...detailLines.slice(0, 40), `… and ${detailLines.length - 40} more lines in the output channel.`] : detailLines).join('\n') +
+					'\n\nZotero keeps no undo for these changes.',
+			},
+			'Push'
+		);
+		if (choice !== 'Push') {
+			return;
+		}
+
+		const result = await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Notification, title: 'Pushing to Zotero…' },
+			() => applyZoteroPush(library.scope, prepared, extensionKeyProvider(secrets, prepared.serverId))
+		);
+		channel.appendLine(formatZoteroPushReport(prepared.plan, label, result));
+		channel.appendLine('');
+		if (zoteroPushSucceeded(result)) {
+			await showZoteroLinkResult('Pushed to Zotero. ' + formatZoteroPushSummary(prepared.plan, label));
+		} else {
+			const why = result.error ? ' ' + describeZoteroLocalApiErrorOrMessage(result.error) : '';
+			const action = await vscode.window.showErrorMessage(
+				'Some changes were not pushed to Zotero.' + why,
+				'Show Details'
+			);
+			if (action === 'Show Details') {
+				channel.show();
+			}
+		}
+	} catch (err: unknown) {
+		showZoteroLinkError(err);
+	}
+}
+
+function describeZoteroLocalApiErrorOrMessage(err: ZoteroLocalApiError): string {
+	return err.kind === 'aborted' || err.kind === 'request-failed' ? err.message : describeZoteroLocalApiError(err.kind);
 }
 
 function showZoteroLinkError(err: unknown): void {

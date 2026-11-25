@@ -125,6 +125,31 @@ Zotero must be running on the same machine, with *Settings → Advanced → Misc
 
 See [UI reference](ui.md#sync-bibliography-from-zotero) for the full flow and messages.
 
+### Pushing a Bibliography to Zotero
+
+**Push Bibliography to Zotero** goes the other way: the `.bib` file is what you and your collaborators edit, and Zotero follows it. It needs Zotero 10 or later, whose local API takes writes. It has two modes:
+
+- **Add** puts every entry in a collection you choose. An entry whose item is elsewhere in the library is added to the collection; an entry Zotero lacks is created there, with the entry's citation key in Zotero's Citation Key field, so the next push finds it. No existing item's fields change.
+- **Add and Update** also makes each matched item say what the entry says: a field whose value differs in Zotero is replaced with the entry's. A field the entry lacks is left alone, because a `.bib` exported from Zotero leaves out fields Zotero keeps.
+
+What counts as a difference:
+
+- Text is compared after TeX is read, so `Flat{\o}` matches Zotero's Flatø and `271--294` matches 271–294. Curly and straight quotes count as the same, and so do runs of spaces.
+- Titles and other title-like fields (journal and book titles, series, short titles, and report and thesis types) are compared without regard to case, because BibTeX exports title-case them: `What Is a 'Planned' Pregnancy? {{Empirical}} Data` is Zotero's "What is a 'planned' pregnancy? Empirical data". A change of capitalization alone is not pushed. When a title does change, Zotero gets the entry's capitalization.
+- A date matches when the entry's parts agree with Zotero's as far as the entry goes, so `year = 2014` leaves Zotero's 2014-06-01 alone.
+- A value Zotero keeps as a line of its Extra field, such as `Series: …`, counts as that field.
+- Authors and editors are compared in order. When they differ, that role's names are replaced and Zotero's other creators, such as translators, stay where they were.
+
+Push never writes `file`, `keywords`, `note`, `zotero-key`, or `zotero-uri`. Fields Zotero has nowhere to put are listed as "not pushed" in the report, and so is any value that still holds a TeX command after decoding, because Zotero would store the command literally.
+
+To protect your library, push changes an existing item only when the entry is tied to it by a stored Zotero identity, its citation key, a DOI, an ISBN, or a PMID. An entry that matches only by URL or by title, author and year is reported and left alone, because a wrong match would overwrite someone else's record, and git can't undo that. An entry is also left alone when its DOI differs from its matched item's, when two entries match the same item, or when two new entries share a DOI. Each item is written once, under the version Zotero gave it when the push read the library, so if anything in the library changed in the meantime the push stops rather than overwriting it. Run it again to replan.
+
+The first push asks for permission: Zotero shows a dialog. Choose **Always Allow** so you aren't asked again. The extension keeps the key in VS Code's secret storage. From the command line, run `manuscript-markdown zotero authorize` once (see [CLI](cli.md#zotero)).
+
+If a Better BibTeX auto-export with "keep updated" writes to the same `.bib` file, turn it off or point it elsewhere. Otherwise every change in Zotero, including the push's own, rewrites the file you edit.
+
+See [UI reference](ui.md#push-bibliography-to-zotero) for the flow and messages.
+
 ## YAML Frontmatter
 
 When a DOCX has Zotero document preferences, the converter extracts them as YAML frontmatter:
