@@ -690,16 +690,14 @@ function extraMigrations(item: ZoteroItemJson, type: SchemaType, schema: ZoteroI
   for (const [variable, mapped] of Object.entries(schema.csl?.fields?.text ?? {})) add(variable, mapped);
   for (const [variable, mapped] of Object.entries(schema.csl?.fields?.date ?? {})) add(variable, [mapped]);
   // (Creator lines stay: Zotero's save excludes them from the move.)
-  // A label that is the type's own field moves only into it when it's
-  // empty; one that reaches a type's field through a base field or a CSL
-  // variable, as `Publisher:` a report's institution, is matched by Zotero
-  // against fields the item may not list under that name, so it counts
-  // whatever the item holds.
+  // A label that names one of the type's fields, itself or as a CSL
+  // variable (`Issued:` for date), moves into it only when it's empty; one
+  // that reaches a type's field through a base field, as `Publisher:` a
+  // report's institution, is matched by Zotero against a name the item
+  // doesn't list, so it counts whatever the item holds.
   const migrates = (label: string, field: string) =>
     type.fields.some(tf =>
-      tf.field === field
-        ? fold(field) !== label || typeof item[tf.field] !== 'string' || item[tf.field] === ''
-        : tf.baseField === field,
+      tf.field === field ? typeof item[tf.field] !== 'string' || item[tf.field] === '' : tf.baseField === field,
     );
   // Zotero looks type names up as written.
   const typeNames = new Set([...schema.itemTypes.map(t => t.itemType), ...Object.keys(schema.csl?.types ?? {})]);

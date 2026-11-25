@@ -316,6 +316,7 @@ describe('createZoteroPushPlan', () => {
       ['Type: journalArticle', true],
       ['type: JournalArticle', false],
       ['Original author: Smith, Ann', false],
+      ['Issued: 2001-2002', false],
       ['{:volume:13}', true],
       ['Type: article', false],
       ['Original title: Something', false],
