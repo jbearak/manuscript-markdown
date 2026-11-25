@@ -1271,8 +1271,9 @@ export interface ParsedBibtexWithRaw {
  *  not the document's layout. */
 interface ScannedBibtex extends ParsedBibtexWithRaw {
   constructEnds: number[];
-  /** Where each @string declaration is, in source order, of those read
-   *  while the scan is in sync, so none is text in another construct */
+  /** Where each @string and @preamble declaration is, in source order, of
+   *  those read while the scan is in sync, so none is text in another
+   *  construct */
   strings: Array<{ start: number; end: number }>;
 }
 
@@ -1589,7 +1590,7 @@ function scanBibtex(input: string): ScannedBibtex {
         pos = close + 1;
         requireLineStart = false;
         if (synced) constructEnds.push(pos);
-        if (synced && lowerType === 'string') strings.push({ start: entryStart, end: close + 1 });
+        if (synced && lowerType !== 'comment') strings.push({ start: entryStart, end: close + 1 });
       }
       continue;
     }
@@ -2174,9 +2175,12 @@ export function spliceFieldsIntoEntry(
  *  - Everything between the existing file's entries — `%` comments,
  *    `@comment`, `@preamble` and `@string` declarations, blank lines — stays
  *    as written, so a file that round-trips through Word comes back as it
- *    was, unless the file repeats a key, the scan loses its place in it, or
+ *    was, unless the file repeats a key, the scan loses its place in it,
  *    that text holds an entry BibTeX reads, as `% @book{B,`, whose key the
- *    produced file gives too.
+ *    produced file gives too, or the text after the last entry leaves
+ *    BibTeX in one, as `% @book{`, where produced entries would follow it.
+ *    Such a file keeps its entries and its `@string` and `@preamble`
+ *    declarations alone.
  *  - Produced-only entries are appended at the end.
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
@@ -2324,9 +2328,31 @@ export function mergeBibtex(existing: string, produced: string): string {
    *  is an entry B to it. Copied with the produced B, BibTeX reads B twice,
    *  reports a repeated entry and keeps the stale one. Keys are compared
    *  without case, as BibTeX compares them. An `@` in a `@string` or
-   *  `@preamble` value can match too, which only costs the skeleton. */
+   *  `@preamble` value can match too, which only costs the skeleton.
+   *
+   *  True too if the text after the last entry, where produced-only entries
+   *  go, leaves BibTeX in an entry or a declaration it opens there, as
+   *  `% @book{` with no closer: BibTeX would read the entries added after
+   *  it as that one's text, and find none of them. */
   const betweenEntriesRepeatsProducedKey = (): boolean => {
     const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
+    const appends = producedOnly().length > 0;
+    // Whether what `opener` opens just before `from` in `text` is still
+    // open at the text's end, by its delimiters, which BibTeX counts in
+    // quotes too
+    const staysOpen = (text: string, from: number, opener: '{' | '('): boolean => {
+      let depth = opener === '{' ? 1 : 0;
+      for (let i = from; i < text.length; i++) {
+        const c = text[i];
+        if (c === '{') depth++;
+        else if (c === '}') {
+          // One that closes it, or one too many, which BibTeX reports, and
+          // reads on for the next @
+          if (--depth <= 0 && (opener === '{' || depth < 0)) return false;
+        } else if (c === ')' && opener === '(' && depth === 0) return false;
+      }
+      return true;
+    };
     let from = 0;
     const gaps = existingResult.ranges.map(range => {
       const gap = existing.slice(from, range.start);
@@ -2334,13 +2360,16 @@ export function mergeBibtex(existing: string, produced: string): string {
       return gap;
     });
     gaps.push(existing.slice(from));
-    return gaps.some(gap => {
+    return gaps.some((gap, k) => {
+      const last = appends && k === gaps.length - 1;
       for (let at = gap.indexOf('@'); at !== -1;) {
         const header = readEntryHeader(gap, at);
         if (!('type' in header)) {
           at = gap.indexOf('@', header.resume);
           continue;
         }
+        // BibTeX reads on past an @comment for the next @, so it opens nothing
+        if (last && header.type.toLowerCase() !== 'comment' && staysOpen(gap, header.end, header.opener)) return true;
         if (PSEUDO_ENTRY_TYPES.has(header.type.toLowerCase())) {
           at = gap.indexOf('@', header.end);
           continue;
@@ -2362,17 +2391,19 @@ export function mergeBibtex(existing: string, produced: string): string {
   }
 
   // A file the scan lost its place in, that repeats a key, whose text
-  // between entries gives BibTeX a key the produced file does, or whose
-  // skeleton reads otherwise: its entries and @string declarations alone,
-  // as the parser read them, since the text between them may be part of an
-  // entry
+  // between entries gives BibTeX a key the produced file does or leaves it
+  // in an entry, or whose skeleton reads otherwise: its entries and @string
+  // and @preamble declarations alone, as the parser read them, since the
+  // text between them may be part of an entry
   const result: string[] = [];
 
-  // The existing file's @string declarations, as written, each before the
-  // first entry that came after it there, so BibTeX reads each macro an
-  // entry uses, a field copied into a merged entry too, as the existing
-  // file declared it where it read that entry. Without them, it warns that
-  // the macro is undefined and drops the field's text.
+  // The existing file's @string and @preamble declarations, as written,
+  // each before the first entry that came after it there, so BibTeX reads
+  // each macro an entry uses, a field copied into a merged entry too, as
+  // the existing file declared it where it read that entry. Without them,
+  // it warns that the macro is undefined and drops the field's text, and a
+  // command an @preamble defines for the entries' text, as \newcommand's,
+  // is undefined where LaTeX sets the bibliography.
   const declarations = existingResult.strings;
   const existingKeys = existingResult.ranges.filter(range => entryStarts.get(range.key) === range.start && existingParsed.has(range.key)).map(range => range.key);
   let declared = 0;

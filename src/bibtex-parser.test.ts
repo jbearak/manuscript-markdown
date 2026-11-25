@@ -1189,6 +1189,37 @@ describe('mergeBibtex', () => {
     expect(mergeBibtex(existing, book('B', 'New'))).toBe(merged);
   });
 
+  it('keeps the @preamble and @string declarations of a file with such an entry, in their places', () => {
+    // Without the @preamble, LaTeX stops at \\mybibname where it sets the bibliography
+    const preamble = '@preamble{"\\newcommand{\\mybibname}{Jane}"}';
+    const a = '@book{A, author={\\mybibname{}}, title={Keep}, publisher=pub, year={2020}}';
+    const existing = preamble + '\n\n@string{pub = "Press"}\n\n% a note\n' + a + '\n\n@PREAMBLE("late")\n% ' + book('B', 'Old') + '\n';
+    expect(mergeBibtex(existing, book('B', 'New')))
+      .toBe([preamble, '@string{pub = "Press"}', a, '@PREAMBLE("late")', book('B', 'New')].join('\n\n'));
+  });
+
+  // BibTeX reads on from `% @book{` for the entry's key and fields, so an
+  // entry added after it is that one's text, and BibTeX finds no B
+  it.each([
+    ['an entry', '% @book{'],
+    ['an entry with a key', '% @book{X,'],
+    ['a field\'s value', '% @book{X, note = {open'],
+    ['an entry in parentheses', '% @book(X, note = {a}'],
+    ['a declaration', '% @string{'],
+  ])('drops text after the last entry that leaves BibTeX in %s, where an entry is added after it', (_name, open) => {
+    const existing = book('A', 'Keep') + '\n\n% a note\n' + open + '\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + book('B', 'New'));
+    // Nothing is added after it: the file is as it was
+    expect(mergeBibtex(existing, book('A', 'Keep'))).toBe(existing);
+  });
+
+  it('keeps text after the last entry that BibTeX reads no entry in, or one it closes', () => {
+    for (const tail of ['% contact alice@example.test', '% @book{X, title={t}}', '% see @comment{ for more', '% a } too many @book{X}}', '@comment{@book(X, title={t})}']) {
+      const existing = book('A', 'Keep') + '\n\n' + tail + '\n';
+      expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + tail + '\n\n' + book('B', 'New') + '\n');
+    }
+  });
+
   it('keeps a commented-out entry whose key the produced file does not give', () => {
     const existing = '% ' + book('A', 'Old') + '\n\n' + book('C', 'Keep') + '\n';
     expect(mergeBibtex(existing, book('B', 'New'))).toBe('% ' + book('A', 'Old') + '\n\n' + book('C', 'Keep') + '\n\n' + book('B', 'New') + '\n');
