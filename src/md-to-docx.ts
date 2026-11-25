@@ -3708,6 +3708,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     let open = state.activeCustomStyle;
     for (let k = at; k < tokens.length; k++) {
       const token = tokens[k];
+      // Comment bodies Word gets no paragraph of, as the loop below skips
+      if (omitsCommentBodies(k, tokens[k - 1])) continue;
       if (isStyleDirective(token)) open = token.customStyleOpen;
       else if (!unstyledInStyleBlock(token)) return (token.type === 'paragraph' && !token.listContinuation || token.type === 'list_item') && open === style;
     }
