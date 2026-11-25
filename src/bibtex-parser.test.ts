@@ -1235,11 +1235,10 @@ describe('mergeBibtex', () => {
       for (const ending of ['', eol, eol + eol]) {
         const existing = book('A', 'Keep') + eol + tail + ending;
         const merged = mergeBibtex(existing, book('B', 'New'));
-        const lastLine = book('B', 'New') + eol;
         expect(merged.startsWith(existing.trimEnd() + eol + eol + book('B', 'New') + eol)).toBe(true);
-        // Something follows B's line ending
-        expect(merged.length).toBeGreaterThan(merged.indexOf(lastLine) + lastLine.length);
-        expect(merged.endsWith(eol + eol)).toBe(true);
+        // A line after B's, which BibTeX ends at a CR and again at an LF
+        const after = merged.slice(merged.indexOf(book('B', 'New')) + book('B', 'New').length);
+        expect(after).toBe(eol === '\n' ? '\n\n' : ending.length > 2 ? ending : '\r\n');
       }
     }
   });
@@ -1260,6 +1259,16 @@ describe('mergeBibtex', () => {
       expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + book('B', 'New'));
       expect(mergeBibtex(existing, book('A', 'Keep'))).toBe(existing);
     }
+  });
+
+  // The @book( in X's value reads as a header to the check, whose key BibTeX
+  // would read on to the comma, `}}@book{B`. BibTeX reads no such entry: X
+  // ends at its last }, and B after it is an entry, a second B
+  it('drops a commented-out entry whose key the produced file gives, after an @ in another one\'s value', () => {
+    const existing = book('A', 'Keep') + '\n% @misc{X, note={@book(}}' + book('B', 'Old') + '\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + book('B', 'New'));
+    // Where the produced file gives no B, the file keeps its comment
+    expect(mergeBibtex(existing, book('C', 'New'))).toBe(existing + '\n' + book('C', 'New') + '\n\n');
   });
 
   it('keeps a commented-out entry whose key the produced file does not give', () => {
@@ -1986,6 +1995,21 @@ describe('entries inside % comments', () => {
     const cr = '% my library\r' + crBook('A', 'One') + '\r\r' + crBook('C', 'Two') + '\r';
     expect(mergeBibtex(cr, crBook('A', 'Changed')))
       .toBe('% my library\r' + crBook('A', 'Changed') + '\r\r' + crBook('C', 'Two') + '\r');
+  });
+
+  it('puts a lone-CR blank line before an entry it adds to a lone-CR file', () => {
+    const cr = '% my library\r' + crBook('A', 'One') + '\r\r' + crBook('C', 'Two') + '\r';
+    const added = '@book{D,\n  title={New}\n}';
+    expect(mergeBibtex(cr, added + '\n')).toBe(cr.slice(0, -1) + '\r\r' + added + '\r');
+    // And between the entries it writes alone, for a file that repeats a key
+    expect(mergeBibtex(crBook('A', 'One') + '\r\r' + crBook('A', 'Again') + '\r', added))
+      .toBe(crBook('A', 'Again') + '\r\r' + added);
+  });
+
+  it('finds the entries on lone-CR lines after the scan loses its place', () => {
+    const lost = '@book{X, title={open\r\r' + crBook('A', 'One') + '\r\r' + crBook('C', 'Two') + '\r';
+    expect(parseBibtexWithRaw(lost).ranges.map((r) => r.key)).toEqual(['A', 'C']);
+    expect(parseBibtexWithRaw(lost.replace(/\r/g, '\n')).ranges.map((r) => r.key)).toEqual(['A', 'C']);
   });
 });
 

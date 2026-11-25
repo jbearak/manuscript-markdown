@@ -1309,8 +1309,9 @@ const PSEUDO_ENTRY_TYPES: ReadonlySet<string> = new Set(['string', 'comment', 'p
 function isAtLineStart(input: string, pos: number): boolean {
   for (let i = pos - 1; i >= 0; i--) {
     const c = input[i];
-    if (c === '\n') return true;
-    if (c !== ' ' && c !== '\t' && c !== '\r') return false;
+    // A lone CR ends a line too, as it ends a % comment (see isInLineComment)
+    if (c === '\n' || c === '\r') return true;
+    if (c !== ' ' && c !== '\t') return false;
   }
   return true;
 }
@@ -2206,6 +2207,11 @@ export function mergeBibtex(existing: string, produced: string): string {
   // document, so resolve it at most once and only on demand.
   let producedEolCache: BibtexEol | null = null;
   const producedEol = () => (producedEolCache ??= detectBibtexEol(produced));
+  // The existing file's line end, for the blank lines the merge writes
+  // between entries: a lone CR in a file with no line feed, whose lines end
+  // so, as classic Mac OS wrote them, and which detectBibtexEol, whose
+  // callers write LF or CRLF, reads as LF
+  const existingEol = (): string => (existing.includes('\r') && !existing.includes('\n') ? '\r' : detectBibtexEol(existing));
   const existingResult = scanBibtex(existing);
   const producedResult = parseBibtexWithRaw(produced);
   const existingParsed = existingResult.parsed;
@@ -2316,7 +2322,7 @@ export function mergeBibtex(existing: string, produced: string): string {
     if (added.length > 0) {
       // After the last of the existing file, with a blank line between each
       // two in the file's line ends, and the file's own ending after them
-      const blank = detectBibtexEol(existing).repeat(2);
+      const blank = existingEol().repeat(2);
       const ending = out.slice(out.trimEnd().length);
       out = out.slice(0, out.length - ending.length);
       const firstAdded = out.length + blank.length;
@@ -2330,11 +2336,13 @@ export function mergeBibtex(existing: string, produced: string): string {
       // a ( or a key's , where the first added entry's @ is. It reports that,
       // and reads on from that @, but not where that @ is on the file's last
       // line: it stops at the end of the file instead, and the entry is lost.
-      // So a line follows that @'s, where the tail has an @.
+      // So a line follows that @'s, where the tail has an @. BibTeX ends a
+      // line at a CR and again at an LF, so in a CRLF file the empty one
+      // between them is that line.
       const tailStart = existingResult.ranges.length > 0 ? existingResult.ranges[existingResult.ranges.length - 1].end : 0;
       if (existing.indexOf('@', tailStart) !== -1) {
-        const eol = detectBibtexEol(existing);
-        while (!/\n[^]/.test(out.slice(firstAdded))) out += eol;
+        const eol = existingEol();
+        while (!/[\r\n][^]/.test(out.slice(firstAdded))) out += eol;
       }
     }
     const read = scanBibtex(out);
@@ -2360,6 +2368,13 @@ export function mergeBibtex(existing: string, produced: string): string {
    *  ends in an @, which BibTeX reads with the first added entry's type. */
   const betweenEntriesRepeatsProducedKey = (): boolean => {
     const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
+    // BIBTEX_KEY_AT's, read to at most one past the longest produced key,
+    // which lower case doesn't shorten, so a longer key still matches none
+    const cap = [...producedKeys].reduce((longest, key) => Math.max(longest, key.length), 0) + 1;
+    const keysAt = {
+      '{': new RegExp(BIBTEX_KEY_AT['{'].source.replace('+)', '{1,' + cap + '})'), 'y'),
+      '(': new RegExp(BIBTEX_KEY_AT['('].source.replace('+)', '{1,' + cap + '})'), 'y'),
+    };
     const appends = producedOnly().length > 0;
     // Whether what `opener` opens just before `from` in `text` is still
     // open at the text's end, by its delimiters, which BibTeX counts in
@@ -2402,12 +2417,19 @@ export function mergeBibtex(existing: string, produced: string): string {
           at = gap.indexOf('@', header.end);
           continue;
         }
-        const keyAt = BIBTEX_KEY_AT[header.opener];
+        const keyAt = keysAt[header.opener];
         keyAt.lastIndex = header.end;
         const key = keyAt.exec(gap);
         if (key && producedKeys.has(key[1].toLowerCase())) return true;
-        // On after the key, as BibTeX reads on, so each @ is read once
-        at = gap.indexOf('@', header.end + (key?.[0].length ?? 0));
+        // On from the opener, not past the key: an @ in a commented-out
+        // entry's value, as `note={@book(}`, reads as a header here, and its
+        // key can run into a second entry BibTeX reads, as
+        // `}}@book{B,`. BibTeX ends the first entry where its value does, but
+        // where a field's text is not one it reads on from the next @, so
+        // skipping the entry's body could miss B too. Each @ is still read
+        // once, and each key to at most one past the longest produced key's
+        // length, beyond which it matches none
+        at = gap.indexOf('@', header.end);
       }
       return false;
     });
@@ -2452,5 +2474,5 @@ export function mergeBibtex(existing: string, produced: string): string {
   for (const entry of producedOnly()) result.push(entry.text);
   // A blank line between each two, in the existing file's line ends, as
   // inSkeleton puts between the entries it adds
-  return result.join(detectBibtexEol(existing).repeat(2));
+  return result.join(existingEol().repeat(2));
 }
