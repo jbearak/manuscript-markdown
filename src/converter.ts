@@ -2878,7 +2878,48 @@ async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
   // changes as Word writes them read as one change around what each holds
   // (see normalizeTrackedMath)
   const nodes = asXmlNodes(xmlParser(parserOptions).parse(text));
+  if (text.includes('<w:commentReference')) anchorReferenceOnlyComments(nodes);
   return text.includes('<m:oMath') ? normalizeTrackedMath(nodes) : nodes;
+}
+
+/**
+ * Gives each comment that a part marks with its w:commentReference alone,
+ * with no w:commentRangeStart or w:commentRangeEnd, as WordprocessingML
+ * allows and tools other than Word write, an empty range at its first
+ * reference: a start and an end next to the reference's run, before it, or
+ * after it where the run has something before the reference. Import reads
+ * a comment only from its range, so without this it dropped such a comment.
+ * A comment with a range is as it was.
+ */
+function anchorReferenceOnlyComments(nodes: XmlNode[]): void {
+  const anchored = new Set<string>();
+  for (const tag of ['w:commentRangeStart', 'w:commentRangeEnd']) {
+    for (const node of findAllDeep(nodes, tag)) anchored.add(xmlNumberId(getAttr(node, 'id')));
+  }
+  const visit = (children: XmlNode[]): void => {
+    for (let i = 0; i < children.length; i++) {
+      const node = children[i];
+      for (const key of Object.keys(node)) {
+        if (key !== ':@' && Array.isArray(node[key])) visit(node[key]);
+      }
+      const run = node['w:r'];
+      if (!Array.isArray(run)) continue;
+      const markers: XmlNode[] = [];
+      let after = false;
+      run.forEach((child: XmlNode, at: number) => {
+        if (child['w:commentReference'] === undefined) return;
+        const id = xmlNumberId(getAttr(child, 'id'));
+        if (anchored.has(id)) return;
+        anchored.add(id);
+        markers.push({ 'w:commentRangeStart': [], ':@': { ...child[':@'] } }, { 'w:commentRangeEnd': [], ':@': { ...child[':@'] } });
+        after ||= run.slice(0, at).some((other: XmlNode) => !('w:rPr' in other || 'w:commentReference' in other));
+      });
+      if (markers.length === 0) continue;
+      spliceAll(children, after ? i + 1 : i, 0, markers);
+      i += markers.length;
+    }
+  };
+  visit(nodes);
 }
 
 function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50): XmlNode[] {
