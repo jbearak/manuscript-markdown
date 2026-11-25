@@ -79,6 +79,25 @@ describe('parseDta', () => {
     expect(html).toContain('<tr><td data-mm-kind="label">No</td><td data-mm-kind="missing"><span class="mm-missing-value">Don\'t know</span>');
   });
 
+  // Format-114 files name no encoding. R's foreign::write.dta writes
+  // UTF-8 bytes; pandas to_stata(version=114) writes Latin-1.
+  it('reads UTF-8 text in a pre-118 file as UTF-8', () => {
+    const data = Uint8Array.from(Buffer.from(
+      'cgIBAAEAAQAAAFdyaXR0ZW4gYnkgUi4gICAgICAgICAgICAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdjaXR5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJTdzAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGNpdHkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUXXDqWJlYw==',
+      'base64'));
+    const html = parseDta(data, { path: 'r.dta' });
+    expect(html).toContain('<td>Québec</td>');
+  });
+
+  it('reads non-UTF-8 text in a pre-118 file as windows-1252', () => {
+    const data = Uint8Array.from(Buffer.from(
+      'cgIBAAEAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADI0IE5vdiAyMDI2IDIxOjA0AAZjaXR5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJTZzAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUXXpYmVjWvxyaWNo',
+      'base64'));
+    const html = parseDta(data, { path: 'pandas.dta' });
+    expect(html).toContain('<td>Québec</td>');
+    expect(html).toContain('<td>Zürich</td>');
+  });
+
   it('rejects files exceeding the size limit', () => {
     const html = parseDta(FIXTURE_DATA, { path: 'embed.dta' }, 1);
     expect(html).toContain('exceeds maximum size');
