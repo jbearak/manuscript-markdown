@@ -98,6 +98,31 @@ describe('parseDta', () => {
     expect(html).toContain('<td>Zürich</td>');
   });
 
+  // The cell is "CAFÉ" + U+00A0 + "BAR" in Latin-1, whose bytes C9 A0
+  // also read as UTF-8 (U+0260). The data label "Marché" ends in a lone
+  // E9, which UTF-8 can't read, so the file is windows-1252.
+  it('counts the data label when choosing a pre-118 file\'s encoding', () => {
+    const data = Uint8Array.from(Buffer.from(
+      'cgIBAAEAAQAAAE1hcmNo6QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADI1IE5vdiAyMDI2IDA2OjUwAAhzdG9yZQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJThzAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ0FGyaBCQVI=',
+      'base64'));
+    const html = parseDta(data, { path: 'pandas.dta' });
+    expect(html).toContain('<td>CAFÉ BAR</td>');
+  });
+
+  // A format-114 file written as UTF-8, whose data label holds a U+FFFD
+  // of its own (EF BF BD): valid UTF-8, not a byte UTF-8 couldn't read.
+  it('reads a pre-118 UTF-8 file that holds a replacement character itself as UTF-8', () => {
+    const data = Uint8Array.from(Buffer.from('cgIBAAEAAQAAAO+/vQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdjaXR5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJTdzAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGNpdHkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUXXDqWJlYw==', 'base64'));
+    expect(parseDta(data, { path: 'label.dta' })).toContain('<td>Québec</td>');
+  });
+
+  // The same file with a characteristic too short to read. They are only
+  // evidence of the encoding, so the table still reads.
+  it('reads a pre-118 file whose characteristics are damaged', () => {
+    const data = Uint8Array.from(Buffer.from('cgIBAAEAAQAAAFdyaXR0ZW4gYnkgUi4gICAgICAgICAgICAgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdjaXR5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJTdzAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGNpdHkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAABRdcOpYmVj', 'base64'));
+    expect(parseDta(data, { path: 'short.dta' })).toContain('<td>Québec</td>');
+  });
+
   it('rejects files exceeding the size limit', () => {
     const html = parseDta(FIXTURE_DATA, { path: 'embed.dta' }, 1);
     expect(html).toContain('exceeds maximum size');
