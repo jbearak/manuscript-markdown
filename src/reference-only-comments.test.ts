@@ -74,6 +74,19 @@ describe('comments marked by their reference alone', () => {
     expect(await roundTrip(out, xml => xml)).toBe(out);
   });
 
+  test('after a hidden run it is in the middle of, which stays whole', async () => {
+    // Export hides an HTML comment in one run, which import reads as one
+    const md = 'A <!--draft text--> B{>>note<<}\n';
+    const out = await roundTrip(md, xml => {
+      const ref = xml.match(/<w:commentReference w:id="\d+"\/>/)![0];
+      const hidden = /(<w:t>[^<]*draft )(text--&gt;<\/w:t>)/;
+      expect(xml).toMatch(hidden);
+      return xml.replace(/<w:commentRange(?:Start|End) w:id="\d+"\/>|<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference w:id="\d+"\/><\/w:r>/g, '')
+        .replace(hidden, (_, before, after) => before + '</w:t>' + ref + '<w:t>' + after);
+    });
+    expect(out).toBe('A <!--draft text-->{>>note<<} B\n');
+  });
+
   test('in a footnote', async () => {
     const md = 'Text.[^1]\n\n[^1]: Note.{>>c<<}\n';
     const ranged = await roundTrip(md, xml => xml, 'word/footnotes.xml');

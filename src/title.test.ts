@@ -483,6 +483,22 @@ describe('A paragraph of comments before the title', () => {
     expect(body).toStartWith('\n{>>@Ann Lee (2024-01-01 10:00) | first\n  {>>@Ben Ray');
   });
 
+  it('leaves a Title paragraph with an equation or a note in it in the body, whole, with the comment before it', async () => {
+    const title = /<w:r><w:t>TITLE<\/w:t><\/w:r>/;
+    const math = '<w:r><w:t xml:space="preserve">A </w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath><w:r><w:t xml:space="preserve"> theorem</w:t></w:r>';
+    const JSZip = (await import('jszip')).default;
+    for (const first of ['<w:p>' + point(0) + '</w:p>', '']) {
+      const zip = await JSZip.loadAsync(await withFirstParagraph('---\ntitle: TITLE\n---\n\nBODY\n\n{==x==}{>>note<<}\n', first));
+      const xml = await zip.file('word/document.xml')!.async('string');
+      expect(xml).toMatch(title);
+      zip.file('word/document.xml', xml.replace(title, math));
+      // Not `title: A ` with the rest a paragraph of the body
+      const markdown = await stableImport(await zip.generateAsync({ type: 'uint8array' }));
+      expect(parseFrontmatter(markdown).metadata.title).toBeUndefined();
+      expect(markdown).toBe((first ? '{>>note<<}\n\n' : '') + 'A $x$ theorem\n\nBODY\n\nx\n');
+    }
+  });
+
   it('still reads a first paragraph with text before a Title paragraph as body text', async () => {
     const docx = await withFirstParagraph('---\ntitle: TITLE\n---\n\nBODY\n', '<w:p><w:r><w:t>Cover</w:t></w:r>' + point(0) + '</w:p>');
     const { markdown } = await convertDocx(docx);

@@ -2902,6 +2902,24 @@ function anchorReferenceOnlyComments(nodes: XmlNode[]): void {
   const anchoredRun = (node: XmlNode): XmlNode[] | undefined => {
     const run = asXmlNodes(node['w:r']);
     const props = run.filter(child => 'w:rPr' in child);
+    // A hidden run stays whole, as its text is read as one, an HTML comment
+    // or the Markdown of a picture export couldn't find (see readHiddenRun):
+    // its ranges go before it, or after it where it has something before
+    // the first reference
+    if (props.some(child => isToggleOn(asXmlNodes(child['w:rPr']), 'w:vanish'))) {
+      const markers: XmlNode[] = [];
+      let after = false;
+      run.forEach((child, at) => {
+        if (child['w:commentReference'] === undefined) return;
+        const id = xmlNumberId(getAttr(child, 'id'));
+        if (anchored.has(id)) return;
+        anchored.add(id);
+        if (markers.length === 0) after = run.slice(0, at).some(other => !('w:rPr' in other || 'w:commentReference' in other));
+        markers.push({ 'w:commentRangeStart': [], ':@': { ...child[':@'] } }, { 'w:commentRangeEnd': [], ':@': { ...child[':@'] } });
+      });
+      if (markers.length === 0) return undefined;
+      return after ? [node, ...markers] : [...markers, node];
+    }
     let pieces: XmlNode[] | undefined;
     let piece: XmlNode[] = [];
     // Whether the piece has something besides references
@@ -19579,6 +19597,9 @@ function titleLineMarkdown(runs: TitleRun[]): string {
   return line;
 }
 
+/** The items a paragraph holds in its text that a title line can't */
+const TITLE_BREAKING_ITEMS: ReadonlySet<ContentItem['type']> = new Set<ContentItem['type']>(['citation', 'math', 'footnote_ref', 'html_comment', 'image']);
+
 /**
  * Extract consecutive Title-styled paragraphs from the beginning of the document.
  * Returns the text of each title paragraph, with its tracked changes as
@@ -19621,6 +19642,13 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
       continue;
     }
     if (item.type !== 'para' || !item.isTitle) break;
+    // A title paragraph with more than text in it, as an equation, a note's
+    // reference or a picture, stays in the body, whole: a title line holds
+    // text alone, so its text up to that would be the title and the rest a
+    // paragraph of the body
+    let textEnd = i + 1;
+    while (textEnd < content.length && content[textEnd].type === 'text') textEnd++;
+    if (textEnd < content.length && TITLE_BREAKING_ITEMS.has(content[textEnd].type)) break;
     // They go on the title, first, as the title's own do, where else they'd
     // make it body text, the frontmatter being the document's start
     if (titles.length === 0 && before.length > 0) {
