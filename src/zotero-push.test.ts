@@ -399,14 +399,24 @@ describe('createZoteroPushPlan', () => {
     const other = plan(bib.replace('2020-01-01', '2020-01-02'), [accessed as ZoteroItemJson]).actions[0];
     expect(other.kind === 'update' && other.patch.accessDate).toBe('2020-01-02');
     // Zotero would drop an access date it can't read, and the one it had.
-    const unreadable = plan(bib.replace('2020-01-01', 'not recorded'), [accessed as ZoteroItemJson]).actions[0];
-    expect(unreadable).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'urldate', reason: 'date-unreadable' }] });
+    for (const bad of ['not recorded', '2020-01-02T:', '2020-02-30', '2020-01-02T25:00']) {
+      const unreadable = plan(bib.replace('2020-01-01', bad), [accessed as ZoteroItemJson]).actions[0];
+      expect([bad, unreadable]).toMatchObject([bad, { kind: 'unchanged', notPushed: [{ field: 'urldate', reason: 'date-unreadable' }] }]);
+    }
+    const timed = plan(bib.replace('2020-01-01', '2020-01-02T10:30:00Z'), [accessed as ZoteroItemJson]).actions[0];
+    expect(timed.kind === 'update' && timed.patch.accessDate).toBe('2020-01-02T10:30:00Z');
   });
 
   it("tells an organization's one-field name from a person's", () => {
     const smith = { ...FLATO, creators: [{ creatorType: 'author', lastName: 'Smith', firstName: 'Jane' }] };
     const p = plan(FLATO_BIB.replace('Flat{\\o}, Martin', '{Smith, Jane}'), [smith as ZoteroItemJson]);
     expect(p.actions[0].kind === 'update' && p.actions[0].patch.creators).toEqual([{ creatorType: 'author', name: 'Smith, Jane' }]);
+  });
+
+  it("doesn't count a DOI that the item type can't hold", () => {
+    // The test schema's book has no DOI field.
+    const bib = '@book{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n@article{b2000,\n  title = {B},\n  doi = {10.1234/a}\n}\n';
+    expect(plan(bib, []).actions.map(a => a.kind)).toEqual(['create', 'create']);
   });
 
   it("doesn't let an entry it can't create block another's DOI", () => {
@@ -576,7 +586,7 @@ describe('applyZoteroPush', () => {
       s.headers['Zotero-API-Key'] === 'OLD'
         ? { status: 401 }
         : { status: 200, version: 9, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'NEW0000' + i, version: 9 }])) } },
-      () => [{ key: 'NEW00000' }],
+      () => [{ key: 'NEW00000', version: 9 }],
     );
     const result = await applyZoteroPush({ type: 'user' }, prepared, provider, { fetchFn });
     expect(provider.invalidated).toBe(1);
@@ -588,13 +598,23 @@ describe('applyZoteroPush', () => {
   it("stops before a batch when another writer changed the library during the last", async () => {
     const { fetchFn, sent } = writeFetch(
       s => ({ status: 200, version: 6, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'MINE' + String(i).padStart(4, '0'), version: 6 }])) } }),
-      () => [{ key: 'MINE0000' }, { key: 'THEIRS01' }],
+      () => [{ key: 'MINE0000', version: 6 }, { key: 'THEIRS01', version: 6 }],
     );
     const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
     expect(sent.length).toBe(1);
     expect(result.error?.kind).toBe('library-changed');
     expect(result.error?.message).toContain('THEIRS01');
     expect(result.outcomes[50]).toBeUndefined();
+  });
+
+  it('stops before a batch when another writer changed an item the push just wrote', async () => {
+    const { fetchFn, sent } = writeFetch(
+      s => ({ status: 200, version: 6, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'MINE' + String(i).padStart(4, '0'), version: 6 }])) } }),
+      () => [{ key: 'MINE0000', version: 7 }],
+    );
+    const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
+    expect(sent.length).toBe(1);
+    expect(result.error?.message).toContain('MINE0000');
   });
 
   it("stops before a batch when Zotero didn't say the library's version", async () => {

@@ -821,19 +821,22 @@ function readVersion(headers: ResponseHeaders | undefined): number | undefined {
   return raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : undefined;
 }
 
-/** The keys of the items changed in the library since a version. */
-export async function fetchZoteroItemKeysSince(
+/** The items changed in the library since a version, each with its
+ *  version now (undefined where the row doesn't say). */
+export async function fetchZoteroItemVersionsSince(
   scope: ZoteroLibraryScope,
   since: number,
   options: ZoteroLocalApiOptions = {},
-): Promise<Set<string>> {
+): Promise<Map<string, number | undefined>> {
   const rows = await requestArray(libraryPrefix(scope) + '/items?since=' + since + '&includeTrashed=1', CATALOG_TIMEOUT_MS, options);
-  const keys = new Set<string>();
+  const versions = new Map<string, number | undefined>();
   for (const row of rows) {
-    const key = asString(asRecord(row)?.key) ?? asString(asRecord(asRecord(row)?.data)?.key);
-    if (key !== undefined) keys.add(key);
+    const record = asRecord(row);
+    const key = asString(record?.key) ?? asString(asRecord(record?.data)?.key);
+    const version = record?.version ?? asRecord(record?.data)?.version;
+    if (key !== undefined) versions.set(key, typeof version === 'number' ? version : undefined);
   }
-  return keys;
+  return versions;
 }
 
 /** Which Zotero is answering: the Zotero-Server-ID every response carries,

@@ -5,7 +5,7 @@
 
 import { createZoteroLinkPlan } from './zotero-link';
 import {
-  fetchZoteroItemKeysSince,
+  fetchZoteroItemVersionsSince,
   fetchZoteroLibrarySnapshot,
   fetchZoteroSchema,
   writeZoteroItems,
@@ -96,17 +96,19 @@ export async function applyZoteroPush(
   const writes = zoteroPushWrites(prepared.plan);
   const outcomes: Array<ZoteroWriteOutcome | 'unknown' | undefined> = writes.map(() => undefined);
   let libraryVersion = prepared.libraryVersion;
-  // The items this push has written, which may change the library.
-  const written = new Set<string>();
+  // The items this push has written, with the version each write left.
+  const written = new Map<string, number>();
   let lastSent = libraryVersion;
   for (let start = 0; start < writes.length; start += BATCH) {
     const batch = writes.slice(start, start + BATCH);
     // A batch's version may include another writer's change made while it
-    // was saved; before the next, check that only this push's items moved.
+    // was saved; before the next, check that only this push's writes moved
+    // the library: no other item changed, and none of ours since we wrote it.
+    // (After the last batch there is nothing left to write over a change.)
     if (start > 0) {
       try {
-        const changed = await fetchZoteroItemKeysSince(scope, lastSent, options);
-        const others = [...changed].filter(k => !written.has(k));
+        const changed = await fetchZoteroItemVersionsSince(scope, lastSent, options);
+        const others = [...changed].filter(([k, v]) => written.get(k) === undefined || v === undefined || v !== written.get(k)).map(([k]) => k);
         if (others.length > 0) {
           return {
             outcomes,
@@ -154,7 +156,7 @@ export async function applyZoteroPush(
       }
     }
     result.outcomes.forEach((o, i) => (outcomes[start + i] = o));
-    for (const o of result.outcomes) if (o.status === 'success') written.add(o.key);
+    for (const o of result.outcomes) if (o.status === 'success') written.set(o.key, o.version);
     lastSent = libraryVersion;
     if (result.libraryVersion === undefined) {
       if (start + BATCH < writes.length) {
