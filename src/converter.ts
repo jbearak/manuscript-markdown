@@ -2878,7 +2878,48 @@ async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
   // changes as Word writes them read as one change around what each holds
   // (see normalizeTrackedMath)
   const nodes = asXmlNodes(xmlParser(parserOptions).parse(text));
+  if (text.includes('<w:commentReference')) anchorReferenceOnlyComments(nodes);
   return text.includes('<m:oMath') ? normalizeTrackedMath(nodes) : nodes;
+}
+
+/**
+ * Gives each comment that a part marks with its w:commentReference alone,
+ * with no w:commentRangeStart or w:commentRangeEnd, as WordprocessingML
+ * allows and tools other than Word write, an empty range at its first
+ * reference: a start and an end next to the reference's run, before it, or
+ * after it where the run has something before the reference. Import reads
+ * a comment only from its range, so without this it dropped such a comment.
+ * A comment with a range is as it was.
+ */
+function anchorReferenceOnlyComments(nodes: XmlNode[]): void {
+  const anchored = new Set<string>();
+  for (const tag of ['w:commentRangeStart', 'w:commentRangeEnd']) {
+    for (const node of findAllDeep(nodes, tag)) anchored.add(xmlNumberId(getAttr(node, 'id')));
+  }
+  const visit = (children: XmlNode[]): void => {
+    for (let i = 0; i < children.length; i++) {
+      const node = children[i];
+      for (const key of Object.keys(node)) {
+        if (key !== ':@' && Array.isArray(node[key])) visit(node[key]);
+      }
+      const run = node['w:r'];
+      if (!Array.isArray(run)) continue;
+      const markers: XmlNode[] = [];
+      let after = false;
+      run.forEach((child: XmlNode, at: number) => {
+        if (child['w:commentReference'] === undefined) return;
+        const id = xmlNumberId(getAttr(child, 'id'));
+        if (anchored.has(id)) return;
+        anchored.add(id);
+        markers.push({ 'w:commentRangeStart': [], ':@': { ...child[':@'] } }, { 'w:commentRangeEnd': [], ':@': { ...child[':@'] } });
+        after ||= run.slice(0, at).some((other: XmlNode) => !('w:rPr' in other || 'w:commentReference' in other));
+      });
+      if (markers.length === 0) continue;
+      spliceAll(children, after ? i + 1 : i, 0, markers);
+      i += markers.length;
+    }
+  };
+  visit(nodes);
 }
 
 function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50): XmlNode[] {
@@ -8337,7 +8378,8 @@ export async function extractDocumentContent(
                   const markBefore = precedingMark?.target === target && precedingMark.end === target.length ? precedingMark.revision : undefined;
                   const breakRevision = fence || rule ? markBefore : undefined;
                   if (rule || breakRevision) target.push({ type: 'para', ...(rule ? { horizontalRule: true } : {}), ...(breakRevision ? { breakRevision } : {}) });
-                  if (fence || rule) walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+                  // Or where it holds a comment's range, which would be lost
+                  if (fence || rule || holdsCommentRange(paraChildren)) walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
                   endSection(target, fence);
                   if (!fence && !rule) markBeforeSection = markBefore;
                   isSectionBreakHandled = true;
@@ -14367,6 +14409,12 @@ const PARAGRAPH_CONTENT_ELEMENTS = new Set([
 ]);
 const PARAGRAPH_TEXT_ELEMENTS = new Set(['w:t', 'w:delText', 'w:instrText']);
 
+/** Whether a paragraph's children hold a comment's range marker */
+function holdsCommentRange(children: XmlNode[]): boolean {
+  return children.some(child => Object.keys(child).some(key => key === 'w:commentRangeStart' || key === 'w:commentRangeEnd'
+    || key !== ':@' && Array.isArray(child[key]) && holdsCommentRange(asXmlNodes(child[key]))));
+}
+
 /** Whether a paragraph holds anything besides its properties and markers */
 function paragraphCarriesContent(children: XmlNode[]): boolean {
   return children.some(child => Object.keys(child).some(key => key !== 'w:pPr' && key !== ':@'
@@ -14562,6 +14610,76 @@ function demoteNoteCodeBlocks(body: ContentItem[]): boolean[] {
     i = end - 1;
   }
   return demoted;
+}
+
+/**
+ * The comments on a code block's text and nothing outside a code block,
+ * which a fence can't hold (see holdsCommentMarkers), so import writes each
+ * after the first code block it's on, as a comment on no text in a
+ * paragraph of its own. One that goes on into the text around the block has
+ * its range there, and isn't one of these.
+ */
+function commentsOnlyInCode(content: ContentItem[]): Set<string> {
+  const inCode = new Set<string>();
+  const outside = new Set<string>();
+  let inCodeBlock = false;
+  const visit = (items: ContentItem[], inTable: boolean) => {
+    for (const item of items) {
+      if (item.type === 'para') inCodeBlock = !inTable && !!item.isCodeBlock;
+      else if (item.type === 'table') {
+        // A table ends a block before it, so its cells' text, which has no
+        // paragraph item of its own here, isn't the block's
+        inCodeBlock = false;
+        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true);
+      } else {
+        // An item but text ends the block's fence (see codeBlockFence)
+        if (item.type !== 'text') inCodeBlock = false;
+        if ('commentIds' in item) for (const id of item.commentIds ?? []) (inCodeBlock ? inCode : outside).add(id);
+      }
+    }
+  };
+  visit(content, false);
+  for (const id of outside) inCode.delete(id);
+  return inCode;
+}
+
+/** Moves the comments on code alone (see commentsOnlyInCode) off the
+ *  code's text, into a paragraph after the first block each is on, as
+ *  comments on no text, a space between two, which is what import reads
+ *  of the Markdown it writes for them exported, so each trip writes them
+ *  the same, in whatever syntax the paragraph's comments take. Returns the
+ *  warning for them, or undefined for none */
+function moveCodeComments(content: ContentItem[]): string | undefined {
+  const moved = commentsOnlyInCode(content);
+  if (moved.size === 0) return undefined;
+  const pending = new Set(moved);
+  for (let i = 0; i < content.length; i++) {
+    const first = content[i];
+    if (first.type !== 'para' || !first.isCodeBlock) continue;
+    // To what ends the block, as for codeBlockFence
+    let end = i + 1;
+    for (let next = content[end]; next && (next.type === 'text' || next.type === 'para' && next.isCodeBlock); next = content[++end]);
+    const ids: string[] = [];
+    for (let k = i + 1; k < end; k++) {
+      const item = content[k];
+      if (item.type !== 'text' || ![...item.commentIds].some(id => moved.has(id))) continue;
+      for (const id of item.commentIds) if (pending.delete(id)) ids.push(id);
+      content[k] = { ...item, commentIds: new Set([...item.commentIds].filter(id => !moved.has(id))) };
+    }
+    if (ids.length > 0) {
+      const para: ContentItem[] = [{ type: 'para' }];
+      ids.forEach((id, n) => {
+        if (n > 0) para.push({ type: 'text', text: ' ', formatting: DEFAULT_FORMATTING, commentIds: new Set(), href: undefined });
+        para.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set([id]), href: undefined });
+      });
+      spliceAll(content, end, 0, para);
+      end += para.length;
+    }
+    i = end - 1;
+  }
+  const one = moved.size === 1;
+  return 'Moved ' + moved.size + ' comment' + (one ? '' : 's') + ' on code to after ' + (one ? 'its code block' : 'their code blocks')
+    + ', as a code block can\'t hold a comment\'s range; ' + (one ? 'it' : 'they') + ' now mark' + (one ? 's' : '') + ' no text.';
 }
 
 /**
@@ -19491,8 +19609,11 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
     }
   };
   keepOn(content);
+  // An empty item for each, in the order the title starts them, as the body
+  // reads comments on nothing, so they stay apart: one item with all their
+  // IDs would make them overlap
   if (titleAt !== undefined && commentIds.size > 0) {
-    content.splice(titleAt, 0, { type: 'para' }, { type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds });
+    spliceAll(content, titleAt, 0, [{ type: 'para' }, ...[...commentIds].map((id): ContentItem => ({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set([id]) }))]);
   }
   return titles;
 }
@@ -21105,6 +21226,8 @@ export async function convertDocx(
   // tableTextDefaultFont), which a table whose text takes them from the
   // table paragraph style takes no directive for
   const documentFonts = resolveFontOverrides(fontFields);
+  // Last, as paragraphs' indexes key what's read before (see moveCodeComments)
+  const codeComments = moveCodeComments(docContent);
   let markdown = buildMarkdown(docContent, comments, {
     crossRefLabels,
     tableSizeHp: documentFonts.tableSizeHp,
@@ -21398,7 +21521,7 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles),
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...(codeComments === undefined ? [] : [codeComments]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles),
     ...[...await commentCustomStyles(zip, styleLayouts, contentOptions)].map(name => 'Custom style "' + name + '" is on a comment\'s paragraph, '
       + 'which a comment can\'t keep, as it holds no style directive; import drops it there.')] };
 }
