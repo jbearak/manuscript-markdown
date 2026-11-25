@@ -3742,3 +3742,22 @@ describe('the source line of a table\'s caption above its table', () => {
       .toEqual([['table_open', 4], ['paragraph_open', 8]]);
   });
 });
+
+describe('a cross-reference\'s source offset in a paragraph split at a change\'s paragraph break', () => {
+  it('is where its source is in its own paragraph\'s text', () => {
+    for (const text of [
+      'A {~~x\n\n@fig-map~>x @fig-map~~} B',
+      'A {--x\n\n@fig-map--} @fig-map B',
+      '{++# H\n\n@fig-map++} @fig-map',
+      '# H {--x\n\n@fig-map--} @fig-map',
+    ]) {
+      const refs: Array<[string, number]> = [];
+      for (const inline of createMarkdownItWithPlugin().parse(text, {}).filter(token => token.type === 'inline')) {
+        for (const child of inline.children ?? []) {
+          if (child.type === 'manuscript_cross_reference') refs.push([inline.content.slice(child.meta.offset, child.meta.offset + 8), child.meta.offset]);
+        }
+      }
+      expect(refs.map(([source]) => source)).toEqual(['@fig-map', '@fig-map']);
+    }
+  });
+});

@@ -684,6 +684,8 @@ function promoteFullParagraphCriticHeading(tokens: Token[], index: number): void
 
 interface CriticHeadingSourceSegment {
   content: string;
+  // Where it starts in the inline token's content it was split from
+  start: number;
   startLineOffset: number;
   endLineOffset: number;
 }
@@ -711,6 +713,7 @@ function splitCriticHeadingSource(
     if (shouldSplit) {
       segments.push({
         content: content.slice(segmentStart, match.index),
+        start: segmentStart,
         startLineOffset: segmentStartLine,
         endLineOffset: currentLine + 1,
       });
@@ -727,6 +730,7 @@ function splitCriticHeadingSource(
   currentLine += (content.slice(sourceCursor).match(/\n/g) ?? []).length;
   segments.push({
     content: content.slice(segmentStart),
+    start: segmentStart,
     startLineOffset: segmentStartLine,
     endLineOffset: currentLine + 1,
   });
@@ -887,6 +891,9 @@ function createCriticBlockSegment(
   sourceSegment: CriticHeadingSourceSegment,
   originalStart: number,
   isHeading: boolean,
+  // How far on in the source the inline rules read the inline token's
+  // content starts, as a heading's marker it lost (see splitCriticHeadingSource)
+  sourceOffsetAdjustment: number,
 ): [Token, Token, Token] | undefined {
   if (!isHeading && !hasVisibleInlineContent(children)) return undefined;
 
@@ -910,7 +917,30 @@ function createCriticBlockSegment(
   setOriginalTokenMap(blockInline, segmentMap);
   blockInline.content = sourceSegment.content;
   blockInline.children = children;
+  rebaseSourceOffsets(children, sourceOffsetAdjustment + sourceSegment.start);
   return [blockOpen, blockInline, blockClose];
+}
+
+/** Moves each source offset the inline rules gave a token, as in the
+ *  content of the inline token it was parsed from, back by `by`, to where
+ *  it is in the content of the segment splitCriticBlocksRule made of it: a
+ *  cross-reference's, which the language server finds it at, and a
+ *  paragraph break's. A token reopened at a segment's start, a clone, has
+ *  its own meta (see cloneInlineToken) */
+function rebaseSourceOffsets(children: Token[] | null, by: number): void {
+  if (by === 0) return;
+  for (const token of children ?? []) {
+    const meta = token.meta;
+    if (meta) {
+      if (token.type === 'manuscript_cross_reference' && typeof meta.offset === 'number') meta.offset -= by;
+      if (typeof meta.manuscriptCriticBreakSourceOffset === 'number') meta.manuscriptCriticBreakSourceOffset -= by;
+      if (Array.isArray(meta.manuscriptCriticConsumedBreakSourceOffsets)) {
+        meta.manuscriptCriticConsumedBreakSourceOffsets = meta.manuscriptCriticConsumedBreakSourceOffsets
+          .map((offset: unknown) => typeof offset === 'number' ? offset - by : offset);
+      }
+    }
+    rebaseSourceOffsets(token.children, by);
+  }
 }
 
 /**
@@ -981,10 +1011,11 @@ function splitCriticBlocksRule(state: StateCore): void {
       continue;
     }
     const removedPrefix = inline.meta?.manuscriptCriticHeadingRemovedPrefix;
+    const sourceOffsetAdjustment = typeof removedPrefix === 'number' ? removedPrefix : 0;
     const sourceSegments = splitCriticHeadingSource(
       inline.content,
       childSplit.boundaries,
-      typeof removedPrefix === 'number' ? removedPrefix : 0,
+      sourceOffsetAdjustment,
     );
     if (sourceSegments.length !== childSegments.length) {
       if (rewritten) rewritten.push(headingOpen);
@@ -1019,6 +1050,7 @@ function splitCriticBlocksRule(state: StateCore): void {
         sourceSegments[segmentIndex],
         originalStart,
         isHeading && segmentIndex === 0,
+        sourceOffsetAdjustment,
       );
       if (!segment) continue;
       markUntil(segmentIndex);

@@ -134,6 +134,21 @@ describe('exporting a cross-reference', () => {
     expect(scanCrossRefs(md).map(usage => [usage.start, md.slice(usage.start, usage.end)])).toEqual([[md.indexOf('@fig-map'), '@fig-map']]);
   });
 
+  it('reads each reference in a paragraph the preview splits at a change\'s paragraph break where it is', () => {
+    // As the same reference after it, past where the split moved the
+    // first, would otherwise take its place
+    for (const text of [
+      'A {~~x\n\n@fig-map~>x @fig-map~~} B',
+      'A {--x\n\n@fig-map--} @fig-map B',
+      'A {++x\n\n@fig-map++} @fig-map B',
+      '{++# H\n\n@fig-map++} @fig-map',
+    ]) {
+      const md = text + '\n\n![m](a.png){#fig-map}\n';
+      const expected = [...text.matchAll(/@fig-map/g)].map(match => match.index);
+      expect(scanCrossRefs(md).map(usage => usage.start)).toEqual(expected);
+    }
+  });
+
   it('reads a key no label can be as text, as Markdown reads it, and the rest of its line so', async () => {
     const md = '@fig-a.b and @fig-map<sup>2</sup> and @fig-caf\u00e9 and [@fig-a.b] and [@fig-a\\_b] and @fig-map.';
     const { body, warnings } = await exported(md + FIGURES);
