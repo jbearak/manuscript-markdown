@@ -342,6 +342,11 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
   const raw = entry.fields.get(name);
   if (raw === undefined) return undefined;
   if (isMacro(entry, name)) return { problem: 'macro' };
+  if (name === 'urldate') {
+    // Zotero drops an access date it can't read, and with it the one it had.
+    const value = raw.trim();
+    return /^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+Z?)?$/.test(value) ? { value } : { problem: 'date-unreadable' };
+  }
   if (name === 'url' || name === 'isbn' || name === 'issn' || name === 'doi') {
     const value = readVerbatim(raw);
     if (value === '') return undefined;
@@ -484,9 +489,13 @@ function creatorText(c: ZoteroCreator): string {
   return c.name !== undefined && c.name !== '' ? c.name : [c.lastName, c.firstName].filter(Boolean).join(', ');
 }
 
+/** Names compared part by part: a one-field name, as an organization's,
+ *  is not the same as a two-field name that prints the same. */
 function sameCreators(a: readonly ZoteroCreator[], b: readonly ZoteroCreator[]): boolean {
-  const fold = (c: ZoteroCreator) => foldText(creatorText(c)).toLowerCase();
-  return a.length === b.length && a.every((c, i) => fold(c) === fold(b[i]));
+  const fold = (s: string | undefined) => foldText(s ?? '').toLowerCase();
+  const key = (c: ZoteroCreator) =>
+    c.name !== undefined && c.name !== '' ? 'name:' + fold(c.name) : 'person:' + fold(c.lastName) + '|' + fold(c.firstName);
+  return a.length === b.length && a.every((c, i) => key(c) === key(b[i]));
 }
 
 const fold = (label: string): string => label.toLowerCase().replace(/[\s_-]/g, '');
@@ -827,8 +836,13 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   // given to an item by a create, or by an update of an item without one.
   const targets = new Map<string, number>();
   const givenDois = new Map<string, number>();
+  // Only entries that would be written: a create needs an item type.
+  const creatable = (entry: BibtexEntry): boolean => {
+    const itemType = ITEM_TYPE_BY_ENTRY_TYPE[entry.type.toLowerCase()];
+    return itemType !== undefined && schemaType(input.schema, itemType) !== undefined;
+  };
   const givesDoi = (c: Candidate): string | undefined =>
-    c.kind === 'create' || (c.kind === 'match' && input.mode === 'update' && effectiveDoi(c.item) === undefined)
+    (c.kind === 'create' && creatable(c.entry)) || (c.kind === 'match' && input.mode === 'update' && effectiveDoi(c.item) === undefined)
       ? entryDoi(c.entry)
       : undefined;
   for (const c of candidates) {

@@ -5,6 +5,7 @@
 
 import { createZoteroLinkPlan } from './zotero-link';
 import {
+  fetchZoteroItemKeysSince,
   fetchZoteroLibrarySnapshot,
   fetchZoteroSchema,
   writeZoteroItems,
@@ -95,8 +96,28 @@ export async function applyZoteroPush(
   const writes = zoteroPushWrites(prepared.plan);
   const outcomes: Array<ZoteroWriteOutcome | 'unknown' | undefined> = writes.map(() => undefined);
   let libraryVersion = prepared.libraryVersion;
+  // The items this push has written, which may change the library.
+  const written = new Set<string>();
+  let lastSent = libraryVersion;
   for (let start = 0; start < writes.length; start += BATCH) {
     const batch = writes.slice(start, start + BATCH);
+    // A batch's version may include another writer's change made while it
+    // was saved; before the next, check that only this push's items moved.
+    if (start > 0) {
+      try {
+        const changed = await fetchZoteroItemKeysSince(scope, lastSent, options);
+        const others = [...changed].filter(k => !written.has(k));
+        if (others.length > 0) {
+          return {
+            outcomes,
+            error: new ZoteroLocalApiError('library-changed', 'Items changed in Zotero during the push: ' + others.join(', ') + '.'),
+          };
+        }
+      } catch (error) {
+        if (error instanceof ZoteroLocalApiError) return { outcomes, error };
+        throw error;
+      }
+    }
     let result: Awaited<ReturnType<typeof writeZoteroItems>> | undefined;
     for (let attempt = 0; result === undefined; attempt++) {
       // A key that can't be had (no key saved, the dialog denied) ends the
@@ -133,7 +154,18 @@ export async function applyZoteroPush(
       }
     }
     result.outcomes.forEach((o, i) => (outcomes[start + i] = o));
-    libraryVersion = result.libraryVersion;
+    for (const o of result.outcomes) if (o.status === 'success') written.add(o.key);
+    lastSent = libraryVersion;
+    if (result.libraryVersion === undefined) {
+      if (start + BATCH < writes.length) {
+        return {
+          outcomes,
+          error: new ZoteroLocalApiError('request-failed', 'Zotero did not report the library version after a write, so the push stopped.'),
+        };
+      }
+    } else {
+      libraryVersion = result.libraryVersion;
+    }
   }
   return { outcomes };
 }

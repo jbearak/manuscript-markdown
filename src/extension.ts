@@ -2338,7 +2338,25 @@ async function pushBibliographyToZotero(secrets: vscode.SecretStorage): Promise<
 			return;
 		}
 
-		const bibText = new TextDecoder().decode(await vscode.workspace.fs.readFile(bibUri));
+		const bibBytes = await vscode.workspace.fs.readFile(bibUri);
+		const bibText = new TextDecoder().decode(bibBytes);
+		// A byte the decoder can't read becomes U+FFFD, which would be pushed
+		// into Zotero as text.
+		if (!bytesEqual(new TextEncoder().encode(bibText), bibBytes)) {
+			vscode.window.showErrorMessage(
+				`"${bibName}" is not plain UTF-8 (it has a byte-order mark or bytes in another encoding), so nothing was pushed.`
+			);
+			return;
+		}
+		// The pickers above wait on the user, who may have edited the file
+		// meanwhile; this checks it before planning, and again before writing.
+		const bibliographyChanged = async (): Promise<boolean> =>
+			vscode.workspace.textDocuments.find(d => d.uri.toString() === bibUri.toString())?.isDirty === true ||
+			!bytesEqual(await vscode.workspace.fs.readFile(bibUri), bibBytes);
+		if (await bibliographyChanged()) {
+			vscode.window.showErrorMessage(`"${bibName}" has unsaved changes. Save it, then run this command again.`);
+			return;
+		}
 		const prepared = await vscode.window.withProgress(
 			{
 				location: vscode.ProgressLocation.Notification,
@@ -2383,6 +2401,10 @@ async function pushBibliographyToZotero(secrets: vscode.SecretStorage): Promise<
 			'Push'
 		);
 		if (choice !== 'Push') {
+			return;
+		}
+		if (await bibliographyChanged()) {
+			vscode.window.showErrorMessage(`"${bibName}" changed while the command was running, so nothing was pushed. Run it again.`);
 			return;
 		}
 

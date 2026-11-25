@@ -215,6 +215,11 @@ async function requestJson(
     } catch {
       // The status alone still says what happened.
     }
+    // Zotero answers 403 before anything else when the "Allow other
+    // applications" setting is off, which the caller's 403 doesn't mean.
+    if (response.status === 403 && /not enabled/i.test(text)) {
+      throw new ZoteroLocalApiError('api-disabled', 'Zotero is running but its local API is turned off.');
+    }
     const error = write.statusError?.(response.status, text);
     if (error) throw error;
     throw new ZoteroLocalApiError(
@@ -639,14 +644,15 @@ export async function fetchZoteroLibrarySnapshot(
   scope: ZoteroLibraryScope,
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroLibrarySnapshot> {
-  const { rows, headers } = await requestArrayWithHeaders(
-    libraryPrefix(scope) + '/items/top',
-    CATALOG_TIMEOUT_MS,
-    options,
-  );
-  const libraryVersion = Number(headers?.get('Last-Modified-Version'));
+  // The version is read before the items, by a request of its own: Zotero
+  // reads a response's version after building its rows, so a write landing
+  // between the two would be in the version but not the rows, and the
+  // version check would then let a create duplicate it.
+  const { headers } = await requestArrayWithHeaders(libraryPrefix(scope) + '/items/top?limit=1', LIST_TIMEOUT_MS, options);
+  const libraryVersion = readVersion(headers);
   const serverId = headers?.get('Zotero-Server-ID') ?? '';
-  if (!Number.isInteger(libraryVersion) || serverId === '') {
+  const { rows } = await requestArrayWithHeaders(libraryPrefix(scope) + '/items/top', CATALOG_TIMEOUT_MS, options);
+  if (libraryVersion === undefined || serverId === '') {
     throw new ZoteroLocalApiError(
       'request-failed',
       'Zotero did not report its library version and server id; writing needs Zotero 10 or later.',
@@ -684,8 +690,12 @@ export async function fetchZoteroSchema(
   options: ZoteroLocalApiOptions = {},
 ): Promise<import('./zotero-push').ZoteroItemSchema> {
   const { body } = await requestJson('/schema', LIST_TIMEOUT_MS, options);
-  const itemTypes = asRecord(body)?.itemTypes;
-  if (!Array.isArray(itemTypes)) {
+  const listed = asRecord(body)?.itemTypes;
+  // Only types whose fields and roles are lists, which the planner reads.
+  const itemTypes = Array.isArray(listed)
+    ? listed.filter(t => typeof asRecord(t)?.itemType === 'string' && Array.isArray(asRecord(t)?.fields) && Array.isArray(asRecord(t)?.creatorTypes))
+    : undefined;
+  if (itemTypes === undefined || itemTypes.length === 0) {
     throw new ZoteroLocalApiError('request-failed', 'Zotero returned an unreadable schema.');
   }
   return {
@@ -748,7 +758,7 @@ export async function writeZoteroItems(
     readonly writeToken: string;
   },
   options: ZoteroLocalApiOptions = {},
-): Promise<{ outcomes: ZoteroWriteOutcome[]; libraryVersion: number }> {
+): Promise<{ outcomes: ZoteroWriteOutcome[]; libraryVersion: number | undefined }> {
   if (objects.length === 0 || objects.length > 50) {
     throw new RangeError('A write takes 1 to 50 objects, not ' + objects.length);
   }
@@ -801,8 +811,29 @@ export async function writeZoteroItems(
       };
     }
   }
-  const libraryVersion = Number(headers?.get('Last-Modified-Version'));
-  return { outcomes, libraryVersion: Number.isInteger(libraryVersion) ? libraryVersion : auth.libraryVersion };
+  return { outcomes, libraryVersion: readVersion(headers) };
+}
+
+/** A response's Last-Modified-Version, or undefined when it has none: a
+ *  missing header is not version 0. */
+function readVersion(headers: ResponseHeaders | undefined): number | undefined {
+  const raw = headers?.get('Last-Modified-Version')?.trim();
+  return raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : undefined;
+}
+
+/** The keys of the items changed in the library since a version. */
+export async function fetchZoteroItemKeysSince(
+  scope: ZoteroLibraryScope,
+  since: number,
+  options: ZoteroLocalApiOptions = {},
+): Promise<Set<string>> {
+  const rows = await requestArray(libraryPrefix(scope) + '/items?since=' + since + '&includeTrashed=1', CATALOG_TIMEOUT_MS, options);
+  const keys = new Set<string>();
+  for (const row of rows) {
+    const key = asString(asRecord(row)?.key) ?? asString(asRecord(asRecord(row)?.data)?.key);
+    if (key !== undefined) keys.add(key);
+  }
+  return keys;
 }
 
 /** Which Zotero is answering: the Zotero-Server-ID every response carries,

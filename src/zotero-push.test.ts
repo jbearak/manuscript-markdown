@@ -27,7 +27,7 @@ const SCHEMA: ZoteroItemSchema = {
   itemTypes: [
     {
       itemType: 'journalArticle',
-      fields: ['title', 'publicationTitle', 'date', 'volume', 'issue', 'pages', 'series', 'DOI', 'url', 'ISSN', 'citationKey', 'extra', 'abstractNote', 'shortTitle'].map(f => field(f)),
+      fields: ['title', 'publicationTitle', 'date', 'volume', 'issue', 'pages', 'series', 'DOI', 'url', 'accessDate', 'ISSN', 'citationKey', 'extra', 'abstractNote', 'shortTitle'].map(f => field(f)),
       creatorTypes: [{ creatorType: 'author' }, { creatorType: 'editor' }, { creatorType: 'translator' }],
     },
     {
@@ -394,7 +394,24 @@ describe('createZoteroPushPlan', () => {
   it("keeps Zotero's access time on the same day", () => {
     const accessed = { ...FLATO, accessDate: '2020-01-01T14:32:02Z' };
     const bib = FLATO_BIB.replace('keywords', 'urldate = {2020-01-01},\n  keywords');
-    expect(plan(bib, [accessed as ZoteroItemJson]).changed).toBe(false);
+    const same = plan(bib, [accessed as ZoteroItemJson]);
+    expect(same.actions[0]).toEqual({ kind: 'unchanged', entryKey: 'flato2018differential', itemKey: 'FLATO001', notPushed: [] });
+    const other = plan(bib.replace('2020-01-01', '2020-01-02'), [accessed as ZoteroItemJson]).actions[0];
+    expect(other.kind === 'update' && other.patch.accessDate).toBe('2020-01-02');
+    // Zotero would drop an access date it can't read, and the one it had.
+    const unreadable = plan(bib.replace('2020-01-01', 'not recorded'), [accessed as ZoteroItemJson]).actions[0];
+    expect(unreadable).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'urldate', reason: 'date-unreadable' }] });
+  });
+
+  it("tells an organization's one-field name from a person's", () => {
+    const smith = { ...FLATO, creators: [{ creatorType: 'author', lastName: 'Smith', firstName: 'Jane' }] };
+    const p = plan(FLATO_BIB.replace('Flat{\\o}, Martin', '{Smith, Jane}'), [smith as ZoteroItemJson]);
+    expect(p.actions[0].kind === 'update' && p.actions[0].patch.creators).toEqual([{ creatorType: 'author', name: 'Smith, Jane' }]);
+  });
+
+  it("doesn't let an entry it can't create block another's DOI", () => {
+    const bib = '@inreference{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n@article{b2000,\n  title = {B},\n  doi = {10.1234/a}\n}\n';
+    expect(plan(bib, []).actions.map(a => a.kind === 'skip' ? a.reason : a.kind)).toEqual(['unsupported-type', 'create']);
   });
 
   it("replaces a free-text date Zotero can't read", () => {
@@ -420,9 +437,14 @@ interface Sent {
   body: unknown[];
 }
 
-function writeFetch(respond: (sent: Sent, n: number) => { status: number; body?: unknown; version?: number; text?: string }) {
+function writeFetch(
+  respond: (sent: Sent, n: number) => { status: number; body?: unknown; version?: number; text?: string },
+  /** What the between-batch check finds changed since a version. */
+  changedSince: () => unknown[] = () => [],
+) {
   const sent: Sent[] = [];
   const fetchFn: ZoteroFetch = async (url, init) => {
+    if (url.includes('/items?since=')) return { ok: true, status: 200, json: async () => changedSince() };
     const s = { url, headers: init?.headers ?? {}, body: JSON.parse(init?.body ?? '[]') as unknown[] };
     sent.push(s);
     const r = respond(s, sent.length);
@@ -479,6 +501,10 @@ describe('writeZoteroItems', () => {
     expect(await write(401)).toBe('unauthorized');
     expect(await write(412)).toBe('library-changed');
     expect(await write(403)).toBe('write-denied');
+    const disabled = await writeZoteroItems({ type: 'user' }, [{ itemType: 'report' }], { apiKey: 'K', serverId: 'S', libraryVersion: 1, writeToken: 'token123' }, {
+      fetchFn: writeFetch(() => ({ status: 403, text: 'Local API is not enabled' })).fetchFn,
+    }).catch((e: ZoteroLocalApiError) => e.kind);
+    expect(disabled).toBe('api-disabled');
   });
 });
 
@@ -547,11 +573,35 @@ describe('applyZoteroPush', () => {
   it('asks for a key again once when Zotero refuses one', async () => {
     const provider = keys();
     const { fetchFn, sent } = writeFetch(s =>
-      s.headers['Zotero-API-Key'] === 'OLD' ? { status: 401 } : { status: 200, version: 9, body: { successful: {} } },
+      s.headers['Zotero-API-Key'] === 'OLD'
+        ? { status: 401 }
+        : { status: 200, version: 9, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'NEW0000' + i, version: 9 }])) } },
+      () => [{ key: 'NEW00000' }],
     );
-    await applyZoteroPush({ type: 'user' }, prepared, provider, { fetchFn });
+    const result = await applyZoteroPush({ type: 'user' }, prepared, provider, { fetchFn });
     expect(provider.invalidated).toBe(1);
     expect(sent.map(s => s.headers['Zotero-API-Key'])).toEqual(['OLD', 'NEW', 'NEW']);
+    expect(result.error).toBeUndefined();
+    expect(result.outcomes.every(o => o !== undefined && o !== 'unknown' && o.status === 'success')).toBe(true);
+  });
+
+  it("stops before a batch when another writer changed the library during the last", async () => {
+    const { fetchFn, sent } = writeFetch(
+      s => ({ status: 200, version: 6, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'MINE' + String(i).padStart(4, '0'), version: 6 }])) } }),
+      () => [{ key: 'MINE0000' }, { key: 'THEIRS01' }],
+    );
+    const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
+    expect(sent.length).toBe(1);
+    expect(result.error?.kind).toBe('library-changed');
+    expect(result.error?.message).toContain('THEIRS01');
+    expect(result.outcomes[50]).toBeUndefined();
+  });
+
+  it("stops before a batch when Zotero didn't say the library's version", async () => {
+    const { fetchFn, sent } = writeFetch(s => ({ status: 200, body: { successful: Object.fromEntries(s.body.map((_, i) => [String(i), { key: 'K' + i, version: 1 }])) } }));
+    const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
+    expect(sent.length).toBe(1);
+    expect(result.error?.kind).toBe('request-failed');
   });
 
   it("marks a batch whose answer never came as unknown, not unsent", async () => {

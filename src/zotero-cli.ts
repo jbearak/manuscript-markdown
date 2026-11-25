@@ -153,9 +153,11 @@ function cliKeyProvider(serverId: string, io: ZoteroCliIo): ZoteroKeyProvider {
       if (key === undefined || key === '') {
         throw new ZoteroLocalApiError(
           'unauthorized',
-          refused
-            ? 'Zotero refused the saved key. Run "manuscript-markdown zotero authorize" again.'
-            : 'No key to write to Zotero with. Run "manuscript-markdown zotero authorize" first.',
+          !refused
+            ? 'No key to write to Zotero with. Run "manuscript-markdown zotero authorize" first.'
+            : fromEnv
+              ? 'Zotero refused the key in ZOTERO_LOCAL_API_KEY. Replace or unset it.'
+              : 'Zotero refused the saved key. Run "manuscript-markdown zotero authorize" again.',
         );
       }
       return key;
