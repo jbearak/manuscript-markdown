@@ -1838,6 +1838,15 @@ const REJECT_CHANGES: ChangeResolution = {
   ]),
 };
 
+/** The opens and closes of an addition and a substitution's new text,
+ *  which in deleted text export deletes with the rest (see resolveChanges) */
+const ADDED_TEXT_TOKENS = new Set([
+  'manuscript_markdown_addition_open',
+  'manuscript_markdown_addition_close',
+  'manuscript_markdown_substitution_new_open',
+  'manuscript_markdown_substitution_new_close',
+]);
+
 /** The opens of a change, which simple markup marks the block of */
 const CHANGE_OPENS = new Set([
   'manuscript_markdown_addition_open',
@@ -1906,15 +1915,21 @@ function isCommentToken(token: Token): boolean {
  *  text the change leaves, none for a dropped one, as is a comment on an
  *  element or a range's span in dropped text, which commentsOnResolvedText
  *  shows as an indicator where all its text went. An image's alt text
- *  reads the same */
+ *  reads the same. Added text in a deletion or a substitution's old text,
+ *  as `{--a {++b++}--}`'s, is
+ *  deleted text, as export writes all of it in the deletion, so it stays
+ *  where the deletion does */
 function resolveChanges(children: Token[], state: StateCore, resolution: ChangeResolution): Token[] {
   const out: Token[] = [];
   // For each unwrapped open still open, by its type, the range span it
   // became, or undefined where it wrote nothing
   const opened = new Map<string, Array<Token | undefined>>();
+  const inDeletion = (): boolean => ['manuscript_markdown_deletion', 'manuscript_markdown_substitution_old']
+    .some(kind => (opened.get(kind)?.length ?? 0) > 0);
   for (let i = 0; i < children.length; i++) {
     const token = children[i];
-    if (resolution.dropped.has(token.type)) {
+    const deleted = ADDED_TEXT_TOKENS.has(token.type) && inDeletion();
+    if (resolution.dropped.has(token.type) && !deleted) {
       const comment = token.attrGet('data-comment');
       if (comment) out.push(commentSpanOpen(state, comment, token.meta?.manuscriptCommentKey ?? token));
       const closeType = token.type.slice(0, -'_open'.length) + '_close';
@@ -1932,7 +1947,7 @@ function resolveChanges(children: Token[], state: StateCore, resolution: ChangeR
       if (comment) out.push(commentSpanClose(state));
       continue;
     }
-    if (!resolution.unwrapped.has(token.type)) {
+    if (!resolution.unwrapped.has(token.type) && !deleted) {
       if (token.children) token.children = resolveChanges(token.children, state, resolution);
       out.push(token);
       continue;

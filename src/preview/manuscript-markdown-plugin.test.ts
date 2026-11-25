@@ -3221,6 +3221,11 @@ describe('No Markup preview', () => {
     expect(html).not.toContain('<del');
   });
 
+  it('drops a change in deleted text, and deleted text in an addition', () => {
+    expect(renderNoMarkup('Before {--outer {++new++}--} after')).toContain('<p>Before  after</p>');
+    expect(renderNoMarkup('Before {++outer {--old--}++} after')).toContain('<p>Before outer  after</p>');
+  });
+
   it('keeps nested formatting in added text', () => {
     expect(renderNoMarkup('a {++**b**++} c')).toContain('<p>a <strong>b</strong> c</p>');
   });
@@ -3376,6 +3381,15 @@ describe('Original preview', () => {
   it('drops a table row whose text was all added', () => {
     expect(renderOriginal('| Head |\n|---|\n| {++x++} |\n| keep |'))
       .toContain('<tbody>\n<tr>\n<td>keep</td>\n</tr>\n</tbody>');
+  });
+
+  it('keeps a change in deleted text, which export deletes with it', () => {
+    expect(renderOriginal('Before {--outer {++new++}--} after')).toContain('<p>Before outer new after</p>');
+    expect(renderOriginal('A {--a {~~b~>c~~} d--} B')).toContain('<p>A a bc d B</p>');
+    expect(renderOriginal('A {~~old {++in++}~>rep~~} B')).toContain('<p>A old in B</p>');
+    expect(renderOriginal('A {--a {++n++}{>>why<<}--} B'))
+      .toContain('<p>A a <span class="manuscript-markdown-comment-range" data-comment="why">n</span> B</p>');
+    expect(renderOriginal('Before {++outer {--old--}++} after')).toContain('<p>Before  after</p>');
   });
 
   it('keeps a deleted heading a heading', () => {
