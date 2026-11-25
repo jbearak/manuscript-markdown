@@ -52,10 +52,57 @@ describe('comments marked by their reference alone', () => {
     expect(out).toBe('Body.X{>>note<<}\n');
   });
 
+  /** 'One {>>first<<}two{>>second<<} three.' exported, with its two
+   *  comments marked only by references in the run that `run` gives */
+  const inOneRun = (run: (refs: string[]) => string) => roundTrip('One {>>first<<}two{>>second<<} three.\n', xml => {
+    const refs = [...xml.matchAll(/<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr>(<w:commentReference w:id="\d+"\/>)<\/w:r>/g)];
+    expect(refs).toHaveLength(2);
+    // The paragraph's runs, from its first to its last, as `run`
+    return xml.replace(/<w:r>.*<\/w:r>(?=<\/w:p>)/s, () => run(refs.map(m => m[1])));
+  });
+
+  test('before the text after the reference in its run', async () => {
+    const out = await inOneRun(([a, b]) => '<w:r>' + a + '<w:t xml:space="preserve">BODY</w:t>' + b + '</w:r>');
+    expect(out).toBe('{>>first<<}BODY{>>second<<}\n');
+    expect(await roundTrip(out, xml => xml)).toBe(out);
+  });
+
+  test('between the texts its run has on each side of the reference', async () => {
+    const out = await inOneRun(([a, b]) => '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">One </w:t>' + a
+      + '<w:t>two</w:t>' + b + '<w:t xml:space="preserve"> three.</w:t></w:r>');
+    expect(out).toBe('**One {>>first<<}two{>>second<<} three.**\n');
+    expect(await roundTrip(out, xml => xml)).toBe(out);
+  });
+
   test('in a footnote', async () => {
     const md = 'Text.[^1]\n\n[^1]: Note.{>>c<<}\n';
     const ranged = await roundTrip(md, xml => xml, 'word/footnotes.xml');
     expect(ranged).toContain('{>>c<<}');
     expect(await roundTrip(md, noRanges, 'word/footnotes.xml')).toBe(ranged);
+  });
+
+  test('before, on and after a title, in a code block, on a section break and mid-run in one document, with a thread split', async () => {
+    const md = '---\ntitle: TITLE\n---\n\n```r\nCODE\n```\n\nBODY\n\n'
+      + ['first\n  {>>reply<<}\n', 'second', 'third', 'fourth', 'fifth'].map(c => '{==x==}{>>' + c + '<<}').join(' ') + '\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const comments = await zip.file('word/comments.xml')!.async('string');
+    const ref = (text: string) => '<w:r><w:commentReference w:id="' + comments.match(new RegExp('<w:comment w:id="(\\d+)"(?:(?!</w:comment>).)*>' + text + '<', 's'))![1] + '"/></w:r>';
+    const section = '<w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr>';
+    const xml = (await zip.file('word/document.xml')!.async('string'))
+      .replace(/<w:commentRange(?:Start|End) w:id="\d+"\/>|<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference w:id="\d+"\/><\/w:r>/g, '')
+      // Before the title, in an empty paragraph, the thread's reply in the code
+      .replace('<w:body>', '<w:body><w:p>' + ref('first') + '</w:p>')
+      .replace(/<w:t>TITLE<\/w:t><\/w:r>/, s => s + ref('second'))
+      .replace(/<w:t>CODE<\/w:t><\/w:r>/, s => s + ref('reply') + ref('third'))
+      // On a section break's paragraph after the code, and mid-run
+      .replace(/<w:p\b[^>]*>(?=<w:r><w:t>BODY)/, s => '<w:p>' + section + ref('fourth') + '</w:p>' + s)
+      .replace('<w:t>BODY</w:t>', '<w:t>BO</w:t>' + ref('fifth').slice(5, -6) + '<w:t>DY</w:t>');
+    zip.file('word/document.xml', xml);
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toStartWith('---\ntitle: TITLE\n---\n\n{>>first\n  {>>reply<<}\n<<}{>>second<<}\n\n```r\nCODE\n```\n\n{>>third<<}\n');
+    expect(markdown).toContain('BO{>>fifth<<}DY');
+    const order = ['first', 'reply', 'second', 'third', 'fourth', 'fifth'].map(c => markdown.indexOf('{>>' + c));
+    expect(order.every((at, k) => at >= 0 && (k === 0 || at > order[k - 1]))).toBe(true);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 });

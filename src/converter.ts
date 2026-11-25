@@ -2886,37 +2886,61 @@ async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
  * Gives each comment that a part marks with its w:commentReference alone,
  * with no w:commentRangeStart or w:commentRangeEnd, as WordprocessingML
  * allows and tools other than Word write, an empty range at its first
- * reference: a start and an end next to the reference's run, before it, or
- * after it where the run has something before the reference. Import reads
- * a comment only from its range, so without this it dropped such a comment.
- * A comment with a range is as it was.
+ * reference: a start and an end right before the reference, between the
+ * runs a run with something before the reference splits into there, each
+ * with the run's properties. Import reads a comment only from its range, so
+ * without this it dropped such a comment. A comment with a range is as it
+ * was. Each array of children is built once, however many references it
+ * has, so a paragraph of many costs no more than their number.
  */
 function anchorReferenceOnlyComments(nodes: XmlNode[]): void {
   const anchored = new Set<string>();
   for (const tag of ['w:commentRangeStart', 'w:commentRangeEnd']) {
     for (const node of findAllDeep(nodes, tag)) anchored.add(xmlNumberId(getAttr(node, 'id')));
   }
+  // The nodes for a run, with the ranges it starts, or undefined for the run as it is
+  const anchoredRun = (node: XmlNode): XmlNode[] | undefined => {
+    const run = asXmlNodes(node['w:r']);
+    const props = run.filter(child => 'w:rPr' in child);
+    let pieces: XmlNode[] | undefined;
+    let piece: XmlNode[] = [];
+    // Whether the piece has something besides references
+    let shows = false;
+    for (const child of run) {
+      if (child['w:commentReference'] !== undefined) {
+        const id = xmlNumberId(getAttr(child, 'id'));
+        if (!anchored.has(id)) {
+          anchored.add(id);
+          pieces ??= [];
+          if (shows) {
+            pieces.push({ ...node, 'w:r': [...props, ...piece] });
+            piece = [];
+            shows = false;
+          }
+          pieces.push({ 'w:commentRangeStart': [], ':@': { ...child[':@'] } }, { 'w:commentRangeEnd': [], ':@': { ...child[':@'] } });
+        }
+      } else if ('w:rPr' in child) continue;
+      else shows = true;
+      piece.push(child);
+    }
+    // The last piece has the last reference at least
+    if (pieces) pieces.push({ ...node, 'w:r': [...props, ...piece] });
+    return pieces;
+  };
   const visit = (children: XmlNode[]): void => {
+    let rebuilt: XmlNode[] | undefined;
     for (let i = 0; i < children.length; i++) {
       const node = children[i];
       for (const key of Object.keys(node)) {
         if (key !== ':@' && Array.isArray(node[key])) visit(node[key]);
       }
-      const run = node['w:r'];
-      if (!Array.isArray(run)) continue;
-      const markers: XmlNode[] = [];
-      let after = false;
-      run.forEach((child: XmlNode, at: number) => {
-        if (child['w:commentReference'] === undefined) return;
-        const id = xmlNumberId(getAttr(child, 'id'));
-        if (anchored.has(id)) return;
-        anchored.add(id);
-        markers.push({ 'w:commentRangeStart': [], ':@': { ...child[':@'] } }, { 'w:commentRangeEnd': [], ':@': { ...child[':@'] } });
-        after ||= run.slice(0, at).some((other: XmlNode) => !('w:rPr' in other || 'w:commentReference' in other));
-      });
-      if (markers.length === 0) continue;
-      spliceAll(children, after ? i + 1 : i, 0, markers);
-      i += markers.length;
+      const pieces = Array.isArray(node['w:r']) ? anchoredRun(node) : undefined;
+      if (pieces) pushAll(rebuilt ??= children.slice(0, i), pieces);
+      else rebuilt?.push(node);
+    }
+    if (rebuilt) {
+      children.length = 0;
+      pushAll(children, rebuilt);
     }
   };
   visit(nodes);
@@ -14653,6 +14677,9 @@ function moveCodeComments(content: ContentItem[]): string | undefined {
   const moved = commentsOnlyInCode(content);
   if (moved.size === 0) return undefined;
   const pending = new Set(moved);
+  // The paragraph for each block's comments, by the index of the item after
+  // the block, all put in at once at the end, so each item moves once
+  const inserts = new Map<number, ContentItem[]>();
   for (let i = 0; i < content.length; i++) {
     const first = content[i];
     if (first.type !== 'para' || !first.isCodeBlock) continue;
@@ -14672,11 +14699,20 @@ function moveCodeComments(content: ContentItem[]): string | undefined {
         if (n > 0) para.push({ type: 'text', text: ' ', formatting: DEFAULT_FORMATTING, commentIds: new Set(), href: undefined });
         para.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set([id]), href: undefined });
       });
-      spliceAll(content, end, 0, para);
-      end += para.length;
+      inserts.set(end, para);
     }
     i = end - 1;
   }
+  const rebuilt: ContentItem[] = [];
+  content.forEach((item, at) => {
+    const para = inserts.get(at);
+    if (para) pushAll(rebuilt, para);
+    rebuilt.push(item);
+  });
+  const last = inserts.get(content.length);
+  if (last) pushAll(rebuilt, last);
+  content.length = 0;
+  pushAll(content, rebuilt);
   const one = moved.size === 1;
   return 'Moved ' + moved.size + ' comment' + (one ? '' : 's') + ' on code to after ' + (one ? 'its code block' : 'their code blocks')
     + ', as a code block can\'t hold a comment\'s range; ' + (one ? 'it' : 'they') + ' now mark' + (one ? 's' : '') + ' no text.';
@@ -19557,12 +19593,19 @@ function titleLineMarkdown(runs: TitleRun[]): string {
  * left in a paragraph of their own where the title was, as comments on
  * nothing, `{>>…<<}`, with their replies, which export writes back at the
  * title's end (see titleCommentRuns in md-to-docx.ts). Not those whose
- * range goes on into the body, whose text there holds them.
+ * range goes on into the body, whose text there holds them. So too the
+ * comments on nothing in paragraphs of nothing else before the title, which
+ * come first: Markdown has nothing before the frontmatter to hold them.
  */
 export function extractTitleLines(content: ContentItem[], paragraphs: string[] = []): string[] {
   const titles: string[] = [];
   const commentIds = new Set<string>();
   let titleAt: number | undefined;
+  // The comments on nothing before the first title, in paragraphs with
+  // nothing else, as a reviewed cover sheet has them: their items' indexes,
+  // and their IDs
+  const before: number[] = [];
+  const beforeIds: string[] = [];
   let i = 0;
 
   while (i < content.length) {
@@ -19572,7 +19615,21 @@ export function extractTitleLines(content: ContentItem[], paragraphs: string[] =
       i++;
       continue;
     }
+    if (titles.length === 0 && item.type === 'text' && item.text === '' && item.commentIds.size > 0 && !item.revision && item.href === undefined) {
+      before.push(i++);
+      pushAll(beforeIds, item.commentIds);
+      continue;
+    }
     if (item.type !== 'para' || !item.isTitle) break;
+    // They go on the title, first, as the title's own do, where else they'd
+    // make it body text, the frontmatter being the document's start
+    if (titles.length === 0 && before.length > 0) {
+      for (const id of beforeIds) commentIds.add(id);
+      // Only plain paragraphs are between them, which stay, as before
+      const kept = content.slice(before[0], i).filter(other => other.type === 'para');
+      spliceAll(content, before[0], i - before[0], kept);
+      i = before[0] + kept.length;
+    }
     paragraphs.push(item.titleXml ?? '');
     titleAt ??= i;
 

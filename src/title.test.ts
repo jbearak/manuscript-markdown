@@ -427,3 +427,66 @@ describe('Title comments, kept in the body', () => {
     expect(titled.match(/<w:p\b(?:(?!<\/w:p>).)*<\/w:p>/gs)![0]).toContain('<w:commentReference');
   });
 });
+
+describe('A paragraph of comments before the title', () => {
+  const COMMENT_MARKERS = /<w:commentRange(?:Start|End) w:id="\d+"\/>|<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference w:id="\d+"\/><\/w:r>/g;
+  const SECTION = '<w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr>';
+
+  /** Export's DOCX of `md` with its comments' markers taken out, and a first
+   *  paragraph `first` before its Title paragraph, as on a reviewed cover sheet */
+  async function withFirstParagraph(md: string, first: string): Promise<Uint8Array> {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = (await zip.file('word/document.xml')!.async('string')).replace(COMMENT_MARKERS, '');
+    zip.file('word/document.xml', xml.replace('<w:body>', '<w:body>' + first));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** The Markdown of `docx`, which a second trip through export and import must keep */
+  async function stableImport(docx: Uint8Array): Promise<string> {
+    const { markdown } = await convertDocx(docx);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+    return markdown;
+  }
+
+  const point = (id: number) => '<w:r><w:commentReference w:id="' + id + '"/></w:r>';
+  const range = (id: number) => '<w:commentRangeStart w:id="' + id + '"/><w:commentRangeEnd w:id="' + id + '"/>' + point(id);
+
+  for (const [carrier, pPr] of [['a continuous section break', SECTION], ['no section break', '']]) {
+    for (const [marked, marker] of [['its reference alone', point], ['an empty range and its reference', range]] as const) {
+      it('keeps the title and a comment marked by ' + marked + ' in an empty first paragraph with ' + carrier, async () => {
+        const docx = await withFirstParagraph('---\ntitle: TITLE\n---\n\nBODY\n\n{==x==}{>>note<<}\n', '<w:p>' + pPr + marker(0) + '</w:p>');
+        expect(await stableImport(docx)).toBe('---\ntitle: TITLE\n---\n\n{>>note<<}\n\nBODY\n\nx\n');
+      });
+    }
+  }
+
+  it('keeps comments there in order with the title\'s own, and their replies', async () => {
+    const md = '---\ntitle: TITLE\n---\n\n{==x==}{>>@Ann Lee (2024-01-01 10:00) | first\n  {>>@Ben Ray (2024-01-02 10:00) | reply<<}\n<<}'
+      + ' {==y==}{>>@Ann Lee (2024-01-01 11:00) | second<<} {==z==}{>>@Ann Lee (2024-01-01 12:00) | third<<}\n';
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const comments = await zip.file('word/comments.xml')!.async('string');
+    /** The ID of the comment whose body has `text` */
+    const id = (text: string) => Number(comments.match(new RegExp('<w:comment w:id="(\\d+)"(?:(?!</w:comment>).)*' + text, 's'))![1]);
+    // The first, with its reply, and the second before the title, the third on it
+    const moved = xml.replace(COMMENT_MARKERS, '').replace('<w:body>', '<w:body><w:p>' + point(id('first')) + point(id('reply')) + range(id('second')) + '</w:p>')
+      .replace('<w:t>TITLE</w:t></w:r>', '<w:t>TITLE</w:t></w:r>' + range(id('third')));
+    zip.file('word/document.xml', moved);
+    const markdown = await stableImport(await zip.generateAsync({ type: 'uint8array' }));
+    expect(parseFrontmatter(markdown).metadata.title).toEqual(['TITLE']);
+    const body = markdown.split('\n---\n')[1];
+    expect(body.indexOf('| first')).toBeLessThan(body.indexOf('| reply'));
+    expect(body.indexOf('| reply')).toBeLessThan(body.indexOf('| second'));
+    expect(body.indexOf('| second')).toBeLessThan(body.indexOf('| third'));
+    expect(body).toStartWith('\n{>>@Ann Lee (2024-01-01 10:00) | first\n  {>>@Ben Ray');
+  });
+
+  it('still reads a first paragraph with text before a Title paragraph as body text', async () => {
+    const docx = await withFirstParagraph('---\ntitle: TITLE\n---\n\nBODY\n', '<w:p><w:r><w:t>Cover</w:t></w:r>' + point(0) + '</w:p>');
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.title).toBeUndefined();
+    expect(markdown).toStartWith('Cover');
+  });
+});
