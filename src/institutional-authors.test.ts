@@ -45,6 +45,14 @@ describe('splitAuthorString', () => {
     expect(splitAuthorString('Smith, John')).toEqual(['Smith, John']);
   });
 
+  it('splits on "and" in any case, as BibTeX does', () => {
+    expect(splitAuthorString('Doe, Jane AND Smith, John And {Johnson AND Johnson}')).toEqual([
+      'Doe, Jane',
+      'Smith, John',
+      '{Johnson AND Johnson}',
+    ]);
+  });
+
   it('handles nested braces', () => {
     expect(splitAuthorString('{Centers for Disease Control and Prevention}')).toEqual([
       '{Centers for Disease Control and Prevention}',

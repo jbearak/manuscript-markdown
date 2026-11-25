@@ -34,12 +34,13 @@
 import {
   bibtexFieldAsPlainText,
   bibtexNamePartAsPlainText,
+  bibtexTexAsText,
   parseBibtexWithRaw,
   type BibtexEntry,
 } from './bibtex-parser';
 import { createHash } from 'crypto';
 import { pushAll } from './arrays';
-import { parseAuthors } from './md-to-docx-citations';
+import { parseAuthors, splitAuthorString } from './md-to-docx-citations';
 import { normalizeDoi, normalizeIsbns, normalizePmid, type ZoteroLinkDecision } from './zotero-link';
 
 /** An item as the Local API returns its `data`, with `meta.parsedDate`. */
@@ -101,6 +102,11 @@ export type ZoteroFieldNotPushedReason =
   | 'incomplete-names'
   /** The DOI is not DOI-shaped. */
   | 'unreadable-doi'
+  /** A name in the list is not one BibTeX reads: empty, a stray `and`, or
+   *  with more than two commas. */
+  | 'unreadable-names'
+  /** The value holds TeX math, whose grouping Zotero's text can't keep. */
+  | 'math'
   /** The PMID is not a PubMed id the matcher reads, as `pending`. */
   | 'unreadable-pmid'
   /** The entry gives the field more than once: BibTeX reads the first,
@@ -146,6 +152,9 @@ export type ZoteroPushSkipReason =
   | 'citation-key-conflict'
   /** Another whole work in the library, as a book, has the entry's ISBN. */
   | 'isbn-owned-elsewhere'
+  /** Zotero's answer left out the item's collections or creators, or gave
+   *  one push can't read, and a write would replace the whole list. */
+  | 'incomplete-item'
   /** Another entry would give the same PMID or whole-work ISBN to an item. */
   | 'duplicate-identifier'
   /** The item type has no Citation Key field, so the next push couldn't
@@ -260,6 +269,7 @@ const ITEM_TYPE_BY_ENTRY_TYPE: Readonly<Record<string, string>> = {
 const FIELD_MAP: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['title', ['title']],
   ['journal', ['publicationTitle']],
+  ['fjournal', ['publicationTitle']],
   ['journaltitle', ['publicationTitle']],
   ['booktitle', ['publicationTitle']],
   ['volume', ['volume']],
@@ -298,7 +308,7 @@ const HANDLED_OR_IGNORED: ReadonlySet<string> = new Set([
 
 /** Base fields compared without case: BibTeX exports title-case them. */
 const CASELESS_BASES: ReadonlySet<string> = new Set([
-  'title', 'publicationTitle', 'shortTitle', 'series', 'seriesTitle', 'type',
+  'title', 'publicationTitle', 'journalAbbreviation', 'shortTitle', 'series', 'seriesTitle', 'type',
 ]);
 
 const CREATOR_ROLES: ReadonlyArray<readonly [string, string]> = [
@@ -394,6 +404,9 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
   }
   const plain = (bibtexFieldAsPlainText(entry, name) ?? '').replace(/\s+/g, ' ').trim();
   if (plain === '') return undefined;
+  // Math, as $x^{12}$, whose groups the text loses: $x^12$ is another
+  // formula.  (An escaped dollar sign, \$, is text.)
+  if (/(?:^|[^\\])\$/.test(entry.texFields?.get(name) ?? entry.fields.get(name) ?? '')) return { problem: 'math' };
   if (TEX_COMMAND.test(plain)) return { problem: 'tex' };
   return { value: plain };
 }
@@ -461,10 +474,53 @@ interface ReadCreators {
   readonly incomplete: boolean;
 }
 
-function readCreators(entry: BibtexEntry, field: string, creatorType: string): ReadCreators | 'tex' | 'macro' | undefined {
-  const raw = entry.fields.get(field);
-  if (raw === undefined || raw.trim() === '') return undefined;
+/** `value` with each `~` outside its groups a space, as BibTeX splits a
+ *  name's words at a tie (bibtex.web, sep_char), but not an escaped one. */
+function tiesAsSpaces(value: string): string {
+  let depth = 0;
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (c === '\\') {
+      out += c + (value[i + 1] ?? '');
+      i++;
+      continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}') depth = Math.max(0, depth - 1);
+    out += c === '~' && depth === 0 ? ' ' : c;
+  }
+  return out;
+}
+
+/** Whether BibTeX reads `name`, one of a list's names, as a name: not empty
+ *  or a stray `and`, and with at most two commas outside its groups (a
+ *  third is "too many commas", which BibTeX drops the rest after). */
+function readableName(name: string): boolean {
+  const trimmed = name.trim();
+  if (trimmed === '' || /^and$|^and\s|\sand$/i.test(trimmed)) return false;
+  let depth = 0;
+  let commas = 0;
+  for (const c of trimmed) {
+    if (c === '{') depth++;
+    else if (c === '}') depth = Math.max(0, depth - 1);
+    else if (c === ',' && depth === 0) commas++;
+  }
+  return commas <= 2;
+}
+
+function readCreators(entry: BibtexEntry, field: string, creatorType: string): ReadCreators | 'tex' | 'macro' | 'unreadable' | undefined {
+  const parsed = entry.fields.get(field);
+  if (parsed === undefined || parsed.trim() === '') return undefined;
   if (isMacro(entry, field)) return 'macro';
+  // The parsed value reads an escaped brace as a brace, which splitting a
+  // name then drops as a group's, and an escaped tilde as a tilde, which is
+  // a tie; where the entry has either, its names are read as written.
+  const written = entry.writtenFields?.get(field)?.trim();
+  const asWritten = written !== undefined && /^\{.*\}$|^".*"$/s.test(written) ? written.slice(1, -1) : undefined;
+  const raw = tiesAsSpaces(asWritten !== undefined && /\\(?:[{}~]|textasciitilde)/.test(asWritten) ? asWritten : parsed);
+  const list = splitAuthorString(raw);
+  if (list.length === 0 || !list.every(readableName)) return 'unreadable';
   const creators: ZoteroCreator[] = [];
   const names = parseAuthors(raw);
   const last = names[names.length - 1];
@@ -473,6 +529,7 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
   for (const name of names) {
     if (name.literal !== undefined) {
       const literal = bibtexNamePartAsPlainText(name.literal).trim();
+      if (literal === '') return 'unreadable';
       if (TEX_COMMAND.test(literal)) return 'tex';
       creators.push({ creatorType, name: literal });
       continue;
@@ -483,6 +540,7 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
     const suffix = part(name.suffix);
     const firstName = suffix ? (given ? given + ', ' + suffix : suffix) : given;
     if (TEX_COMMAND.test(lastName) || TEX_COMMAND.test(firstName)) return 'tex';
+    if (lastName === '') return 'unreadable';
     creators.push(firstName ? { creatorType, lastName, firstName } : { creatorType, lastName, firstName: '' });
   }
   return { creators, incomplete };
@@ -491,6 +549,29 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
 // ---------------------------------------------------------------------------
 // Comparing
 // ---------------------------------------------------------------------------
+
+// The rich text Zotero keeps in titles and other fields
+// (Zotero.Utilities.Internal's formatting tags, and the small-caps form
+// Zotero's BibTeX import writes), and the entities of the characters that
+// would read as tags.
+const ZOTERO_MARKUP = /<\/?(?:i|b|sub|sup|sc)>|<span (?:style="font-variant: ?small-caps;?"|style="small-caps"|class="nocase")>|<\/span>/g;
+const ZOTERO_ENTITIES: Readonly<Record<string, string>> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"' };
+
+/** A Zotero value's text, its markup set aside. */
+function withoutMarkup(value: string): string {
+  return value.replace(ZOTERO_MARKUP, '').replace(/&(?:amp|lt|gt|quot);/g, e => ZOTERO_ENTITIES[e]);
+}
+
+/** Text with TeX's formatting and math set aside, as \textit{x} or
+ *  $x^{12}$, for telling whether a value push won't write is Zotero's own:
+ *  the commands of formatting Zotero keeps as markup, and math's dollar
+ *  signs, scripts and groups.  Coarser than the text: it only ever spares a
+ *  write. */
+function looseText(value: string): string {
+  return value
+    .replace(/\\(?:textit|textbf|textsc|textrm|textup|textnormal|emph|mathrm|mathit|mathbf|textsuperscript|textsubscript)(?![A-Za-z])\s*/g, '')
+    .replace(/[{}^_]|\$/g, '');
+}
 
 function foldText(value: string): string {
   return value
@@ -520,9 +601,10 @@ function sameValue(base: string, a: string, b: string): boolean {
     case 'pages':
       return foldText(a).replace(/[‐-―-]+/g, '-') === foldText(b).replace(/[‐-―-]+/g, '-');
     default:
+      // Zotero's rich text, as <i>…</i>, is markup on the same text.
       return CASELESS_BASES.has(base)
-        ? foldText(a).toLowerCase() === foldText(b).toLowerCase()
-        : foldText(a) === foldText(b);
+        ? foldText(withoutMarkup(a)).toLowerCase() === foldText(b).toLowerCase()
+        : foldText(withoutMarkup(a)) === foldText(b);
   }
 }
 
@@ -555,6 +637,19 @@ function extraFields(item: ZoteroItemJson): Map<string, string> {
   return out;
 }
 
+/** `value` as a list, if it is one and push reads every element of it. */
+function wholeList<T>(value: unknown, readable: (v: unknown) => v is T): T[] | undefined {
+  return Array.isArray(value) && value.every(readable) ? (value as T[]) : undefined;
+}
+
+function isCreator(value: unknown): value is ZoteroCreator {
+  if (typeof value !== 'object' || value === null) return false;
+  const c = value as Record<string, unknown>;
+  const text = (v: unknown) => v === undefined || typeof v === 'string';
+  return typeof c.creatorType === 'string' && text(c.name) && text(c.firstName) && text(c.lastName) &&
+    (typeof c.name === 'string' || typeof c.lastName === 'string');
+}
+
 function asCreators(value: unknown): ZoteroCreator[] {
   if (!Array.isArray(value)) return [];
   return value.filter((c): c is ZoteroCreator => typeof c === 'object' && c !== null && typeof (c as ZoteroCreator).creatorType === 'string');
@@ -563,6 +658,12 @@ function asCreators(value: unknown): ZoteroCreator[] {
 /** The creators with one role's run replaced by `next`, where that role
  *  first appeared, and every other creator kept in its place. */
 function replaceRole(existing: readonly ZoteroCreator[], role: string, next: readonly ZoteroCreator[]): ZoteroCreator[] {
+  // As many names as before: each takes the place of the one it replaces,
+  // so a translator between two authors stays between them.
+  if (existing.filter(c => c.creatorType === role).length === next.length) {
+    let i = 0;
+    return existing.map(c => (c.creatorType === role ? next[i++] : c));
+  }
   const out: ZoteroCreator[] = [];
   let placed = false;
   for (const c of existing) {
@@ -584,6 +685,10 @@ function replaceRole(existing: readonly ZoteroCreator[], role: string, next: rea
 interface EntryFields {
   /** Zotero field → value, for the given item type. */
   readonly fields: Map<string, { readonly value: string; readonly base: string; readonly from: string }>;
+  /** Zotero field → a value left out for its TeX or math, as looseText
+   *  reads it, with its line in `notPushed`, which an update drops where
+   *  Zotero's value is the same text. */
+  readonly kept: Map<string, { readonly loose: string; readonly base: string; readonly line: ZoteroFieldNotPushed }>;
   readonly date?: readonly number[];
   readonly creators: Map<string, ReadCreators>;
   readonly notPushed: ZoteroFieldNotPushed[];
@@ -593,19 +698,19 @@ interface EntryFields {
  *  written, since BibTeX and biber read different ones of them. */
 function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet<string>): EntryFields {
   const fields: EntryFields['fields'] = new Map();
+  const kept: EntryFields['kept'] = new Map();
   const creators = new Map<string, ReadCreators>();
   const notPushed: ZoteroFieldNotPushed[] = [];
-  for (const [name, bases] of FIELD_MAP) {
+  for (const [name, mapped] of FIELD_MAP) {
     const read = readText(entry, name);
     if (read === undefined) continue;
     if (repeated.has(name)) {
       notPushed.push({ field: name, reason: 'repeated-field' });
       continue;
     }
-    if ('problem' in read) {
-      notPushed.push({ field: name, reason: read.problem });
-      continue;
-    }
+    // With fjournal beside it, journal is the abbreviation, as Zotero's
+    // BibTeX import reads the pair.
+    const bases = name === 'journal' && entry.fields.has('fjournal') ? ['journalAbbreviation'] : mapped;
     let target: string | undefined;
     let base = '';
     for (const b of bases) {
@@ -614,6 +719,16 @@ function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet
         base = b;
         break;
       }
+    }
+    if ('problem' in read) {
+      const line = { field: name, reason: read.problem };
+      notPushed.push(line);
+      if ((read.problem === 'tex' || read.problem === 'math') && target !== undefined && !kept.has(target)) {
+        // As TeX, where a command's group is still around its argument.
+        const tex = entry.texFields?.get(name) ?? bibtexFieldAsPlainText(entry, name) ?? '';
+        kept.set(target, { loose: looseText(bibtexTexAsText(tex)), base, line });
+      }
+      continue;
     }
     if (target === undefined) {
       notPushed.push({ field: name, reason: 'no-zotero-field' });
@@ -642,10 +757,11 @@ function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet
     if (read === undefined) continue;
     if (repeated.has(field)) notPushed.push({ field, reason: 'repeated-field' });
     else if (read === 'tex' || read === 'macro') notPushed.push({ field, reason: read });
+    else if (read === 'unreadable') notPushed.push({ field, reason: 'unreadable-names' });
     else if (!type.creatorTypes.some(c => c.creatorType === role)) notPushed.push({ field, reason: 'no-creator-role' });
     else creators.set(role, read);
   }
-  return { fields, date, creators, notPushed };
+  return { fields, kept, date, creators, notPushed };
 }
 
 // The characters of a Zotero object key (Zotero.Utilities.isValidObjectKey).
@@ -698,7 +814,15 @@ function updateChanges(
   const read = entryFields(entry, type, repeated);
   const changes: ZoteroFieldChange[] = [];
   const patch: Record<string, unknown> = {};
-  const notPushed = [...read.notPushed];
+  // A value left out for its TeX that is Zotero's own text, its markup and
+  // math set aside, is no difference to report.
+  const same = new Set<ZoteroFieldNotPushed>();
+  for (const [field, { loose, base, line }] of read.kept) {
+    const current = typeof item[field] === 'string' ? (item[field] as string) : '';
+    const fold = (v: string) => (CASELESS_BASES.has(baseOf(type, field) || base) ? foldText(v).toLowerCase() : foldText(v));
+    if (current !== '' && fold(looseText(withoutMarkup(current))) === fold(loose)) same.add(line);
+  }
+  const notPushed = read.notPushed.filter(line => !same.has(line));
   const extra = extraFields(item);
   for (const [field, { value, base, from }] of read.fields) {
     const current = typeof item[field] === 'string' ? (item[field] as string) : '';
@@ -1076,9 +1200,18 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     if ((targets.get(c.item.key) ?? 0) > 1) {
       return { kind: 'skip', entryKey: c.entryKey, reason: 'duplicate-target', detail: c.item.key };
     }
-    const collections = Array.isArray(c.item.collections)
-      ? (c.item.collections as unknown[]).filter((k): k is string => typeof k === 'string')
-      : [];
+    // A write replaces the item's collections and creators whole, so each is
+    // sent only from a list read whole: a response that left it out, or
+    // has an element push can't read, would drop what it didn't say.
+    const collections = wholeList(c.item.collections, (k): k is string => typeof k === 'string');
+    if (collections === undefined) return { kind: 'skip', entryKey: c.entryKey, reason: 'incomplete-item', detail: 'collections' };
+    if (
+      input.mode === 'update' &&
+      (c.entry.fields.has('author') || c.entry.fields.has('editor')) &&
+      wholeList(c.item.creators, isCreator) === undefined
+    ) {
+      return { kind: 'skip', entryKey: c.entryKey, reason: 'incomplete-item', detail: 'creators' };
+    }
     const addToCollection = !collections.includes(input.collectionKey);
     const type = schemaType(input.schema, c.item.itemType);
     let changes: ZoteroFieldChange[] = [];

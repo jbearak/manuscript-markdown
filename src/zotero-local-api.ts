@@ -651,12 +651,18 @@ export async function fetchZoteroLibrarySnapshot(
   const { headers } = await requestArrayWithHeaders(libraryPrefix(scope) + '/items/top?limit=1', LIST_TIMEOUT_MS, options);
   const libraryVersion = readVersion(headers);
   const serverId = headers?.get('Zotero-Server-ID') ?? '';
-  const { rows } = await requestArrayWithHeaders(libraryPrefix(scope) + '/items/top', CATALOG_TIMEOUT_MS, options);
+  const { rows, headers: rowHeaders } = await requestArrayWithHeaders(libraryPrefix(scope) + '/items/top', CATALOG_TIMEOUT_MS, options);
   if (libraryVersion === undefined || serverId === '') {
     throw new ZoteroLocalApiError(
       'request-failed',
       'Zotero did not report its library version and server id; writing needs Zotero 10 or later.',
     );
+  }
+  // Both reads must come from one Zotero: a profile switched between them
+  // would pair one library's version with another's items, and the version
+  // check would then pass a write planned against the wrong library.
+  if (rowHeaders?.get('Zotero-Server-ID') !== serverId) {
+    throw new ZoteroLocalApiError('library-changed', 'A different Zotero answered while the library was being read.');
   }
   // Only the catalog's items, the bibliographic ones, with the identity
   // URI the catalog gives each, so a stored link to another library's item

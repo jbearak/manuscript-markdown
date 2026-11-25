@@ -995,11 +995,13 @@ export function splitAuthorString(authorString: string): string[] {
   const result: string[] = [];
   let depth = 0;
   let start = 0;
+  // BibTeX reads `and` in any case (bibtex.web, "Name-process ... and"),
+  // so Doe AND Smith is two names. (The parser has run spaces together.)
   const sep = ' and ';
   for (let i = 0; i < authorString.length; i++) {
     if (authorString[i] === '{') { depth++; continue; }
     if (authorString[i] === '}') { depth = Math.max(0, depth - 1); continue; }
-    if (depth === 0 && authorString.slice(i, i + sep.length) === sep) {
+    if (depth === 0 && authorString.slice(i, i + sep.length).toLowerCase() === sep) {
       result.push(authorString.slice(start, i).trim());
       i += sep.length - 1;
       start = i + 1;

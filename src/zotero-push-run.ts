@@ -202,6 +202,7 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
     'more than one Zotero item answers to its citation key, in the Citation Key field or a "Citation Key:" line of Extra; link it with zotero-key',
   'isbn-owned-elsewhere': "its ISBN is another item's",
   'duplicate-identifier': 'another entry would give the same identifier to an item',
+  'incomplete-item': "Zotero's answer did not give the whole list that writing would replace",
   'no-citation-key-field':
     'Zotero has no Citation Key field for this item type, so the next push could not find the item and would create it again',
   'key-in-use':
@@ -222,6 +223,8 @@ const NOT_PUSHED_PROSE: Readonly<Record<ZoteroFieldNotPushedReason, string>> = {
   'incomplete-names': "ends with 'and others' and differs from Zotero's first names",
   'unreadable-doi': 'not a DOI',
   'unreadable-pmid': 'not a PubMed id',
+  'unreadable-names': 'a name BibTeX does not read as one',
+  math: 'TeX math, which Zotero would not keep as written',
   'repeated-field': 'given more than once',
 };
 

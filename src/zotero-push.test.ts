@@ -226,9 +226,12 @@ describe('createZoteroPushPlan', () => {
   });
 
   it('never writes a value that still holds TeX', () => {
-    const bib = FLATO_BIB.replace('{{Sub-Saharan Africa}}', '\\emph{Sub-Saharan Africa}');
+    const bib = FLATO_BIB.replace('{{Sub-Saharan Africa}}', '\\emph{Sub-Saharan Africa}, Revised');
     const p = plan(bib, [FLATO]);
     expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'title', reason: 'tex' }] });
+    // Zotero's own text, the formatting set aside, is no difference to report.
+    const same = plan(FLATO_BIB.replace('{{Sub-Saharan Africa}}', '\\emph{Sub-Saharan Africa}'), [FLATO]);
+    expect(same.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
   });
 
   it('leaves an entry matched only by its metadata alone', () => {
@@ -1000,5 +1003,101 @@ describe('push: never a second copy of a work the library has', () => {
   it("won't create an item under a key the library already has", () => {
     const renamed = item(pushItemKey('a'), { title: 'A', citationKey: 'renamed' });
     expect(plan('@article{a,\n  title = {Another}\n}\n', [renamed]).actions[0]).toMatchObject({ kind: 'skip', reason: 'key-in-use' });
+  });
+});
+
+describe("push: an unchanged export never damages Zotero's metadata", () => {
+  const authors = [
+    { creatorType: 'author', firstName: 'Jane', lastName: 'Doe' },
+    { creatorType: 'translator', name: 'Translators Guild' },
+    { creatorType: 'author', firstName: 'John', lastName: 'Smith' },
+  ];
+
+  it('reads names as BibTeX does: and in any case, ties, escaped braces', () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators: authors });
+    expect(plan('@article{k,\n  author = {Doe, Jane AND Smith, John}\n}\n', [k]).actions[0]).toMatchObject({ kind: 'unchanged' });
+    const ties = plan('@article{k,\n  author = {Jane~Doe and Ludwig~van~Beethoven}\n}\n', []).actions[0];
+    expect(ties).toMatchObject({
+      kind: 'create',
+      data: {
+        creators: [
+          { creatorType: 'author', lastName: 'Doe', firstName: 'Jane' },
+          { creatorType: 'author', lastName: 'van Beethoven', firstName: 'Ludwig' },
+        ],
+      },
+    });
+    const council = item('AAAA2222', { title: 'T', citationKey: 'k', creators: [{ creatorType: 'author', name: 'Research {EU} Council' }] });
+    expect(plan('@article{k,\n  author = {{Research \\{EU\\} Council}}\n}\n', [council]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+    // An escaped tilde is a tilde, not a tie.
+    const tilde = plan('@article{k,\n  author = {Doe\\textasciitilde{}Roe, Jane}\n}\n', []).actions[0];
+    expect(tilde).toMatchObject({ kind: 'create', data: { creators: [{ creatorType: 'author', lastName: 'Doe~Roe', firstName: 'Jane' }] } });
+  });
+
+  it("doesn't write a name BibTeX doesn't read as one", () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators: authors });
+    for (const names of [' and ', 'Doe,Dr.,Jane,Smith', 'Doe, Jane and and Smith, John']) {
+      const p = plan(`@article{k,\n  author = {${names}}\n}\n`, [k]);
+      expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'author', reason: 'unreadable-names' }] });
+    }
+  });
+
+  it('keeps each creator in its place when a name changes', () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators: authors });
+    const p = plan('@article{k,\n  author = {Doe, Janet and Smith, John}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({
+      kind: 'update',
+      patch: { creators: [{ creatorType: 'author', lastName: 'Doe', firstName: 'Janet' }, authors[1], authors[2]] },
+    });
+  });
+
+  it("never writes math, and reads Zotero's rich text as its text", () => {
+    const cases: Array<[string, string]> = [
+      ['Average $x^{12}$', 'Average $x^{12}$'],
+      ['The {NASA} report', 'The <span class="nocase">NASA</span> report'],
+      ['On E. coli growth', 'On <i>E. coli</i> growth'],
+      ['H$_2$O uptake', 'H<sub>2</sub>O uptake'],
+      // As Zotero's BibTeX export writes <i> and <sub> (mapHTMLmarkup).
+      ['On \\textit{E. coli} growth', 'On <i>E. coli</i> growth'],
+      ['H$_{\\textrm{2}}$O uptake', 'H<sub>2</sub>O uptake'],
+      ['Cats \\& dogs', 'Cats &amp; dogs'],
+    ];
+    for (const [entry, zotero] of cases) {
+      const p = plan(`@article{k,\n  title = {${entry}}\n}\n`, [item('AAAA2222', { title: zotero, citationKey: 'k' })]);
+      expect([entry, p.actions[0]]).toMatchObject([entry, { kind: 'unchanged', notPushed: [] }]);
+    }
+    // Other math is left out, not written without its groups.
+    const other = plan('@article{k,\n  title = {Average $x^{13}$}\n}\n', [item('AAAA2222', { title: 'Average $x^{12}$', citationKey: 'k' })]);
+    expect(other.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'title', reason: 'math' }] });
+  });
+
+  it('reads journal beside fjournal as the abbreviation', async () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', publicationTitle: 'Journal of Biology', journalAbbreviation: 'J. Biol.' });
+    const same = await pushThroughApi('@article{k,\n  journal = {J. Biol.},\n  fjournal = {Journal of Biology}\n}\n', [k]);
+    expect(same.plan.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+    const created = await pushThroughApi('@article{n,\n  journal = {J. Biol.},\n  fjournal = {Journal of Biology}\n}\n', []);
+    expect(created.posts[0][0]).toMatchObject({ publicationTitle: 'Journal of Biology', journalAbbreviation: 'J. Biol.' });
+  });
+
+  it("doesn't replace a list Zotero's answer didn't give whole", () => {
+    const noCollections = { ...item('AAAA2222', { title: 'T', citationKey: 'k' }), collections: undefined } as unknown as ZoteroItemJson;
+    expect(plan('@article{k,\n  title = {T}\n}\n', [noCollections], 'add').actions[0]).toMatchObject({ kind: 'skip', reason: 'incomplete-item', detail: 'collections' });
+    const oddCollections = item('AAAA2222', { title: 'T', citationKey: 'k', collections: 'OTHER001' });
+    expect(plan('@article{k,\n  title = {T}\n}\n', [oddCollections], 'add').actions[0]).toMatchObject({ kind: 'skip', reason: 'incomplete-item' });
+    const noCreators = { ...item('AAAA2222', { title: 'T', citationKey: 'k' }), creators: undefined } as unknown as ZoteroItemJson;
+    expect(plan('@article{k,\n  author = {Jane Doe}\n}\n', [noCreators]).actions[0]).toMatchObject({ kind: 'skip', reason: 'incomplete-item', detail: 'creators' });
+  });
+});
+
+describe('fetchZoteroLibrarySnapshot, read from one Zotero', () => {
+  it('refuses items from another Zotero than the version came from', async () => {
+    const fetchFn: ZoteroFetch = async url => ({
+      ok: true,
+      status: 200,
+      json: async () => [],
+      headers: { get: (n: string) => (n === 'Last-Modified-Version' ? '4' : n === 'Zotero-Server-ID' ? (url.includes('limit=1') ? 'A' : 'B') : null) },
+    });
+    const error = await fetchZoteroLibrarySnapshot({ type: 'user' }, { fetchFn }).catch((e: ZoteroLocalApiError) => e);
+    expect(error).toBeInstanceOf(ZoteroLocalApiError);
+    expect((error as ZoteroLocalApiError).kind).toBe('library-changed');
   });
 });
