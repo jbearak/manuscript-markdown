@@ -114,7 +114,7 @@ export function parseDta(
 
 interface DtaTable {
   release: number;
-  variables: Variable[];
+  variables: readonly Variable[];
   rows: Cell[][];
   valueLabelTables: (ValueLabels | undefined)[];
 }
@@ -141,7 +141,7 @@ function tableText(table: DtaTable): string[] {
   const text: string[] = [];
   for (const v of table.variables) text.push(v.name, v.label);
   for (const labels of table.valueLabelTables) {
-    if (labels) text.push(...labels.values());
+    if (labels) for (const label of labels.values()) text.push(label);
   }
   for (const row of table.rows) {
     for (const cell of row) if (typeof cell === 'string') text.push(cell);
@@ -161,7 +161,7 @@ function tableText(table: DtaTable): string[] {
 function readTable(data: Uint8Array): DtaTable {
   const table = readTableAs(data);
   if (table.release >= 118) return table;
-  if (!tableText(table).some(t => /[^\x00-\x7f]/.test(t))) return table;
+  if (!tableText(table).some(t => /[^\x20-\x7e]/.test(t))) return table;
   const utf8 = readTableAs(data, 'utf-8');
   return tableText(utf8).some(t => t.includes('\ufffd')) ? table : utf8;
 }
