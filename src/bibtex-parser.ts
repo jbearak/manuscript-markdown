@@ -2191,9 +2191,9 @@ export function spliceFieldsIntoEntry(
  *    with the next entry's type, where produced entries would follow it.
  *    Such a file keeps its entries and its `@string` and `@preamble`
  *    declarations alone.
- *  - Produced-only entries are appended at the end, and a line after them
- *    where the text after the existing file's last entry has an @ (see
- *    inSkeleton).
+ *  - Produced-only entries are appended at the end.
+ *  - A line follows the last entry, where the merge wrote it and the text
+ *    before it has an @ outside a declaration (see inSkeleton).
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
  *  This is a post-processing step that runs after any restoration layer. */
@@ -2311,11 +2311,16 @@ export function mergeBibtex(existing: string, produced: string): string {
       entries.push({ key, start: out.length, end: out.length + text.length });
       out += text;
     };
+    // Whether the last entry put is text the existing file didn't have there
+    let lastWritten = false;
     for (const range of existingResult.ranges) {
       copy(range.start);
       at = range.end;
       const text = existingParsed.has(range.key) ? mergedEntry(range.key) : existing.slice(range.start, range.end);
-      if (text) put(range.key, text);
+      if (text) {
+        put(range.key, text);
+        lastWritten = text !== existing.slice(range.start, range.end);
+      }
     }
     copy(existing.length);
     const added = producedOnly();
@@ -2325,25 +2330,37 @@ export function mergeBibtex(existing: string, produced: string): string {
       const blank = existingEol().repeat(2);
       const ending = out.slice(out.trimEnd().length);
       out = out.slice(0, out.length - ending.length);
-      const firstAdded = out.length + blank.length;
       for (const entry of added) {
         out += blank;
         put(entry.key, entry.text);
       }
       out += ending;
-      // BibTeX reads an @ in a % comment, so a tail such as
-      // `% alice@example.test` or `% see @foo(k)` leaves it expecting a { or
-      // a ( or a key's , where the first added entry's @ is. It reports that,
-      // and reads on from that @, but not where that @ is on the file's last
-      // line: it stops at the end of the file instead, and the entry is lost.
-      // So a line follows that @'s, where the tail has an @. BibTeX ends a
-      // line at a CR and again at an LF, so in a CRLF file the empty one
-      // between them is that line.
-      const tailStart = existingResult.ranges.length > 0 ? existingResult.ranges[existingResult.ranges.length - 1].end : 0;
-      if (existing.indexOf('@', tailStart) !== -1) {
-        const eol = existingEol();
-        while (!/[\r\n][^]/.test(out.slice(firstAdded))) out += eol;
+      lastWritten = true;
+    }
+    // BibTeX reads an @ in a % comment, so text before an entry such as
+    // `% alice@example.test` or `% see @foo(k)` leaves it expecting a { or a
+    // ( or a key's , where the entry's @ is. It reports that, and reads on
+    // from that @, but not where that @ is on the file's last line: it stops
+    // at the end of the file instead, and the entry is lost. So a line
+    // follows the last entry's, where the merge wrote it and the text before
+    // it has an @ outside the @string and @preamble declarations, which
+    // BibTeX reads whole. BibTeX ends a line at a CR and again at an LF, so
+    // in a CRLF file the empty one between them is that line.
+    const last = entries[entries.length - 1];
+    const strayAt = (from: number, to: number): boolean => {
+      for (const string of strings) {
+        if (string.end <= from) continue;
+        if (string.start >= to) break;
+        const at = out.indexOf('@', from);
+        if (at !== -1 && at < string.start) return true;
+        from = string.end;
       }
+      const at = out.indexOf('@', from);
+      return at !== -1 && at < to;
+    };
+    if (lastWritten && strayAt(entries.length > 1 ? entries[entries.length - 2].end : 0, last.start)) {
+      const eol = existingEol();
+      while (!/[\r\n][^]/.test(out.slice(last.start))) out += eol;
     }
     const read = scanBibtex(out);
     const same = read.rangesTrusted

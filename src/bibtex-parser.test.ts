@@ -1243,6 +1243,19 @@ describe('mergeBibtex', () => {
     }
   });
 
+  it('puts a line after the last entry it replaces with a one-line entry after text with an @', () => {
+    const existing = book('A', 'Keep') + '\n% contact alice@example.test\n@book{B,\n  title = {Old},\n}\n';
+    expect(mergeBibtex(existing, book('A', 'Keep') + '\n' + book('B', 'New')))
+      .toBe(book('A', 'Keep') + '\n% contact alice@example.test\n' + book('B', 'New') + '\n\n');
+    // A file the merge leaves as it was stays so
+    const same = book('A', 'Keep') + '\n% contact alice@example.test\n' + book('B', 'Old') + '\n';
+    expect(mergeBibtex(same, book('B', 'Old'))).toBe(same);
+    // BibTeX reads an @string or @preamble declaration whole, so an @ in one
+    // leaves it expecting nothing
+    const declared = '@string{pub = "a@b"}\n@preamble{"@"}\n@book{B,\n  title = {Old},\n}';
+    expect(mergeBibtex(declared, book('B', 'New'))).toBe('@string{pub = "a@b"}\n@preamble{"@"}\n' + book('B', 'New'));
+  });
+
   it('adds no line after an added entry that is not on the last line, or after text with no @', () => {
     const multi = '@book{B,\n  title = {New},\n}';
     expect(mergeBibtex(book('A', 'Keep') + '\n% a@b\n', multi + '\n')).toBe(book('A', 'Keep') + '\n% a@b\n\n' + multi + '\n');
