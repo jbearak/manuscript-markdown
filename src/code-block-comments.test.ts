@@ -119,12 +119,14 @@ describe('comments on a code block', () => {
     expect(await again(markdown)).toBe(markdown);
   });
 
-  test('leaves one on text after an equation, which ends the fence, where it is', async () => {
-    const zip = await JSZip.loadAsync((await convertMdToDocx('Para {==word==}{>>' + ALICE + 'on code<<}.\n\n' + CODE + '\n')).docx);
+  test('leaves one on text after a note\'s reference, which ends the fence, where it is', async () => {
+    // Not an equation, which the code holds as its LaTeX (see codeMathAsText)
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Para {==word==}{>>' + ALICE + 'on code<<}.[^1]\n\n' + CODE + '\n\n[^1]: Note.\n')).docx);
     let xml = await zip.file(DOC)!.async('string');
     const { start, end, ref } = markers(xml, 0);
-    xml = putAt(putAt(xml.replace(start, '').replace(end, '').replace(ref, ''), 'x <- 1', start, false), 'x <- 1', end + ref, true);
-    zip.file(DOC, xml.replace(start, '<m:oMath><m:r><m:t>a</m:t></m:r></m:oMath>' + start));
+    const note = xml.match(/<w:r><w:rPr><w:rStyle w:val="FootnoteReference"\/><\/w:rPr><w:footnoteReference w:id="\d+"\/><\/w:r>/)![0];
+    xml = putAt(putAt(xml.replace(start, '').replace(end, '').replace(ref, '').replace(note, ''), 'x <- 1', start, false), 'x <- 1', end + ref, true);
+    zip.file(DOC, xml.replace(start, note + start));
     const { markdown, warnings } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
     expect(markdown).toContain('{==x <- 1==}{>>' + ALICE + 'on code<<}');
     expect(warnings).toEqual([]);
