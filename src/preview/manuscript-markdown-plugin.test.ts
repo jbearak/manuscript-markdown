@@ -3173,6 +3173,20 @@ describe('frontmatter for VS Code\'s preview table', () => {
     expect(frontmatterYamlForPreview('title: Plain {--old--} title\nfont: X')).toBe('title: "Plain {--old--} title"\nfont: X');
   });
 
+  it('quotes a title with a colon and a space in it, which YAML reads as a mapping', () => {
+    expect(frontmatterYamlForPreview('title: Purpose: methods and figures\nauthor: Jane Smith'))
+      .toBe('title: "Purpose: methods and figures"\nauthor: Jane Smith');
+    expect(frontmatterYamlForPreview('title: Purpose:\nauthor: Jane Smith')).toBe('title: "Purpose:"\nauthor: Jane Smith');
+  });
+
+  it('leaves a title with a colon YAML reads as part of it as it is', () => {
+    for (const yaml of ['title: At 07:53\nfont: X', 'title: https://example.org/a\nfont: X', 'title: "A: b"\nfont: X',
+      'title: "A: \\"B\\""\nfont: X', 'title: ["A: B", "C"]\nfont: X',
+      'title:\n  - One\n  - Two: three\nfont: X']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
   it('quotes an inline array\'s titles that hold a brace', () => {
     expect(frontmatterYamlForPreview('title: [{++New++} title, Other]')).toBe('title:\n  - "{++New++} title"\n  - "Other"');
   });

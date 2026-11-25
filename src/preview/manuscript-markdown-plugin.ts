@@ -2627,9 +2627,13 @@ export function frontmatterYamlForPreview(content: string): string {
     k = end - 1;
   }
   // A brace anywhere in the title, which YAML can read as a mapping's, in a
-  // value, a list's item or an inline array's
-  const holdsBrace = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{')));
-  if (entries.length < 2 && !holdsBrace) return content;
+  // value, a list's item or an inline array's, or a colon before a space or
+  // the line's end in the key's own value, not quoted nor an inline array,
+  // as in `title: Purpose: methods`, which YAML reads as a mapping in a
+  // mapping's value, and fails on
+  const holdsMapping = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{'))
+    || /^\s*[^\s"'[].*:(?:[ \t]|$)/.test(lines[start].replace(/^title\s*:/, '')));
+  if (entries.length < 2 && !holdsMapping) return content;
   // The title lines its entries give, which must be those export reads from
   // the whole frontmatter: not where it reads others, as from a `title:`
   // indented under another key, nor none, as from frontmatter with a blank
