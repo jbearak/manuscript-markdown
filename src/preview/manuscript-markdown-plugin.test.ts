@@ -3517,6 +3517,15 @@ describe('a paragraph mark a change tracks, in the resolved previews', () => {
     expect(render('none', 'A{--\n\n\n\n--}B')).toBe('<p>AB</p>');
   });
 
+  it('joins at a mark after the last text in a change, to the paragraph after', () => {
+    expect(render('none', 'A{--\n\n--}{++\n\ny++}B')).toBe('<p>AyB</p>');
+    expect(render('original', 'A{++\n\n++}{--\n\ny--}B')).toBe('<p>AyB</p>');
+    expect(render('original', 'A{++\n\n++}\n\nB')).toBe('<p>AB</p>');
+    expect(render('none', 'A{++\n\n++}\n\nB')).toBe('<p>A</p>\n<p>B</p>');
+    // Not to a heading, as for one in the change
+    expect(render('original', 'A{++x\n\n++}\n\n# H')).toBe('<p>A</p>\n<h1>H</h1>');
+  });
+
   it('joins only at the marks the view drops', () => {
     expect(render('none', 'A{--\n\n--}B{++\n\n++}C')).toBe('<p>AB</p>\n<p>C</p>');
     expect(render('original', 'A{--\n\n--}B{++\n\n++}C')).toBe('<p>A</p>\n<p>BC</p>');

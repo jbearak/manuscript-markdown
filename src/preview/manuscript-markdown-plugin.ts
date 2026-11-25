@@ -989,6 +989,19 @@ function splitCriticBlocksRule(state: StateCore): void {
     keepRangeMarkers(childSegments, childSegments.map((children, segmentIndex) => (isHeading && segmentIndex === 0) || hasVisibleInlineContent(children)), childSplit.reopened);
     // The last paragraph kept, and where it ends
     let kept: { close: Token; index: number } | undefined;
+    // The marks from the paragraph kept last to the block after it, before
+    // `end`, for joinParagraphsAtDroppedMarks: as export writes them, those
+    // of the paragraph breaks between, the ones omitted with their empty
+    // paragraphs too. Export tracks those after the last text in the
+    // block as well, so they join it to the block after
+    const markUntil = (end: number) => {
+      if (!kept || kept.index >= end) return;
+      kept.close.meta = {
+        ...(kept.close.meta || {}),
+        manuscriptParagraphMarks: childSplit.boundaries.slice(kept.index, end)
+          .filter(boundary => boundary.kind === 'paragraph').map(boundary => boundary.revision),
+      };
+    };
     for (let segmentIndex = 0; segmentIndex < childSegments.length; segmentIndex++) {
       const segment = createCriticBlockSegment(
         state,
@@ -999,21 +1012,12 @@ function splitCriticBlocksRule(state: StateCore): void {
         isHeading && segmentIndex === 0,
       );
       if (!segment) continue;
-      // The marks from the paragraph before to this block, for
-      // joinParagraphsAtDroppedMarks: as export writes them, those of the
-      // paragraph breaks between, the ones omitted with their empty
-      // paragraphs too
-      if (kept) {
-        kept.close.meta = {
-          ...(kept.close.meta || {}),
-          manuscriptParagraphMarks: childSplit.boundaries.slice(kept.index, segmentIndex)
-            .filter(boundary => boundary.kind === 'paragraph').map(boundary => boundary.revision),
-        };
-      }
+      markUntil(segmentIndex);
       kept = segment[0].type === 'paragraph_open' ? { close: segment[2], index: segmentIndex } : undefined;
       // eslint-disable-next-line no-restricted-syntax -- a segment's three tokens
       rewritten.push(...segment);
     }
+    markUntil(childSegments.length - 1);
     index += 2;
   }
   if (rewritten) state.tokens = rewritten;
