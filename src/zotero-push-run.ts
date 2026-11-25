@@ -212,6 +212,9 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   'citation-key-conflict':
     'another Zotero item answers to its citation key, in its Citation Key field or a "Citation Key:" line of Extra; link the entry with zotero-key',
   'isbn-owned-elsewhere': "its ISBN is another item's",
+  'generated-key':
+    "Zotero's BibTeX export makes this citation key for an item with none stored, so it may be that item; if it is, give it the citation key in Zotero",
+
   'duplicate-identifier': 'another entry would give the same identifier to an item',
   'incomplete-item': "Zotero's answer did not give the whole list that writing would replace",
   'no-citation-key-field':

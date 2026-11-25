@@ -869,11 +869,16 @@ describe('push: an entry writes only the item it clearly owns', () => {
     expect(posts).toEqual([]);
   });
 
-  it("doesn't create an item for a key another item's Extra gives it", async () => {
-    // The matcher reads B by the key in its field, so cite-B finds nothing.
+  it("reads a key only an item's Extra gives as that item's, as Zotero's export does", async () => {
+    // The matcher reads B by the key in its field, so cite-B finds nothing;
+    // Zotero exports B as cite-B.
     const { plan: p, posts } = await pushThroughApi('@article{cite-B,\n  title = {Title B}\n}\n', [A, B]);
-    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'citation-key-conflict', detail: 'BBBB2222' });
+    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', itemKey: 'BBBB2222' });
     expect(posts).toEqual([]);
+    // One item, its field and Extra different: the export's key is its own.
+    const one = item('AAAA2222', { title: 'Old title', citationKey: 'native', extra: 'Citation Key: manual' });
+    const edited = await pushThroughApi('@article{manual,\n  title = {New title}\n}\n', [one]);
+    expect(edited.plan.actions[0]).toMatchObject({ kind: 'update', itemKey: 'AAAA2222', changes: [{ field: 'title', to: 'New title' }] });
   });
 
   it("doesn't count an item's key in its field and its Extra as two claims", async () => {
@@ -1262,5 +1267,54 @@ describe('push: review follow-ups', () => {
   it('never writes math in a name', () => {
     const p = plan('@article{k,\n  author = {{Group $x^{12}$}}\n}\n', []);
     expect(p.actions[0]).toMatchObject({ kind: 'create', notPushed: [{ field: 'author', reason: 'tex' }] });
+  });
+});
+
+describe("push: citation keys as Zotero's export gives them", () => {
+  it('counts the key the export makes for an item with none stored', async () => {
+    const strata = item('AAAA2222', {
+      title: 'Strata',
+      parsedDate: '2020',
+      date: '2020',
+      creators: [{ creatorType: 'author', firstName: 'Jane', lastName: 'Doe' }],
+    });
+    const soil = item('BBBB2222', { title: 'Soil', citationKey: 'doe_strata_2020', extra: 'Citation Key: other' });
+    const { plan: p, posts } = await pushThroughApi('@article{doe_strata_2020,\n  title = {Strata},\n  author = {Doe, Jane},\n  year = {2020}\n}\n', [strata, soil]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'citation-key-conflict' });
+    expect(posts).toEqual([]);
+    // An undated item with no author or key exports as noauthor_undated_nodate.
+    const undated = item('CCCC2222', { title: 'Undated' });
+    const again = await pushThroughApi('@article{noauthor_undated_nodate,\n  title = {Undated}\n}\n', [undated]);
+    expect(again.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'generated-key', detail: 'CCCC2222' });
+    expect(again.posts).toEqual([]);
+  });
+
+  it("reads Extra's key as Zotero's export does, only from a line labelled Citation Key", async () => {
+    const strata = item('AAAA2222', { title: 'Strata', citationKey: 'native', extra: 'CitationKey: obsolete\nCitation Key: exported' });
+    const soil = item('BBBB2222', { title: 'Soil', citationKey: 'exported', extra: 'Citation Key: other' });
+    const { plan: p, posts } = await pushThroughApi('@article{exported,\n  title = {Strata}\n}\n\n@article{other,\n  title = {Soil}\n}\n', [strata, soil]);
+    expect(p.actions).toMatchObject([
+      { kind: 'skip', reason: 'citation-key-conflict' },
+      { kind: 'unchanged', itemKey: 'BBBB2222' },
+    ]);
+    expect(posts).toEqual([]);
+  });
+
+  it("counts every identifier line of Extra, not just the first", async () => {
+    const twoDois = item('AAAA2222', { title: 'A', citationKey: 'a', extra: 'DOI: 10.1000/a\n{:doi:10.1000/b}' });
+    expect(plan('@article{x,\n  title = {Other},\n  doi = {10.1000/b}\n}\n', [twoDois]).actions[0]).toMatchObject({ kind: 'skip', reason: 'doi-owned-elsewhere' });
+    const isbnInExtra = item('BBBB2222', { itemType: 'book', title: 'Second book', citationKey: 'b', extra: 'ISBN: 9780262033848' });
+    expect(plan('@book{new,\n  title = {Second book},\n  isbn = {9780262033848}\n}\n', [isbnInExtra]).actions[0]).toMatchObject({
+      kind: 'skip',
+      reason: 'isbn-owned-elsewhere',
+    });
+  });
+
+  it('stops reading a library whose item comes without its version', async () => {
+    const A = item('AAAA2222', { title: 'A', citationKey: 'old-A', extra: 'Citation Key: cite-A' });
+    const api = libraryApi([{ ...A, version: undefined } as unknown as ZoteroItemJson]);
+    const error = await prepareZoteroPush({ type: 'user' }, '@article{cite-A,\n  title = {A edited}\n}\n', COLLECTION, 'update', api).catch(e => e);
+    expect(error).toBeInstanceOf(ZoteroLocalApiError);
+    expect(api.posts).toEqual([]);
   });
 });

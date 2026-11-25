@@ -153,6 +153,10 @@ export type ZoteroPushSkipReason =
    *  field or a `Citation Key:` line of Extra, which Zotero's BibTeX export
    *  prefers: two items answer to the key, so it names neither for sure. */
   | 'citation-key-conflict'
+  /** No item has the entry's citation key stored, but Zotero's export makes
+   *  it for one that has none (see generatedCitationKey), so it may be in
+   *  the library already. */
+  | 'generated-key'
   /** Another whole work in the library, as a book, has the entry's ISBN. */
   | 'isbn-owned-elsewhere'
   /** Zotero's answer left out the item's collections or creators, or gave
@@ -929,11 +933,90 @@ function isbnsOf(value: unknown): string[] {
   return typeof value === 'string' ? normalizeIsbns(value).map(isbn13) : [];
 }
 
-/** The citation keys an item answers to: its Citation Key field, and a
- *  `Citation Key:` line of Extra, which Zotero's BibTeX export prefers. */
-function claimedKeys(item: ZoteroItemJson): string[] {
-  const keys = [typeof item.citationKey === 'string' ? item.citationKey.trim() : '', extraFields(item).get('citationkey') ?? ''];
-  return [...new Set(keys.filter(k => k !== ''))];
+/** Every value of Extra's lines with this folded label, in either form
+ *  Zotero reads, where extraFields gives only the first. */
+function extraValues(item: ZoteroItemJson, label: string): string[] {
+  const extra = typeof item.extra === 'string' ? item.extra : '';
+  const out: string[] = [];
+  for (const line of extra.split(/\r?\n/)) {
+    const m = /^([A-Za-z][\w -]*):\s*(.+)$/.exec(line.trim()) ?? /^\{:([A-Za-z][\w -]*):\s*(.+)\}$/.exec(line.trim());
+    if (m && fold(m[1]) === label) out.push(m[2].trim());
+  }
+  return out;
+}
+
+/** The key Zotero's BibTeX export gives an item from Extra: the first line
+ *  labelled exactly `Citation Key`, in any case (buildCiteKey and
+ *  parseExtraFields in BibTeX.js), so not `CitationKey:`. */
+function extraCitationKey(item: ZoteroItemJson): string | undefined {
+  const extra = typeof item.extra === 'string' ? item.extra : '';
+  for (const raw of extra.split(/[\r\n]+/)) {
+    const line = raw.trim();
+    const at = line.indexOf(':');
+    if (at > 1 && line.slice(0, at).trim().toLowerCase() === 'citation key') {
+      const value = line.slice(at + 1).trim();
+      if (value !== '') return value;
+    }
+  }
+  return undefined;
+}
+
+// The words Zotero's export leaves out of a title's first word for a key
+// (citeKeyTitleBannedRe in BibTeX.js).
+const KEY_TITLE_BANNED =
+  /\b(a|an|the|some|from|on|in|to|of|do|with|der|die|das|ein|eine|einer|eines|einem|einen|un|une|la|le|l'|les|el|las|los|al|uno|una|unos|unas|de|des|del|d')(\s+|\b)|(<\/?(i|b|sup|sub|sc|span style="small-caps"|span)>)/g;
+
+/** The key Zotero's BibTeX export makes for an item with none stored, as
+ *  its default format, %a_%t_%y, does (buildCiteKey in BibTeX.js): the
+ *  first creator's last name, the title's first word that isn't an
+ *  article or preposition, and the year.  Followed closely, not exactly
+ *  (Zotero's diacritics and date reading are its own), so push uses it only
+ *  to hold back, never to write. */
+function generatedCitationKey(item: ZoteroItemJson): string {
+  const first = asCreators(item.creators)[0];
+  const last = first?.lastName || first?.name;
+  const author = last ? last.toLowerCase().replace(/ /g, '_').replace(/,/g, '') : 'noauthor';
+  const title = typeof item.title === 'string' && item.title !== '' ? item.title.toLowerCase().replace(KEY_TITLE_BANNED, '').split(/\s+/g)[0] : 'notitle';
+  const year =
+    /^(\d{4})/.exec(item.parsedDate ?? '')?.[1] ??
+    (typeof item.date === 'string' ? /\b(\d{4})\b/.exec(item.date)?.[1] : undefined) ??
+    'nodate';
+  const base = (author + '_' + title + '_' + (year === '0000' ? 'nodate' : year)).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const added = typeof item.dateAdded === 'string' ? Number(item.dateAdded.slice(0, 4)) : NaN;
+  return base.replace(added >= 2020 ? /[^a-z0-9_-]/g : /[^a-z0-9!$&*+\-./:;<>?[\]^_`|]+/g, '');
+}
+
+type KeyClaim = { readonly item: string; readonly source: 'field' | 'extra' | 'generated' };
+
+/** Who answers to each citation key: an item by its Citation Key field,
+ *  by Extra's `Citation Key:` line (which Zotero's export prefers), and,
+ *  with neither, by the key Zotero's export makes for it, where items that
+ *  make the same one each answer to it and its numbered forms. */
+function citationKeyClaims(items: Iterable<ZoteroItemJson>): Map<string, KeyClaim[]> {
+  const claims = new Map<string, KeyClaim[]>();
+  const add = (key: string, claim: KeyClaim) => {
+    const list = claims.get(key) ?? [];
+    if (!list.some(c => c.item === claim.item)) claims.set(key, [...list, claim]);
+  };
+  const generated = new Map<string, string[]>();
+  for (const item of items) {
+    const field = typeof item.citationKey === 'string' ? item.citationKey.trim() : '';
+    const extra = extraCitationKey(item);
+    if (field !== '') add(field, { item: item.key, source: 'field' });
+    if (extra !== undefined) add(extra, { item: item.key, source: 'extra' });
+    if (field === '' && extra === undefined) {
+      const base = generatedCitationKey(item);
+      generated.set(base, [...(generated.get(base) ?? []), item.key]);
+    }
+  }
+  // The export numbers repeats (base, base-1, …) in an order push can't
+  // know, so each such item answers to all of them.
+  for (const [base, keys] of generated) {
+    for (let i = 0; i < keys.length; i++) {
+      for (const key of keys) add(i === 0 ? base : base + '-' + i, { item: key, source: 'generated' });
+    }
+  }
+  return claims;
 }
 
 /** The item's DOI as the link planner reads it: its DOI field, or a
@@ -1038,7 +1121,8 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   // …and each whole work's ISBN (a chapter shares its book's), and each
   // citation key, from either place an item keeps one.
   const isbnOwners = new Map<string, string[]>();
-  const keyOwners = new Map<string, string[]>();
+  const keyClaims = citationKeyClaims(input.items.values());
+  const keyOwners = new Map([...keyClaims].map(([key, claims]) => [key, claims.map(c => c.item)]));
   const own = (owners: Map<string, string[]>, value: string, key: string) => {
     const list = owners.get(value) ?? [];
     if (!list.includes(key)) owners.set(value, [...list, key]);
@@ -1046,14 +1130,17 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   for (const item of input.items.values()) {
     // Every DOI and PMID it holds, in its field and in Extra, though the
     // field is the one compared.
-    for (const doi of [validDoi(typeof item.DOI === 'string' ? item.DOI : undefined), validDoi(extraFields(item).get('doi'))]) {
+    // (Every line of Extra: a second DOI line is the item's as much as the
+    // first.)
+    for (const doi of [typeof item.DOI === 'string' ? item.DOI : undefined, ...extraValues(item, 'doi')].map(validDoi)) {
       if (doi !== undefined) own(doiOwners, doi, item.key);
     }
-    for (const pmid of [normalizePmid(typeof item.PMID === 'string' ? item.PMID : undefined), normalizePmid(extraFields(item).get('pmid'))]) {
+    for (const pmid of [typeof item.PMID === 'string' ? item.PMID : undefined, ...extraValues(item, 'pmid')].map(normalizePmid)) {
       if (pmid !== undefined) own(pmidOwners, pmid, item.key);
     }
-    if (!COMPONENT_ITEM_TYPES.has(item.itemType)) for (const isbn of isbnsOf(item.ISBN)) own(isbnOwners, isbn, item.key);
-    for (const key of claimedKeys(item)) own(keyOwners, key, item.key);
+    if (!COMPONENT_ITEM_TYPES.has(item.itemType)) {
+      for (const isbn of [item.ISBN, ...extraValues(item, 'isbn')].flatMap(isbnsOf)) own(isbnOwners, isbn, item.key);
+    }
   }
   // The whole-work ISBNs the entry gives, as ISBN-13s.
   const entryIsbns = (entry: BibtexEntry): string[] =>
@@ -1067,8 +1154,26 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     return read !== undefined && 'value' in read ? validDoi(read.value) : undefined;
   };
 
+  // The matcher reads an item's Citation Key field over its Extra line, and
+  // Zotero's export the other way: an entry the matcher finds nothing for,
+  // whose key is one item's Extra line and no one else's, is that item.
+  const decisions = input.decisions.map((decision): ZoteroLinkDecision => {
+    if (decision.outcome !== 'unmatched') return decision;
+    const claims = keyClaims.get(decision.entry.key) ?? [];
+    const owner = claims.length === 1 && claims[0].source === 'extra' ? input.items.get(claims[0].item) : undefined;
+    if (owner === undefined) return decision;
+    return {
+      outcome: 'update',
+      entry: decision.entry,
+      tier: 'citation-key',
+      evidence: ['citation-key'],
+      target: { key: owner.key, uri: owner.uri ?? '' },
+      additions: [],
+    };
+  });
+
   // First pass: what each entry is, on its own.
-  const candidates: Candidate[] = input.decisions.map((decision): Candidate => {
+  const candidates: Candidate[] = decisions.map((decision): Candidate => {
     const entryKey = decision.entry.key;
     const entry = parsed.get(entryKey);
     // As written: the parser reads some TeX away, as \url{} around a PMID,
@@ -1092,8 +1197,12 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         // An identifier the matcher doesn't find, as a `Citation Key:` line
         // of Extra behind another key, or the ISBN-10 of an ISBN-13, still
         // names an item the library has, so creating one would copy it.
-        const keyClaims = keyOwners.get(entryKey) ?? [];
-        if (keyClaims.length > 0) return skip(entryKey, 'citation-key-conflict', keyClaims.join(', '));
+        const claims = keyClaims.get(entryKey) ?? [];
+        if (claims.length > 1) return skip(entryKey, 'citation-key-conflict', claims.map(c => c.item).join(', '));
+        // A key the export makes for an item with none stored only
+        // suggests it: Zotero's own reading may differ.
+        if (claims.length === 1 && claims[0].source === 'generated') return skip(entryKey, 'generated-key', claims[0].item);
+        if (claims.length === 1) return skip(entryKey, 'citation-key-conflict', claims[0].item);
         const isbnClaims = isbnElsewhere(entry);
         if (isbnClaims.length > 0) return skip(entryKey, 'isbn-owned-elsewhere', isbnClaims.join(', '));
         const pmidRead = readText(entry, 'pmid');
