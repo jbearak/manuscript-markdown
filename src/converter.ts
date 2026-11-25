@@ -14627,7 +14627,7 @@ function moveCodeComments(content: ContentItem[]): string | undefined {
         if (n > 0) para.push({ type: 'text', text: ' ', formatting: DEFAULT_FORMATTING, commentIds: new Set(), href: undefined });
         para.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set([id]), href: undefined });
       });
-      content.splice(end, 0, ...para);
+      spliceAll(content, end, 0, para);
       end += para.length;
     }
     i = end - 1;
