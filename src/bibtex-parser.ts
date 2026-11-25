@@ -1048,7 +1048,8 @@ export type BibtexEol = '\n' | '\r\n';
 function isInLineComment(input: string, gapStart: number, pos: number): boolean {
   for (let i = pos - 1; i >= gapStart; i--) {
     const ch = input[i];
-    if (ch === '\n') return false;
+    // A line ends at \n, \r\n or a \r alone, as in a classic Mac file
+    if (ch === '\n' || ch === '\r') return false;
     if (ch === '%') return true;
   }
   return false;
@@ -1068,7 +1069,9 @@ function scanForwardForNewline(text: string, from: number): BibtexEol | null {
   for (let i = from; i < text.length; i++) {
     const ch = text[i];
     if (ch === '\n') return text[i - 1] === '\r' ? '\r\n' : '\n';
-    if (ch === '%') inComment = true;
+    // A \r alone ends the comment's line too, but isn't a BibtexEol
+    if (ch === '\r') inComment = false;
+    else if (ch === '%') inComment = true;
     else if (!inComment && ch === '@') {
       // A construct header complete before the line's end (see
       // readEntryHeader). A bare @ is none: it turns up in e-mail addresses
@@ -1558,8 +1561,10 @@ function scanBibtex(input: string): ScannedBibtex {
     if (isInLineComment(input, pos, entryStart)) {
       // Resume past the comment line rather than at the next `@`, which may
       // well be further along in the same comment.
-      const lineEnd = input.indexOf('\n', entryStart);
-      pos = lineEnd === -1 ? input.length : lineEnd + 1;
+      // Its line ends at \n, \r\n or a \r alone (see isInLineComment).
+      let lineEnd = entryStart;
+      while (lineEnd < input.length && input[lineEnd] !== '\n' && input[lineEnd] !== '\r') lineEnd++;
+      pos = lineEnd + 1;
       continue;
     }
 
@@ -2386,5 +2391,7 @@ export function mergeBibtex(existing: string, produced: string): string {
 
   declareBefore(existing.length);
   for (const entry of producedOnly()) result.push(entry.text);
-  return result.join('\n\n');
+  // A blank line between each two, in the existing file's line ends, as
+  // inSkeleton puts between the entries it adds
+  return result.join(detectBibtexEol(existing).repeat(2));
 }
