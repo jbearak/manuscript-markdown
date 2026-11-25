@@ -1175,24 +1175,129 @@ describe('mergeBibtex', () => {
 
   // BibTeX has no % comments: `% @book{B,` is an entry B to it. Copying that
   // line with the produced B gave BibTeX B twice, so it reported a repeated
-  // entry and kept the stale one. Such a file merges without its text
-  // between entries, as it did before the skeleton.
+  // entry and kept the stale one. The merge drops that text, the lines it
+  // fills where it fills them, and keeps the rest of the file as written.
   const book = (key: string, title: string) => '@book{' + key + ',author={Smith},title={' + title + '},publisher={P},year={2020}}';
   it.each([
     ['alone', '% ' + book('B', 'Old') + '\n', book('B', 'New')],
-    ['before another entry', '% ' + book('B', 'Old') + '\n\n' + book('C', 'Keep') + '\n', book('C', 'Keep') + '\n\n' + book('B', 'New')],
+    ['before another entry', '% ' + book('B', 'Old') + '\n\n' + book('C', 'Keep') + '\n', book('C', 'Keep') + '\n\n' + book('B', 'New') + '\n'],
     ['in another case', '% ' + book('b', 'Old') + '\n', book('B', 'New')],
-    ['in an @comment', '@comment{' + book('B', 'Old') + '}\n', book('B', 'New')],
+    ['in an @comment', '@comment{' + book('B', 'Old') + '}\n', '@comment{}\n\n' + book('B', 'New') + '\n'],
     // BibTeX takes the key before it reads what follows
     ['with no comma after its key', '% @book{B title={Old}}\n', book('B', 'New')],
   ])('drops a commented-out entry whose key the produced file gives, %s', (_name, existing, merged) => {
     expect(mergeBibtex(existing, book('B', 'New'))).toBe(merged);
+    expect(mergeBibtex(merged, book('B', 'New'))).toBe(merged);
   });
 
   it('keeps a commented-out entry whose key the produced file does not give', () => {
     const existing = '% ' + book('A', 'Old') + '\n\n' + book('C', 'Keep') + '\n';
     expect(mergeBibtex(existing, book('B', 'New'))).toBe('% ' + book('A', 'Old') + '\n\n' + book('C', 'Keep') + '\n\n' + book('B', 'New') + '\n');
   });
+
+  // Which, on such an entry, wrote the file's entries and @string
+  // declarations alone, so it lost the @preamble that defines a command an
+  // entry uses, and LaTeX then stopped on it, and every % comment
+  const newB = '@book{B,\n  title = {New},\n}\n';
+  const head = '@preamble{"\\newcommand{\\mybibname}{Jane}"}\n\n@string{pub = "Press"}\n\n% a note\n'
+    + '@book{A, author={\\mybibname{}}, title={Keep}, publisher=pub, year={2020}}\n';
+  it.each([
+    ['on one line', '\n% @book{B, title={old}}\n'],
+    ['on lines of its own', '\n% @book{B,\n%   title = {old},\n% }\n'],
+    ['in an @comment on lines of its own', '\n@comment{\n@book{B,\n  title = {old},\n}\n}\n'],
+  ])('keeps the file as written about a commented-out entry %s that the produced file gives', (name, tail) => {
+    const merged = mergeBibtex(head + tail, newB);
+    const kept = name.includes('@comment') ? '\n@comment{\n}\n' : '';
+    expect(merged).toBe(head + kept + '\n' + newB);
+    expect(mergeBibtex(merged, newB)).toBe(merged);
+  });
+
+  it('keeps a CRLF file as written about a commented-out entry the produced file gives', () => {
+    const crlf = (text: string) => text.replace(/\n/g, '\r\n');
+    const merged = mergeBibtex(crlf(head + '\n% @book{B,\n%   title = {old},\n% }\n'), newB);
+    expect(merged).toBe(crlf(head) + '\r\n' + newB.replace(/\n$/, '\r\n'));
+    expect(mergeBibtex(merged, newB)).toBe(merged);
+  });
+
+  it('drops a commented-out entry between entries and the blank line after it', () => {
+    const existing = book('A', 'Keep') + '\n\n% ' + book('B', 'Old') + '\n\n' + book('C', 'Keep') + '\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + book('C', 'Keep') + '\n\n' + book('B', 'New') + '\n');
+  });
+
+  // BibTeX reads B's fields into the @string's header there; the
+  // declaration stays, and BibTeX now reads it
+  it('drops a commented-out entry up to a declaration BibTeX reads it into', () => {
+    const existing = book('A', 'Keep') + '\n% @book{B,\n@string{pub = "Press"}\n' + book('C', 'Keep') + '\n';
+    expect(mergeBibtex(existing, book('B', 'New')))
+      .toBe(book('A', 'Keep') + '\n@string{pub = "Press"}\n' + book('C', 'Keep') + '\n\n' + book('B', 'New') + '\n');
+  });
+
+  // BibTeX reads text in a declaration's value or an entry's field as text,
+  // so an entry there is none, and the file stays as written
+  it.each([
+    ['an @string value', '@string{example = "@book{B, title={Example}}"}\n\n'],
+    ['an @preamble', '@preamble{"@book{B, title={Example}}"}\n\n'],
+    ['a concatenation in an @string', '@string(example = {x} # "@book{B, title={Example}}")\n\n'],
+  ])('keeps text shaped like the produced entry in %s', (_name, declaration) => {
+    const existing = '% a note\n' + declaration + book('A', 'Keep') + '\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(existing + '\n' + book('B', 'New') + '\n');
+  });
+
+  it('keeps text shaped like the produced entry in another entry\'s field', () => {
+    const existing = '% a note\n@book{A, note = {@book{B, title={Example}}}}\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(existing + '\n' + book('B', 'New') + '\n');
+  });
+
+  // Which appended the produced entries after text that left BibTeX in an
+  // entry, so it read the first of them as part of that one: `% @book{`
+  // and the next entry's `@book{B` read as a key
+  it.each([
+    ['an opener', '% @book{\n'],
+    ['an opener and a key', '% @book{X,\n'],
+    ['a field whose value is open', '% @book{X, title = {open\n'],
+  ])('drops text after the last entry that leaves BibTeX in %s', (_name, tail) => {
+    const existing = book('A', 'Keep') + '\n' + tail;
+    const merged = mergeBibtex(existing, newB);
+    expect(merged).toBe(book('A', 'Keep') + '\n\n' + newB);
+    expect(mergeBibtex(merged, newB)).toBe(merged);
+  });
+
+  it('drops text between entries that leaves BibTeX in an entry the produced file gives', () => {
+    const existing = book('A', 'Keep') + '\n% @book{X, note = {open\n' + book('B', 'Old') + '\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n' + book('B', 'New') + '\n');
+  });
+
+  // BibTeX reads on into the entries after such text, past those only the
+  // existing file gives, to the appended ones
+  it('drops text that leaves BibTeX in an entry before entries only the existing file gives', () => {
+    const existing = '% @book{X, note = {open\n' + book('A', 'Keep') + '\n\n% a note\n' + book('C', 'Keep') + '\n';
+    expect(mergeBibtex(existing, newB)).toBe(book('A', 'Keep') + '\n\n% a note\n' + book('C', 'Keep') + '\n\n' + newB);
+  });
+
+  it('keeps an opener at the end of the file, with nothing appended after it', () => {
+    const existing = book('A', 'Keep') + '\n% @book{';
+    expect(mergeBibtex(existing, book('A', 'New'))).toBe(book('A', 'New') + '\n% @book{');
+  });
+
+  // An @ that opens no entry BibTeX reads into what follows: it reports an
+  // error and reads on at the next @
+  it.each([
+    ['an e-mail address', '% contact alice@example.test\n'],
+    ['an entry that ends', '% @book{X, title = {x}}\n'],
+    ['an entry with its closer missing', '% @book{X, title = {x}\n'],
+  ])('keeps text after the last entry with %s', (_name, tail) => {
+    const existing = book('A', 'Keep') + '\n' + tail;
+    expect(mergeBibtex(existing, newB)).toBe(existing + '\n' + newB);
+  });
+
+  it('reads the text between many entries in linear time', () => {
+    const time = (n: number) => {
+      const text = Array.from({ length: n }, (_, k) => '% @book{c' + k + ', note = {' + k + '}}\n@article{e' + k + ', note = {x}}').join('\n');
+      return fastestRun(() => mergeBibtex(text, '@article{e0,\n  title = {T}\n}\n\n@book{new,\n  title = {N}\n}'));
+    };
+    time(4000);
+    expect(time(16000) / time(4000)).toBeLessThan(8);
+  }, 30000);
 });
 
 describe('extractRawField', () => {

@@ -8,6 +8,8 @@
 // - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly.
 // - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string).
 
+import { pushAll } from './arrays';
+
 export interface BibtexEntry {
   type: string;
   key: string;
@@ -1352,13 +1354,6 @@ export function readEntryHeader(text: string, at: number, sameLine = false):
  *  ;, ] or backtick in it (see isCitableKey). */
 const ENTRY_KEY_AT = { '}': /\s*([^\s,@}]+)\s*([,}])/y, ')': /\s*([^\s,@)]+)\s*([,)])/y };
 
-/** A key as BibTeX reads it, which it takes for an entry's before it reads
- *  what follows: after white space, to white space, a comma or, in a brace
- *  entry, the } (bibtex.web's scan2_white(comma, right_brace); in a paren
- *  entry, scan1_white(comma)), an @ or a ) in it too. Only mergeBibtex
- *  reads keys so, to find the entries BibTeX reads between the parser's. */
-const BIBTEX_KEY_AT = { '{': /\s*([^\s,}]+)/y, '(': /\s*([^\s,]+)/y };
-
 /** The key of the entry whose opener is just before `at` in `text`, and
  *  where it starts, and where the entry's body does: just past the comma
  *  after the key, or at the closer, for an entry with no fields; or
@@ -2166,6 +2161,159 @@ export function spliceFieldsIntoEntry(
   return before + cleaned.join(',' + eol) + eol + closer;
 }
 
+/** A command BibTeX reads at the top level of a .bib file: an entry, with
+ *  its key, an `@string` or an `@preamble`, from its @ (`start`) and its
+ *  opener (`opener`) to where BibTeX reads on for the next @ (`end`): past
+ *  its closer, or where it found an error, or the text's end, where it was
+ *  still reading the command (`open`) */
+interface BibtexCommandRead {
+  kind: 'entry' | 'string' | 'preamble';
+  key?: string;
+  start: number;
+  opener: number;
+  end: number;
+  open: boolean;
+}
+
+// White space as BibTeX reads it: a space, a tab, and a line's end
+const isBibtexWhite = (c: string | undefined) => c === ' ' || c === '\t' || c === '\n' || c === '\r';
+// An identifier as BibTeX's scan_identifier reads one (see
+// BIBTEX_IDENTIFIER_CHAR), white space as BibTeX's, so a no-break space is
+// in one
+const BIBTEX_ID_CHAR = '[^ \\t\\n\\r\\x00-\\x1f\\x7f"#%\'(),={}]';
+const BIBTEX_ID_AT = new RegExp('(?![0-9])' + BIBTEX_ID_CHAR + '+', 'y');
+
+/** The commands BibTeX reads in `text`, from its top level, as bibtex.web
+ *  reads a .bib file (get_bib_command_or_entry_and_process): it skips to
+ *  the next @, of which `%` makes nothing a comment, reads the type, and
+ *  after `comment` reads on for the next @ at once, so an entry in an
+ *  `@comment`'s body is one. Of others it reads the opener, and an
+ *  `@string`'s name and value, an `@preamble`'s value, or an entry's key,
+ *  which it takes for the entry's before it reads on, and its fields; a
+ *  value, braced, quoted, a number or a macro, joined by `#`, is text, so
+ *  an @ in one opens nothing. Where it finds what it doesn't expect, it
+ *  reports an error and reads on for the next @ from there; at the text's
+ *  end in a command, it stops. Each character is read once.
+ *
+ *  BibTeX reads a key it reads again, if the document cites it, to its
+ *  end only, and reads on from there, and stops after the command it ends
+ *  on the file's last line; this reads neither, so it may read an entry
+ *  BibTeX doesn't. `stopAt`: read no command that starts at or after it. */
+function readCommandsAsBibtex(text: string, stopAt = text.length): BibtexCommandRead[] {
+  const commands: BibtexCommandRead[] = [];
+  const n = text.length;
+  let i = 0;
+  // Past white space, and whether there's more
+  const white = (): boolean => {
+    while (i < n && isBibtexWhite(text[i])) i++;
+    return i < n;
+  };
+  // An identifier at i, which ends at white space, the text's end or one of
+  // `stops`, or undefined where there's none or it ends at another
+  // character, which BibTeX reports; i past it
+  const identifier = (stops: string): string | undefined => {
+    BIBTEX_ID_AT.lastIndex = i;
+    const id = BIBTEX_ID_AT.exec(text)?.[0];
+    if (!id) return undefined;
+    i += id.length;
+    return i === n || isBibtexWhite(text[i]) || stops.includes(text[i]) ? id : undefined;
+  };
+  // A value at i, its parts joined by #, and the white space after it:
+  // 'ok', 'error' at i, or 'end' at the text's end
+  const value = (closer: string): 'ok' | 'error' | 'end' => {
+    for (;;) {
+      const c = text[i];
+      if (c === '{' || c === '"') {
+        // To the } that pairs with the {, or the " outside the groups in it,
+        // where a } with no { open is an error
+        let depth = c === '{' ? 1 : 0;
+        for (i++; ; i++) {
+          if (i === n) return 'end';
+          const d = text[i];
+          if (d === '{') depth++;
+          else if (d === '}') {
+            if (depth === 0) return 'error';
+            if (--depth === 0 && c === '{') break;
+          } else if (d === '"' && c === '"' && depth === 0) break;
+        }
+        i++;
+      } else if (c >= '0' && c <= '9') {
+        while (i < n && text[i] >= '0' && text[i] <= '9') i++;
+      } else if (identifier(',#' + closer) === undefined) {
+        return 'error';
+      }
+      if (!white()) return 'end';
+      if (text[i] !== '#') return 'ok';
+      i++;
+      if (!white()) return 'end';
+    }
+  };
+  // The body after the opener; 'ok' with i past the closer
+  const body = (command: BibtexCommandRead, closer: '}' | ')'): 'ok' | 'error' | 'end' => {
+    if (!white()) return 'end';
+    if (command.kind === 'string') {
+      if (identifier('=') === undefined) return 'error';
+      if (!white()) return 'end';
+      if (text[i] !== '=') return 'error';
+      i++;
+    }
+    if (command.kind !== 'entry') {
+      if (!white()) return 'end';
+      const read = value(closer);
+      if (read !== 'ok') return read;
+      if (text[i] !== closer) return 'error';
+      i++;
+      return 'ok';
+    }
+    // The key, to white space, a comma or, in a brace entry, the }
+    const keyStart = i;
+    while (i < n && !isBibtexWhite(text[i]) && text[i] !== ',' && (closer === ')' || text[i] !== '}')) i++;
+    command.key = text.slice(keyStart, i);
+    for (;;) {
+      if (!white()) return 'end';
+      if (text[i] === closer) {
+        i++;
+        return 'ok';
+      }
+      if (text[i] !== ',') return 'error';
+      i++;
+      if (!white()) return 'end';
+      if (text[i] === closer) {
+        i++;
+        return 'ok';
+      }
+      if (identifier('=') === undefined) return 'error';
+      if (!white()) return 'end';
+      if (text[i] !== '=') return 'error';
+      i++;
+      if (!white()) return 'end';
+      const read = value(closer);
+      if (read !== 'ok') return read;
+    }
+  };
+  for (;;) {
+    const at = text.indexOf('@', i);
+    if (at === -1 || at >= stopAt) return commands;
+    i = at + 1;
+    white();
+    const type = identifier('{(')?.toLowerCase();
+    if (type === undefined || type === 'comment') continue;
+    if (!white()) return commands;
+    if (text[i] !== '{' && text[i] !== '(') continue;
+    const closer = text[i] === '{' ? '}' : ')';
+    const kind = type === 'string' || type === 'preamble' ? type : 'entry';
+    const command: BibtexCommandRead = { kind, start: at, opener: i, end: n, open: false };
+    commands.push(command);
+    i++;
+    const read = body(command, closer);
+    if (read === 'end') {
+      command.open = true;
+      return commands;
+    }
+    command.end = i;
+  }
+}
+
 /** Merge an existing .bib (from disk) with a produced .bib (from conversion).
  *  - Existing-only entries are preserved verbatim.
  *  - Entries in both: produced text wins, but existing-only fields are spliced in.
@@ -2174,9 +2322,11 @@ export function spliceFieldsIntoEntry(
  *  - Everything between the existing file's entries — `%` comments,
  *    `@comment`, `@preamble` and `@string` declarations, blank lines — stays
  *    as written, so a file that round-trips through Word comes back as it
- *    was, unless the file repeats a key, the scan loses its place in it, or
- *    that text holds an entry BibTeX reads, as `% @book{B,`, whose key the
- *    produced file gives too.
+ *    was, unless the file repeats a key or the scan loses its place in it.
+ *    But an entry BibTeX reads there whose key the produced file gives, as
+ *    `% @book{B,` (BibTeX has no % comments), goes, and so does text that
+ *    leaves BibTeX in an entry where the produced one would follow, as
+ *    `% @book{`, so BibTeX reads each produced key once (see cutsBetween).
  *  - Produced-only entries are appended at the end.
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
@@ -2261,8 +2411,120 @@ export function mergeBibtex(existing: string, produced: string): string {
     .map(key => ({ key, text: producedRaw.get(key) }))
     .filter((entry): entry is { key: string; text: string } => entry.text !== undefined);
 
+  const isEol = (c: string | undefined) => c === '\n' || c === '\r';
+  // Past the line end at `at`, \r\n, \n or \r, or `at` where there's none
+  const pastEol = (at: number) => (existing[at] === '\r' && existing[at + 1] === '\n' ? at + 2 : isEol(existing[at]) ? at + 1 : at);
+  // True if the line before the one that starts at `at` is blank, or `at`
+  // starts the file
+  const blankBefore = (at: number) => {
+    if (at === 0) return true;
+    let i = at - 1;
+    if (existing[i] === '\n' && existing[i - 1] === '\r') i--;
+    i--;
+    while (i >= 0 && (existing[i] === ' ' || existing[i] === '\t')) i--;
+    return i < 0 || isEol(existing[i]);
+  };
+  const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
+
+  // The first @string declaration that may end after the text cutsBetween
+  // reads, which reads the file's text from its start on
+  let stringAt = 0;
+  /** What of the text between entries from `from` to `to` to drop: each
+   *  command BibTeX reads there that would give it a key the produced file
+   *  gives, as `% @book{B,` (BibTeX has no % comments) or an entry in an
+   *  `@comment`, which BibTeX reads on into; and one it is still reading at
+   *  the entry the merge writes after it (`next`, from `nextAt` in it),
+   *  which it would read into that one, as `% @book{`, and on, maybe to
+   *  the end: `next` is given where an entry the produced file gives comes
+   *  after. Keys are compared without case, as BibTeX
+   *  compares them. Each goes from its @ to where BibTeX reads on for the
+   *  next @, but not into an @string declaration the parser reads, so that
+   *  BibTeX reads the rest of the file as it did, without it; and with the
+   *  lines it fills where it fills them, to its brace-matched end, if there's
+   *  no @ to there, so `% @book{B,`, `%   title = {old},` and `% }` all
+   *  go, and the blank line after them, or before them at the file's end.
+   *  Undefined where one starts in a declaration the parser reads, which
+   *  BibTeX reads otherwise. */
+  const cutsBetween = (from: number, to: number, next?: string, nextAt = 0): Array<[number, number]> | undefined => {
+    const firstAt = existing.indexOf('@', from);
+    if (firstAt === -1 || firstAt >= to) return [];
+    const followAt = to - from + nextAt;
+    const commands = readCommandsAsBibtex(existing.slice(from, to) + (next ?? ''), followAt);
+    const cuts: Array<[number, number]> = [];
+    for (const command of commands) {
+      const collides = command.key !== undefined && producedKeys.has(command.key.toLowerCase());
+      if (!collides && !(next !== undefined && command.end > followAt)) continue;
+      const start = from + command.start;
+      while (stringAt < existingResult.strings.length && existingResult.strings[stringAt].end <= start) stringAt++;
+      const string = existingResult.strings[stringAt];
+      if (string && string.start < start) return undefined;
+      const cap = string && string.start < to ? string.start : to;
+      const end = Math.min(from + command.end, cap);
+      // To the delimiter that pairs with its opener, if there's no @ to it
+      const open = existing[from + command.opener];
+      const close = open === '{' ? '}' : ')';
+      let fill = end;
+      for (let i = from + command.opener, depth = 0; i < cap; i++) {
+        if (i >= end && existing[i] === '@') break;
+        if (existing[i] === open) depth++;
+        else if (existing[i] === close && --depth === 0) {
+          fill = Math.max(end, i + 1);
+          break;
+        }
+      }
+      let lineStart = start;
+      while (lineStart > from && (existing[lineStart - 1] === ' ' || existing[lineStart - 1] === '\t' || existing[lineStart - 1] === '%')) lineStart--;
+      let lineEnd = fill;
+      if (!isEol(existing[fill - 1])) {
+        while (lineEnd < to && (existing[lineEnd] === ' ' || existing[lineEnd] === '\t')) lineEnd++;
+      }
+      const ownLines = (lineStart === 0 || isEol(existing[lineStart - 1])) && (isEol(existing[fill - 1]) || lineEnd === to || isEol(existing[lineEnd]));
+      if (!ownLines) {
+        // Its text alone, and the spaces before it where only spaces follow
+        let cutStart = start;
+        if (lineEnd === to || isEol(existing[lineEnd])) {
+          while (cutStart > from && (existing[cutStart - 1] === ' ' || existing[cutStart - 1] === '\t')) cutStart--;
+        }
+        cuts.push([cutStart, end]);
+        continue;
+      }
+      let cutStart = lineStart;
+      let cutEnd = isEol(existing[fill - 1]) ? fill : pastEol(lineEnd);
+      if (blankBefore(cutStart)) {
+        for (;;) {
+          let i = cutEnd;
+          while (i < to && (existing[i] === ' ' || existing[i] === '\t')) i++;
+          if (i >= to || !isEol(existing[i])) break;
+          cutEnd = pastEol(i);
+        }
+      }
+      if (cutEnd === existing.length) {
+        // The file's last lines: the blank lines before them too, so the
+        // file ends as the text before them does
+        while (cutStart > from && blankBefore(cutStart)) {
+          let i = cutStart - 1;
+          if (existing[i] === '\n' && existing[i - 1] === '\r') i--;
+          let lineFrom = i;
+          while (lineFrom > 0 && !isEol(existing[lineFrom - 1])) lineFrom--;
+          if (lineFrom < from) break;
+          cutStart = lineFrom;
+        }
+      }
+      cuts.push([cutStart, cutEnd]);
+    }
+    // In order, each joined with any it overlaps
+    const joined: Array<[number, number]> = [];
+    for (const cut of cuts.sort((x, y) => x[0] - y[0])) {
+      const last = joined[joined.length - 1];
+      if (last && cut[0] <= last[1]) last[1] = Math.max(last[1], cut[1]);
+      else joined.push([cut[0], cut[1]]);
+    }
+    return joined;
+  };
+
   /** The existing file as the skeleton: each entry's text replaced by the
-   *  merge's, and the text between entries copied as it is. That text is
+   *  merge's, and the text between entries copied as it is, but for what
+   *  BibTeX would read a produced key in (see cutsBetween). That text is
    *  all at the top level — the scan stayed in sync — so it holds nothing
    *  the parser read as an entry, and with an entry in each entry's place,
    *  reads as it did. Only for a file that gives each key once: dropping a
@@ -2271,41 +2533,65 @@ export function mergeBibtex(existing: string, produced: string): string {
    *  and a `{` after it. The result is read again, and taken only where each
    *  entry and @string declaration it holds is where the merge put it. */
   const inSkeleton = (): string | undefined => {
+    const added = producedOnly();
+    const blank = detectBibtexEol(existing).repeat(2);
+    const texts = existingResult.ranges.map(range => existingParsed.has(range.key) ? mergedEntry(range.key) : existing.slice(range.start, range.end));
+    // What to drop of the text between entries
+    const cuts: Array<[number, number]> = [];
+    // The last of the existing file's entries the produced file gives
+    let lastProduced = added.length > 0 ? texts.length : -1;
+    for (let k = texts.length - 1; lastProduced < 0 && k >= 0; k--) {
+      if (producedParsed.has(existingResult.ranges[k].key)) lastProduced = k;
+    }
+    for (let k = 0, from = 0; k <= texts.length; k++) {
+      const range = existingResult.ranges[k];
+      const to = range ? range.start : existing.length;
+      const text = range ? texts[k] : added[0]?.text;
+      const next = text !== undefined && k <= lastProduced ? (range ? '' : blank) + text : undefined;
+      const between = cutsBetween(from, to, next, range ? 0 : blank.length);
+      if (between === undefined) return undefined;
+      pushAll(cuts, between);
+      if (range) from = range.end;
+    }
     // Where each entry and declaration should be in the result
     const entries: Array<{ key: string; start: number; end: number }> = [];
     const strings: Array<{ start: number; end: number }> = [];
     let declared = 0;
+    let cut = 0;
     let out = '';
     let at = 0;
-    // The existing file's text from `at` to `to`, with the declarations in it
+    // The existing file's text from `at` to `to`, with the declarations in
+    // it, and without what's cut
     const copy = (to: number) => {
-      const shift = out.length - at;
-      for (; declared < existingResult.strings.length && existingResult.strings[declared].start < to; declared++) {
-        const { start, end } = existingResult.strings[declared];
-        strings.push({ start: start + shift, end: end + shift });
+      while (at < to) {
+        while (cut < cuts.length && cuts[cut][1] <= at) cut++;
+        const piece = cut < cuts.length && cuts[cut][0] < to ? Math.max(cuts[cut][0], at) : to;
+        const shift = out.length - at;
+        for (; declared < existingResult.strings.length && existingResult.strings[declared].start < piece; declared++) {
+          const { start, end } = existingResult.strings[declared];
+          strings.push({ start: start + shift, end: end + shift });
+        }
+        out += existing.slice(at, piece);
+        at = piece < to ? Math.min(cuts[cut][1], to) : to;
       }
-      out += existing.slice(at, to);
     };
     const put = (key: string, text: string) => {
       entries.push({ key, start: out.length, end: out.length + text.length });
       out += text;
     };
-    for (const range of existingResult.ranges) {
+    existingResult.ranges.forEach((range, k) => {
       copy(range.start);
       at = range.end;
-      const text = existingParsed.has(range.key) ? mergedEntry(range.key) : existing.slice(range.start, range.end);
-      if (text) put(range.key, text);
-    }
+      if (texts[k]) put(range.key, texts[k]!);
+    });
     copy(existing.length);
-    const added = producedOnly();
     if (added.length > 0) {
       // After the last of the existing file, with a blank line between each
       // two in the file's line ends, and the file's own ending after them
-      const blank = detectBibtexEol(existing).repeat(2);
       const ending = out.slice(out.trimEnd().length);
       out = out.slice(0, out.length - ending.length);
       for (const entry of added) {
-        out += blank;
+        if (out.length > 0) out += blank;
         put(entry.key, entry.text);
       }
       out += ending;
@@ -2317,53 +2603,14 @@ export function mergeBibtex(existing: string, produced: string): string {
     return same ? out : undefined;
   };
 
-  /** True if the text between the existing file's entries holds an entry
-   *  BibTeX reads whose key the produced file also gives. The scan reads a
-   *  `%` line as a comment, and skips an `@comment`'s body; BibTeX does
-   *  neither: it reads every `@type{key,` outside an entry, so `% @book{B,`
-   *  is an entry B to it. Copied with the produced B, BibTeX reads B twice,
-   *  reports a repeated entry and keeps the stale one. Keys are compared
-   *  without case, as BibTeX compares them. An `@` in a `@string` or
-   *  `@preamble` value can match too, which only costs the skeleton. */
-  const betweenEntriesRepeatsProducedKey = (): boolean => {
-    const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
-    let from = 0;
-    const gaps = existingResult.ranges.map(range => {
-      const gap = existing.slice(from, range.start);
-      from = range.end;
-      return gap;
-    });
-    gaps.push(existing.slice(from));
-    return gaps.some(gap => {
-      for (let at = gap.indexOf('@'); at !== -1;) {
-        const header = readEntryHeader(gap, at);
-        if (!('type' in header)) {
-          at = gap.indexOf('@', header.resume);
-          continue;
-        }
-        if (PSEUDO_ENTRY_TYPES.has(header.type.toLowerCase())) {
-          at = gap.indexOf('@', header.end);
-          continue;
-        }
-        const keyAt = BIBTEX_KEY_AT[header.opener];
-        keyAt.lastIndex = header.end;
-        const key = keyAt.exec(gap);
-        if (key && producedKeys.has(key[1].toLowerCase())) return true;
-        // On after the key, as BibTeX reads on, so each @ is read once
-        at = gap.indexOf('@', header.end + (key?.[0].length ?? 0));
-      }
-      return false;
-    });
-  };
-
-  if (existingResult.rangesTrusted && findDuplicateBibtexKeys(existingResult.ranges).size === 0 && !betweenEntriesRepeatsProducedKey()) {
+  if (existingResult.rangesTrusted && findDuplicateBibtexKeys(existingResult.ranges).size === 0) {
     const out = inSkeleton();
     if (out !== undefined) return out;
   }
 
   // A file the scan lost its place in, that repeats a key, whose text
-  // between entries gives BibTeX a key the produced file does, or whose
-  // skeleton reads otherwise: its entries and @string declarations alone,
+  // between entries BibTeX reads a produced key in where it can't be cut,
+  // or whose skeleton reads otherwise: its entries and @string declarations alone,
   // as the parser read them, since the text between them may be part of an
   // entry
   const result: string[] = [];
