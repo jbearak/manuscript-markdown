@@ -2039,8 +2039,9 @@ function commentsOnResolvedText(inlines: Token[], state: StateCore): void {
   }
 }
 
-/** The containers a paragraph's removal can leave with nothing in them */
-const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list', 'blockquote']);
+/** The containers a paragraph's or table row's removal can leave with
+ *  nothing in them */
+const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list', 'blockquote', 'thead', 'tbody', 'table']);
 
 /**
  * Core rule that, where the preview resolves each change, writes the
@@ -2048,7 +2049,10 @@ const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list'
  * resolveChanges), with each comment still shown (see
  * commentsOnResolvedText). A paragraph or heading that held only dropped
  * text goes, as Word drops a paragraph whose text and mark are deleted, and
- * so does a list item, list or quote that held only such paragraphs.
+ * so does a list item, list or quote that held only such paragraphs. So
+ * does a table row whose cells held only dropped text, as export tracks
+ * the row's insertion or deletion (see rowRevision in md-to-docx.ts), the
+ * header row too, and a table with no rows left.
  */
 function resolveChangesRule(state: StateCore, resolution: ChangeResolution): void {
   const tokens = state.tokens;
@@ -2057,14 +2061,8 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
   const hadContent = new Set(inlines.filter(hasText));
   for (const inline of inlines) inline.children = resolveChanges(inline.children!, state, resolution);
   commentsOnResolvedText(inlines, state);
-  for (let i = 0; i < tokens.length; i++) {
-    const inline = tokens[i];
-    if (!hadContent.has(inline) || hasText(inline)) continue;
-    const open = tokens[i - 1];
-    if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
-    // The paragraph's open, inline and close, then each container left empty
-    let start = i - 1;
-    let end = i + 2;
+  // Takes the tokens from start to end, then each container left empty
+  const remove = (start: number, end: number): number => {
     while (
       start > 0 && end < tokens.length &&
       tokens[start - 1].nesting === 1 && tokens[end].nesting === -1 &&
@@ -2075,7 +2073,22 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
       end++;
     }
     tokens.splice(start, end - start);
-    i = start - 1;
+    return start;
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].type === 'tr_open') {
+      let close = i + 1;
+      while (tokens[close].type !== 'tr_close') close++;
+      const cells = tokens.slice(i, close).filter(token => token.type === 'inline' && token.children);
+      if (cells.some(cell => hadContent.has(cell)) && !cells.some(hasText)) i = remove(i, close + 1) - 1;
+      continue;
+    }
+    const inline = tokens[i];
+    if (!hadContent.has(inline) || hasText(inline)) continue;
+    const open = tokens[i - 1];
+    if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
+    // The paragraph's open, inline and close
+    i = remove(i - 1, i + 2) - 1;
   }
 }
 

@@ -3244,6 +3244,27 @@ describe('No Markup preview', () => {
     expect(html).toContain('<td></td>\n<td>y</td>');
   });
 
+  it('drops a table row whose text was all deleted, as export tracks its deletion', () => {
+    expect(renderNoMarkup('| Head |\n|---|\n| {--x--} |\n| keep |'))
+      .toContain('<tbody>\n<tr>\n<td>keep</td>\n</tr>\n</tbody>');
+    expect(renderNoMarkup('| a | b |\n|---|---|\n| {--x--} |  |\n| k | l |')).not.toContain('<td></td>');
+  });
+
+  it('drops a deleted header row, and a table with no rows left', () => {
+    const html = renderNoMarkup('| {--Head--} |\n|---|\n| keep |');
+    expect(html).not.toContain('<thead');
+    expect(html).toContain('<table>\n<tbody>\n<tr>\n<td>keep</td>');
+    const gone = renderNoMarkup('One\n\n| {--a--} |\n|---|\n| {--x--} |\n\nTwo');
+    expect(gone).not.toContain('<table');
+    expect(gone).toContain('<p>One</p>\n<p>Two</p>\n');
+  });
+
+  it('keeps a table row with a cell that shows text or a comment', () => {
+    expect(renderNoMarkup('| a | b |\n|---|---|\n| {--x--} | y |')).toContain('<td></td>\n<td>y</td>');
+    expect(renderNoMarkup('| a |\n|---|\n| {--x--}{>>c<<} |')).toContain('data-comment="c"');
+    expect(renderNoMarkup('| a |\n|---|\n|  |\n| k |')).toContain('<td></td>');
+  });
+
   it('keeps comments on changes', () => {
     const html = renderNoMarkup('A {~~cat~>dog~~}{>>why<<} and {--gone--}{>>note<<} and {++new++}{>>added<<}.');
     expect(html).toContain('<span class="manuscript-markdown-comment-range" data-comment="why">dog</span>');
@@ -3346,6 +3367,11 @@ describe('Original preview', () => {
     expect(html).not.toContain('<h1');
   });
 
+  it('drops a table row whose text was all added', () => {
+    expect(renderOriginal('| Head |\n|---|\n| {++x++} |\n| keep |'))
+      .toContain('<tbody>\n<tr>\n<td>keep</td>\n</tr>\n</tbody>');
+  });
+
   it('keeps a deleted heading a heading', () => {
     expect(renderOriginal('{--# Old--}\n\nText')).toContain('<h1>Old</h1>');
   });
@@ -3398,6 +3424,11 @@ describe('Simple Markup preview', () => {
     expect(html).toContain('<h1 class="manuscript-markdown-changed">H </h1>');
     expect(html).toContain('<td class="manuscript-markdown-changed">q</td>');
     expect(html).toContain('<p>Also same</p>');
+  });
+
+  it('drops a table row whose text was all deleted, as No Markup does', () => {
+    expect(renderSimple('| Head |\n|---|\n| {--x--} |\n| keep |'))
+      .toContain('<tbody>\n<tr>\n<td>keep</td>\n</tr>\n</tbody>');
   });
 
   it('marks a tight list item, whose paragraph shows no tag', () => {
