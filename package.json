@@ -221,6 +221,10 @@
         "title": "Sync Bibliography from Zotero"
       },
       {
+        "command": "manuscript-markdown.pushBibliographyToZotero",
+        "title": "Push Bibliography to Zotero"
+      },
+      {
         "command": "manuscript-markdown.addBibtexEntry.article",
         "title": "Add Journal Article (@article)"
       },
@@ -1115,6 +1119,11 @@
           "command": "manuscript-markdown.syncBibliographyFromZotero",
           "when": "editorLangId == markdown",
           "group": "3_zotero@1"
+        },
+        {
+          "command": "manuscript-markdown.pushBibliographyToZotero",
+          "when": "editorLangId == markdown",
+          "group": "3_zotero@2"
         }
       ],
       "markdown.frontmatter.code": [
@@ -1183,6 +1192,11 @@
           "command": "manuscript-markdown.syncBibliographyFromZotero",
           "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
           "group": "1_zotero@1"
+        },
+        {
+          "command": "manuscript-markdown.pushBibliographyToZotero",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
+          "group": "1_zotero@2"
         },
         {
           "command": "manuscript-markdown.addBibtexEntry.article",

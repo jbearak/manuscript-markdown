@@ -125,7 +125,7 @@ Export and document-setting commands. See [Converter](converter.md) for details 
 | Settings | **Document** — title, author, timezone, hard line breaks, and caption titles and location |
 | | **Typography** — body, heading, and title typography; paragraph layout; blockquotes; callout labels; colors; and custom styles |
 | | **Tables** — fonts, widths, borders, number formatting, and source line-width limits |
-| | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, bibliography indentation, and Zotero sync |
+| | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, bibliography indentation, and Zotero sync and push |
 | | **Code Blocks** — font, size, colors, and inset |
 
 > **Export to Word** converts the Markdown file to `.docx`. If a `.docx` with the same name already exists, its paragraph and formatting styles, and its headers and footers, are automatically reused as a template — so fonts, spacing, colors, and page numbers you previously set in Word are preserved.
@@ -166,6 +166,7 @@ When a `.bib` file is open in the editor, one dropdown menu appears in the toolb
 | Item | Command |
 |------|---------|
 | **Sync Bibliography from Zotero** | `manuscript-markdown.syncBibliographyFromZotero` |
+| **Push Bibliography to Zotero** | `manuscript-markdown.pushBibliographyToZotero` |
 | **Add Journal Article (@article)** | `manuscript-markdown.addBibtexEntry.article` |
 | **Add Book (@book)** | `manuscript-markdown.addBibtexEntry.book` |
 | **Add Book Chapter (@incollection)** | `manuscript-markdown.addBibtexEntry.incollection` |
@@ -173,7 +174,7 @@ When a `.bib` file is open in the editor, one dropdown menu appears in the toolb
 | **Add Report (@techreport)** | `manuscript-markdown.addBibtexEntry.techreport` |
 | **Add Miscellaneous Entry (@misc)** | `manuscript-markdown.addBibtexEntry.misc` |
 
-The sync command sits in its own section at the top; see [Sync Bibliography from Zotero](#sync-bibliography-from-zotero).
+The Zotero commands sit in their own section at the top; see [Sync Bibliography from Zotero](#sync-bibliography-from-zotero) and [Push Bibliography to Zotero](#push-bibliography-to-zotero).
 
 Each **Add** item appends a skeleton entry of that type at the end of the file, with a placeholder citation key and empty values for the type's standard fields. The cursor lands on the key so you can type it immediately, and `Tab` steps through the field values.
 
@@ -358,3 +359,30 @@ A per-entry report (new links, already linked, metadata updates, metadata fields
 | Local API off | `"Zotero is running, but other applications are not allowed to talk to it. In Zotero, open Settings → Advanced → Miscellaneous, …"` |
 | Bibliography unparsable | `"Could not safely parse "<name>.bib", so nothing was changed. …"` |
 | File changed during confirmation | `"<name>.bib" changed while the command was running, so nothing was written. Run it again.` |
+
+### Push Bibliography to Zotero
+
+Available from the Command Palette, from the toolbar's **Citations & Notes** submenu on Markdown files, and from the [**Bibliography** toolbar menu](#editor-toolbar--bibliography-files) on `.bib` files. Puts the bibliography's entries in a Zotero collection and, in **Add and Update** mode, makes matched items' fields say what the entries say. See [Pushing a Bibliography to Zotero](zotero-roundtrip.md#pushing-a-bibliography-to-zotero) for what is compared and what is never written.
+
+**Requirements:** Zotero 10 or later, running on the same machine as the VS Code window, with its local API on (as for the sync command). Unavailable in remote workspaces.
+
+**Flow:**
+
+1. Resolves the bibliography as the sync command does, and refuses to run while it has unsaved changes.
+2. Asks for the mode: **Add** (the default) or **Add and Update**.
+3. Asks for the library, then for the collection, listed by path ("Parent / Child") with its key.
+4. Reads the library and plans the push, with a cancellable progress notification.
+5. With nothing to push, says so. Otherwise shows a confirmation modal with the counts (to create, to add to the collection, to update, unchanged, skipped) and each planned change, field by field.
+6. On **Push**, gets a write key: the one kept in VS Code's secret storage for this Zotero, or a new one, which Zotero asks you to allow in a dialog. A key allowed with **Always Allow** is kept; one allowed with **Allow** is good for one write and isn't kept.
+7. Writes in batches of up to 50 items. Each batch is made against the library version the last one left, so a change made in Zotero meanwhile stops the push.
+
+The per-entry report, with each write's outcome, goes to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details**.
+
+| Scenario | Message |
+|----------|---------|
+| Remote workspace | `"Push Bibliography to Zotero needs Zotero running on the same machine as this window. …"` |
+| Library has no collections | `""<library>" has no collections. Create one in Zotero, then run this command again."` |
+| Nothing to push | `"Nothing to push. "<collection>": N entries, …"` |
+| Access denied in Zotero | `"Some changes were not pushed to Zotero. Access was denied in Zotero, so nothing was written."` |
+| Library changed during the push | `"Some changes were not pushed to Zotero. The Zotero library changed while the command was running. Run it again."` |
+| Read-only group library | `"Some changes were not pushed to Zotero. Zotero does not let you edit this library. …"` |
