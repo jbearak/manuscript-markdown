@@ -419,6 +419,19 @@ describe('createZoteroPushPlan', () => {
     expect(plan(bib, [blocked]).actions.map(a => (a.kind === 'skip' ? a.reason : a.kind))).toEqual(['extra-would-migrate', 'create']);
   });
 
+  it("doesn't count a DOI from entries skipped for sharing an item", () => {
+    const target = item('SHARED01', { title: 'A', citationKey: 'a2000' });
+    const bib =
+      '@article{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n' +
+      '@article{b2000,\n  title = {A},\n  zotero-key = {SHARED01},\n  zotero-uri = {http://zotero.org/users/1/items/SHARED01}\n}\n\n' +
+      '@article{c2000,\n  title = {C},\n  doi = {10.1234/a}\n}\n';
+    expect(plan(bib, [target]).actions.map(a => (a.kind === 'skip' ? a.reason : a.kind))).toEqual([
+      'duplicate-target',
+      'duplicate-target',
+      'create',
+    ]);
+  });
+
   it("doesn't count a DOI that the item type can't hold", () => {
     // The test schema's book has no DOI field.
     const bib = '@book{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n@article{b2000,\n  title = {B},\n  doi = {10.1234/a}\n}\n';

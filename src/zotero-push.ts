@@ -862,6 +862,11 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
       : undefined;
   for (const c of candidates) {
     if (c.kind === 'match') targets.set(c.item.key, (targets.get(c.item.key) ?? 0) + 1);
+  }
+  // An entry sharing its item with another is skipped, so its DOI isn't
+  // given to anything.
+  for (const c of candidates) {
+    if (c.kind === 'match' && (targets.get(c.item.key) ?? 0) > 1) continue;
     const doi = givesDoi(c);
     if (doi !== undefined) givenDois.set(doi, (givenDois.get(doi) ?? 0) + 1);
   }
