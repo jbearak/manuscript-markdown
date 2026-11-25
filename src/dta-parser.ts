@@ -160,18 +160,46 @@ function readTableAs(data: Uint8Array, encoding?: EncodingName): DtaTable {
   }
 }
 
-/** Every piece of text the reader decoded. */
-function tableText(table: DtaTable): string[] {
+/**
+ * Every piece of text the reader decoded but the table's string cells,
+ * which readTable checks one by one.
+ */
+function otherTableText(table: DtaTable): string[] {
   const text: string[] = [...table.otherText];
   for (const v of table.variables) text.push(v.name, v.label, v.format, v.valueLabels);
   // Visit each value label set once: wide files share one across many variables.
   for (const labels of new Set(table.valueLabelTables)) {
     if (labels) for (const label of labels.values()) text.push(label);
   }
-  for (const row of table.rows) {
-    for (const cell of row) if (typeof cell === 'string') text.push(cell);
-  }
   return text;
+}
+
+const NON_ASCII = /[\u0080-\uffff]/;
+const REPLACEMENT = '\ufffd';
+
+/**
+ * How many U+FFFD the UTF-8 read of a string has beyond those the file
+ * holds itself: a U+FFFD the file holds is valid UTF-8 (EF BF BD), which
+ * reads as these three characters in windows-1252 or latin1.
+ */
+function unreadableCount(utf8: string, singleByte: string): number {
+  return utf8.split(REPLACEMENT).length - singleByte.split('\u00ef\u00bf\u00bd').length;
+}
+
+/**
+ * Whether a strN value, as latin1 (one character per byte), fills its
+ * width and ends in the first bytes of a UTF-8 character: the value was
+ * cut mid-character to fit. UTF-8 reads that tail as one U+FFFD.
+ */
+function endsCutMidCharacter(bytes: string, type: string): boolean {
+  const width = /^str(\d+)$/.exec(type);
+  if (!width || bytes.length !== Number(width[1])) return false;
+  let lead = bytes.length - 1;
+  while (lead >= 0 && bytes.length - lead <= 3 && (bytes.charCodeAt(lead) & 0xc0) === 0x80) lead--;
+  if (lead < 0) return false;
+  const b = bytes.charCodeAt(lead);
+  const needs = b >= 0xc2 && b <= 0xdf ? 2 : b >= 0xe0 && b <= 0xef ? 3 : b >= 0xf0 && b <= 0xf4 ? 4 : 0;
+  return bytes.length - lead < needs;
 }
 
 /**
@@ -181,27 +209,51 @@ function tableText(table: DtaTable): string[] {
  * write UTF-8. The library decodes them as windows-1252 unless told
  * otherwise, so where that read has non-ASCII text, read again as UTF-8
  * and keep that read when all its text was valid UTF-8: no U+FFFD but
- * one the file holds itself, which is valid UTF-8 (EF BF BD) and reads
- * as three characters in windows-1252.
+ * one the file holds itself (see unreadableCount).
  * All the file's text counts, shown in the table or not: one string
  * UTF-8 can't read proves the file isn't UTF-8. Where every string reads
  * as UTF-8, nothing settles the question and the UTF-8 read wins.
+ * One exception: a strN value that fills its width and ends in a UTF-8
+ * character cut short (endsCutMidCharacter) was cut to fit by a writer
+ * that sized it in characters, not bytes, so its one trailing U+FFFD is forgiven and dropped, leaving the text up to the
+ * last whole character. A Latin-1 value ending in an accented letter
+ * looks the same, so cut tails are no evidence for UTF-8: the UTF-8 read
+ * wins only if some other non-ASCII text reads as UTF-8.
  * Release 118 and later declare UTF-8 and are read once, as is.
  */
 function readTable(data: Uint8Array): DtaTable {
   const table = readTableAs(data);
   if (table.release >= 118) return table;
-  const text = tableText(table);
-  if (!text.some(t => /[\u0080-\uffff]/.test(t))) return table;
+  const text = otherTableText(table);
+  const isText = (cell: Cell): cell is string => typeof cell === 'string' && NON_ASCII.test(cell);
+  if (!text.some(t => NON_ASCII.test(t)) && !table.rows.some(row => row.some(isText))) return table;
   const utf8 = readTableAs(data, 'utf-8');
-  const utf8Text = tableText(utf8);
-  const count = (t: string, part: string) => t.split(part).length - 1;
-  // Both reads give the same strings in the same order, so each U+FFFD
-  // the file holds has its three bytes in the windows-1252 read of its
-  // string; one more than those is a byte UTF-8 couldn't read.
-  const unreadable = utf8Text.length !== text.length
-    || utf8Text.some((t, i) => count(t, '\ufffd') > count(text[i], '\u00ef\u00bf\u00bd'));
-  return unreadable ? table : utf8;
+  const utf8Text = otherTableText(utf8);
+  if (utf8Text.length !== text.length || utf8Text.some((t, i) => unreadableCount(t, text[i]) > 0)) return table;
+  let evidence = utf8Text.some(t => NON_ASCII.test(t));
+  // The bytes of the string cells, read only once a cell has a U+FFFD.
+  let bytes: Cell[][] | undefined;
+  const cut: [number, number][] = [];
+  for (let r = 0; r < utf8.rows.length; r++) {
+    const row = utf8.rows[r];
+    for (let c = 0; c < row.length; c++) {
+      const cell = row[c];
+      if (typeof cell !== 'string') continue;
+      const unreadable = unreadableCount(cell, table.rows[r][c] as string);
+      if (unreadable > 0) {
+        bytes ??= readTableAs(data, 'latin1').rows;
+        if (unreadable > 1 || !cell.endsWith(REPLACEMENT)
+          || !endsCutMidCharacter(bytes[r][c] as string, utf8.variables[c].type)) return table;
+        cut.push([r, c]);
+        if (!evidence) evidence = NON_ASCII.test(cell.slice(0, -1));
+      } else if (!evidence) {
+        evidence = NON_ASCII.test(cell);
+      }
+    }
+  }
+  if (!evidence) return table;
+  for (const [r, c] of cut) utf8.rows[r][c] = (utf8.rows[r][c] as string).slice(0, -1);
+  return utf8;
 }
 
 interface FormattedCell {

@@ -123,6 +123,53 @@ describe('parseDta', () => {
     expect(parseDta(data, { path: 'short.dta' })).toContain('<td>Québec</td>');
   });
 
+  // A format-114 file with one strN variable `s` whose values are the
+  // bytes given, each cut or NUL-padded to the width.
+  function dta114(width: number, values: (string | number[])[]): Uint8Array {
+    const bytes: number[] = [114, 2, 1, 0, 1, 0, values.length & 255, values.length >> 8, 0, 0];
+    const field = (value: string | number[], length: number) => {
+      const b = typeof value === 'string' ? [...Buffer.from(value, 'utf8')] : value;
+      for (let i = 0; i < length; i++) bytes.push(i < b.length ? b[i] : 0);
+    };
+    field('', 81); field('', 18); // data label, timestamp
+    bytes.push(width); field('s', 33); field('', 4); field('%' + width + 's', 49); field('', 33); field('', 81);
+    field('', 5); // no characteristics
+    for (const value of values) field(value, width);
+    return Uint8Array.from(bytes);
+  }
+
+  // A writer that sizes str6 for "Montré" in characters but cuts its
+  // bytes leaves the value ending in the first byte of é.
+  it('reads a pre-118 UTF-8 file with a string cut mid-character as UTF-8', () => {
+    const html = parseDta(dta114(6, ['Québec', 'Montréal']), { path: 'cut.dta' });
+    expect(html).toContain('<td>Québe</td>');
+    expect(html).toContain('<td>Montr</td>');
+  });
+
+  it('keeps a U+FFFD the file holds next to a string cut mid-character', () => {
+    const html = parseDta(dta114(6, ['Qu�b', 'Montréal']), { path: 'cut.dta' });
+    expect(html).toContain('<td>Qu�b</td>');
+    expect(html).toContain('<td>Montr</td>');
+  });
+
+  // Latin-1 "Café" fills its str4 and ends in E9, the start of a 3-byte
+  // UTF-8 character: no whole UTF-8 character says the file is UTF-8.
+  it('reads a pre-118 file whose only non-ASCII byte ends a full string as windows-1252', () => {
+    expect(parseDta(dta114(4, [[0x43, 0x61, 0x66, 0xe9]]), { path: 'cafe.dta' })).toContain('<td>Café</td>');
+  });
+
+  it('reads a pre-118 file with a cut string and a byte UTF-8 can\'t read as windows-1252', () => {
+    const html = parseDta(dta114(6, ['Québec', 'Montréal', [0x5a, 0xfc, 0x72, 0x69, 0x63, 0x68]]), { path: 'cut.dta' });
+    expect(html).toContain('<td>Zürich</td>');
+  });
+
+  // Only a value that fills its width can have been cut.
+  it('reads a pre-118 file with a lone lead byte ending a short string as windows-1252', () => {
+    const html = parseDta(dta114(8, ['Québec', [0x4d, 0x6f, 0x6e, 0x74, 0x72, 0xc3]]), { path: 'short.dta' });
+    expect(html).toContain('<td>QuÃ©bec</td>');
+    expect(html).toContain('<td>MontrÃ</td>');
+  });
+
   it('rejects files exceeding the size limit', () => {
     const html = parseDta(FIXTURE_DATA, { path: 'embed.dta' }, 1);
     expect(html).toContain('exceeds maximum size');
