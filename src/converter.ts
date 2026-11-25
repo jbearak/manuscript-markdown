@@ -2890,7 +2890,9 @@ async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
  * runs a run with something before the reference splits into there, each
  * with the run's properties. Import reads a comment only from its range, so
  * without this it dropped such a comment. A comment with a range is as it
- * was. Each array of children is built once, however many references it
+ * was. In a citation's or note cross-reference's result, which Markdown
+ * writes whole, the empty range reads as a point after it (see
+ * FieldResultComments). Each array of children is built once, however many references it
  * has, so a paragraph of many costs no more than their number.
  */
 function anchorReferenceOnlyComments(nodes: XmlNode[]): void {
@@ -2962,6 +2964,42 @@ function anchorReferenceOnlyComments(nodes: XmlNode[]): void {
     }
   };
   visit(nodes);
+}
+
+/**
+ * The comments whose ranges end in the result of a citation or of a
+ * cross-reference to a note, which import writes no text of, but one item
+ * for, at the field's end. A range that holds some of the result's text
+ * ends with the field, on the item, rather than before it, on nothing. One
+ * that holds none of it is a point in the result, as a comment marked by
+ * its reference alone is (see anchorReferenceOnlyComments): Markdown can't
+ * write a point inside the item, so it goes right after the item, on
+ * nothing, wherever in the result it was, and the item doesn't take it.
+ */
+class FieldResultComments {
+  private readonly ends: string[] = [];
+  private readonly points: string[] = [];
+  // Each range that starts in the result, with how much of its text was before
+  private readonly starts = new Map<string, number>();
+  private texts = 0;
+  /** A range starts in the result */
+  start(id: string): void { this.starts.set(id, this.texts); }
+  /** Some of the result's text */
+  text(): void { this.texts++; }
+  /** A range ends in the result; whether it's a point, which the item
+   *  mustn't take */
+  end(id: string): boolean {
+    const point = this.starts.get(id) === this.texts;
+    (point ? this.points : this.ends).push(id);
+    return point;
+  }
+  /** The field ends, or another begins where it had no end: the ranges
+   *  that end with it, then the points, which go after its item */
+  flush(): { ends: string[]; points: string[] } {
+    this.starts.clear();
+    this.texts = 0;
+    return { ends: this.ends.splice(0), points: this.points.splice(0) };
+  }
 }
 
 function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50): XmlNode[] {
@@ -6178,8 +6216,19 @@ function parseNoteBody(
   let citationTextParts: string[] = [];
   let fieldFormatting: RunFormatting | undefined;
   // As in extractDocumentContent: the comments whose ranges end in a
-  // citation's or cross-reference's result, which end with the field
-  const resultEnds: string[] = [];
+  // citation's or cross-reference's result, which end with the field, but
+  // points, which go after it
+  const resultComments = new FieldResultComments();
+  // Ends the comments the field's result held back (see FieldResultComments)
+  const endResultComments = (target: ContentItem[]): void => {
+    const { ends, points } = resultComments.flush();
+    for (const id of ends) endComment(id, target);
+    for (const id of points) {
+      activeComments.add(id);
+      commentStartTargetIndex.set(id, { target, index: target.length });
+      endComment(id, target);
+    }
+  };
   // As in extractDocumentContent: a NOTEREF field's note, which its number
   // shows, and the instruction of a deleted field, read only for that and
   // for a HYPERLINK field
@@ -6256,12 +6305,14 @@ function parseNoteBody(
           if (hasRange(id)) {
             activeComments.add(id);
             commentStartTargetIndex.set(id, { target, index: target.length });
+            if ((inCitationField && currentCitation) || noterefInfo) resultComments.start(id);
           }
         } else if (key === 'w:commentRangeEnd') {
           const id = xmlNumberId(getAttr(node, 'id'));
           if (hasRange(id)) {
-            if ((inCitationField && currentCitation) || noterefInfo) resultEnds.push(id);
-            else endComment(id, target);
+            if ((inCitationField && currentCitation) || noterefInfo) {
+              if (resultComments.end(id)) activeComments.delete(id);
+            } else endComment(id, target);
           }
         } else if (key in REVISION_ELEMENTS) {
           const author = getAttr(node, 'author');
@@ -6274,7 +6325,7 @@ function parseNoteBody(
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
             // A field with no end, whose result's comments end
-            for (const id of resultEnds.splice(0)) endComment(id, target);
+            endResultComments(target);
             inField = true;
             fieldDepth++;
             fieldShows.begin();
@@ -6338,7 +6389,7 @@ function parseNoteBody(
                 ...highlightOnly(fieldFormatting),
               });
             }
-            for (const id of resultEnds.splice(0)) endComment(id, target);
+            endResultComments(target);
             inField = false;
             inCitationField = false;
             currentCitation = undefined;
@@ -6458,10 +6509,12 @@ function parseNoteBody(
             if (noterefInfo) {
               // The note's number, which its reference is
               fieldFormatting ??= currentFormatting;
+              resultComments.text();
               noterefNumber.shown = true;
               noterefNumber.revisions.push(currentRevision);
             } else if (inCitationField && context) {
               fieldFormatting ??= currentFormatting;
+              resultComments.text();
               citationTextParts.push(text);
             } else {
               const textItem: ContentItem = {
@@ -6646,7 +6699,7 @@ function parseNoteBody(
   }
 
   walkNoteBody(noteChildren);
-  for (const id of resultEnds.splice(0)) endComment(id, content);
+  endResultComments(content);
   // As in extractDocumentContent: the last paragraph's tracked mark
   if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
     content.push({ type: 'para', breakRevision: trackedParaMark.revision });
@@ -7920,8 +7973,19 @@ export async function extractDocumentContent(
   let deletedInstrParts: string[] = [];
   // The comments whose ranges end in a citation's or cross-reference's
   // result, which import writes no text of, so they end with the field, on
-  // the citation or reference, rather than before it, on nothing
-  const resultEnds: string[] = [];
+  // the citation or reference, rather than before it, on nothing, but
+  // points, which go after it (see FieldResultComments)
+  const resultComments = new FieldResultComments();
+  // Ends the comments the field's result held back (see FieldResultComments)
+  const endResultComments = (target: ContentItem[]): void => {
+    const { ends, points } = resultComments.flush();
+    for (const id of ends) endComment(id, target);
+    for (const id of points) {
+      activeComments.add(id);
+      commentStartTargetIndex.set(id, { target, index: target.length });
+      endComment(id, target);
+    }
+  };
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
   let currentHref: string | undefined;
@@ -8069,7 +8133,7 @@ export async function extractDocumentContent(
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
             // A field with no end, whose result's comments end
-            for (const id of resultEnds.splice(0)) endComment(id, target);
+            endResultComments(target);
             inField = true;
             fieldDepth++;
             fieldShows.begin();
@@ -8160,7 +8224,7 @@ export async function extractDocumentContent(
             if (inBibliographyField && shows) {
               target.push({ type: 'bibliography_marker' });
             }
-            for (const id of resultEnds.splice(0)) endComment(id, target);
+            endResultComments(target);
             inField = false;
             inCitationField = false;
             inBibliographyField = false;
@@ -8182,12 +8246,14 @@ export async function extractDocumentContent(
           if (hasRange(id)) {
             activeComments.add(id);
             commentStartTargetIndex.set(id, { target, index: target.length });
+            if ((inCitationField && currentCitation) || (inNoterefField && noterefInfo)) resultComments.start(id);
           }
         } else if (key === 'w:commentRangeEnd') {
           const id = xmlNumberId(getAttr(node, 'id'));
           if (hasRange(id)) {
-            if ((inCitationField && currentCitation) || (inNoterefField && noterefInfo)) resultEnds.push(id);
-            else endComment(id, target);
+            if ((inCitationField && currentCitation) || (inNoterefField && noterefInfo)) {
+              if (resultComments.end(id)) activeComments.delete(id);
+            } else endComment(id, target);
           }
         } else if (key === 'w:footnoteReference') {
           const noteId = xmlNumberId(getAttr(node, 'id'));
@@ -8316,7 +8382,10 @@ export async function extractDocumentContent(
         } else if (key === 'w:t' || key === 'w:delText') {
           const text = nodeText(asXmlNodes(node[key]));
           if (text) {
-            if (inCitationField || inNoterefField) fieldFormatting ??= currentFormatting;
+            if (inCitationField || inNoterefField) {
+              fieldFormatting ??= currentFormatting;
+              resultComments.text();
+            }
             if (inNoterefField) {
               // The note's number, which its reference is
               noterefNumber.shown = true;
@@ -8750,7 +8819,7 @@ export async function extractDocumentContent(
   }
 
   walk(parsed);
-  for (const id of resultEnds.splice(0)) endComment(id, content);
+  endResultComments(content);
   // The last paragraph's tracked mark, which no paragraph after it takes,
   // goes on an empty one, as an empty paragraph after it would take it
   if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
