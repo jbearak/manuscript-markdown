@@ -2656,6 +2656,15 @@ function withoutComment(value: string): string {
   return value.replace(/(?:^|[ \t])#.*$/, '').trim();
 }
 
+/** A title key's line's value, `line` past `title:`, without the comment
+ *  after it where YAML reads it without quotes, as `Fieldwork` of
+ *  `title: Fieldwork # draft {x}`, but as it is where it starts with a
+ *  quote or a collection's opener, which quotableTitleValue reads */
+function titleValue(line: string): string {
+  const value = line.replace(/^title\s*:/, '');
+  return /^\s*["'[{]/.test(value) ? value.trim() : withoutComment(value);
+}
+
 export function frontmatterYamlForPreview(content: string): string {
   // Not YAML with an alias, as `author: *t`, a value or item that starts
   // with one, or an anchor one refers to, as `x: &t v`, which quoting the
@@ -2675,7 +2684,7 @@ export function frontmatterYamlForPreview(content: string): string {
     const list = blockListAfter(lines, k);
     if (list) {
       if (list.items.some(item => item.more.length > 0 || !quotableTitleValue(item.text))) return content;
-    } else if (!quotableTitleValue(lines[k].replace(/^title\s*:/, '').trim())) return content;
+    } else if (!quotableTitleValue(titleValue(lines[k]))) return content;
     const end = list ? list.last + 1 : k + 1;
     // Not a value YAML reads over more lines: the line after it, past blank
     // lines and comments, is another key's, or there's none, not one
@@ -2686,15 +2695,20 @@ export function frontmatterYamlForPreview(content: string): string {
     k = end - 1;
   }
   // A brace anywhere in the title, which YAML can read as a mapping's, in a
-  // value, a list's item or an inline array's
-  const holdsBrace = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{')));
+  // value, a list's item or an inline array's: in the key's line, in its
+  // value, not its comment, as YAML reads none in `title: A # {b}`
+  const holdsBrace = entries.some(({ start, end }) => titleValue(lines[start]).includes('{')
+    || lines.slice(start + 1, end).some(line => line.includes('{')));
   // Or a colon before a space or the line's end in the key's own value, not
   // quoted nor an inline array, as in `title: Purpose: methods`, which YAML
   // reads as a mapping in a mapping's value, and fails on. Not one in a
   // comment after it, as in `title: Fieldwork # draft: private`, which YAML
   // reads as `Fieldwork`, nor so one in a comment alone, `title: # a: b`,
-  // which it reads as no title
-  const holdsColon = entries.some(({ start }) => /^[^\s"'[].*:(?:[ \t]|$)/.test(withoutComment(lines[start].replace(/^title\s*:/, ''))));
+  // which it reads as no title. Only where the key is `title`, its colon
+  // before a space or the line's end, not `title:chapter: Methods`, whose
+  // key YAML reads as `title:chapter`
+  const holdsColon = entries.some(({ start }) => /^title:(?:[ \t]|$)/.test(lines[start])
+    && /^[^\s"'[].*:(?:[ \t]|$)/.test(titleValue(lines[start])));
   if (entries.length < 2 && !holdsBrace && !holdsColon) return content;
   // The title lines its entries give, which must be those export reads from
   // the whole frontmatter: not where it reads others, as from a `title:`
