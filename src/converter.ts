@@ -14565,6 +14565,43 @@ function demoteNoteCodeBlocks(body: ContentItem[]): boolean[] {
 }
 
 /**
+ * The comments on a code block's text and nothing outside a code block,
+ * which a fence can't hold (see holdsCommentMarkers), so import writes each
+ * after the first code block it's on, as a comment on no text in a
+ * paragraph of its own. One that goes on into the text around the block has
+ * its range there, and isn't one of these.
+ */
+function commentsOnlyInCode(content: ContentItem[]): Set<string> {
+  const inCode = new Set<string>();
+  const outside = new Set<string>();
+  let inCodeBlock = false;
+  const visit = (items: ContentItem[], inTable: boolean) => {
+    for (const item of items) {
+      if (item.type === 'para') inCodeBlock = !inTable && !!item.isCodeBlock;
+      else if (item.type === 'table') {
+        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true);
+        inCodeBlock = false;
+      } else if ('commentIds' in item) {
+        for (const id of item.commentIds ?? []) (inCodeBlock && item.type === 'text' ? inCode : outside).add(id);
+      }
+    }
+  };
+  visit(content, false);
+  for (const id of outside) inCode.delete(id);
+  return inCode;
+}
+
+/** The warning for the comments import moves after their code blocks (see
+ *  commentsOnlyInCode), or undefined for none */
+function codeCommentsWarning(content: ContentItem[]): string | undefined {
+  const count = commentsOnlyInCode(content).size;
+  if (count === 0) return undefined;
+  const one = count === 1;
+  return 'Moved ' + count + ' comment' + (one ? '' : 's') + ' on code to after ' + (one ? 'its code block' : 'their code blocks')
+    + ', as a code block can\'t hold a comment\'s range; ' + (one ? 'it' : 'they') + ' now mark' + (one ? 's' : '') + ' no text.';
+}
+
+/**
  * The fenced block of the code-block paragraphs from content[start], in the
  * given language, and the index of the item after them. Each code line in
  * DOCX is a { type: 'para', isCodeBlock: true } with the line's text items
@@ -16515,6 +16552,7 @@ function buildMarkdownOnce(
     : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup, takesNoRanges)));
   // The block edges before each item, which key its paragraph, and the
   // paragraphs that may take the forms buildMarkdown reads back
+  const onlyInCode = commentsOnlyInCode(mergedContent);
   const formsKeys = edgesBefore(mergedContent);
   const plain = plainParagraphs(mergedContent);
 
@@ -17550,8 +17588,22 @@ function buildMarkdownOnce(
 
         const lang = codeBlockLangs?.get(String(codeBlockGroupIndex)) || '';
         const code = codeBlockFence(mergedContent, i, lang);
+        // The comments on its text alone go after it, on no text, each with
+        // its replies inside it, as {>>a<<}{>>r<<} reads as two comments
+        // (see commentsOnlyInCode)
+        const codeComments: string[] = [];
+        for (let k = i; k < code.end; k++) {
+          const line = mergedContent[k];
+          if (line.type !== 'text') continue;
+          for (const id of line.commentIds) {
+            const comment = comments.get(id);
+            if (!comment || !onlyInCode.has(id)) continue;
+            onlyInCode.delete(id);
+            codeComments.push(formatCommentBody(id, { ...comment, consecutiveReplies: false }, options?.timezone));
+          }
+        }
         i = code.end;
-        output.push(code.block);
+        output.push(code.block + (codeComments.length > 0 ? '\n\n' + codeComments.join(' ') : ''));
         codeBlockGroupIndex++;
         // Skip a plain separator para that was inserted during export between
         // consecutive code-block groups or before a blockquote group.  Only
@@ -21108,6 +21160,7 @@ export async function convertDocx(
   // tableTextDefaultFont), which a table whose text takes them from the
   // table paragraph style takes no directive for
   const documentFonts = resolveFontOverrides(fontFields);
+  const codeComments = codeCommentsWarning(docContent);
   let markdown = buildMarkdown(docContent, comments, {
     crossRefLabels,
     tableSizeHp: documentFonts.tableSizeHp,
@@ -21401,7 +21454,7 @@ export async function convertDocx(
   while (end > 0 && markdown[end - 1] === '\n') end--;
   markdown = markdown.slice(0, end) + '\n';
 
-  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles),
+  return { markdown, bibtex, zoteroPrefs, zoteroBiblData, images, warnings: [...(formatChanges === undefined ? [] : [formatChanges]), ...(codeComments === undefined ? [] : [codeComments]), ...lostCustomStyleWarnings(contentOptions.lostCustomStyles),
     ...[...await commentCustomStyles(zip, styleLayouts, contentOptions)].map(name => 'Custom style "' + name + '" is on a comment\'s paragraph, '
       + 'which a comment can\'t keep, as it holds no style directive; import drops it there.')] };
 }
