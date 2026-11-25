@@ -14754,6 +14754,39 @@ function commentsOnlyInCode(content: ContentItem[]): Set<string> {
   return inCode;
 }
 
+/**
+ * Each equation in a code block's lines, which a fence can't hold as an
+ * equation, as its LaTeX in the code's text, between $ or, for a display
+ * equation, two, each line of it a line of the code, as a line break in
+ * the text would read as Word's, a \ and a line end (see codeBlockFence).
+ * Export writes it back as the code's text, so each trip after the first
+ * writes the same. Without this the equation ended the fence, and the next
+ * import took the text after it into a code block.
+ */
+function codeMathAsText(content: ContentItem[]): void {
+  let inCode = false;
+  let rebuilt: ContentItem[] | undefined;
+  content.forEach((item, at) => {
+    if (item.type === 'para') inCode = !!item.isCodeBlock;
+    else if (item.type === 'math' && inCode) {
+      rebuilt ??= content.slice(0, at);
+      const delimiter = item.display ? '$' + '$' : '$';
+      (delimiter + item.latex + delimiter).split('\n').forEach((line, n) => {
+        if (n > 0) rebuilt!.push({ type: 'para', isCodeBlock: true });
+        rebuilt!.push({ type: 'text', text: line, formatting: DEFAULT_FORMATTING, commentIds: new Set(item.commentIds), href: undefined,
+          ...(item.revision ? { revision: item.revision } : {}) });
+      });
+      return;
+    // An item but text ends the block's fence (see codeBlockFence)
+    } else if (item.type !== 'text') inCode = false;
+    rebuilt?.push(item);
+  });
+  if (rebuilt) {
+    content.length = 0;
+    pushAll(content, rebuilt);
+  }
+}
+
 /** Moves the comments on code alone (see commentsOnlyInCode) off the
  *  code's text, into a paragraph after the first block each is on, as
  *  comments on no text, a space between two, which is what import reads
@@ -21384,7 +21417,10 @@ export async function convertDocx(
   // tableTextDefaultFont), which a table whose text takes them from the
   // table paragraph style takes no directive for
   const documentFonts = resolveFontOverrides(fontFields);
-  // Last, as paragraphs' indexes key what's read before (see moveCodeComments)
+  // Last, as paragraphs' indexes key what's read before (see
+  // moveCodeComments), and equations in code first, as text, whose
+  // comments are on code
+  codeMathAsText(docContent);
   const codeComments = moveCodeComments(docContent);
   let markdown = buildMarkdown(docContent, comments, {
     crossRefLabels,
