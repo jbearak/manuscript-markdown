@@ -2107,7 +2107,8 @@ const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list'
  * commentsOnResolvedText). A paragraph or heading that held only dropped
  * text goes, as Word drops a paragraph whose text and mark are deleted, and
  * so does a list item, list or quote that held only such paragraphs. So
- * does a table row whose cells held only dropped text, as export tracks
+ * does a table row whose cells held only dropped text, but for line
+ * breaks and whitespace (see isResolvedCellTextVisible), as export tracks
  * the row's insertion or deletion (see rowRevision in md-to-docx.ts), the
  * header row too, and a table with no rows left.
  */
