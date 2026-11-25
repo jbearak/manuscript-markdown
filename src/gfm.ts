@@ -22,6 +22,14 @@ export function isGfmDisallowedRawHtml(html: string): boolean {
   return !!tagName && DISALLOWED_RAW_HTML_TAGS.has(tagName);
 }
 
+/** Whether an inline HTML tag, as markdown-it reads one, is a line break,
+ *  `<br>`, `<br/>` or `<br />`, which export writes as Word's and the
+ *  preview counts as no text a table row shows. Another tag export can't
+ *  format with stays text, as `<wbr>` */
+export function isHtmlLineBreak(html: string): boolean {
+  return /^<br\s*\/?>$/i.test(html);
+}
+
 export function escapeHtmlText(text: string): string {
   return text
     .replace(/&/g, '&amp;')

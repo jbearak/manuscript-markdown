@@ -28,7 +28,7 @@ import { LineMap } from './line-map';
 import { pushAll, spliceAll } from '../arrays';
 import { attributeValue, captionLabelText, captionOptions, captionSeparator, DEFAULT_CAPTION_OPTIONS, isCaptionText, tableCaptionSource, type CaptionOptions, type FigureAttributes } from '../captions';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
-import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
+import { isGfmDisallowedRawHtml, isHtmlLineBreak, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { blockListAfter, parseFrontmatter, type ColorScheme } from '../frontmatter';
 import { styleFence } from '../style-fence';
 import { htmlBlockKind } from '../html-blocks';
@@ -2019,6 +2019,18 @@ function isResolvedTextVisible(token: Token): boolean {
   return tag === undefined || !TEXT_FORMATTING_HTML_TAGS.has(tag.tag);
 }
 
+/** Whether a table cell's token shows anything once every change is
+ *  resolved, as export reads a row's cells to track the row (see
+ *  rowRevision in md-to-docx.ts): as isResolvedTextVisible, but a line
+ *  break's tag, `<br>`, shows nothing, as export writes it as a break, and
+ *  an entity or escape, which markdown-it hasn't yet joined to the text,
+ *  as `&nbsp;`, shows only what isn't whitespace, as text does */
+function isResolvedCellTextVisible(token: Token): boolean {
+  if (token.type === 'text_special') return token.content.trim().length > 0;
+  if (token.type === 'html_inline' && isHtmlLineBreak(token.content)) return false;
+  return isResolvedTextVisible(token);
+}
+
 /** The index of the close of the element that opens at `open` */
 function elementClose(children: Token[], open: number): number {
   let depth = 0;
@@ -2100,10 +2112,11 @@ const EMPTIABLE_CONTAINERS = new Set(['list_item', 'bullet_list', 'ordered_list'
  * header row too, and a table with no rows left.
  */
 function resolveChangesRule(state: StateCore, resolution: ChangeResolution): void {
-  const tokens = state.tokens;
-  const inlines = tokens.filter(token => token.type === 'inline' && token.children);
+  const inlines = state.tokens.filter(token => token.type === 'inline' && token.children);
   const hasText = (inline: Token): boolean => inline.children!.some(isResolvedTextVisible);
+  const cellHasText = (inline: Token): boolean => inline.children!.some(isResolvedCellTextVisible);
   const hadContent = new Set(inlines.filter(hasText));
+  const cellHadContent = new Set(inlines.filter(cellHasText));
   for (const inline of inlines) inline.children = resolveChanges(inline.children!, state, resolution);
   commentsOnResolvedText(inlines, state);
   // A caption's label, its delimiter only where it still has text to show
@@ -2118,35 +2131,45 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
     });
   }
   joinParagraphsAtDroppedMarks(state, resolution);
-  // Takes the tokens from start to end, then each container left empty
-  const remove = (start: number, end: number): number => {
-    while (
-      start > 0 && end < tokens.length &&
-      tokens[start - 1].nesting === 1 && tokens[end].nesting === -1 &&
-      EMPTIABLE_CONTAINERS.has(tokens[start - 1].type.slice(0, -'_open'.length)) &&
-      tokens[end].type === tokens[start - 1].type.slice(0, -'_open'.length) + '_close'
-    ) {
-      start--;
-      end++;
-    }
-    tokens.splice(start, end - start);
-    return start;
-  };
+  // The tokens kept, in one pass, as a document can have many rows to
+  // take. For each container open, where its open is in `out`, which goes
+  // too where nothing in it is left and something in it was taken
+  const tokens = state.tokens;
+  const out: Token[] = [];
+  const containers: Array<{ at: number; lost: boolean }> = [];
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].type === 'tr_open') {
+    const token = tokens[i];
+    // Where the paragraph, heading or row that starts here and goes ends
+    let end: number | undefined;
+    if (token.type === 'tr_open') {
       let close = i + 1;
       while (tokens[close].type !== 'tr_close') close++;
-      const cells = tokens.slice(i, close).filter(token => token.type === 'inline' && token.children);
-      if (cells.some(cell => hadContent.has(cell)) && !cells.some(hasText)) i = remove(i, close + 1) - 1;
+      const cells = tokens.slice(i, close).filter(cell => cell.type === 'inline' && cell.children);
+      if (cells.some(cell => cellHadContent.has(cell)) && !cells.some(cellHasText)) end = close + 1;
+    } else if ((token.type === 'paragraph_open' || token.type === 'heading_open') && tokens[i + 1]?.type === 'inline' &&
+        hadContent.has(tokens[i + 1]) && !hasText(tokens[i + 1])) {
+      // Its open, inline and close
+      end = i + 3;
+    }
+    if (end !== undefined) {
+      if (containers.length > 0) containers[containers.length - 1].lost = true;
+      i = end - 1;
       continue;
     }
-    const inline = tokens[i];
-    if (!hadContent.has(inline) || hasText(inline)) continue;
-    const open = tokens[i - 1];
-    if (open?.type !== 'paragraph_open' && open?.type !== 'heading_open') continue;
-    // The paragraph's open, inline and close
-    i = remove(i - 1, i + 2) - 1;
+    const container = token.type.slice(0, token.type.lastIndexOf('_'));
+    if (EMPTIABLE_CONTAINERS.has(container) && token.nesting === 1) {
+      containers.push({ at: out.length, lost: false });
+    } else if (EMPTIABLE_CONTAINERS.has(container) && token.nesting === -1 && containers.length > 0) {
+      const { at, lost } = containers.pop()!;
+      if (lost && out.length === at + 1) {
+        out.length = at;
+        if (containers.length > 0) containers[containers.length - 1].lost = true;
+        continue;
+      }
+    }
+    out.push(token);
   }
+  state.tokens = out;
 }
 
 /**
@@ -2155,10 +2178,16 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
  * accepted, or an addition's, rejected. Export tracks a paragraph break in
  * a change as the mark of the paragraph before it, so Word joins the two
  * there. A heading's mark stays, as which style Word gives the paragraph
- * it joins is not known.
+ * it joins is not known. So does the mark before or after a figure or a
+ * table's caption (see captionsRule), whose element and ID, which a
+ * cross-reference links to, a paragraph of text can't hold: it shows apart.
  */
 function joinParagraphsAtDroppedMarks(state: StateCore, resolution: ChangeResolution): void {
   const tokens = state.tokens;
+  // A paragraph of its own text, not one captionsRule made a figure or a
+  // caption of, which it gives its tag and ID
+  const isTextParagraph = (open: Token | undefined): boolean =>
+    open?.type === 'paragraph_open' && open.tag === 'p' && !open.attrGet('id');
   const lineMap = getPreviewEnvironment(state).lineMap;
   // A token's source line as the source has it, which the map of a
   // paragraph splitCriticBlocksRule made is in already
@@ -2182,7 +2211,7 @@ function joinParagraphsAtDroppedMarks(state: StateCore, resolution: ChangeResolu
     const second = tokens[i + 2];
     if (close.type !== 'paragraph_close' || !marks?.length ||
         !marks.every(mark => mark !== undefined && resolution.dropped.has(mark)) ||
-        first?.type !== 'inline' || tokens[i + 1]?.type !== 'paragraph_open' ||
+        first?.type !== 'inline' || !isTextParagraph(out[out.length - 2]) || !isTextParagraph(tokens[i + 1]) ||
         second?.type !== 'inline' || tokens[i + 3]?.type !== 'paragraph_close') {
       out.push(close);
       continue;

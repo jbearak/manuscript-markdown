@@ -9,7 +9,7 @@ import { type CrossRefSource, citationEnd, citationPrefixText, readCitationItems
 import { DOCX_DOLLAR_MATH_OPTIONS, findDollarMathAt } from './math-delimiters';
 import { type FigureAttributes, attributeValue, tableCaptionSource } from './captions';
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign, getDisplayWidth, gridColumnAlign } from './grid-table-preprocess';
-import { type GfmAlertType, isGfmDisallowedRawHtml, parseGfmAlertMarker, parseTaskListMarker } from './gfm';
+import { type GfmAlertType, isGfmDisallowedRawHtml, isHtmlLineBreak, parseGfmAlertMarker, parseTaskListMarker } from './gfm';
 import { type HtmlTableRow, type HtmlTableRun, cellParagraphMarkAt, extractHtmlTables } from './html-table-parser';
 import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, criticBreaksEndLinks, criticBreaksInRawHtml, criticBreaksLeftOver, criticCloserSearch, findMatchingClose, matchCriticHeadingPrefix, preprocessCriticMarkup, preprocessCriticMarkupWithLines, restoreCriticLineBreaks } from './critic-markup';
 import { type LineMap, throughLines, withEnd } from './line-map';
@@ -3859,7 +3859,7 @@ export function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             href: currentHref,
             rawHtml: true,
           });
-        } else if (/^<br\s*\/?>$/i.test(html)) {
+        } else if (isHtmlLineBreak(html)) {
           // A line break, as import writes one Markdown's \ can't hold: at
           // the end of a paragraph, or in a heading
           runs.push({ type: 'hardbreak', text: '\n', htmlBreak: true, ...formatStack, href: currentHref });

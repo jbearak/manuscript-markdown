@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
 import MarkdownIt from 'markdown-it';
+import type Token from 'markdown-it/lib/token.mjs';
 import { frontmatterYamlForPreview, manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
 import type { EmbedResolver } from '../embed-preprocess';
 import { VALID_COLOR_IDS, setDefaultHighlightColor, getDefaultHighlightColor } from '../highlight-colors';
@@ -3264,6 +3265,42 @@ describe('No Markup preview', () => {
     expect(gone).toContain('<p>One</p>\n<p>Two</p>\n');
   });
 
+  it('drops a table row whose other cells hold only a line break or a space, as export tracks its deletion', () => {
+    for (const blank of ['<br>', '<br/>', '<BR />', '&nbsp;', '&#9;', '&emsp;']) {
+      expect(renderNoMarkup('| H | I |\n|---|---|\n| {--x--} | ' + blank + ' |\n| k | l |'))
+        .toContain('<tbody>\n<tr>\n<td>k</td>\n<td>l</td>\n</tr>\n</tbody>');
+    }
+  });
+
+  it('keeps a row of line breaks with no change in it, and a cell export writes as text', () => {
+    expect(renderNoMarkup('| H | I |\n|---|---|\n| <br> | &nbsp; |\n| k | l |')).toContain('<td><br></td>');
+    expect(renderNoMarkup('| H | I |\n|---|---|\n| {--x--} | <wbr> |\n| k | l |')).toContain('<td><wbr></td>');
+    expect(renderNoMarkup('| H | I |\n|---|---|\n| {--x--} | \\* |\n| k | l |')).toContain('<td>*</td>');
+  });
+
+  it('drops many rows in one pass over the tokens', () => {
+    // Each row's removal from the tokens one at a time moved every token
+    // after it, as many times as there are rows
+    const md = createMarkdownItWithPlugin();
+    md.manuscriptPreviewMarkup = 'none';
+    const table = '| H |\n|---|\n' + Array(256).fill('| {--x--} |').join('\n') + '\n| keep |';
+    const splice = Array.prototype.splice;
+    let moved = 0;
+    let tokens: Token[] = [];
+    try {
+      Array.prototype.splice = function (this: unknown[], start: number, deleteCount?: number, ...items: unknown[]) {
+        const at = this[start] as Token | undefined;
+        if (at?.type === 'tr_open' || at?.type === 'tbody_open') moved += this.length - start - (deleteCount ?? 0);
+        return splice.call(this, start, deleteCount ?? this.length - start, ...items);
+      } as typeof splice;
+      tokens = md.parse(table, {});
+    } finally {
+      Array.prototype.splice = splice;
+    }
+    expect(tokens.filter(token => token.type === 'tr_open')).toHaveLength(2);
+    expect(moved).toBeLessThanOrEqual(tokens.length);
+  });
+
   it('keeps a table row with a cell that shows text or a comment', () => {
     expect(renderNoMarkup('| a | b |\n|---|---|\n| {--x--} | y |')).toContain('<td></td>\n<td>y</td>');
     expect(renderNoMarkup('| a |\n|---|\n| {--x--}{>>c<<} |')).toContain('data-comment="c"');
@@ -3381,6 +3418,13 @@ describe('Original preview', () => {
   it('drops a table row whose text was all added', () => {
     expect(renderOriginal('| Head |\n|---|\n| {++x++} |\n| keep |'))
       .toContain('<tbody>\n<tr>\n<td>keep</td>\n</tr>\n</tbody>');
+  });
+
+  it('drops a table row whose other cells hold only a line break or a space, as export tracks its insertion', () => {
+    for (const blank of ['<br>', '&nbsp;']) {
+      expect(renderOriginal('| H | I |\n|---|---|\n| {++x++} | ' + blank + ' |\n| k | l |'))
+        .toContain('<tbody>\n<tr>\n<td>k</td>\n<td>l</td>\n</tr>\n</tbody>');
+    }
   });
 
   it('keeps a change in deleted text, which export deletes with it', () => {
@@ -3534,6 +3578,33 @@ describe('a paragraph mark a change tracks, in the resolved previews', () => {
   it('tracks a mark as the innermost change, as export does', () => {
     expect(render('none', '{++a{--\n\n--}b++}')).toBe('<p>ab</p>');
     expect(render('original', 'x {--a{++\n\n++}b--} y')).toBe('<p>x ab y</p>');
+  });
+
+  it('keeps a figure apart, with its ID, where the mark before it is dropped', () => {
+    const figure = '<figure id="fig-map" class="manuscript-markdown-figure"><img src="a.png" alt="map"><figcaption>Figure 1: map</figcaption></figure>';
+    const link = '<p>See <a href="#fig-map" class="manuscript-markdown-cross-reference">Figure 1</a>.</p>';
+    expect(render('none', 'A{--\n\n--}\n\n![map](a.png){#fig-map}\n\nSee @fig-map.')).toBe('<p>A</p>\n' + figure + '\n' + link);
+    expect(render('original', 'A{++\n\n++}\n\n![map](a.png){#fig-map}\n\nSee @fig-map.')).toBe('<p>A</p>\n' + figure + '\n' + link);
+    expect(render('simple', 'A{--\n\n--}\n\n![map](a.png){#fig-map}')).toBe('<p class="manuscript-markdown-changed">A</p>\n' + figure);
+  });
+
+  it('keeps a table\'s caption apart, with its ID, where it goes above the table after a dropped mark', () => {
+    // Above the table where the frontmatter says nothing, as Quarto puts it
+    const top = '---\ntbl-cap-location: top\n---\n\n';
+    const caption = '<p>A</p>\n<p id="tbl-x" class="manuscript-markdown-table-caption">Table 1: Table</p>\n<table>';
+    const link = '<p>See <a href="#tbl-x" class="manuscript-markdown-cross-reference">Table 1</a>.</p>';
+    const none = render('none', 'A{--\n\n--}\n\n| H |\n|---|\n| b |\n\n: Table {#tbl-x}\n\nSee @tbl-x.');
+    expect(none).toMatch(/^<p>A<\/p>\n<p id="tbl-x" class="manuscript-markdown-table-caption">Table 1: Table<\/p>\n<table>/);
+    expect(none).toContain(link);
+    expect(render('none', top + 'A{--\n\n--}\n\n| H |\n|---|\n| b |\n\n: Table {#tbl-x}')).toContain(caption);
+    expect(render('original', top + 'A{++\n\n++}\n\n| H |\n|---|\n| b |\n\n: Table {#tbl-x}')).toContain(caption);
+    // An HTML block's table, whose caption splits the block
+    expect(render('none', top + 'A{--\n\n--}\n\n<table><tr><td>h</td></tr></table>\n\n: Table {#tbl-x}'))
+      .toContain('<p>A</p>\n<p id="tbl-x" class="manuscript-markdown-table-caption">Table 1: Table</p>');
+  });
+
+  it('joins a paragraph that reads as a caption only where no table is before it, as export reads it', () => {
+    expect(render('none', 'A{--\n\n--}\n\n: Table {#tbl-x}\n\n| H |\n|---|\n| b |')).toMatch(/^<p>A: Table <\/p>\n<table>/);
   });
 
   it('joins paragraphs in a list item or a quote', () => {
