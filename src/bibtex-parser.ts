@@ -1309,8 +1309,9 @@ const PSEUDO_ENTRY_TYPES: ReadonlySet<string> = new Set(['string', 'comment', 'p
 function isAtLineStart(input: string, pos: number): boolean {
   for (let i = pos - 1; i >= 0; i--) {
     const c = input[i];
-    if (c === '\n') return true;
-    if (c !== ' ' && c !== '\t' && c !== '\r') return false;
+    // A lone CR ends a line too, as it ends a % comment (see isInLineComment)
+    if (c === '\n' || c === '\r') return true;
+    if (c !== ' ' && c !== '\t') return false;
   }
   return true;
 }
@@ -2186,10 +2187,13 @@ export function spliceFieldsIntoEntry(
  *    was, unless the file repeats a key, the scan loses its place in it,
  *    that text holds an entry BibTeX reads, as `% @book{B,`, whose key the
  *    produced file gives too, or the text after the last entry leaves
- *    BibTeX in one, as `% @book{`, where produced entries would follow it.
+ *    BibTeX in one, as `% @book{`, or ends in an @ that BibTeX would read
+ *    with the next entry's type, where produced entries would follow it.
  *    Such a file keeps its entries and its `@string` and `@preamble`
  *    declarations alone.
  *  - Produced-only entries are appended at the end.
+ *  - A line follows the last entry, where the merge wrote it and the text
+ *    before it has an @ outside a declaration (see inSkeleton).
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
  *  This is a post-processing step that runs after any restoration layer. */
@@ -2203,6 +2207,11 @@ export function mergeBibtex(existing: string, produced: string): string {
   // document, so resolve it at most once and only on demand.
   let producedEolCache: BibtexEol | null = null;
   const producedEol = () => (producedEolCache ??= detectBibtexEol(produced));
+  // The existing file's line end, for the blank lines the merge writes
+  // between entries: a lone CR in a file with no line feed, whose lines end
+  // so, as classic Mac OS wrote them, and which detectBibtexEol, whose
+  // callers write LF or CRLF, reads as LF
+  const existingEol = (): string => (existing.includes('\r') && !existing.includes('\n') ? '\r' : detectBibtexEol(existing));
   const existingResult = scanBibtex(existing);
   const producedResult = parseBibtexWithRaw(produced);
   const existingParsed = existingResult.parsed;
@@ -2302,18 +2311,23 @@ export function mergeBibtex(existing: string, produced: string): string {
       entries.push({ key, start: out.length, end: out.length + text.length });
       out += text;
     };
+    // Whether the last entry put is text the existing file didn't have there
+    let lastWritten = false;
     for (const range of existingResult.ranges) {
       copy(range.start);
       at = range.end;
       const text = existingParsed.has(range.key) ? mergedEntry(range.key) : existing.slice(range.start, range.end);
-      if (text) put(range.key, text);
+      if (text) {
+        put(range.key, text);
+        lastWritten = text !== existing.slice(range.start, range.end);
+      }
     }
     copy(existing.length);
     const added = producedOnly();
     if (added.length > 0) {
       // After the last of the existing file, with a blank line between each
       // two in the file's line ends, and the file's own ending after them
-      const blank = detectBibtexEol(existing).repeat(2);
+      const blank = existingEol().repeat(2);
       const ending = out.slice(out.trimEnd().length);
       out = out.slice(0, out.length - ending.length);
       for (const entry of added) {
@@ -2321,6 +2335,32 @@ export function mergeBibtex(existing: string, produced: string): string {
         put(entry.key, entry.text);
       }
       out += ending;
+      lastWritten = true;
+    }
+    // BibTeX reads an @ in a % comment, so text before an entry such as
+    // `% alice@example.test` or `% see @foo(k)` leaves it expecting a { or a
+    // ( or a key's , where the entry's @ is. It reports that, and reads on
+    // from that @, but not where that @ is on the file's last line: it stops
+    // at the end of the file instead, and the entry is lost. So a line
+    // follows the last entry's, where the merge wrote it and the text before
+    // it has an @ outside the @string and @preamble declarations, which
+    // BibTeX reads whole. BibTeX ends a line at a CR and again at an LF, so
+    // in a CRLF file the empty one between them is that line.
+    const last = entries[entries.length - 1];
+    const strayAt = (from: number, to: number): boolean => {
+      for (const string of strings) {
+        if (string.end <= from) continue;
+        if (string.start >= to) break;
+        const at = out.indexOf('@', from);
+        if (at !== -1 && at < string.start) return true;
+        from = string.end;
+      }
+      const at = out.indexOf('@', from);
+      return at !== -1 && at < to;
+    };
+    if (lastWritten && strayAt(entries.length > 1 ? entries[entries.length - 2].end : 0, last.start)) {
+      const eol = existingEol();
+      while (!/[\r\n][^]/.test(out.slice(last.start))) out += eol;
     }
     const read = scanBibtex(out);
     const same = read.rangesTrusted
@@ -2341,35 +2381,63 @@ export function mergeBibtex(existing: string, produced: string): string {
    *  True too if the text after the last entry, where produced-only entries
    *  go, leaves BibTeX in an entry or a declaration it opens there, as
    *  `% @book{` with no closer: BibTeX would read the entries added after
-   *  it as that one's text, and find none of them. */
+   *  it as that one's text, and find none of them. True too if that text
+   *  ends in an @, which BibTeX reads with the first added entry's type. */
   const betweenEntriesRepeatsProducedKey = (): boolean => {
     const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
+    // BIBTEX_KEY_AT's, read to at most one past the longest produced key,
+    // which lower case doesn't shorten, so a longer key still matches none
+    const cap = [...producedKeys].reduce((longest, key) => Math.max(longest, key.length), 0) + 1;
+    const keysAt = {
+      '{': new RegExp(BIBTEX_KEY_AT['{'].source.replace('+)', '{1,' + cap + '})'), 'y'),
+      '(': new RegExp(BIBTEX_KEY_AT['('].source.replace('+)', '{1,' + cap + '})'), 'y'),
+    };
     const appends = producedOnly().length > 0;
     // Whether what `opener` opens just before `from` in `text` is still
     // open at the text's end, by its delimiters, which BibTeX counts in
     // quotes too
     const staysOpen = (text: string, from: number, opener: '{' | '('): boolean => {
       let depth = opener === '{' ? 1 : 0;
+      // In a quoted value of an entry ( opens, whose ) is text there. One
+      // that runs to the text's end, or a brace still open there, keeps the
+      // entry open; otherwise a ) in a quote counts as a closer, as it did
+      // before quotes were read, where the padding inSkeleton writes serves
+      // BibTeX
+      let quoted = false, closedInQuote = false;
       for (let i = from; i < text.length; i++) {
         const c = text[i];
-        if (c === '{') depth++;
+        if (c === '"' && opener === '(' && depth === 0) quoted = !quoted;
+        else if (c === '{') depth++;
         else if (c === '}') {
           // One that closes it, or one too many, which BibTeX reports, and
           // reads on for the next @
           if (--depth <= 0 && (opener === '{' || depth < 0)) return false;
-        } else if (c === ')' && opener === '(' && depth === 0) return false;
+        } else if (c === ')' && opener === '(' && depth === 0) {
+          if (!quoted) return false;
+          closedInQuote = true;
+        }
       }
-      return true;
+      return quoted || depth > 0 || !closedInQuote;
     };
     let from = 0;
+    const gapStarts: number[] = [];
     const gaps = existingResult.ranges.map(range => {
+      gapStarts.push(from);
       const gap = existing.slice(from, range.start);
       from = range.end;
       return gap;
     });
+    gapStarts.push(from);
     gaps.push(existing.slice(from));
+    // Where each @string and @preamble the scan read ends, by where it
+    // starts: BibTeX reads it whole, so an @ in its value opens nothing
+    const declarationEnds = new Map(existingResult.strings.map(({ start, end }) => [start, end]));
     return gaps.some((gap, k) => {
       const last = appends && k === gaps.length - 1;
+      // An @ that ends the text, as `% email me @`, starts the type BibTeX
+      // reads, and white space is no end to it: it reads the first added
+      // entry's @book as the type `@book`, which no style defines
+      if (last && gap.trimEnd().endsWith('@')) return true;
       for (let at = gap.indexOf('@'); at !== -1;) {
         const header = readEntryHeader(gap, at);
         if (!('type' in header)) {
@@ -2379,15 +2447,23 @@ export function mergeBibtex(existing: string, produced: string): string {
         // BibTeX reads on past an @comment for the next @, so it opens nothing
         if (last && header.type.toLowerCase() !== 'comment' && staysOpen(gap, header.end, header.opener)) return true;
         if (PSEUDO_ENTRY_TYPES.has(header.type.toLowerCase())) {
-          at = gap.indexOf('@', header.end);
+          const end = declarationEnds.get(gapStarts[k] + at);
+          at = gap.indexOf('@', end === undefined ? header.end : end - gapStarts[k]);
           continue;
         }
-        const keyAt = BIBTEX_KEY_AT[header.opener];
+        const keyAt = keysAt[header.opener];
         keyAt.lastIndex = header.end;
         const key = keyAt.exec(gap);
         if (key && producedKeys.has(key[1].toLowerCase())) return true;
-        // On after the key, as BibTeX reads on, so each @ is read once
-        at = gap.indexOf('@', header.end + (key?.[0].length ?? 0));
+        // On from the opener, not past the key: an @ in a commented-out
+        // entry's value, as `note={@book(}`, reads as a header here, and its
+        // key can run into a second entry BibTeX reads, as
+        // `}}@book{B,`. BibTeX ends the first entry where its value does, but
+        // where a field's text is not one it reads on from the next @, so
+        // skipping the entry's body could miss B too. Each @ is still read
+        // once, and each key to at most one past the longest produced key's
+        // length, beyond which it matches none
+        at = gap.indexOf('@', header.end);
       }
       return false;
     });
@@ -2432,5 +2508,5 @@ export function mergeBibtex(existing: string, produced: string): string {
   for (const entry of producedOnly()) result.push(entry.text);
   // A blank line between each two, in the existing file's line ends, as
   // inSkeleton puts between the entries it adds
-  return result.join(detectBibtexEol(existing).repeat(2));
+  return result.join(existingEol().repeat(2));
 }
