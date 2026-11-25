@@ -82,8 +82,8 @@ describe('parseDta', () => {
   it('shows %tc values by their mask', () => {
     const t = Date.UTC(2010, 0, 20, 15, 15, 30, 987) - Date.UTC(1960, 0, 1);
     const masks = [
-      '%tcHH:MM:SS.sss', '%tcCCYY.NN.DD_HH:MM', '%tcMonth_dd,_CCYY_hh:MM_am', '%tCDay_Mon_DD_HH:MM:SS_CCYY',
-      '%tc+hh+:+MM+A.M.', '%tcDAYNAME|', '%tcJJJ!h_q_WW_.s_.ss', '%-tcyy/nn/dd\\hH:mm:ss', '%tcHH:MM_Q',
+      '%tcHH:MM:SS.sss', '%tcCCYY.NN.DD_HH:MM', '%tcMonth_dd,_CCYY_hh:MM_am', '%tcDay_Mon_DD_HH:MM:SS_CCYY',
+      '%tc+hh+:+MM+A.M.', '%tcDAYNAME|', '%tcJJJ!h_q_WW_.s_.ss', '%-tcyy/nn/dd\\hH:mm:ss', '%tcHH:MM_Q', '%tCHH:MM',
     ];
     const data = writeDta({
       variables: [
@@ -106,6 +106,9 @@ describe('parseDta', () => {
     expect(html).toContain(cell(masks[6], '020h 1 03 .9 .98'));
     expect(html).toContain(cell(masks[7], '10/1/20\\15:15:30'));
     expect(html).toContain(cell(masks[8], '2010-01-20 15:15:30'));
+    // %tC counts leap seconds, which a mask read as %tc would put some
+    // seconds off, so it stays the library's.
+    expect(html).toContain(cell(masks[9], '2010-01-20 15:15:30'));
   });
 
   // The manual lists hh as 0 to 12: midnight's hour is 0, noon's 12.

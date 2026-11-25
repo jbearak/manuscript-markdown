@@ -309,14 +309,15 @@ function formatCell(
 }
 
 // -----------------------------------------------------------
-// %tc and %tC masks
+// %tc masks
 //
-// The library shows %tc and %tC values as 2022-10-31 13:05:09 whatever
-// their mask, so 1 and 2 under %tcHH:MM:SS.sss both read 00:00:00.
+// The library shows %tc values as 2022-10-31 13:05:09 whatever their
+// mask, so 1 and 2 under %tcHH:MM:SS.sss both read 00:00:00.
 // formatClock follows the mask instead, with every code in Stata's
 // "Datetime display formats" manual entry. As there, times are
-// truncated, not rounded. Leap seconds in %tC are not counted, as the
-// library doesn't. A mask with a character that isn't a code, a year
+// truncated, not rounded. %tC values, which count leap seconds, stay
+// the library's, which doesn't count them, rather than show a mask
+// some seconds off. A mask with a character that isn't a code, a year
 // outside 100 to 9999 (Stata's own range; JavaScript reads years below
 // 100 as 19xx) or a value past JavaScript's dates leaves the whole
 // value to the library. %td masks, and all other formats, are the
@@ -330,9 +331,9 @@ const STATA_EPOCH = Date.UTC(1960, 0, 1);
 // Longest first, so DAYNAME isn't read as Da, nor .sss as .s.
 const CLOCK_CODE = /^(?:DAYNAME|Dayname|Month|month|A\.M\.|a\.m\.|\.sss|JJJ|jjj|Mon|mon|Day|day|\.ss|CC|cc|YY|yy|NN|nn|DD|dd|Da|da|WW|ww|HH|Hh|hH|hh|MM|mm|SS|ss|\.s|am|AM|![^]|[hq.,:\-_/\\+])/;
 
-/** A %tc or %tC value shown by its mask; undefined to leave it to the library. */
+/** A %tc value shown by its mask; undefined to leave it to the library. */
 function formatClock(value: number, format: string): string | undefined {
-  const mask = /^%-?t[cC](.+)$/.exec(format)?.[1];
+  const mask = /^%-?tc(.+)$/.exec(format)?.[1];
   if (mask === undefined) return undefined;
   const ms = Math.floor(value);
   const date = new Date(STATA_EPOCH + ms);
