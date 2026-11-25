@@ -201,6 +201,11 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   'citation-key-conflict':
     'more than one Zotero item answers to its citation key, in the Citation Key field or a "Citation Key:" line of Extra; link it with zotero-key',
   'isbn-owned-elsewhere': "its ISBN is another item's",
+  'duplicate-identifier': 'another entry would give the same identifier to an item',
+  'no-citation-key-field':
+    'Zotero has no Citation Key field for this item type, so the next push could not find the item and would create it again',
+  'key-in-use':
+    'push created an item for this citation key before, and its citation key has changed in Zotero since; link the entry to it with zotero-key',
   'unsupported-type': 'no Zotero item type for this entry type',
   'unreadable-identifier': 'an identifier is written with TeX; write it plain',
   'extra-would-migrate':
@@ -250,6 +255,8 @@ export function formatZoteroPushReport(
           ? ' [not sent]'
           : outcome === 'unknown'
             ? ' [outcome unknown: run the push again to check]'
+          : outcome.status === 'failed' && a.kind === 'create' && outcome.code === 412
+            ? ` [failed: Zotero already has an item under this key, ${String(a.data.key)}: an earlier push may still be saving it, or it is in Zotero's trash. Run the push again; if this recurs, restore the item from the trash or empty the trash.]`
           : outcome.status === 'failed'
             ? ` [failed: ${outcome.message}]`
             : outcome.status === 'success'

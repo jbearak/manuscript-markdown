@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import { createZoteroLinkPlan, type ZoteroCatalogItem } from './zotero-link';
 import {
   createZoteroPushPlan,
+  pushItemKey,
   zoteroPushWrites,
   type ZoteroItemJson,
   type ZoteroItemSchema,
@@ -216,6 +217,8 @@ describe('createZoteroPushPlan', () => {
           ],
           citationKey: 'doe2026new',
           collections: [COLLECTION],
+          key: pushItemKey('doe2026new'),
+          version: 0,
         },
         notPushed: [{ field: 'note', reason: 'no-zotero-field' }],
       },
@@ -891,5 +894,111 @@ describe('push: an entry writes only the item it clearly owns', () => {
     const { plan: p, posts } = await pushThroughApi('@article{k,\n  title = {First},\n  title = {Second}\n}\n', [k]);
     expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'title', reason: 'repeated-field' }] });
     expect(posts).toEqual([]);
+  });
+});
+
+describe('push: never a second copy of a work the library has', () => {
+  it('creates neither of two new entries with one PMID or one whole-work ISBN', async () => {
+    const pmids = await pushThroughApi('@article{a,\n  pmid = {222},\n  title = {One}\n}\n\n@article{b,\n  pmid = {222},\n  title = {One}\n}\n', []);
+    expect(pmids.plan.actions).toMatchObject([
+      { kind: 'skip', reason: 'duplicate-identifier', detail: 'PMID 222' },
+      { kind: 'skip', reason: 'duplicate-identifier', detail: 'PMID 222' },
+    ]);
+    // An ISBN-10 and the ISBN-13 of the same edition are one ISBN.
+    const isbns = await pushThroughApi('@book{a,\n  isbn = {0306406152},\n  title = {One}\n}\n\n@book{b,\n  isbn = {978-0-306-40615-7},\n  title = {One}\n}\n', []);
+    expect(isbns.plan.actions).toMatchObject([
+      { kind: 'skip', reason: 'duplicate-identifier', detail: 'ISBN 9780306406157' },
+      { kind: 'skip', reason: 'duplicate-identifier', detail: 'ISBN 9780306406157' },
+    ]);
+    expect([...pmids.posts, ...isbns.posts]).toEqual([]);
+  });
+
+  it("doesn't create a book whose ISBN-10 is an existing book's ISBN-13", async () => {
+    const book = item('AAAA2222', { itemType: 'book', title: 'The same book', ISBN: '9780306406157', citationKey: 'old' });
+    const { plan: p, posts } = await pushThroughApi('@book{new,\n  title = {The same book},\n  isbn = {0306406152}\n}\n', [book]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'isbn-owned-elsewhere', detail: 'AAAA2222' });
+    expect(posts).toEqual([]);
+  });
+
+  it("reads identifiers in Extra's old {:doi:…} and {:pmid:…} lines", async () => {
+    const doi = item('AAAA2222', { title: 'A', citationKey: 'other', extra: '{:doi:10.1000/a}' });
+    const byDoi = await pushThroughApi('@article{x,\n  doi = {10.1000/a},\n  title = {A}\n}\n', [doi]);
+    expect(byDoi.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'doi-owned-elsewhere', detail: 'AAAA2222' });
+    const pmid = item('AAAA2222', { itemType: 'book', title: 'A', citationKey: 'other', extra: '{:pmid:12345}' });
+    const byPmid = await pushThroughApi('@article{x,\n  pmid = {12345},\n  title = {A}\n}\n', [pmid]);
+    expect(byPmid.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'pmid-disagreement', detail: 'AAAA2222' });
+    expect([...byDoi.posts, ...byPmid.posts]).toEqual([]);
+  });
+
+  it("won't create an item it couldn't find again by its citation key", async () => {
+    const noKey: ZoteroItemSchema = {
+      ...AUDIT_SCHEMA,
+      itemTypes: AUDIT_SCHEMA.itemTypes.map(t => (t.itemType === 'journalArticle' ? { ...t, fields: t.fields.filter(f => f.field !== 'citationKey') } : t)),
+    };
+    const api = libraryApi([], noKey);
+    const prepared = await prepareZoteroPush({ type: 'user' }, '@article{k,\n  title = {Article}\n}\n', COLLECTION, 'add', api);
+    expect(prepared?.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'no-citation-key-field' });
+    expect(prepared?.plan.changed).toBe(false);
+  });
+
+  it('creates each item under a key from its citation key, which a retry names too', async () => {
+    // Zotero's writeMultipleObjects: a keyed object Zotero lacks is created
+    // under that key; one it has is refused when its version differs.
+    const stored = new Map<string, ZoteroItemJson>();
+    let libraryVersion = 10;
+    const save = (o: Record<string, unknown>) => {
+      const key = typeof o.key === 'string' ? o.key : 'NEW' + String(stored.size).padStart(5, '0');
+      const had = stored.get(key);
+      if (had !== undefined && o.version !== had.version) return { failed: { key, code: 412, message: 'item version mismatch' } };
+      stored.set(key, { ...(o as ZoteroItemJson), version: ++libraryVersion, uri: undefined });
+      return { ok: { key, version: libraryVersion } };
+    };
+    let finishFirst: (() => void) | undefined;
+    const headers = { get: (n: string) => (n === 'Last-Modified-Version' ? String(libraryVersion) : n === 'Zotero-Server-ID' ? 'SERVER' : null) };
+    const fetchFn: ZoteroFetch = async (url, init) => {
+      const path = new URL(url).pathname;
+      if (init?.method === 'POST') {
+        const body = JSON.parse(init.body ?? '[]') as Array<Record<string, unknown>>;
+        if (finishFirst === undefined) {
+          // The first request saves a, then its answer is lost while b saves.
+          save(body[0]);
+          finishFirst = () => void save(body[1]);
+          throw new DOMException('timed out', 'TimeoutError');
+        }
+        const results = body.map(save);
+        const successful = Object.fromEntries(results.flatMap((r, i) => (r.ok ? [[String(i), r.ok]] : [])));
+        const failed = Object.fromEntries(results.flatMap((r, i) => (r.failed ? [[String(i), r.failed]] : [])));
+        return { ok: true, status: 200, json: async () => ({ successful, failed }), headers };
+      }
+      const rows = [...stored.values()].map(data => ({ key: data.key, library: { type: 'user', id: 1 }, data, meta: {} }));
+      const body = path.endsWith('/schema') ? AUDIT_SCHEMA : path.endsWith('/items/top') ? rows : [];
+      return { ok: true, status: 200, json: async () => body, headers };
+    };
+    const bib = '@article{a,\n  title = {A}\n}\n\n@article{b,\n  title = {B}\n}\n';
+    const run = async () => {
+      const prepared = (await prepareZoteroPush({ type: 'user' }, bib, COLLECTION, 'add', { fetchFn }))!;
+      return { prepared, result: await applyZoteroPush({ type: 'user' }, prepared, { get: async () => 'KEY', invalidate: async () => {} }, { fetchFn }) };
+    };
+    const first = await run();
+    expect(zoteroPushWrites(first.prepared.plan)).toMatchObject([
+      { citationKey: 'a', key: pushItemKey('a'), version: 0 },
+      { citationKey: 'b', key: pushItemKey('b'), version: 0 },
+    ]);
+    expect(first.result.outcomes).toEqual(['unknown', 'unknown']);
+    const retry = await run();
+    expect(retry.prepared.plan.actions.map(a => a.kind)).toEqual(['unchanged', 'create']);
+    finishFirst!();
+    expect([...stored.values()].map(i => i.citationKey)).toEqual(['a', 'b']);
+  });
+
+  it('says what a refused create means', () => {
+    const p = plan('@article{a,\n  title = {A}\n}\n', []);
+    const report = formatZoteroPushReport(p, 'Coll', { outcomes: [{ status: 'failed', key: pushItemKey('a'), code: 412, message: 'item version mismatch' }] });
+    expect(report).toContain('Zotero already has an item under this key, ' + pushItemKey('a'));
+  });
+
+  it("won't create an item under a key the library already has", () => {
+    const renamed = item(pushItemKey('a'), { title: 'A', citationKey: 'renamed' });
+    expect(plan('@article{a,\n  title = {Another}\n}\n', [renamed]).actions[0]).toMatchObject({ kind: 'skip', reason: 'key-in-use' });
   });
 });

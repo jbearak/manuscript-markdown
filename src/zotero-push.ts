@@ -37,6 +37,7 @@ import {
   parseBibtexWithRaw,
   type BibtexEntry,
 } from './bibtex-parser';
+import { createHash } from 'crypto';
 import { pushAll } from './arrays';
 import { parseAuthors } from './md-to-docx-citations';
 import { normalizeDoi, normalizeIsbns, normalizePmid, type ZoteroLinkDecision } from './zotero-link';
@@ -145,6 +146,15 @@ export type ZoteroPushSkipReason =
   | 'citation-key-conflict'
   /** Another whole work in the library, as a book, has the entry's ISBN. */
   | 'isbn-owned-elsewhere'
+  /** Another entry would give the same PMID or whole-work ISBN to an item. */
+  | 'duplicate-identifier'
+  /** The item type has no Citation Key field, so the next push couldn't
+   *  find the item it creates, and would create it again. */
+  | 'no-citation-key-field'
+  /** The library has an item under the key push gives this entry's item
+   *  (see pushItemKey), but by another citation key: push made it, and its
+   *  key was changed in Zotero since. */
+  | 'key-in-use'
   /** Push has no Zotero item type for this entry type. */
   | 'unsupported-type'
   /** An identifier is written with TeX the matcher doesn't read. */
@@ -537,7 +547,9 @@ function extraFields(item: ZoteroItemJson): Map<string, string> {
   const out = new Map<string, string>();
   const extra = typeof item.extra === 'string' ? item.extra : '';
   for (const line of extra.split(/\r?\n/)) {
-    const m = /^([A-Za-z][\w -]*):\s*(.+)$/.exec(line.trim());
+    // `Label: value`, or citeproc's old `{:label:value}`, which Zotero reads
+    // too (see extraMigrations).
+    const m = /^([A-Za-z][\w -]*):\s*(.+)$/.exec(line.trim()) ?? /^\{:([A-Za-z][\w -]*):\s*(.+)\}$/.exec(line.trim());
     if (m && !out.has(fold(m[1]))) out.set(fold(m[1]), m[2].trim());
   }
   return out;
@@ -636,6 +648,20 @@ function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet
   return { fields, date, creators, notPushed };
 }
 
+// The characters of a Zotero object key (Zotero.Utilities.isValidObjectKey).
+const ITEM_KEY_ALPHABET = '23456789ABCDEFGHIJKLMNPQRSTUVWXYZ';
+
+/** The key push creates an entry's item under: the same for the same
+ *  citation key on every run, so a retry names the item the first try may
+ *  still be saving.  Zotero creates an item under a key it doesn't have, and
+ *  refuses a create (version 0) under one it has. */
+export function pushItemKey(citationKey: string): string {
+  const digest = createHash('sha256').update('manuscript-markdown push\n' + citationKey).digest();
+  let key = '';
+  for (let i = 0; i < 8; i++) key += ITEM_KEY_ALPHABET[digest[i] % ITEM_KEY_ALPHABET.length];
+  return key;
+}
+
 function createData(
   entry: BibtexEntry,
   itemType: string,
@@ -656,8 +682,10 @@ function createData(
   // `and others` stands for names nobody wrote down; the item gets the
   // ones given.
   data.creators = [...(read.creators.get('author')?.creators ?? []), ...(read.creators.get('editor')?.creators ?? [])];
-  if (type.fields.some(f => f.field === 'citationKey')) data.citationKey = entry.key;
+  data.citationKey = entry.key;
   data.collections = [collectionKey];
+  data.key = pushItemKey(entry.key);
+  data.version = 0;
   return { data, notPushed: read.notPushed };
 }
 
@@ -969,46 +997,61 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     }
   });
 
-  // Second pass: entries that would collide with each other.  A DOI is
-  // given to an item by a create, or by an update of an item without one.
+  // Second pass: entries that would collide with each other.  An
+  // identifier is given to an item by a create, or by an update of an item
+  // without one: a DOI, a PMID, or a whole work's ISBN.
   const targets = new Map<string, number>();
-  const givenDois = new Map<string, number>();
-  // Only entries that would be written: a create needs an item type.
+  const given = new Map<string, number>();
+  // Only entries that would be written: a create needs an item type, and a
+  // Citation Key field to find the item by next time.
   const creatable = (entry: BibtexEntry): boolean => {
     const itemType = ITEM_TYPE_BY_ENTRY_TYPE[entry.type.toLowerCase()];
-    return itemType !== undefined && schemaType(input.schema, itemType) !== undefined;
-  };
-  // …and a DOI field in its type, so the payload carries the DOI.
-  const hasDoiField = (itemType: string | undefined): boolean => {
     const type = itemType === undefined ? undefined : schemaType(input.schema, itemType);
-    return type !== undefined && resolveField(type, 'DOI') !== undefined;
+    return type !== undefined && type.fields.some(f => f.field === 'citationKey');
   };
-  const givesDoi = (c: Candidate): string | undefined =>
-    (c.kind === 'create' && creatable(c.entry) && hasDoiField(ITEM_TYPE_BY_ENTRY_TYPE[c.entry.type.toLowerCase()])) ||
-    (c.kind === 'match' &&
-      input.mode === 'update' &&
-      effectiveDoi(c.item) === undefined &&
-      hasDoiField(c.item.itemType) &&
-      // An item skipped for its Extra is never written.
-      extraMigrations(c.item, schemaType(input.schema, c.item.itemType)!, input.schema).length === 0)
-      ? entryDoi(c.entry)
-      : undefined;
+  // …and a field for the identifier in its type, so the payload carries it.
+  const hasField = (itemType: string | undefined, base: string): boolean => {
+    const type = itemType === undefined ? undefined : schemaType(input.schema, itemType);
+    return type !== undefined && resolveField(type, base) !== undefined;
+  };
+  // An item skipped for its Extra is never written.
+  const writable = (item: ZoteroItemJson): boolean =>
+    extraMigrations(item, schemaType(input.schema, item.itemType)!, input.schema).length === 0;
+  const givesIds = (c: Candidate): string[] => {
+    if (c.kind === 'skip') return [];
+    const itemType = c.kind === 'create' ? ITEM_TYPE_BY_ENTRY_TYPE[c.entry.type.toLowerCase()] : c.item.itemType;
+    if (c.kind === 'create' ? !creatable(c.entry) : input.mode !== 'update' || schemaType(input.schema, itemType) === undefined || !writable(c.item)) {
+      return [];
+    }
+    const ids: string[] = [];
+    const doi = entryDoi(c.entry);
+    if (doi !== undefined && hasField(itemType, 'DOI') && (c.kind === 'create' || effectiveDoi(c.item) === undefined)) ids.push('DOI ' + doi);
+    const pmid = readText(c.entry, 'pmid');
+    if (pmid !== undefined && 'value' in pmid && hasField(itemType, 'PMID') && (c.kind === 'create' || effectivePmid(c.item) === undefined)) {
+      ids.push('PMID ' + pmid.value);
+    }
+    if (hasField(itemType, 'ISBN') && (c.kind === 'create' || isbnsOf(c.item.ISBN).length === 0)) {
+      for (const isbn of entryIsbns(c.entry)) ids.push('ISBN ' + isbn);
+    }
+    return ids;
+  };
   for (const c of candidates) {
     if (c.kind === 'match') targets.set(c.item.key, (targets.get(c.item.key) ?? 0) + 1);
   }
-  // An entry sharing its item with another is skipped, so its DOI isn't
-  // given to anything.
+  // An entry sharing its item with another is skipped, so its identifiers
+  // aren't given to anything.
   for (const c of candidates) {
     if (c.kind === 'match' && (targets.get(c.item.key) ?? 0) > 1) continue;
-    const doi = givesDoi(c);
-    if (doi !== undefined) givenDois.set(doi, (givenDois.get(doi) ?? 0) + 1);
+    for (const id of new Set(givesIds(c))) given.set(id, (given.get(id) ?? 0) + 1);
   }
 
   const actions: ZoteroPushAction[] = candidates.map((c): ZoteroPushAction => {
     if (c.kind === 'skip') return c;
-    const doi = givesDoi(c);
-    if (doi !== undefined && (givenDois.get(doi) ?? 0) > 1) {
-      return { kind: 'skip', entryKey: c.entryKey, reason: 'duplicate-doi', detail: doi };
+    const shared = givesIds(c).find(id => (given.get(id) ?? 0) > 1);
+    if (shared !== undefined) {
+      return shared.startsWith('DOI ')
+        ? { kind: 'skip', entryKey: c.entryKey, reason: 'duplicate-doi', detail: shared.slice(4) }
+        : { kind: 'skip', entryKey: c.entryKey, reason: 'duplicate-identifier', detail: shared };
     }
     if (c.kind === 'create') {
       const itemType = ITEM_TYPE_BY_ENTRY_TYPE[c.entry.type.toLowerCase()];
@@ -1016,6 +1059,17 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
       if (itemType === undefined || type === undefined) {
         return { kind: 'skip', entryKey: c.entryKey, reason: 'unsupported-type', detail: c.entry.type };
       }
+      // The next push finds the item by its citation key: without a field
+      // for one, every push would create it again.
+      if (!type.fields.some(f => f.field === 'citationKey')) {
+        return { kind: 'skip', entryKey: c.entryKey, reason: 'no-citation-key-field', detail: itemType };
+      }
+      // A retry after a lost answer, while Zotero may still be saving the
+      // first request, must not create the item twice: the item's key comes
+      // from the citation key, so both requests name the same item, and
+      // version 0 makes Zotero refuse the second rather than merge it.
+      const itemKey = pushItemKey(c.entryKey);
+      if (input.items.has(itemKey)) return { kind: 'skip', entryKey: c.entryKey, reason: 'key-in-use', detail: itemKey };
       const { data, notPushed } = createData(c.entry, itemType, type, input.collectionKey, c.repeated);
       return { kind: 'create', entryKey: c.entryKey, itemType, data, notPushed };
     }
