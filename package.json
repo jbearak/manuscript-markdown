@@ -1479,7 +1479,7 @@
   "private": true,
   "dependencies": {
     "@e965/xlsx": "^0.20.3",
-    "@jbearak/dta-parser": "^1.0.0",
+    "@jbearak/dta-parser": "^1.2.1",
     "citeproc": "^2.4.63",
     "entities": "^4.5.0",
     "fast-xml-parser": "^5.5.7",
