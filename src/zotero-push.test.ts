@@ -637,6 +637,10 @@ describe('applyZoteroPush', () => {
     const result = await applyZoteroPush({ type: 'user' }, prepared, keys(), { fetchFn });
     expect(sent.length).toBe(1);
     expect(result.error?.message).toContain('MINE0000');
+    expect(result.outcomes.slice(0, 50)).toEqual(
+      Array.from({ length: 50 }, (_, i) => ({ status: 'success', key: 'MINE' + String(i).padStart(4, '0'), version: 6 })),
+    );
+    expect(result.outcomes[50]).toBeUndefined();
   });
 
   it("stops before a batch when Zotero didn't say the library's version", async () => {
