@@ -136,10 +136,10 @@ function readTableAs(data: Uint8Array, encoding?: EncodingName): DtaTable {
   }
 }
 
-/** Every piece of text the table shows or could show. */
+/** Every piece of text the reader decoded, but the data label. */
 function tableText(table: DtaTable): string[] {
   const text: string[] = [];
-  for (const v of table.variables) text.push(v.name, v.label);
+  for (const v of table.variables) text.push(v.name, v.label, v.format, v.valueLabels);
   for (const labels of table.valueLabelTables) {
     if (labels) for (const label of labels.values()) text.push(label);
   }
@@ -161,7 +161,7 @@ function tableText(table: DtaTable): string[] {
 function readTable(data: Uint8Array): DtaTable {
   const table = readTableAs(data);
   if (table.release >= 118) return table;
-  if (!tableText(table).some(t => /[^\x20-\x7e]/.test(t))) return table;
+  if (!tableText(table).some(t => /[\u0080-\uffff]/.test(t))) return table;
   const utf8 = readTableAs(data, 'utf-8');
   return tableText(utf8).some(t => t.includes('\ufffd')) ? table : utf8;
 }
