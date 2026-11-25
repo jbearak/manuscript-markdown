@@ -3328,6 +3328,12 @@ describe('No Markup preview', () => {
     expect(html.split('data-comment="d"').length - 1).toBe(1);
   });
 
+  it('gives a caption whose text was all deleted no delimiter', () => {
+    expect(renderNoMarkup('![{--old--}](a.png){#fig-a}')).toContain('<figcaption>Figure 1</figcaption>');
+    expect(renderNoMarkup('![x {--old--}](a.png){#fig-a}')).toContain('<figcaption>Figure 1: x </figcaption>');
+    expect(renderNoMarkup('| a |\n|---|\n| b |\n\n: {--old--} {#tbl-x}')).toContain('class="manuscript-markdown-table-caption">Table 1</p>');
+  });
+
   it('accepts changes in an image alt text', () => {
     expect(renderNoMarkup('![{~~old~>new~~}](missing.png)')).toContain('alt="new"');
   });
@@ -3391,6 +3397,10 @@ describe('Original preview', () => {
   it('shows a comment on an addition over paragraphs once', () => {
     const html = renderOriginal('{++one\n\ntwo++}{>>a<<}\n\nkept');
     expect(html.split('data-comment="a"').length - 1).toBe(1);
+  });
+
+  it('gives a caption whose text was all added no delimiter', () => {
+    expect(renderOriginal('![{++new++}](a.png){#fig-a}')).toContain('<figcaption>Figure 1</figcaption>');
   });
 
   it('rejects changes in an image alt text', () => {

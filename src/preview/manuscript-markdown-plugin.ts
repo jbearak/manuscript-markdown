@@ -2061,6 +2061,17 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
   const hadContent = new Set(inlines.filter(hasText));
   for (const inline of inlines) inline.children = resolveChanges(inline.children!, state, resolution);
   commentsOnResolvedText(inlines, state);
+  // A caption's label, its delimiter only where it still has text to show
+  // (see captionsRule): the text after the label, to the figure's caption's
+  // close or the table's caption's end
+  for (const inline of inlines) {
+    const children = inline.children!;
+    children.forEach((label, at) => {
+      if (label.meta?.captionLabel === undefined) return;
+      const close = children.findIndex((child, after) => after > at && child.type === 'manuscript_figcaption_close');
+      if (!captionHasText(children.slice(at + 1, close < 0 ? children.length : close))) label.content = label.meta.captionLabel;
+    });
+  }
   // Takes the tokens from start to end, then each container left empty
   const remove = (start: number, end: number): number => {
     while (
@@ -2343,6 +2354,7 @@ function captionsRule(state: StateCore): void {
       token.attrJoin('class', 'manuscript-markdown-table-caption');
       const label = new state.Token('text', '', 0);
       label.content = captionLabelText(options.tblTitle, tableNumber) + captionSeparator(options.titleDelim, captionHasText(table.children));
+      label.meta = { captionLabel: captionLabelText(options.tblTitle, tableNumber) };
       inline.children = [label, ...table.children];
       if (options.tblCapLocation === 'top') {
         const paragraph = tokens.splice(i, 3);
@@ -2382,6 +2394,7 @@ function captionsRule(state: StateCore): void {
     const label = new state.Token('text', '', 0);
     // Its delimiter only where it has text to show
     label.content = captionLabelText(options.figTitle, number) + captionSeparator(options.titleDelim, captionHasText(children));
+    label.meta = { captionLabel: captionLabelText(options.figTitle, number) };
     caption.push(open, label);
     for (const child of children) caption.push(Object.assign(new state.Token(child.type, child.tag, child.nesting), child));
     caption.push(new state.Token('manuscript_figcaption_close', 'figcaption', -1));
