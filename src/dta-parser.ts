@@ -140,7 +140,13 @@ function readTableAs(data: Uint8Array, encoding?: EncodingName): DtaTable {
     if (info.release < 118) {
       otherText.push(info.label, info.timestamp);
       pushAll(otherText, info.sortedBy);
-      for (const c of reader.characteristics()) otherText.push(c.variable, c.name, c.value);
+      // Only evidence, so characteristics the library can't read, as
+      // damaged ones, don't keep the table from being read.
+      try {
+        for (const c of reader.characteristics()) otherText.push(c.variable, c.name, c.value);
+      } catch {
+        // No more evidence from them.
+      }
     }
     return {
       release: info.release,
@@ -174,7 +180,9 @@ function tableText(table: DtaTable): string[] {
  * the platform's code page, while R's foreign::write.dta and other tools
  * write UTF-8. The library decodes them as windows-1252 unless told
  * otherwise, so where that read has non-ASCII text, read again as UTF-8
- * and keep that read when all its text was valid UTF-8 (no U+FFFD).
+ * and keep that read when all its text was valid UTF-8: no U+FFFD but
+ * one the file holds itself, which is valid UTF-8 (EF BF BD) and reads
+ * as three characters in windows-1252.
  * All the file's text counts, shown in the table or not: one string
  * UTF-8 can't read proves the file isn't UTF-8. Where every string reads
  * as UTF-8, nothing settles the question and the UTF-8 read wins.
@@ -183,9 +191,17 @@ function tableText(table: DtaTable): string[] {
 function readTable(data: Uint8Array): DtaTable {
   const table = readTableAs(data);
   if (table.release >= 118) return table;
-  if (!tableText(table).some(t => /[\u0080-\uffff]/.test(t))) return table;
+  const text = tableText(table);
+  if (!text.some(t => /[\u0080-\uffff]/.test(t))) return table;
   const utf8 = readTableAs(data, 'utf-8');
-  return tableText(utf8).some(t => t.includes('\ufffd')) ? table : utf8;
+  const utf8Text = tableText(utf8);
+  const count = (t: string, part: string) => t.split(part).length - 1;
+  // Both reads give the same strings in the same order, so each U+FFFD
+  // the file holds has its three bytes in the windows-1252 read of its
+  // string; one more than those is a byte UTF-8 couldn't read.
+  const unreadable = utf8Text.length !== text.length
+    || utf8Text.some((t, i) => count(t, '\ufffd') > count(text[i], '\u00ef\u00bf\u00bd'));
+  return unreadable ? table : utf8;
 }
 
 interface FormattedCell {
