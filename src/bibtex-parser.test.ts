@@ -1153,6 +1153,25 @@ describe('mergeBibtex', () => {
     const result = mergeBibtex('', produced);
     expect(result).toBe(produced);
   });
+
+  // BibTeX has no % comments: `% @book{B,` is an entry B to it. Copying that
+  // line with the produced B gave BibTeX B twice, so it reported a repeated
+  // entry and kept the stale one. Such a file merges without its text
+  // between entries, as it did before the skeleton.
+  const book = (key: string, title: string) => '@book{' + key + ',author={Smith},title={' + title + '},publisher={P},year={2020}}';
+  it.each([
+    ['alone', '% ' + book('B', 'Old') + '\n', book('B', 'New')],
+    ['before another entry', '% ' + book('B', 'Old') + '\n\n' + book('C', 'Keep') + '\n', book('C', 'Keep') + '\n\n' + book('B', 'New')],
+    ['in another case', '% ' + book('b', 'Old') + '\n', book('B', 'New')],
+    ['in an @comment', '@comment{' + book('B', 'Old') + '}\n', book('B', 'New')],
+  ])('drops a commented-out entry whose key the produced file gives, %s', (_name, existing, merged) => {
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe(merged);
+  });
+
+  it('keeps a commented-out entry whose key the produced file does not give', () => {
+    const existing = '% ' + book('A', 'Old') + '\n\n' + book('C', 'Keep') + '\n';
+    expect(mergeBibtex(existing, book('B', 'New'))).toBe('% ' + book('A', 'Old') + '\n\n' + book('C', 'Keep') + '\n\n' + book('B', 'New') + '\n');
+  });
 });
 
 describe('extractRawField', () => {

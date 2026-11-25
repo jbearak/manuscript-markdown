@@ -2162,7 +2162,9 @@ export function spliceFieldsIntoEntry(
  *  - Everything between the existing file's entries — `%` comments,
  *    `@comment`, `@preamble` and `@string` declarations, blank lines — stays
  *    as written, so a file that round-trips through Word comes back as it
- *    was, unless the file repeats a key or the scan loses its place in it.
+ *    was, unless the file repeats a key, the scan loses its place in it, or
+ *    that text holds an entry BibTeX reads, as `% @book{B,`, whose key the
+ *    produced file gives too.
  *  - Produced-only entries are appended at the end.
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
@@ -2303,12 +2305,41 @@ export function mergeBibtex(existing: string, produced: string): string {
     return same ? out : undefined;
   };
 
-  if (existingResult.rangesTrusted && findDuplicateBibtexKeys(existingResult.ranges).size === 0) {
+  /** True if the text between the existing file's entries holds an entry
+   *  BibTeX reads whose key the produced file also gives. The scan reads a
+   *  `%` line as a comment, and skips an `@comment`'s body; BibTeX does
+   *  neither: it reads every `@type{key,` outside an entry, so `% @book{B,`
+   *  is an entry B to it. Copied with the produced B, BibTeX reads B twice,
+   *  reports a repeated entry and keeps the stale one. Keys are compared
+   *  without case, as BibTeX compares them. An `@` in a `@string` or
+   *  `@preamble` value can match too, which only costs the skeleton. */
+  const betweenEntriesRepeatsProducedKey = (): boolean => {
+    const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
+    let from = 0;
+    const gaps = existingResult.ranges.map(range => {
+      const gap = existing.slice(from, range.start);
+      from = range.end;
+      return gap;
+    });
+    gaps.push(existing.slice(from));
+    return gaps.some(gap => {
+      for (let at = gap.indexOf('@'); at !== -1; at = gap.indexOf('@', at + 1)) {
+        const header = readEntryHeader(gap, at);
+        if (!('type' in header) || PSEUDO_ENTRY_TYPES.has(header.type.toLowerCase())) continue;
+        const key = readEntryKey(gap, header.end, header.opener === '{' ? '}' : ')')?.key;
+        if (key !== undefined && producedKeys.has(key.toLowerCase())) return true;
+      }
+      return false;
+    });
+  };
+
+  if (existingResult.rangesTrusted && findDuplicateBibtexKeys(existingResult.ranges).size === 0 && !betweenEntriesRepeatsProducedKey()) {
     const out = inSkeleton();
     if (out !== undefined) return out;
   }
 
-  // A file the scan lost its place in, that repeats a key, or whose
+  // A file the scan lost its place in, that repeats a key, whose text
+  // between entries gives BibTeX a key the produced file does, or whose
   // skeleton reads otherwise: its entries and @string declarations alone,
   // as the parser read them, since the text between them may be part of an
   // entry
