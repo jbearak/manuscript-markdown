@@ -2186,10 +2186,13 @@ export function spliceFieldsIntoEntry(
  *    was, unless the file repeats a key, the scan loses its place in it,
  *    that text holds an entry BibTeX reads, as `% @book{B,`, whose key the
  *    produced file gives too, or the text after the last entry leaves
- *    BibTeX in one, as `% @book{`, where produced entries would follow it.
+ *    BibTeX in one, as `% @book{`, or ends in an @ that BibTeX would read
+ *    with the next entry's type, where produced entries would follow it.
  *    Such a file keeps its entries and its `@string` and `@preamble`
  *    declarations alone.
- *  - Produced-only entries are appended at the end.
+ *  - Produced-only entries are appended at the end, and a line after them
+ *    where the text after the existing file's last entry has an @ (see
+ *    inSkeleton).
  *  Citation keys are case-sensitive: `Smith2020` and `smith2020` are treated as
  *  distinct entries, consistent with the case-preserving behavior of parseBibtex.
  *  This is a post-processing step that runs after any restoration layer. */
@@ -2316,11 +2319,23 @@ export function mergeBibtex(existing: string, produced: string): string {
       const blank = detectBibtexEol(existing).repeat(2);
       const ending = out.slice(out.trimEnd().length);
       out = out.slice(0, out.length - ending.length);
+      const firstAdded = out.length + blank.length;
       for (const entry of added) {
         out += blank;
         put(entry.key, entry.text);
       }
       out += ending;
+      // BibTeX reads an @ in a % comment, so a tail such as
+      // `% alice@example.test` or `% see @foo(k)` leaves it expecting a { or
+      // a ( or a key's , where the first added entry's @ is. It reports that,
+      // and reads on from that @, but not where that @ is on the file's last
+      // line: it stops at the end of the file instead, and the entry is lost.
+      // So a line follows that @'s, where the tail has an @.
+      const tailStart = existingResult.ranges.length > 0 ? existingResult.ranges[existingResult.ranges.length - 1].end : 0;
+      if (existing.indexOf('@', tailStart) !== -1) {
+        const eol = detectBibtexEol(existing);
+        while (!/\n[^]/.test(out.slice(firstAdded))) out += eol;
+      }
     }
     const read = scanBibtex(out);
     const same = read.rangesTrusted
@@ -2341,7 +2356,8 @@ export function mergeBibtex(existing: string, produced: string): string {
    *  True too if the text after the last entry, where produced-only entries
    *  go, leaves BibTeX in an entry or a declaration it opens there, as
    *  `% @book{` with no closer: BibTeX would read the entries added after
-   *  it as that one's text, and find none of them. */
+   *  it as that one's text, and find none of them. True too if that text
+   *  ends in an @, which BibTeX reads with the first added entry's type. */
   const betweenEntriesRepeatsProducedKey = (): boolean => {
     const producedKeys = new Set([...producedParsed.keys()].map(key => key.toLowerCase()));
     const appends = producedOnly().length > 0;
@@ -2370,6 +2386,10 @@ export function mergeBibtex(existing: string, produced: string): string {
     gaps.push(existing.slice(from));
     return gaps.some((gap, k) => {
       const last = appends && k === gaps.length - 1;
+      // An @ that ends the text, as `% email me @`, starts the type BibTeX
+      // reads, and white space is no end to it: it reads the first added
+      // entry's @book as the type `@book`, which no style defines
+      if (last && gap.trimEnd().endsWith('@')) return true;
       for (let at = gap.indexOf('@'); at !== -1;) {
         const header = readEntryHeader(gap, at);
         if (!('type' in header)) {

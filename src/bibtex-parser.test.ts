@@ -1216,7 +1216,49 @@ describe('mergeBibtex', () => {
   it('keeps text after the last entry that BibTeX reads no entry in, or one it closes', () => {
     for (const tail of ['% contact alice@example.test', '% @book{X, title={t}}', '% see @comment{ for more', '% a } too many @book{X}}', '@comment{@book(X, title={t})}']) {
       const existing = book('A', 'Keep') + '\n\n' + tail + '\n';
-      expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + tail + '\n\n' + book('B', 'New') + '\n');
+      // A line after B's, since each tail has an @ (see the tests below)
+      expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + tail + '\n\n' + book('B', 'New') + '\n\n');
+    }
+  });
+
+  // BibTeX reads an @ in a % comment, so after each of these it expects a
+  // { or a ( or a key's , where the added entry's @ is. It reports that and
+  // reads on from that @, unless it is on the file's last line, where BibTeX
+  // stops, and finds no B
+  it.each([
+    ['a dangling type', '% contact alice@example.test'],
+    ['a key with no comma', '% see @foo(k)'],
+    ['an entry closed in a value', '% @misc(k, n = "a)"'],
+    ['a declaration with no opener', '% @string'],
+  ])('puts a line after a one-line entry added after text with %s', (_name, tail) => {
+    for (const eol of ['\n', '\r\n']) {
+      for (const ending of ['', eol, eol + eol]) {
+        const existing = book('A', 'Keep') + eol + tail + ending;
+        const merged = mergeBibtex(existing, book('B', 'New'));
+        const lastLine = book('B', 'New') + eol;
+        expect(merged.startsWith(existing.trimEnd() + eol + eol + book('B', 'New') + eol)).toBe(true);
+        // Something follows B's line ending
+        expect(merged.length).toBeGreaterThan(merged.indexOf(lastLine) + lastLine.length);
+        expect(merged.endsWith(eol + eol)).toBe(true);
+      }
+    }
+  });
+
+  it('adds no line after an added entry that is not on the last line, or after text with no @', () => {
+    const multi = '@book{B,\n  title = {New},\n}';
+    expect(mergeBibtex(book('A', 'Keep') + '\n% a@b\n', multi + '\n')).toBe(book('A', 'Keep') + '\n% a@b\n\n' + multi + '\n');
+    expect(mergeBibtex(book('A', 'Keep') + '\n% a@b\n', book('B', 'New') + '\n' + book('C', 'New')))
+      .toBe(book('A', 'Keep') + '\n% a@b\n\n' + book('B', 'New') + '\n\n' + book('C', 'New') + '\n');
+    expect(mergeBibtex(book('A', 'Keep') + '\n% a note\n', book('B', 'New'))).toBe(book('A', 'Keep') + '\n% a note\n\n' + book('B', 'New') + '\n');
+  });
+
+  // White space ends no type: BibTeX reads `@`, then the added entry's
+  // `@book` as its type, which no style defines, and B as a misc
+  it('drops text after the last entry that ends in an @, where an entry is added after it', () => {
+    for (const tail of ['% email me @', '% email me @  \n', '% a@b@']) {
+      const existing = book('A', 'Keep') + '\n\n' + tail + '\n';
+      expect(mergeBibtex(existing, book('B', 'New'))).toBe(book('A', 'Keep') + '\n\n' + book('B', 'New'));
+      expect(mergeBibtex(existing, book('A', 'Keep'))).toBe(existing);
     }
   });
 
