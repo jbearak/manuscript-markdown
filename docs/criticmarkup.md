@@ -76,7 +76,7 @@ spans multiple lines
 including empty lines.++}
 ```
 
-Blank lines inside additions and deletions separate paragraphs in the preview and Word export. Inline formatting continues across those paragraph boundaries. A single newline stays within the same paragraph.
+Blank lines inside additions, deletions and either side of a substitution separate paragraphs in the preview and Word export, which tracks each such paragraph break as part of its change. No Markup and Original join the two paragraphs where they drop that change, as Word does, but keep a heading apart from the paragraph after it. Inline formatting continues across those paragraph boundaries. A single newline stays within the same paragraph.
 
 The preview has Word's four markup views. The button in the preview's title bar shows the current view; click it to choose another, or set `manuscriptMarkdown.previewMarkup`:
 

@@ -553,10 +553,20 @@ interface CriticBreakSource {
 interface CriticHeadingBoundary {
   kind: CriticBreakKind;
   sourceOffset?: number;
-  // For a paragraph break, the open of the innermost addition or deletion it
-  // is in, whose paragraph mark export tracks as that change
+  // For a paragraph break, the open of the innermost addition or deletion,
+  // or substitution's old or new text, it is in, whose paragraph mark export
+  // tracks as that change: as deleted in the old text, inserted in the new
   revision?: string;
 }
+
+/** The opens whose paragraph breaks export tracks as the paragraph mark's
+ *  deletion or insertion (see CriticHeadingBoundary) */
+const TRACKED_MARK_OPENS = new Set([
+  'manuscript_markdown_addition_open',
+  'manuscript_markdown_deletion_open',
+  'manuscript_markdown_substitution_old_open',
+  'manuscript_markdown_substitution_new_open',
+]);
 
 /** Record absolute inline-source offsets so nested payload breaks retain their original positions. */
 function collectProtectedBreaks(content: string, sourceBase: number): CriticBreakSource[] {
@@ -674,6 +684,8 @@ function promoteFullParagraphCriticHeading(tokens: Token[], index: number): void
 
 interface CriticHeadingSourceSegment {
   content: string;
+  // Where it starts in the inline token's content it was split from
+  start: number;
   startLineOffset: number;
   endLineOffset: number;
 }
@@ -701,6 +713,7 @@ function splitCriticHeadingSource(
     if (shouldSplit) {
       segments.push({
         content: content.slice(segmentStart, match.index),
+        start: segmentStart,
         startLineOffset: segmentStartLine,
         endLineOffset: currentLine + 1,
       });
@@ -717,6 +730,7 @@ function splitCriticHeadingSource(
   currentLine += (content.slice(sourceCursor).match(/\n/g) ?? []).length;
   segments.push({
     content: content.slice(segmentStart),
+    start: segmentStart,
     startLineOffset: segmentStartLine,
     endLineOffset: currentLine + 1,
   });
@@ -817,8 +831,7 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
       next.meta?.manuscriptCriticBreakSourceOffset === sourceOffset;
     const isLineBreak = token.type === 'softbreak' || (token.type === 'hardbreak' && !isParagraphBreak);
     const revision = openStack.slice().reverse().find(wrapper => wrapper.kind === 'token' &&
-      (wrapper.open.type === 'manuscript_markdown_addition_open' ||
-       wrapper.open.type === 'manuscript_markdown_deletion_open'))?.open.type;
+      TRACKED_MARK_OPENS.has(wrapper.open.type))?.open.type;
     const insideRevision = revision !== undefined;
     const shouldSplit = (isParagraphBreak && (isHeading || insideRevision)) ||
       (splitFirstLineBreak && isLineBreak) ||
@@ -878,6 +891,9 @@ function createCriticBlockSegment(
   sourceSegment: CriticHeadingSourceSegment,
   originalStart: number,
   isHeading: boolean,
+  // How far on in the source the inline rules read the inline token's
+  // content starts, as a heading's marker it lost (see splitCriticHeadingSource)
+  sourceOffsetAdjustment: number,
 ): [Token, Token, Token] | undefined {
   if (!isHeading && !hasVisibleInlineContent(children)) return undefined;
 
@@ -901,7 +917,30 @@ function createCriticBlockSegment(
   setOriginalTokenMap(blockInline, segmentMap);
   blockInline.content = sourceSegment.content;
   blockInline.children = children;
+  rebaseSourceOffsets(children, sourceOffsetAdjustment + sourceSegment.start);
   return [blockOpen, blockInline, blockClose];
+}
+
+/** Moves each source offset the inline rules gave a token, as in the
+ *  content of the inline token it was parsed from, back by `by`, to where
+ *  it is in the content of the segment splitCriticBlocksRule made of it: a
+ *  cross-reference's, which the language server finds it at, and a
+ *  paragraph break's. A token reopened at a segment's start, a clone, has
+ *  its own meta (see cloneInlineToken) */
+function rebaseSourceOffsets(children: Token[] | null, by: number): void {
+  if (by === 0) return;
+  for (const token of children ?? []) {
+    const meta = token.meta;
+    if (meta) {
+      if (token.type === 'manuscript_cross_reference' && typeof meta.offset === 'number') meta.offset -= by;
+      if (typeof meta.manuscriptCriticBreakSourceOffset === 'number') meta.manuscriptCriticBreakSourceOffset -= by;
+      if (Array.isArray(meta.manuscriptCriticConsumedBreakSourceOffsets)) {
+        meta.manuscriptCriticConsumedBreakSourceOffsets = meta.manuscriptCriticConsumedBreakSourceOffsets
+          .map((offset: unknown) => typeof offset === 'number' ? offset - by : offset);
+      }
+    }
+    rebaseSourceOffsets(token.children, by);
+  }
 }
 
 /**
@@ -972,10 +1011,11 @@ function splitCriticBlocksRule(state: StateCore): void {
       continue;
     }
     const removedPrefix = inline.meta?.manuscriptCriticHeadingRemovedPrefix;
+    const sourceOffsetAdjustment = typeof removedPrefix === 'number' ? removedPrefix : 0;
     const sourceSegments = splitCriticHeadingSource(
       inline.content,
       childSplit.boundaries,
-      typeof removedPrefix === 'number' ? removedPrefix : 0,
+      sourceOffsetAdjustment,
     );
     if (sourceSegments.length !== childSegments.length) {
       if (rewritten) rewritten.push(headingOpen);
@@ -1010,6 +1050,7 @@ function splitCriticBlocksRule(state: StateCore): void {
         sourceSegments[segmentIndex],
         originalStart,
         isHeading && segmentIndex === 0,
+        sourceOffsetAdjustment,
       );
       if (!segment) continue;
       markUntil(segmentIndex);
@@ -2179,8 +2220,9 @@ function resolveChangesRule(state: StateCore, resolution: ChangeResolution): voi
 
 /**
  * Joins each paragraph to the next where the view drops every paragraph
- * mark between them, as splitCriticBlocksRule records them: a deletion's,
- * accepted, or an addition's, rejected. Export tracks a paragraph break in
+ * mark between them, as splitCriticBlocksRule records them: a deletion's
+ * or a substitution's old text's, accepted, or an addition's or a
+ * substitution's new text's, rejected. Export tracks a paragraph break in
  * a change as the mark of the paragraph before it, so Word joins the two
  * there. A heading's mark stays, as which style Word gives the paragraph
  * it joins is not known. So does the mark before or after a figure or a
@@ -2495,7 +2537,15 @@ function captionsRule(state: StateCore): void {
       inline.children = [label, ...table.children];
       if (options.tblCapLocation === 'top') {
         const paragraph = tokens.splice(i, 3);
+        // Its paragraph's source line the table's first, as scroll sync
+        // reads the blocks' lines in the order shown, as ascending; its
+        // text's, which the language server reads, its own
+        const startsAt = (table: Token): void => {
+          token.map = table.map ? [table.map[0], table.map[0]] : null;
+          token.meta = { ...(token.meta || {}), manuscriptMapIsOriginal: table.meta?.manuscriptMapIsOriginal };
+        };
         if (lastTableLine === undefined) {
+          startsAt(tokens[afterTable!]);
           spliceAll(tokens, afterTable!, 0, paragraph);
         } else {
           // The block's HTML before the table, then the caption, then the
@@ -2509,6 +2559,7 @@ function captionsRule(state: StateCore): void {
             before.map = [block.map[0], split];
             rest.map = [split, block.map[1]];
           }
+          startsAt(rest);
           spliceAll(tokens, afterTable!, 1, [before, ...paragraph, rest]);
           i++;
         }
@@ -2597,6 +2648,37 @@ function quotableTitleValue(value: string): boolean {
  * Otherwise the YAML stays as it is, which the preview's code block of it
  * shows.
  */
+/** A plain scalar's text, as a value YAML reads without quotes, `value`,
+ *  without the comment after it, which starts at a `#` first in it or
+ *  after a space or tab, and the whitespace before that, as `Fieldwork` of
+ *  `Fieldwork # draft` */
+function withoutComment(value: string): string {
+  return value.replace(/(?:^|[ \t])#.*$/, '').trim();
+}
+
+/** A title key's line's value, `line` past `title:`, without the comment
+ *  after it where YAML reads it without quotes, as `Fieldwork` of
+ *  `title: Fieldwork # draft {x}`, but as it is where it starts with a
+ *  quote or a collection's opener, which quotableTitleValue reads. Only
+ *  where the colon needs quoting (see colonRepair) */
+function titleValue(line: string): string {
+  const value = line.replace(/^title\s*:/, '');
+  return /^\s*["'[{]/.test(value) ? value.trim() : withoutComment(value);
+}
+
+/** Whether a title key's line, `line`, holds a colon before a space or the
+ *  line's end in its value, not quoted nor an inline array, as in
+ *  `title: Purpose: methods`, which YAML reads as a mapping in a mapping's
+ *  value, and fails on, so quoting it reads it as export does. Not one in a
+ *  comment after it, as in `title: Fieldwork # draft: private`, which YAML
+ *  reads as `Fieldwork`, nor so one in a comment alone, `title: # a: b`,
+ *  which it reads as no title. Only where the key is `title`, its colon
+ *  before a space or the line's end, not `title:chapter: Methods`, whose
+ *  key YAML reads as `title:chapter` */
+function colonRepair(line: string): boolean {
+  return /^title:(?:[ \t]|$)/.test(line) && /^[^\s"'[].*:(?:[ \t]|$)/.test(titleValue(line));
+}
+
 export function frontmatterYamlForPreview(content: string): string {
   // Not YAML with an alias, as `author: *t`, a value or item that starts
   // with one, or an anchor one refers to, as `x: &t v`, which quoting the
@@ -2616,7 +2698,7 @@ export function frontmatterYamlForPreview(content: string): string {
     const list = blockListAfter(lines, k);
     if (list) {
       if (list.items.some(item => item.more.length > 0 || !quotableTitleValue(item.text))) return content;
-    } else if (!quotableTitleValue(lines[k].replace(/^title\s*:/, '').trim())) return content;
+    } else if (!quotableTitleValue(colonRepair(lines[k]) ? titleValue(lines[k]) : lines[k].replace(/^title\s*:/, '').trim())) return content;
     const end = list ? list.last + 1 : k + 1;
     // Not a value YAML reads over more lines: the line after it, past blank
     // lines and comments, is another key's, or there's none, not one
@@ -2627,13 +2709,16 @@ export function frontmatterYamlForPreview(content: string): string {
     k = end - 1;
   }
   // A brace anywhere in the title, which YAML can read as a mapping's, in a
-  // value, a list's item or an inline array's, or a colon before a space or
-  // the line's end in the key's own value, not quoted nor an inline array,
-  // as in `title: Purpose: methods`, which YAML reads as a mapping in a
-  // mapping's value, and fails on
-  const holdsMapping = entries.some(({ start, end }) => lines.slice(start, end).some(line => line.includes('{'))
-    || /^\s*[^\s"'[].*:(?:[ \t]|$)/.test(lines[start].replace(/^title\s*:/, '')));
-  if (entries.length < 2 && !holdsMapping) return content;
+  // value, a list's item or an inline array's: in the key's line where the
+  // colon needs quoting, in its value, not its comment, which a brace or a
+  // bracket in it would otherwise quote with it, or keep from quoting, as
+  // in `title: A: b # {c}`, and otherwise in all of it, as before the colon
+  // was quoted, so `title: A # {b}` shows `A # {b}`, as export writes it
+  const holdsBrace = entries.some(({ start, end }) =>
+    (colonRepair(lines[start]) ? titleValue(lines[start]) : lines[start]).includes('{')
+    || lines.slice(start + 1, end).some(line => line.includes('{')));
+  const holdsColon = entries.some(({ start }) => colonRepair(lines[start]));
+  if (entries.length < 2 && !holdsBrace && !holdsColon) return content;
   // The title lines its entries give, which must be those export reads from
   // the whole frontmatter: not where it reads others, as from a `title:`
   // indented under another key, nor none, as from frontmatter with a blank
@@ -2642,6 +2727,12 @@ export function frontmatterYamlForPreview(content: string): string {
   const titles = parseFrontmatter('---\n' + titleYaml + '\n---\n').metadata.title ?? [];
   const exported = parseFrontmatter('---\n' + content + '\n---\n').metadata.title ?? [];
   if (titles.length === 0 || JSON.stringify(exported) !== JSON.stringify(titles)) return content;
+  // Where only the colon needs quoting, the title YAML reads, without its
+  // comment, as `Purpose: methods` of `title: Purpose: methods # draft`,
+  // which export reads all of, and the preview read before quoting it. A
+  // title of several lines, or a brace, is quoted with its comment, as
+  // export reads it, as it was before
+  if (entries.length === 1 && !holdsBrace) titles[0] = withoutComment(titles[0]);
   const title = titles.length === 1 ? ['title: ' + JSON.stringify(titles[0])]
     : ['title:', ...titles.map(line => '  - ' + JSON.stringify(line))];
   const out: string[] = [];
