@@ -165,6 +165,9 @@ export type ZoteroPushSkipReason =
   /** An item with no citation key stored has the entry's title and names,
    *  so it may be the entry's (see sameWorkWithoutKey). */
   | 'possible-existing'
+  /** Matched by citation key to one item, while another with no citation
+   *  key stored has the entry's title and names (see sameWorkWithoutKey). */
+  | 'plain-match-elsewhere'
   /** Another whole work in the library, as a book, has the entry's ISBN. */
   | 'isbn-owned-elsewhere'
   /** Zotero's answer left out the item's collections or creators, or gave
@@ -1039,6 +1042,9 @@ function updateChanges(
     // Each stored creator whose name the entry gives as Zotero's export
     // writes it stays as stored, so correcting one coauthor rewrites no
     // other.
+    // A list the entry gives name for name as Zotero's export writes the
+    // stored one is no change, even where two creators export alike.
+    if (sameAsExported(current, next, texts)) continue;
     // Not where two of the role's creators export the same text, as a
     // surname-only "Reed, Ann" and Ann Reed: which one the entry kept is
     // then unclear, so it gives its own reading, as before.
@@ -1468,6 +1474,16 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         if (decision.outcome === 'update' && decision.tier !== 'existing') {
           const others = (keyClaims.get(entryKey) ?? []).map(c => c.item).filter(k => k !== item.key);
           if (others.length > 0) return skip(entryKey, 'citation-key-conflict', [item.key, ...others].join(', '));
+        }
+        // A citation-key match on one item, where another item with no key
+        // stored has the entry's title and names: that one may be the
+        // entry's, as Zotero's export of it would make this key, which push
+        // can't always tell (generatedCitationKey).  Both are named.
+        if (decision.outcome === 'update' && decision.tier === 'citation-key') {
+          const plain = sameWorkWithoutKey(entry, [...input.items.values()].filter(i => i.key !== item.key));
+          if (plain !== undefined) return skip(entryKey, 'plain-match-elsewhere', item.key + ' and ' + plain);
+        }
+        if (decision.outcome === 'update' && decision.tier !== 'existing') {
           // The library holds the key push would have created this entry's
           // item under, and not on this item: push made that one for the
           // citation key, which has since moved to this one.

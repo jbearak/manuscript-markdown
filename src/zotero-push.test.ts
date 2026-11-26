@@ -1664,3 +1664,47 @@ describe('push: round four, the create safety net reads names as exported, role 
     expect(p.actions[0]).toMatchObject({ kind: 'update', patch: { creators: [{ lastName: 'Reed', firstName: 'Ann' }, creators[2]] } });
   });
 });
+
+describe('push: round five', () => {
+  it("leaves a creator list alone that the entry gives as Zotero exports it, twins and all", () => {
+    // A surname-only "Reed, Ann" beside the person Ann Reed export alike.
+    const creators = [
+      { creatorType: 'author', firstName: '', lastName: 'Reed, Ann' },
+      { creatorType: 'author', firstName: 'Ann', lastName: 'Reed' },
+      { creatorType: 'author', firstName: '', lastName: 'Garcia Lopez' },
+      { creatorType: 'author', firstName: '', lastName: 'Garcia Lopez' },
+    ];
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators });
+    const p = plan('@article{k,\n  author = {Reed, Ann and Reed, Ann and Garcia Lopez and Garcia Lopez}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+  });
+
+  it("won't take a citation-key match while another, keyless item is the entry's by title and names", async () => {
+    // Seed 4066, reduced: the keyless article's export key, which push can't
+    // make (Ħ), is the book's own citation key.
+    const book = item('BBBB2222', {
+      itemType: 'book',
+      title: 'Editorial notes',
+      citationKey: 'hasan_editorial_nodate',
+      numPages: '120',
+      creators: [{ creatorType: 'author', firstName: 'Eva', lastName: 'Kim' }],
+    });
+    const article = item('AAAA2222', {
+      title: 'Editorial',
+      pages: '12–23',
+      creators: [
+        { creatorType: 'author', firstName: 'Sam', lastName: 'Ħasan' },
+        { creatorType: 'author', firstName: 'Eva', lastName: 'Kim' },
+      ],
+    });
+    const bib = '@article{hasan_editorial_nodate,\n  title = {Editorial},\n  author = {Ħasan, Sam and Kim, Eva},\n  pages = {12--23}\n}\n';
+    for (const mode of ['add', 'update'] as const) {
+      const r = await pushThroughApi(bib, [book, article], mode);
+      expect(r.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'BBBB2222 and AAAA2222' });
+      expect(r.posts).toEqual([]);
+    }
+    // The ordinary case: the item the key names is the plain match itself.
+    const own = item('AAAA2222', { ...article, citationKey: 'hasan_editorial_nodate' });
+    expect(plan(bib, [own]).actions[0]).toMatchObject({ kind: 'unchanged' });
+  });
+});
