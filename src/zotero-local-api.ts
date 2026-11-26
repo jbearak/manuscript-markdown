@@ -455,7 +455,14 @@ function libraryPrefix(scope: ZoteroLibraryScope): string {
 }
 
 /** The catalog from the rows of `/items/top`. */
-function catalogFromRows(scope: ZoteroLibraryScope, rows: readonly unknown[]): ZoteroCatalogItem[] {
+function catalogFromRows(
+  scope: ZoteroLibraryScope,
+  rows: readonly unknown[],
+  /** Push's reading: a personal library with no account id still has
+   *  items push can write, by key; their URIs are empty, so an entry
+   *  linked by a stored URI is never taken for one of them. */
+  withoutAccount = false,
+): ZoteroCatalogItem[] {
   const read = [];
   for (const row of rows) {
     const item = readItemRow(row);
@@ -482,6 +489,9 @@ function catalogFromRows(scope: ZoteroLibraryScope, rows: readonly unknown[]): Z
       );
     }
     const id = ids.values().next().value;
+    if (read.length > 0 && id === undefined && withoutAccount) {
+      return read.map(({ userLibraryId: _id, ...item }) => ({ ...item, uri: '' }));
+    }
     if (read.length > 0 && id === undefined) {
       throw new ZoteroLocalApiError(
         'user-id-unavailable',
@@ -597,6 +607,8 @@ export interface ZoteroCollectionSummary {
   /** Names from the top-level collection down, joined with " / ". */
   readonly path: string;
   readonly itemCount: number;
+  /** The Zotero that listed it: a push to it must read and write there. */
+  readonly serverId?: string;
 }
 
 /** Every collection in the library, sorted by path. */
@@ -604,7 +616,8 @@ export async function listZoteroCollections(
   scope: ZoteroLibraryScope,
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroCollectionSummary[]> {
-  const rows = await requestArray(libraryPrefix(scope) + '/collections', LIST_TIMEOUT_MS, options);
+  const { rows, headers } = await requestArrayWithHeaders(libraryPrefix(scope) + '/collections', LIST_TIMEOUT_MS, options);
+  const serverId = headers?.get('Zotero-Server-ID') ?? undefined;
   const byKey = new Map<string, { name: string; parent: string | undefined; itemCount: number }>();
   for (const row of rows) {
     const record = asRecord(row);
@@ -626,7 +639,7 @@ export async function listZoteroCollections(
     return pathOf(c.parent, seen) + ' / ' + c.name;
   };
   return [...byKey.entries()]
-    .map(([key, c]) => ({ key, name: c.name, path: pathOf(key), itemCount: c.itemCount }))
+    .map(([key, c]) => ({ key, name: c.name, path: pathOf(key), itemCount: c.itemCount, ...(serverId ? { serverId } : {}) }))
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -638,6 +651,9 @@ export interface ZoteroLibrarySnapshot {
   readonly items: Map<string, import('./zotero-push').ZoteroItemJson>;
   readonly libraryVersion: number;
   readonly serverId: string;
+  /** Every item key the library holds, its trash, notes and attachments
+   *  included, which push may never create an item under. */
+  readonly takenKeys: ReadonlySet<string>;
 }
 
 export async function fetchZoteroLibrarySnapshot(
@@ -651,17 +667,36 @@ export async function fetchZoteroLibrarySnapshot(
   const { headers } = await requestArrayWithHeaders(libraryPrefix(scope) + '/items/top?limit=1', LIST_TIMEOUT_MS, options);
   const libraryVersion = readVersion(headers);
   const serverId = headers?.get('Zotero-Server-ID') ?? '';
-  const { rows } = await requestArrayWithHeaders(libraryPrefix(scope) + '/items/top', CATALOG_TIMEOUT_MS, options);
+  const { rows, headers: rowHeaders } = await requestArrayWithHeaders(libraryPrefix(scope) + '/items/top', CATALOG_TIMEOUT_MS, options);
   if (libraryVersion === undefined || serverId === '') {
     throw new ZoteroLocalApiError(
       'request-failed',
       'Zotero did not report its library version and server id; writing needs Zotero 10 or later.',
     );
   }
+  // Both reads must come from one Zotero: a profile switched between them
+  // would pair one library's version with another's items, and the version
+  // check would then pass a write planned against the wrong library.
+  // Every key, trash and child items too: Zotero takes a create under a
+  // key it has, at the same version, for an update (writeMultipleObjects),
+  // and an item never saved since its migration is at version 0.
+  const { body: versions, headers: keyHeaders } = await requestJson(
+    libraryPrefix(scope) + '/items?format=versions&includeTrashed=1',
+    CATALOG_TIMEOUT_MS,
+    options,
+  );
+  if (rowHeaders?.get('Zotero-Server-ID') !== serverId || keyHeaders?.get('Zotero-Server-ID') !== serverId) {
+    throw new ZoteroLocalApiError('library-changed', 'A different Zotero answered while the library was being read.');
+  }
+  const versionMap = asRecord(versions);
+  if (versionMap === undefined || Array.isArray(versions)) {
+    throw new ZoteroLocalApiError('request-failed', "Zotero returned an unreadable list of the library's item keys.");
+  }
+  const takenKeys = new Set(Object.keys(versionMap));
   // Only the catalog's items, the bibliographic ones, with the identity
   // URI the catalog gives each, so a stored link to another library's item
   // with the same key is told apart.
-  const catalog = catalogFromRows(scope, rows);
+  const catalog = catalogFromRows(scope, rows, true);
   const uris = new Map(catalog.map(c => [c.key, c.uri]));
   const items = new Map<string, import('./zotero-push').ZoteroItemJson>();
   for (const row of rows) {
@@ -670,7 +705,12 @@ export async function fetchZoteroLibrarySnapshot(
     const key = asString(data?.key);
     const itemType = asString(data?.itemType);
     if (data === undefined || key === undefined || itemType === undefined) continue;
-    if (typeof data.version !== 'number' || !uris.has(key)) continue;
+    if (!uris.has(key)) continue;
+    // An item push can't read whole still answers to its keys and
+    // identifiers, so it can't be left out of the plan.
+    if (typeof data.version !== 'number') {
+      throw new ZoteroLocalApiError('request-failed', 'Zotero returned item ' + key + ' without its version.');
+    }
     const parsedDate = asString(asRecord(record?.meta)?.parsedDate);
     items.set(key, { ...data, key, itemType, version: data.version, parsedDate, uri: uris.get(key) });
   }
@@ -682,7 +722,7 @@ export async function fetchZoteroLibrarySnapshot(
     // field over a stale line of Extra.
     return pmid === undefined ? c : { ...c, extra: 'PMID: ' + pmid + (c.extra ? '\n' + c.extra : '') };
   });
-  return { catalog: pushCatalog, items, libraryVersion, serverId };
+  return { catalog: pushCatalog, items, libraryVersion, serverId, takenKeys };
 }
 
 /** Zotero's item types, their fields and their creator roles. */
@@ -768,7 +808,10 @@ export async function authorizeZoteroLocalApi(
 export type ZoteroWriteOutcome =
   | { readonly status: 'success'; readonly key: string; readonly version: number }
   | { readonly status: 'unchanged'; readonly key: string }
-  | { readonly status: 'failed'; readonly key?: string; readonly code: number; readonly message: string };
+  | { readonly status: 'failed'; readonly key?: string; readonly code: number; readonly message: string }
+  /** Zotero's answer didn't mention the object, so whether it was written
+   *  is unknown, as when an answer is lost. */
+  | { readonly status: 'unreported' };
 
 /** Up to 50 item objects in one request.  Throws only when the request as a
  *  whole was refused; each object's own outcome is in the result. */
@@ -807,11 +850,8 @@ export async function writeZoteroItems(
             : undefined,
   });
   const results = asRecord(body);
-  const outcomes: ZoteroWriteOutcome[] = objects.map(() => ({
-    status: 'failed',
-    code: 0,
-    message: 'Zotero reported no outcome for this object.',
-  }));
+  // An object the answer doesn't mention may have been written or not.
+  const outcomes: ZoteroWriteOutcome[] = objects.map(() => ({ status: 'unreported' }));
   for (const [index, value] of Object.entries(asRecord(results?.successful) ?? {})) {
     const record = asRecord(value);
     const key = asString(record?.key);

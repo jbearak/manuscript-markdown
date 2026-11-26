@@ -2370,7 +2370,7 @@ async function pushBibliographyToZotero(secrets: vscode.SecretStorage): Promise<
 			async (_progress, token) => {
 				const controller = new AbortController();
 				token.onCancellationRequested(() => controller.abort());
-				return prepareZoteroPush(library.scope, bibText, collection.collection.key, mode.mode, { signal: controller.signal });
+				return prepareZoteroPush(library.scope, bibText, collection.collection, mode.mode, { signal: controller.signal });
 			}
 		);
 		if (prepared === undefined) {

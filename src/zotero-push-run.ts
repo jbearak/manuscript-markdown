@@ -10,6 +10,7 @@ import {
   fetchZoteroSchema,
   writeZoteroItems,
   ZoteroLocalApiError,
+  type ZoteroCollectionSummary,
   type ZoteroLibraryScope,
   type ZoteroLocalApiOptions,
   type ZoteroWriteOutcome,
@@ -38,11 +39,19 @@ export interface ZoteroPushPrepared {
 export async function prepareZoteroPush(
   scope: ZoteroLibraryScope,
   bibText: string,
-  collectionKey: string,
+  /** The collection, as listed (whose Zotero the library must be read
+   *  from), or its key. */
+  collection: string | ZoteroCollectionSummary,
   mode: ZoteroPushMode,
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroPushPrepared | undefined> {
   const snapshot = await fetchZoteroLibrarySnapshot(scope, options);
+  // A collection key names a collection in one Zotero: a profile switched
+  // since it was chosen would put the items in another's.
+  const collectionKey = typeof collection === 'string' ? collection : collection.key;
+  if (typeof collection !== 'string' && collection.serverId !== undefined && collection.serverId !== snapshot.serverId) {
+    throw new ZoteroLocalApiError('library-changed', 'A different Zotero is answering than the one the collection was chosen from.');
+  }
   const schema = await fetchZoteroSchema(options);
   const link = createZoteroLinkPlan(bibText, snapshot.catalog);
   if (link.blocked !== undefined) return undefined;
@@ -53,6 +62,8 @@ export async function prepareZoteroPush(
     schema,
     collectionKey,
     mode,
+    keySalt: snapshot.serverId + '\n' + (scope.type === 'user' ? 'user' : 'group ' + scope.groupId),
+    takenKeys: snapshot.takenKeys,
   });
   return { plan, serverId: snapshot.serverId, libraryVersion: snapshot.libraryVersion };
 }
@@ -70,7 +81,7 @@ export interface ZoteroPushResult {
    *  `unknown` for a write in a request that failed in a way that leaves
    *  open whether Zotero made it, as a timeout; absent for writes never
    *  sent. */
-  readonly outcomes: ReadonlyArray<ZoteroWriteOutcome | 'unknown' | undefined>;
+  readonly outcomes: ReadonlyArray<Exclude<ZoteroWriteOutcome, { status: 'unreported' }> | 'unknown' | undefined>;
   /** Why writing stopped early, if it did. */
   readonly error?: ZoteroLocalApiError;
 }
@@ -101,7 +112,7 @@ export async function applyZoteroPush(
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroPushResult> {
   const writes = zoteroPushWrites(prepared.plan);
-  const outcomes: Array<ZoteroWriteOutcome | 'unknown' | undefined> = writes.map(() => undefined);
+  const outcomes: Array<Exclude<ZoteroWriteOutcome, { status: 'unreported' }> | 'unknown' | undefined> = writes.map(() => undefined);
   let libraryVersion = prepared.libraryVersion;
   // The items this push has written, with the version each write left.
   const written = new Map<string, number>();
@@ -166,7 +177,7 @@ export async function applyZoteroPush(
         throw error;
       }
     }
-    result.outcomes.forEach((o, i) => (outcomes[start + i] = o));
+    result.outcomes.forEach((o, i) => (outcomes[start + i] = o.status === 'unreported' ? 'unknown' : o));
     for (const o of result.outcomes) if (o.status === 'success') written.set(o.key, o.version);
     lastSent = libraryVersion;
     if (result.libraryVersion === undefined) {
@@ -191,13 +202,32 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   conflict: 'the entry cannot be read safely',
   ambiguous: 'several Zotero items match',
   'weak-match':
-    'matched only by URL, by title, author and year, or by an ISBN a book shares with its parts; link it with a citation key or DOI',
+    'matched only by URL, by title, author and year, or by an ISBN a book shares with its parts or with another kind of item; link it with a citation key or DOI',
   'other-library': 'linked to an item in another library',
   'identity-disagreement': "its DOI differs from the matched item's",
   'duplicate-target': 'another entry matches the same item',
   'duplicate-doi': 'another entry would give the same DOI to an item',
   'doi-owned-elsewhere': 'another item in the library has its DOI',
   'pmid-disagreement': "its PMID is another item's, or its matched item has another",
+  'citation-key-conflict':
+    'another Zotero item answers to its citation key, in its Citation Key field or a "Citation Key:" line of Extra; link the entry with zotero-key',
+  'isbn-owned-elsewhere': "its ISBN is another item's",
+  'plain-match-elsewhere':
+    'its citation key is the first item\'s, but the second, which has no citation key stored, has its title and names, so either may be its item; check both in Zotero',
+  'possible-existing':
+    'an item with no citation key stored has its title and names, so it may be that item; if it is, give it the citation key in Zotero',
+  'extra-key-only':
+    "only a \"Citation Key:\" line of this item's Extra gives its citation key, and push can't rule out that Zotero's export gives the key to another item too; check which item it is in Zotero, and link the entry with zotero-key",
+  'generated-key':
+    "Zotero's BibTeX export makes this citation key for an item with none stored, so it may be that item; if it is, give it the citation key in Zotero",
+
+  'duplicate-identifier': 'another entry would give the same identifier to an item',
+  'incomplete-item': "Zotero's answer did not give the whole list that writing would replace",
+  'no-citation-key-field':
+    'Zotero has no Citation Key field for this item type, so the next push could not find the item and would create it again',
+  'key-taken': "Zotero already holds the item key push would create this entry's item under, so push won't create it",
+  'citation-key-moved':
+    'push created an item for this citation key before, and another item has the citation key now, so which one the entry means is unclear; check both in Zotero',
   'unsupported-type': 'no Zotero item type for this entry type',
   'unreadable-identifier': 'an identifier is written with TeX; write it plain',
   'extra-would-migrate':
@@ -213,6 +243,12 @@ const NOT_PUSHED_PROSE: Readonly<Record<ZoteroFieldNotPushedReason, string>> = {
   macro: "a @string macro's name",
   'incomplete-names': "ends with 'and others' and differs from Zotero's first names",
   'unreadable-doi': 'not a DOI',
+  'unreadable-pmid': 'not a PubMed id',
+  'unreadable-names': 'a name BibTeX does not read as one',
+  math: 'TeX math, which Zotero would not keep as written',
+  'ambiguous-journal': 'Zotero has a full title and an abbreviation, and this could be either; give fjournal too, or change it in Zotero',
+  'series-editors': "Zotero's export lists its series editors as editors; change them in Zotero",
+  'repeated-field': 'given more than once',
 };
 
 /** One line saying what the plan does. */
@@ -245,6 +281,8 @@ export function formatZoteroPushReport(
           ? ' [not sent]'
           : outcome === 'unknown'
             ? ' [outcome unknown: run the push again to check]'
+          : outcome.status === 'failed' && a.kind === 'create' && outcome.code === 412
+            ? ` [failed: Zotero already has an item under this key, ${String(a.data.key)}, which was free when push read the library: an earlier push may have been saving it. Run the push again to see what is there.]`
           : outcome.status === 'failed'
             ? ` [failed: ${outcome.message}]`
             : outcome.status === 'success'

@@ -95,11 +95,11 @@ manuscript-markdown zotero push refs.bib --collection "Planned Births" --update
 
 | Option | Description |
 |--------|-------------|
-| `--collection <collection>` | The collection's key, its path (`"Parent / Child"`), or a name only one collection has. Required. |
+| `--collection <collection>` | The collection's key, its path (`"Parent / Child"`), or a name only one collection has. A top-level collection's path is its name, so when a collection inside another has the same name, give the top-level one's key. Required. |
 | `--library <library>` | `user` for My Library (the default), or a group library's id or name. |
 | `--update` | Also replace matched items' field values that differ from the bibliography's. Without it, push only adds entries to the collection, creating those Zotero lacks. |
 | `--dry-run` | Print the plan and write nothing. Needs no key. |
 
 `authorize` saves the key, per Zotero instance, in `~/.manuscript-markdown/zotero-keys.json`, readable only by you. A key allowed with **Allow** rather than **Always Allow** is good for one write and isn't saved. When the environment variable `ZOTERO_LOCAL_API_KEY` is set, push uses it instead. A push that needs a key and has none stops before writing and says to run `authorize`, rather than waiting on a dialog nobody may be watching.
 
-Exit codes: 0 when everything planned was written (or with `--dry-run`), 1 when Zotero couldn't be reached, refused a write, or the library changed during the push, and 2 for a usage error.
+Exit codes: 0 when everything planned was written (or with `--dry-run`), 1 when Zotero couldn't be reached, refused a write, didn't say whether it made one, or the library changed during the push, and 2 for a usage error.

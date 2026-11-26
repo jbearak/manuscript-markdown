@@ -131,12 +131,15 @@ export function resolveCollection(
   const byKey = collections.find(c => c.key === value);
   if (byKey) return byKey;
   // Two collections can share a path, and then it names neither.
+  // A top-level collection's path is its name, so a name that is one
+  // collection's path and other collections' name names none for sure.
   const byPath = collections.filter(c => c.path === value);
-  const named = byPath.length > 0 ? byPath : collections.filter(c => c.name === value);
+  const byName = collections.filter(c => c.name === value);
+  const named = byPath.length > 0 && byName.every(c => byPath.includes(c)) ? byPath : [...new Set([...byPath, ...byName])];
   if (named.length === 1) return named[0];
   if (named.length > 1) {
     throw new UsageError(
-      `Several collections are named "${value}"; give its key or path:\n` +
+      `Several collections are named "${value}"; give its key, or the path of one inside another:\n` +
         named.map(c => `  ${c.key}  ${c.path}`).join('\n'),
     );
   }
@@ -185,7 +188,7 @@ async function push(args: readonly string[], io: ZoteroCliIo): Promise<number> {
   const scope = await resolveLibrary(flags.values.get('--library'), api);
   const collection = resolveCollection(collectionValue, await listZoteroCollections(scope, api));
   const mode = flags.switches.has('--update') ? 'update' : 'add';
-  const prepared = await prepareZoteroPush(scope, bibText, collection.key, mode, api);
+  const prepared = await prepareZoteroPush(scope, bibText, collection, mode, api);
   if (prepared === undefined) {
     io.err(`Could not safely parse "${bibPath}". Check it for unbalanced braces or a stray @.`);
     return 1;

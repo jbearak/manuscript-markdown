@@ -364,7 +364,9 @@ A per-entry report (new links, already linked, metadata updates, metadata fields
 
 Available from the Command Palette, from the toolbar's **Citations & Notes** submenu on Markdown files, and from the [**Bibliography** toolbar menu](#editor-toolbar--bibliography-files) on `.bib` files. Puts the bibliography's entries in a Zotero collection and, in **Add and Update** mode, makes matched items' fields say what the entries say. See [Pushing a Bibliography to Zotero](zotero-roundtrip.md#pushing-a-bibliography-to-zotero) for what is compared and what is never written.
 
-**Requirements:** Zotero 10 or later, running on the same machine as the VS Code window, with its local API on (as for the sync command). Unavailable in remote workspaces.
+Push changes an existing item only when the entry is tied to it exactly: a stored Zotero link, a citation key stored in Zotero, a DOI, an ISBN or a PMID. An item with no citation key in Zotero and no DOI is found only by title, author and year, and its entry is reported and left alone; give such items a citation key in Zotero (in its Citation Key field: a `Citation Key:` line of Extra alone isn't enough for push), or keep their DOIs. An entry matched by its citation key is left alone too, with both items named, when another item with no citation key stored has its title and names, since either may be its item. See [Pushing a Bibliography to Zotero](zotero-roundtrip.md#pushing-a-bibliography-to-zotero).
+
+**Requirements:** Zotero 10 or later, running on the same machine as the VS Code window, with its local API on (as for the sync command). My Library works without a Zotero account. Unavailable in remote workspaces.
 
 **Flow:**
 
@@ -376,7 +378,7 @@ Available from the Command Palette, from the toolbar's **Citations & Notes** sub
 6. On **Push**, gets a write key: the one kept in VS Code's secret storage for this Zotero, or a new one, which Zotero asks you to allow in a dialog. A key allowed with **Always Allow** is kept; one allowed with **Allow** is good for one write and isn't kept.
 7. Writes in batches of up to 50 items. Each batch is made against the library version the last one left, so a change made in Zotero meanwhile stops the push.
 
-The per-entry report, with each write's outcome, goes to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details**.
+The per-entry report, with each write's outcome, goes to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details**. A write whose answer never came, or that Zotero's answer doesn't mention, is reported as `outcome unknown`; running the push again is safe, since an item it creates is named by its citation key, in a key no other item has, and Zotero refuses a second copy (see [Pushing a Bibliography to Zotero](zotero-roundtrip.md#pushing-a-bibliography-to-zotero)).
 
 | Scenario | Message |
 |----------|---------|
