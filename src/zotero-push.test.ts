@@ -1419,3 +1419,133 @@ describe('push: names and text, as BibTeX and Zotero write them', () => {
     expect(plan('@article{k,\n  journal = {Journal of Biology}\n}\n', [k]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
   });
 });
+
+describe('push: round three of review', () => {
+  it('rewrites only the coauthor the entry changes', () => {
+    const creators = [
+      { creatorType: 'author', firstName: '', lastName: 'Garcia Lopez' },
+      { creatorType: 'author', firstName: 'Ann', lastName: 'Reed' },
+    ];
+    const k = item('AAAA2222', { title: 'Field studies', citationKey: 'k', creators });
+    const p = plan('@article{k,\n  author = {Garcia Lopez and Reed, Anne}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({
+      kind: 'update',
+      patch: { creators: [creators[0], { creatorType: 'author', lastName: 'Reed', firstName: 'Anne' }] },
+    });
+    const one = item('AAAA2222', { title: 'Field studies', citationKey: 'k', creators: [creators[0]] });
+    const appended = plan('@article{k,\n  author = {Garcia Lopez and Reed, Anne}\n}\n', [one]);
+    expect(appended.actions[0]).toMatchObject({ kind: 'update', patch: { creators: [creators[0], { lastName: 'Reed', firstName: 'Anne' }] } });
+  });
+
+  it("holds back an export of a keyless item, whether or not push makes Zotero's key for it", () => {
+    // Keys Zotero's export makes, with letters decomposition doesn't reduce
+    // and years it reads its own way.
+    const cases: Array<[string, string, string]> = [
+      ['sondergaard_spring_nodate', 'Søndergaard', ''],
+      ['coeur_spring_nodate', 'Cœur', ''],
+      ['gros_spring_nodate', 'Groß', ''],
+      ['lukasik_spring_nodate', 'Łukasik', ''],
+      ['doe_spring_44', 'Doe', '0044'],
+      ['doe_spring_200bce', 'Doe', '200 BCE'],
+    ];
+    for (const [key, last, date] of cases) {
+      const keyless = item('AAAA2222', {
+        title: 'The spring atlas',
+        date,
+        creators: [{ creatorType: 'author', firstName: 'Ada', lastName: last }],
+      });
+      const year = date === '' ? '' : '  year = {' + date.replace(/^0+/, '') + '},\n';
+      const p = plan(`@article{${key},\n  title = {The spring atlas},\n  author = {${last}, Ada},\n${year}}\n`, [keyless], 'add');
+      expect([key, p.actions[0].kind]).toEqual([key, 'skip']);
+    }
+    // A key push can't make, as for a thorn, still finds the item by its
+    // title and names.
+    const thorn = item('AAAA2222', { title: 'The spring atlas', creators: [{ creatorType: 'author', firstName: 'Ada', lastName: 'Þórsson' }] });
+    const p = plan('@article{thorsson_spring_nodate,\n  title = {The spring atlas},\n  author = {Þórsson, Ada}\n}\n', [thorn], 'add');
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'possible-existing', detail: 'AAAA2222' });
+  });
+
+  it('reports a formula whose groups or case changed', () => {
+    const cases: Array<[string, string]> = [
+      ['Ratio $\\frac{ab}{c}$', 'Ratio $\\frac{a}{bc}$'],
+      ['Rate $p$', 'Rate $P$'],
+    ];
+    for (const [entry, zotero] of cases) {
+      const p = plan(`@article{k,\n  title = {${entry}}\n}\n`, [item('AAAA2222', { title: zotero, citationKey: 'k' })]);
+      expect([entry, p.actions[0]]).toMatchObject([entry, { kind: 'unchanged', notPushed: [{ field: 'title', reason: 'math' }] }]);
+    }
+    const same = plan('@article{k,\n  title = {Ratio $\\frac{a}{bc}$}\n}\n', [item('AAAA2222', { title: 'Ratio $\\frac{a}{bc}$', citationKey: 'k' })]);
+    expect(same.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+  });
+
+  it("takes a weak match for the item whose Extra alone gives the entry's key", async () => {
+    const doe = item('AAAA2222', {
+      title: 'Tidal basins',
+      citationKey: 'doe2020',
+      extra: 'Citation Key: manual',
+      date: '2020',
+      parsedDate: '2020',
+      pages: '21–30',
+      creators: [{ creatorType: 'author', firstName: 'Ann', lastName: 'Doe' }],
+    });
+    const bib = '@article{manual,\n  title = {Tidal basins},\n  author = {Doe, Ann},\n  year = {2020},\n  pages = {21--30}\n}\n';
+    const unchanged = await pushThroughApi(bib, [doe]);
+    expect(unchanged.plan.actions[0]).toMatchObject({ kind: 'unchanged', itemKey: 'AAAA2222' });
+    const edited = await pushThroughApi(bib.replace('21--30', '21--31'), [doe]);
+    expect(edited.plan.actions[0]).toMatchObject({ kind: 'update', changes: [{ field: 'pages', to: '21–31' }] });
+  });
+
+  it("reads Zotero's swung dash, tilde and circumflex as its export writes them", () => {
+    const pages = item('AAAA2222', { title: 'T', citationKey: 'k', pages: '100⁓120' });
+    expect(plan('@article{k,\n  pages = {100--120}\n}\n', [pages]).actions[0]).toMatchObject({ kind: 'unchanged' });
+    const tilde = item('AAAA2222', { title: 'A model with ~ error', citationKey: 'k' });
+    expect(plan('@article{k,\n  title = {A model with {\\textasciitilde} error}\n}\n', [tilde]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+    const hat = item('AAAA2222', { title: 'A^2 + B^2', citationKey: 'k' });
+    expect(plan('@article{k,\n  title = {A{\\textasciicircum}2 + {B}{\\textasciicircum}2}\n}\n', [hat]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+  });
+});
+
+describe("push: CodeRabbit's review of round two", () => {
+  const authors = [
+    { creatorType: 'author', firstName: 'Jane', lastName: 'Doe' },
+    { creatorType: 'author', firstName: 'John', lastName: 'Smith' },
+  ];
+
+  it('leaves an entry with a concatenated name list alone', () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators: authors });
+    const p = plan('@article{k,\n  author = {Doe, Jane and {Research \\textasciitilde{} Development}} # { and Smith, John}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'conflict', detail: 'concatenated-field' });
+  });
+
+  it("won't write a name list with an escaped brace outside its groups", () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators: authors });
+    const p = plan('@article{k,\n  author = {Doe, Jane\\{ AND Smith, John\\}}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'author', reason: 'unreadable-names' }] });
+  });
+
+  it("doesn't take an empty fjournal for a full title", () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', publicationTitle: 'Journal of Biology', journalAbbreviation: 'J. Biol.' });
+    const p = plan('@article{k,\n  journal = {New Biology Journal},\n  fjournal = {}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [{ field: 'journal', reason: 'ambiguous-journal' }] });
+  });
+
+  it('reads many keyless items that make one key in linear time', () => {
+    const items = Array.from({ length: 2000 }, (_, i) => item('K' + String(i).padStart(7, '2'), { title: 'Untitled ' + i }));
+    const start = performance.now();
+    const p = plan('@article{noauthor_untitled_nodate,\n  title = {Something else}\n}\n', items, 'add');
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'citation-key-conflict' });
+    expect(performance.now() - start).toBeLessThan(5000);
+  });
+
+  it("reserves an ISBN two chapters' entries would give two books", () => {
+    const one = item('AAAA2222', { itemType: 'book', title: 'One', citationKey: 'one' });
+    const two = item('BBBB2222', { itemType: 'book', title: 'Two', citationKey: 'two' });
+    const bib = '@incollection{one,\n  title = {One},\n  isbn = {9780262033848}\n}\n\n@incollection{two,\n  title = {Two},\n  isbn = {9780262033848}\n}\n';
+    expect(plan(bib, [one, two]).actions.map(a => a.kind)).toEqual(['skip', 'skip']);
+    // Chapters share their book's ISBN.
+    const chapterA = item('CCCC2222', { itemType: 'bookSection', title: 'A', citationKey: 'a' });
+    const chapterB = item('DDDD2222', { itemType: 'bookSection', title: 'B', citationKey: 'b' });
+    const parts = '@incollection{a,\n  title = {A},\n  isbn = {9780262033848}\n}\n\n@incollection{b,\n  title = {B},\n  isbn = {9780262033848}\n}\n';
+    expect(plan(parts, [chapterA, chapterB]).actions.map(a => a.kind)).toEqual(['update', 'update']);
+  });
+});

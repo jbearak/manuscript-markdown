@@ -34,7 +34,6 @@
 import {
   bibtexFieldAsPlainText,
   bibtexNamePartAsPlainText,
-  bibtexTexAsText,
   parseBibtexWithRaw,
   type BibtexEntry,
 } from './bibtex-parser';
@@ -160,6 +159,9 @@ export type ZoteroPushSkipReason =
    *  it for one that has none (see generatedCitationKey), so it may be in
    *  the library already. */
   | 'generated-key'
+  /** An item with no citation key stored has the entry's title and names,
+   *  so it may be the entry's (see sameWorkWithoutKey). */
+  | 'possible-existing'
   /** Another whole work in the library, as a book, has the entry's ISBN. */
   | 'isbn-owned-elsewhere'
   /** Zotero's answer left out the item's collections or creators, or gave
@@ -423,7 +425,13 @@ function readText(entry: BibtexEntry, name: string): Read | undefined {
     if (name === 'doi' && validDoi(value) === undefined) return { problem: 'unreadable-doi' };
     return { value };
   }
-  const plain = (bibtexFieldAsPlainText(entry, name) ?? '').replace(/\s+/g, ' ').trim();
+  // Zotero's export writes a tilde and a circumflex as \textasciitilde
+  // and \textasciicircum, which are those characters.
+  const plain = (bibtexFieldAsPlainText(entry, name) ?? '')
+    .replace(/\\textasciitilde(?![A-Za-z])/g, '~')
+    .replace(/\\textasciicircum(?![A-Za-z])/g, '^')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (plain === '') return undefined;
   // Math, as $x^{12}$, whose groups the text loses: $x^12$ is another
   // formula.  It takes two dollar signs; an escaped one, \$, is text, and
@@ -521,6 +529,21 @@ function tiesAsSpaces(value: string): string {
   return out;
 }
 
+/** Whether `value` has an escaped brace, \{ or \}, outside the groups its
+ *  unescaped braces make. */
+function escapedBraceOutsideGroups(value: string): boolean {
+  let depth = 0;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (c === '\\') {
+      if ((value[i + 1] === '{' || value[i + 1] === '}') && depth === 0) return true;
+      i++;
+    } else if (c === '{') depth++;
+    else if (c === '}') depth = Math.max(0, depth - 1);
+  }
+  return false;
+}
+
 /** Whether BibTeX reads `name`, one of a list's names, as a name: not empty
  *  or a stray `and`, and with at most two commas outside its groups (a
  *  third is "too many commas", which BibTeX drops the rest after). */
@@ -551,6 +574,10 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
   const raw = asWritten !== undefined && /\\(?:[{}]|~\{\}|textasciitilde)/.test(asWritten) ? asWritten : parsed;
   // Names part at an `and` between spaces, in any case, as BibTeX parts
   // them, before a tie reads as a space: Doe~and~Smith is one name.
+  // An escaped brace outside every group, as in Doe, Jane\{ AND Smith,
+  // John\}, is one BibTeX counts as a group's and this list's reader as a
+  // character, so where its names part is unclear.
+  if (escapedBraceOutsideGroups(raw)) return 'unreadable';
   const list = splitAuthorString(raw, true);
   if (list.length === 0 || !list.every(readableName)) return 'unreadable';
   // Math, as in a title (see readText), loses its groups as a name's part;
@@ -601,41 +628,61 @@ function withoutMarkup(value: string): string {
   return value.replace(ZOTERO_MARKUP, '').replace(/&(?:amp|lt|gt|quot);/g, e => ZOTERO_ENTITIES[e]);
 }
 
-/** Text with TeX's formatting and math set aside, as \textit{x} or
- *  $x^{12}$, for telling whether a value push won't write is Zotero's own:
- *  the commands of formatting Zotero keeps as markup, and math's dollar
- *  signs, scripts and groups.  Coarser than the text: it only ever spares a
- *  write. */
+/** Text with TeX's formatting set aside, as \textit{x}, for telling
+ *  whether a value push won't write is Zotero's own: the commands of
+ *  formatting Zotero keeps as markup, and the groups around text.  Math,
+ *  between dollar signs, is kept as written, groups and case too, since
+ *  $\frac{a}{bc}$ and $\frac{ab}{c}$, or $P$ and $p$, differ; only the
+ *  spellings of one formula are read as one, as Zotero's <sub>2</sub>, its
+ *  export's $_{\textrm{2}}$ and $_2$.  Math is marked (MATH_OPEN,
+ *  MATH_CLOSE) so looseFold leaves its case alone. */
 function looseText(value: string): string {
   const FORMAT = 'textit|textbf|textsc|textrm|textup|textnormal|emph|mathrm|mathit|mathbf';
+  const command = new RegExp('\\\\(?:' + FORMAT + ')\\s*\\{([^{}]*)\\}', 'g');
+  const bare = new RegExp('\\\\(?:' + FORMAT + ')(?![A-Za-z])\\s*', 'g');
+  const unwrap = (s: string) => {
+    for (let before = ''; before !== s; ) {
+      before = s;
+      s = s.replace(command, (_m, x: string) => '{' + x + '}');
+    }
+    return s.replace(bare, '');
+  };
   let text = value
     // Zotero's export spells < and > as commands, as in a nocase span.
     .replace(/\{\\textless\}|\\textless(?:\{\})?/g, '<')
     .replace(/\{\\textgreater\}|\\textgreater(?:\{\})?/g, '>')
     // Zotero's sub- and superscripts, as math writes them.
-    .replace(/<sub>(.*?)<\/sub>/g, (_m, x: string) => '_{' + x + '}')
-    .replace(/<sup>(.*?)<\/sup>/g, (_m, x: string) => '^{' + x + '}')
-    .replace(/\\textsubscript\s*\{/g, '_{')
-    .replace(/\\textsuperscript\s*\{/g, '^{');
+    .replace(/<sub>(.*?)<\/sub>/g, (_m, x: string) => '$_{' + x + '}$')
+    .replace(/<sup>(.*?)<\/sup>/g, (_m, x: string) => '$^{' + x + '}$')
+    .replace(/\\textsubscript\s*\{([^{}]*)\}/g, (_m, x: string) => '$_{' + x + '}$')
+    .replace(/\\textsuperscript\s*\{([^{}]*)\}/g, (_m, x: string) => '$^{' + x + '}$');
   text = withoutMarkup(text);
-  // A formatting command's argument, without the command.
-  for (let before = ''; before !== text; ) {
-    before = text;
-    text = text.replace(new RegExp('\\\\(?:' + FORMAT + ')\\s*\\{([^{}]*)\\}', 'g'), (_m, x: string) => '{' + x + '}');
-  }
-  text = text.replace(new RegExp('\\\\(?:' + FORMAT + ')(?![A-Za-z])\\s*', 'g'), '');
-  // Groups within groups, as _{{2}}, as one.
-  for (let before = ''; before !== text; ) {
-    before = text;
-    text = text.replace(/\{\{([^{}]*)\}\}/g, (_m, x: string) => '{' + x + '}');
-  }
-  // A script's reach kept, x^{12} not x^12, and every other group and
-  // dollar sign set aside.
-  text = text.replace(/([_^])\s*([^{\s])/g, (_m, s: string, x: string) => s + '{' + x + '}');
-  const scripts: string[] = [];
-  text = text.replace(/([_^])\{([^{}]*)\}/g, (_m, s: string, x: string) => '\uE000' + scripts.push(s + '{' + x.replace(/[{}]|\$/g, '') + '}') + '\uE000');
-  text = text.replace(/[{}]|\$/g, '');
-  return text.replace(/\uE000(\d+)\uE000/g, (_m, i: string) => scripts[Number(i) - 1]);
+  // Text and math, split at each dollar sign that isn't escaped.
+  const parts = text.split(/(?<!\\)\$/);
+  return parts
+    .map((part, i) => {
+      if (i % 2 === 0) return unwrap(part).replace(/\\([{}$&%#_])/g, (_m, c: string) => '' + c).replace(/[{}]/g, '').replace(//g, '');
+      let math = unwrap(part).replace(/\s+/g, '');
+      for (let before = ''; before !== math; ) {
+        before = math;
+        math = math.replace(/\{\{([^{}]*)\}\}/g, (_m, x: string) => '{' + x + '}');
+      }
+      math = math.replace(/([_^])([^{\\])/g, (_m, s: string, x: string) => s + '{' + x + '}');
+      return MATH_OPEN + math + MATH_CLOSE;
+    })
+    .join('');
+}
+
+const MATH_OPEN = '';
+const MATH_CLOSE = '';
+
+/** looseText's text folded as foldText does, without case where `caseless`,
+ *  but its math as it is. */
+function looseFold(value: string, caseless: boolean): string {
+  return value
+    .split(/([^]*)/)
+    .map(part => (part.startsWith(MATH_OPEN) ? part : caseless ? foldText(part).toLowerCase() : foldText(part)))
+    .join('');
 }
 
 function foldText(value: string): string {
@@ -664,7 +711,8 @@ function sameValue(base: string, a: string, b: string): boolean {
       // that gives a time means that time.
       return b.trim().length === 10 ? a.trim().slice(0, 10) === b.trim() : a.trim() === b.trim();
     case 'pages':
-      return foldText(a).replace(/[‐-―-]+/g, '-') === foldText(b).replace(/[‐-―-]+/g, '-');
+      // Dashes, and the swung dash (U+2053) Zotero's export writes as --.
+      return foldText(a).replace(/[‐-―\u2053-]+/g, '-') === foldText(b).replace(/[‐-―\u2053-]+/g, '-');
     default:
       // Zotero's rich text, as <i>…</i>, is markup on the same text.
       // (Read on both sides: Zotero's export writes its &amp; as \&amp;.)
@@ -778,6 +826,14 @@ interface EntryFields {
   readonly notPushed: ZoteroFieldNotPushed[];
 }
 
+/** Whether the entry gives a full journal title push reads, beside which
+ *  `journal` is the abbreviation: an empty or unreadable fjournal gives
+ *  none. */
+function hasFullJournal(entry: BibtexEntry): boolean {
+  const read = readText(entry, 'fjournal');
+  return read !== undefined && 'value' in read;
+}
+
 /** `repeated`: the fields the entry gives more than once, which are never
  *  written, since BibTeX and biber read different ones of them. */
 function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet<string>): EntryFields {
@@ -794,7 +850,7 @@ function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet
     }
     // With fjournal beside it, journal is the abbreviation, as Zotero's
     // BibTeX import reads the pair.
-    const bases = name === 'journal' && entry.fields.has('fjournal') ? ['journalAbbreviation'] : mapped;
+    const bases = name === 'journal' && hasFullJournal(entry) ? ['journalAbbreviation'] : mapped;
     let target: string | undefined;
     let base = '';
     for (const b of bases) {
@@ -809,8 +865,10 @@ function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet
       notPushed.push(line);
       if ((read.problem === 'tex' || read.problem === 'math') && target !== undefined && !kept.has(target)) {
         // As TeX, where a command's group is still around its argument.
+        // As TeX, escapes and all, where a command's group is still around
+        // its argument and an escaped dollar sign is text.
         const tex = entry.texFields?.get(name) ?? bibtexFieldAsPlainText(entry, name) ?? '';
-        kept.set(target, { loose: looseText(bibtexTexAsText(tex)), base, line });
+        kept.set(target, { loose: looseText(tex), base, line });
       }
       continue;
     }
@@ -908,8 +966,8 @@ function updateChanges(
   const same = new Set<ZoteroFieldNotPushed>();
   for (const [field, { loose, base, line }] of read.kept) {
     const current = typeof item[field] === 'string' ? (item[field] as string) : '';
-    const fold = (v: string) => (CASELESS_BASES.has(baseOf(type, field) || base) ? foldText(v).toLowerCase() : foldText(v));
-    if (current !== '' && fold(looseText(current)) === fold(loose)) same.add(line);
+    const caseless = CASELESS_BASES.has(baseOf(type, field) || base);
+    if (current !== '' && looseFold(looseText(current), caseless) === looseFold(loose, caseless)) same.add(line);
   }
   const notPushed = read.notPushed.filter(line => !same.has(line));
   const extra = extraFields(item);
@@ -926,7 +984,7 @@ function updateChanges(
     const abbreviation = item.journalAbbreviation;
     if (from === 'journal' && typeof abbreviation === 'string' && abbreviation !== '' && sameValue('journalAbbreviation', abbreviation, value)) continue;
     // …and a different one may be either, where Zotero has both.
-    if (from === 'journal' && !entry.fields.has('fjournal') && typeof abbreviation === 'string' && abbreviation !== '' && current !== '') {
+    if (from === 'journal' && !hasFullJournal(entry) && typeof abbreviation === 'string' && abbreviation !== '' && current !== '') {
       notPushed.push({ field: from, reason: 'ambiguous-journal' });
       continue;
     }
@@ -964,13 +1022,17 @@ function updateChanges(
       if (!sameAsExported(exported, next, texts)) notPushed.push({ field: role, reason: 'series-editors' });
       continue;
     }
-    if (sameAsExported(current, next, texts)) continue;
+    // Each stored creator whose name the entry gives as Zotero's export
+    // writes it stays as stored, so correcting one coauthor rewrites no
+    // other.
+    const merged = next.map((n, i) => (i < current.length && sameAsExported([current[i]], [n], [texts[i]]) ? current[i] : n));
+    if (sameCreators(current, merged)) continue;
     changes.push({
       field: 'creators:' + role,
       from: current.map(creatorText).join('; '),
-      to: next.map(creatorText).join('; '),
+      to: merged.map(creatorText).join('; '),
     });
-    creators = replaceRole(creators, role, next);
+    creators = replaceRole(creators, role, merged);
   }
   if (creators !== existing) patch.creators = creators;
   return { changes, patch, notPushed };
@@ -1045,21 +1107,59 @@ const KEY_TITLE_BANNED =
  *  article or preposition, and the year.  Followed closely, not exactly
  *  (Zotero's diacritics and date reading are its own), so push uses it only
  *  to hold back, never to write. */
+// Letters Zotero's export reduces (its removeDiacritics) that Unicode
+// decomposition leaves as they are.
+const KEY_LETTERS: Readonly<Record<string, string>> = { ø: 'o', œ: 'oe', æ: 'ae', ß: 's', ł: 'l', đ: 'd', ı: 'i' };
+
+/** The year in the key, as Zotero reads it from the date (strToDate): a
+ *  year alone keeps its era and loses its leading zeros (0044 is 44, 200
+ *  BCE is 200 BCE); otherwise the parsed date's year. */
+function keyYear(item: ZoteroItemJson): string {
+  const date = typeof item.date === 'string' ? item.date.trim() : '';
+  const alone = /^0*(\d{1,4})\s*((?:B\.?\s?C\.?(?:\s?E\.?)?|C\.?\s?E\.?|A\.?\s?D\.?))?$/i.exec(date);
+  if (alone) return String(Number(alone[1])) + (alone[2] ? ' ' + alone[2] : '');
+  const parsed = /^(\d{4})/.exec(item.parsedDate ?? '')?.[1] ?? /\b(\d{4})\b/.exec(date)?.[1];
+  return parsed === undefined || parsed === '0000' ? 'nodate' : String(Number(parsed));
+}
+
 function generatedCitationKey(item: ZoteroItemJson): string {
   const first = asCreators(item.creators)[0];
   const last = first?.lastName || first?.name;
   const author = last ? last.toLowerCase().replace(/ /g, '_').replace(/,/g, '') : 'noauthor';
   const title = typeof item.title === 'string' && item.title !== '' ? item.title.toLowerCase().replace(KEY_TITLE_BANNED, '').split(/\s+/g)[0] : 'notitle';
-  const year =
-    /^(\d{4})/.exec(item.parsedDate ?? '')?.[1] ??
-    (typeof item.date === 'string' ? /\b(\d{4})\b/.exec(item.date)?.[1] : undefined) ??
-    'nodate';
-  const base = (author + '_' + title + '_' + (year === '0000' ? 'nodate' : year)).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const base = (author + '_' + title + '_' + keyYear(item))
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[øœæßłđı]/g, c => KEY_LETTERS[c]);
   const added = typeof item.dateAdded === 'string' ? Number(item.dateAdded.slice(0, 4)) : NaN;
   return base.replace(added >= 2020 ? /[^a-z0-9_-]/g : /[^a-z0-9!$&*+\-./:;<>?[\]^_`|]+/g, '');
 }
 
 type KeyClaim = { readonly item: string; readonly source: 'field' | 'extra' | 'generated' };
+
+/** An item with no citation key stored, Zotero's export of which would
+ *  make a key from its metadata, whose title and creators are the entry's
+ *  and whose year, where both give one, is too. */
+function sameWorkWithoutKey(entry: BibtexEntry, items: Iterable<ZoteroItemJson>): string | undefined {
+  const title = readText(entry, 'title');
+  if (title === undefined || !('value' in title)) return undefined;
+  const names = (['author', 'editor'] as const).flatMap(role => {
+    const read = readCreators(entry, role, role);
+    return typeof read === 'object' ? read.creators : [];
+  });
+  const date = readDate(entry);
+  const year = date !== undefined && 'parts' in date ? date.parts[0] : undefined;
+  for (const item of items) {
+    if ((typeof item.citationKey === 'string' && item.citationKey.trim() !== '') || extraCitationKey(item) !== undefined) continue;
+    if (typeof item.title !== 'string' || !sameValue('title', item.title, title.value)) continue;
+    if (!sameCreators(asCreators(item.creators), names)) continue;
+    const itemYear = zoteroDateParts(item)?.[0];
+    if (year !== undefined && itemYear !== undefined && year !== itemYear) continue;
+    return item.key;
+  }
+  return undefined;
+}
 
 /** Who answers to each citation key: an item by its Citation Key field,
  *  by Extra's `Citation Key:` line (which Zotero's export prefers), and,
@@ -1084,9 +1184,13 @@ function citationKeyClaims(items: Iterable<ZoteroItemJson>): Map<string, KeyClai
   }
   // The export numbers repeats (base, base-1, …) in an order push can't
   // know, so each such item answers to all of them.
+  // One list for the group, shared by its keys, not one each.
   for (const [base, keys] of generated) {
+    const group: KeyClaim[] = keys.map(item => ({ item, source: 'generated' }));
     for (let i = 0; i < keys.length; i++) {
-      for (const key of keys) add(i === 0 ? base : base + '-' + i, { item: key, source: 'generated' });
+      const key = i === 0 ? base : base + '-' + i;
+      const stored = claims.get(key);
+      claims.set(key, stored === undefined ? group : [...stored, ...group.filter(g => !stored.some(c => c.item === g.item))]);
     }
   }
   return claims;
@@ -1195,7 +1299,7 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   // citation key, from either place an item keeps one.
   const isbnOwners = new Map<string, string[]>();
   const keyClaims = citationKeyClaims(input.items.values());
-  const keyOwners = new Map([...keyClaims].map(([key, claims]) => [key, claims.map(c => c.item)]));
+
   const own = (owners: Map<string, string[]>, value: string, key: string) => {
     const list = owners.get(value) ?? [];
     if (!list.includes(key)) owners.set(value, [...list, key]);
@@ -1242,11 +1346,14 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   // The matcher reads an item's Citation Key field over its Extra line, and
   // Zotero's export the other way: an entry the matcher finds nothing for,
   // whose key is one item's Extra line and no one else's, is that item.
+  // So is one the matcher found only weakly, by title, author and year or
+  // by URL, when that is the same item.
   const decisions = input.decisions.map((decision): ZoteroLinkDecision => {
-    if (decision.outcome !== 'unmatched') return decision;
+    const weak = decision.outcome === 'update' && !STRONG_TIERS.has(decision.tier);
+    if (decision.outcome !== 'unmatched' && !weak) return decision;
     const claims = keyClaims.get(decision.entry.key) ?? [];
     const owner = claims.length === 1 && claims[0].source === 'extra' ? input.items.get(claims[0].item) : undefined;
-    if (owner === undefined) return decision;
+    if (owner === undefined || (weak && decision.target.key !== owner.key)) return decision;
     return {
       outcome: 'update',
       entry: decision.entry,
@@ -1288,6 +1395,11 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         // suggests it: Zotero's own reading may differ.
         if (claims.length === 1 && claims[0].source === 'generated') return skip(entryKey, 'generated-key', claims[0].item);
         if (claims.length === 1) return skip(entryKey, 'citation-key-conflict', claims[0].item);
+        // Nor does a create depend on that key being Zotero's exactly: an
+        // item with no key stored and the entry's title and names, and no
+        // year against it, may be this entry's.
+        const lookalike = sameWorkWithoutKey(entry, input.items.values());
+        if (lookalike !== undefined) return skip(entryKey, 'possible-existing', lookalike);
         const isbnClaims = isbnElsewhere(entry);
         if (isbnClaims.length > 0) return skip(entryKey, 'isbn-owned-elsewhere', isbnClaims.join(', '));
         const pmidRead = readText(entry, 'pmid');
@@ -1326,8 +1438,8 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         // gives an item the key in its Extra over its own field, names
         // neither for sure.  (A stored identity names its item outright.)
         if (decision.outcome === 'update' && decision.tier !== 'existing') {
-          const keyClaims = (keyOwners.get(entryKey) ?? []).filter(k => k !== item.key);
-          if (keyClaims.length > 0) return skip(entryKey, 'citation-key-conflict', [item.key, ...keyClaims].join(', '));
+          const others = (keyClaims.get(entryKey) ?? []).map(c => c.item).filter(k => k !== item.key);
+          if (others.length > 0) return skip(entryKey, 'citation-key-conflict', [item.key, ...others].join(', '));
           // The library holds the key push would have created this entry's
           // item under, and not on this item: push made that one for the
           // citation key, which has since moved to this one.
@@ -1402,8 +1514,12 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     }
     if (gives('ISBN')) {
       // An update gives an ISBN the item doesn't have, adding or replacing.
+      // An update to a whole work reserves the ISBN whatever the entry's
+      // type, as a chapter's entry would give its book's; a part shares
+      // its book's.
       const has = c.kind === 'create' ? [] : isbnsOf(c.item.ISBN);
-      for (const isbn of entryIsbns(c.entry)) if (!has.includes(isbn)) ids.push('ISBN ' + isbn);
+      const anyType = c.kind === 'match' && !COMPONENT_ITEM_TYPES.has(c.item.itemType);
+      for (const isbn of entryIsbns(c.entry, anyType)) if (!has.includes(isbn)) ids.push('ISBN ' + isbn);
     }
     return ids;
   };
