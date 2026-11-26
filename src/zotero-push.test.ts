@@ -438,22 +438,23 @@ describe('createZoteroPushPlan', () => {
     expect(p.actions[0].kind === 'update' && p.actions[0].patch.creators).toEqual([{ creatorType: 'author', name: 'Smith, Jane' }]);
   });
 
-  it("doesn't count a DOI for an item it won't write", () => {
+  it("counts a DOI an entry gives though its item won't be written", () => {
+    // A skipped entry still names its work, so another can't take its DOI.
     const blocked = item('BLOCK001', { title: 'A', citationKey: 'a2000', extra: 'Type: book' });
     const bib = '@article{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n@article{b2000,\n  title = {B},\n  doi = {10.1234/a}\n}\n';
-    expect(plan(bib, [blocked]).actions.map(a => (a.kind === 'skip' ? a.reason : a.kind))).toEqual(['extra-would-migrate', 'create']);
+    expect(plan(bib, [blocked]).actions.map(a => (a.kind === 'skip' ? a.reason : a.kind))).toEqual(['duplicate-doi', 'duplicate-doi']);
   });
 
-  it("doesn't count a DOI from entries skipped for sharing an item", () => {
+  it('counts a DOI from entries skipped for sharing an item', () => {
     const target = item('SHARED01', { title: 'A', citationKey: 'a2000' });
     const bib =
       '@article{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n' +
       '@article{b2000,\n  title = {A},\n  zotero-key = {SHARED01},\n  zotero-uri = {http://zotero.org/users/1/items/SHARED01}\n}\n\n' +
       '@article{c2000,\n  title = {C},\n  doi = {10.1234/a}\n}\n';
     expect(plan(bib, [target]).actions.map(a => (a.kind === 'skip' ? a.reason : a.kind))).toEqual([
+      'duplicate-doi',
       'duplicate-target',
-      'duplicate-target',
-      'create',
+      'duplicate-doi',
     ]);
   });
 
@@ -469,9 +470,9 @@ describe('createZoteroPushPlan', () => {
     ]);
   });
 
-  it("doesn't let an entry it can't create block another's DOI", () => {
+  it("counts the DOI of an entry it can't create", () => {
     const bib = '@inreference{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n@article{b2000,\n  title = {B},\n  doi = {10.1234/a}\n}\n';
-    expect(plan(bib, []).actions.map(a => a.kind === 'skip' ? a.reason : a.kind)).toEqual(['unsupported-type', 'create']);
+    expect(plan(bib, []).actions.map(a => a.kind === 'skip' ? a.reason : a.kind)).toEqual(['duplicate-doi', 'duplicate-doi']);
   });
 
   it("replaces a free-text date Zotero can't read", () => {
@@ -1565,5 +1566,20 @@ describe("push: CodeRabbit's review of round two", () => {
     const chapterB = item('DDDD2222', { itemType: 'bookSection', title: 'B', citationKey: 'b' });
     const parts = '@incollection{a,\n  title = {A},\n  isbn = {9780262033848}\n}\n\n@incollection{b,\n  title = {B},\n  isbn = {9780262033848}\n}\n';
     expect(plan(parts, [chapterA, chapterB]).actions.map(a => a.kind)).toEqual(['update', 'update']);
+  });
+});
+
+describe('push: round four, a skip never withdraws a claim', () => {
+  it("won't give an item a DOI, PMID or ISBN an entry skipped for another reason gives too", () => {
+    // A keyless, undated Editorial by Ann Doe holds the first entry back as
+    // possibly that item; it still names the DOI.
+    const editorial = item('AAAA2222', { title: 'Editorial', creators: [{ creatorType: 'author', firstName: 'Ann', lastName: 'Doe' }] });
+    const winter = item('BBBB2222', { title: 'Winter surveys', citationKey: 'winter' });
+    for (const field of ['doi = {10.1234/editorial}', 'pmid = {987654}']) {
+      const bib = `@article{editorial,\n  title = {Editorial},\n  author = {Doe, Ann},\n  ${field}\n}\n\n@article{winter,\n  title = {Winter surveys},\n  ${field}\n}\n`;
+      const p = plan(bib, [editorial, winter]);
+      expect([field, p.actions.map(a => a.kind)]).toEqual([field, ['skip', 'skip']]);
+      expect(p.changed).toBe(false);
+    }
   });
 });

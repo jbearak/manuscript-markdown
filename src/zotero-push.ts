@@ -1462,62 +1462,35 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     }
   });
 
-  // Second pass: entries that would collide with each other.  An
-  // identifier is given to an item by a create, or by an update of an item
-  // without one: a DOI, a PMID, or a whole work's ISBN.
-  const targets = new Map<string, number>();
-  const given = new Map<string, number>();
-  // Only entries that would be written: a create needs an item type, and a
-  // Citation Key field to find the item by next time.
-  const creatable = (entry: BibtexEntry): boolean => {
-    const itemType = ITEM_TYPE_BY_ENTRY_TYPE[entry.type.toLowerCase()];
-    const type = itemType === undefined ? undefined : schemaType(input.schema, itemType);
-    return type !== undefined && type.fields.some(f => f.field === 'citationKey');
-  };
-  // …and a field for the identifier in its type, so the payload carries it.
-  const hasField = (itemType: string | undefined, base: string): boolean => {
-    const type = itemType === undefined ? undefined : schemaType(input.schema, itemType);
-    return type !== undefined && resolveField(type, base) !== undefined;
-  };
-  // An item skipped for its Extra is never written.
-  const writable = (item: ZoteroItemJson): boolean =>
-    extraMigrations(item, schemaType(input.schema, item.itemType)!, input.schema).length === 0;
-  const givesIds = (c: Candidate): string[] => {
-    if (c.kind === 'skip') return [];
-    const itemType = c.kind === 'create' ? ITEM_TYPE_BY_ENTRY_TYPE[c.entry.type.toLowerCase()] : c.item.itemType;
-    if (c.kind === 'create' ? !creatable(c.entry) : input.mode !== 'update' || schemaType(input.schema, itemType) === undefined || !writable(c.item)) {
-      return [];
-    }
+  // Second pass: entries that would collide with each other.  Every entry
+  // claims the identifiers it gives, DOI, PMID and a whole work's ISBN, as
+  // written, and the item it names, whether or not it is written or skipped
+  // for another reason: a skipped entry still names that work, so another
+  // entry can't take its identifier or its item.  (An identifier the named
+  // item has already gives it nothing, as a set's ISBN on each volume.)
+  const claimsOf = (decision: ZoteroLinkDecision): string[] => {
+    const entry = parsed.get(decision.entry.key);
+    if (entry === undefined) return [];
+    const target = decision.outcome === 'update' || decision.outcome === 'preserve' ? input.items.get(decision.target.key) : undefined;
+    const holds = (owners: ReadonlyMap<string, string[]>, id: string) => target !== undefined && (owners.get(id) ?? []).includes(target.key);
     const ids: string[] = [];
-    // Two new entries with one identifier are one work, whatever the item
-    // type can store; an update gives one only where the type has a field.
-    const gives = (base: string) => c.kind === 'create' || hasField(itemType, base);
-    const doi = entryDoi(c.entry);
-    if (doi !== undefined && gives('DOI') && (c.kind === 'create' || effectiveDoi(c.item) === undefined)) ids.push('DOI ' + doi);
-    const pmid = readText(c.entry, 'pmid');
-    if (pmid !== undefined && 'value' in pmid && gives('PMID') && (c.kind === 'create' || effectivePmid(c.item) === undefined)) {
-      ids.push('PMID ' + pmid.value);
-    }
-    if (gives('ISBN')) {
-      // An update gives an ISBN the item doesn't have, adding or replacing.
-      // An update to a whole work reserves the ISBN whatever the entry's
-      // type, as a chapter's entry would give its book's; a part shares
-      // its book's.
-      const has = c.kind === 'create' ? [] : isbnsOf(c.item.ISBN);
-      const anyType = c.kind === 'match' && !COMPONENT_ITEM_TYPES.has(c.item.itemType);
-      for (const isbn of entryIsbns(c.entry, anyType)) if (!has.includes(isbn)) ids.push('ISBN ' + isbn);
-    }
-    return ids;
+    const doi = entryDoi(entry);
+    if (doi !== undefined && !holds(doiOwners, doi)) ids.push('DOI ' + doi);
+    const pmid = readText(entry, 'pmid');
+    if (pmid !== undefined && 'value' in pmid && !holds(pmidOwners, pmid.value)) ids.push('PMID ' + pmid.value);
+    // A whole work's ISBN, as a chapter's entry would give its book's; a
+    // part shares its book's.
+    const held = target === undefined ? [] : [target.ISBN, ...extraValues(target, 'isbn')].flatMap(isbnsOf);
+    const anyType = target !== undefined && !COMPONENT_ITEM_TYPES.has(target.itemType);
+    for (const isbn of entryIsbns(entry, anyType)) if (!held.includes(isbn)) ids.push('ISBN ' + isbn);
+    return [...new Set(ids)];
   };
-  for (const c of candidates) {
-    if (c.kind === 'match') targets.set(c.item.key, (targets.get(c.item.key) ?? 0) + 1);
-  }
-  // An entry sharing its item with another is skipped, so its identifiers
-  // aren't given to anything.
-  for (const c of candidates) {
-    if (c.kind === 'match' && (targets.get(c.item.key) ?? 0) > 1) continue;
-    for (const id of new Set(givesIds(c))) given.set(id, (given.get(id) ?? 0) + 1);
-  }
+  const claims = decisions.map(claimsOf);
+  const named = decisions.map(d => (d.outcome === 'update' || d.outcome === 'preserve' ? d.target.key : undefined));
+  const given = new Map<string, number>();
+  for (const ids of claims) for (const id of ids) given.set(id, (given.get(id) ?? 0) + 1);
+  const targets = new Map<string, number>();
+  for (const key of named) if (key !== undefined) targets.set(key, (targets.get(key) ?? 0) + 1);
 
   // The key each create would take, and what holds a key already, for the
   // report.
@@ -1536,9 +1509,9 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
       : itemKey + ', held by an item with no citation key';
   };
 
-  const actions: ZoteroPushAction[] = candidates.map((c): ZoteroPushAction => {
+  const actions: ZoteroPushAction[] = candidates.map((c, i): ZoteroPushAction => {
     if (c.kind === 'skip') return c;
-    const shared = givesIds(c).find(id => (given.get(id) ?? 0) > 1);
+    const shared = claims[i].find(id => (given.get(id) ?? 0) > 1);
     if (shared !== undefined) {
       return shared.startsWith('DOI ')
         ? { kind: 'skip', entryKey: c.entryKey, reason: 'duplicate-doi', detail: shared.slice(4) }
