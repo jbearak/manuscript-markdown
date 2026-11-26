@@ -166,8 +166,9 @@ export type ZoteroPushSkipReason =
   /** An item with no citation key stored has the entry's title and names,
    *  so it may be the entry's (see sameWorkWithoutKey). */
   | 'possible-existing'
-  /** Matched by citation key to one item, while another with no citation
-   *  key stored has the entry's title and names (see sameWorkWithoutKey). */
+  /** Matched by citation key, DOI, PMID or ISBN to one item, while another
+   *  with no citation key stored has the entry's title and names (see
+   *  sameWorkWithoutKey). */
   | 'plain-match-elsewhere'
   /** Another whole work in the library, as a book, has the entry's ISBN. */
   | 'isbn-owned-elsewhere'
@@ -1406,6 +1407,9 @@ type Candidate =
       readonly entry: BibtexEntry;
       readonly item: ZoteroItemJson;
       readonly repeated: ReadonlySet<string>;
+      /** For a match by DOI, PMID or ISBN: the keyless item that has the
+       *  entry's title and names too, if one does (see plain-match-elsewhere). */
+      readonly plainElsewhere?: string;
     }
   | { readonly kind: 'create'; readonly entryKey: string; readonly entry: BibtexEntry; readonly repeated: ReadonlySet<string> }
   | Extract<ZoteroPushAction, { kind: 'skip' }>;
@@ -1617,7 +1621,15 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         // …and for a whole work's ISBN.
         const isbnClaims = isbnElsewhere(entry, item);
         if (isbnClaims.length > 0) return skip(entryKey, 'isbn-owned-elsewhere', isbnClaims.join(', '));
-        return { kind: 'match', entryKey, entry, item, repeated: repeatedByKey.get(entryKey) ?? new Set() };
+        // The same for a match by DOI, PMID or ISBN: an edited DOI can name
+        // another work with the same title, while the entry's own item has
+        // no key stored.  Skipped last (see below), so the other skips keep
+        // their reasons.
+        const plainElsewhere =
+          decision.outcome === 'update' && (decision.tier === 'doi' || decision.tier === 'isbn-pmid')
+            ? sameWorkWithoutKey(entry, keyless(), item.key)
+            : undefined;
+        return { kind: 'match', entryKey, entry, item, repeated: repeatedByKey.get(entryKey) ?? new Set(), plainElsewhere };
       }
     }
   });
@@ -1724,14 +1736,18 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     if (input.mode === 'update' && type !== undefined) {
       ({ changes, patch, notPushed } = updateChanges(c.entry, c.item, type, c.repeated));
     }
-    if (!addToCollection && changes.length === 0) {
-      return { kind: 'unchanged', entryKey: c.entryKey, itemKey: c.item.key, notPushed };
-    }
+    const unchanged = !addToCollection && changes.length === 0;
     // Any write to the item would let Zotero rewrite it from its Extra.
-    const migrations = type === undefined ? [] : extraMigrations(c.item, type, input.schema);
+    const migrations = unchanged || type === undefined ? [] : extraMigrations(c.item, type, input.schema);
     if (migrations.length > 0) {
       return { kind: 'skip', entryKey: c.entryKey, reason: 'extra-would-migrate', detail: migrations.join(', ') };
     }
+    // Matched by an identifier while a keyless item is the plain match:
+    // either may be the entry's, so neither is written or reported as it.
+    if (c.plainElsewhere !== undefined) {
+      return { kind: 'skip', entryKey: c.entryKey, reason: 'plain-match-elsewhere', detail: c.item.key + ' and ' + c.plainElsewhere };
+    }
+    if (unchanged) return { kind: 'unchanged', entryKey: c.entryKey, itemKey: c.item.key, notPushed };
     if (addToCollection) patch.collections = [...collections, input.collectionKey];
     return {
       kind: 'update',

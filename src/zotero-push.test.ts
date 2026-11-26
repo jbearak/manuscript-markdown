@@ -1793,3 +1793,60 @@ describe('push: a stored creator the entry moves', () => {
     ]);
   });
 });
+
+describe('push: a match by identifier while another, keyless item is the plain match', () => {
+  // Seed 1897, reduced: the keyless book's entry has the section's DOI.
+  const book = item('ZZZZ2222', {
+    itemType: 'book',
+    title: 'Field atlas',
+    // Zotero reads 23 as a day, so its export's key is oster_field_nodate,
+    // where push's reading makes oster_field_23.
+    date: '23',
+    DOI: '10.4242/winter.b',
+    creators: [
+      { creatorType: 'editor', firstName: 'Bo', lastName: 'Øster' },
+      { creatorType: 'author', firstName: 'Ann', lastName: 'Reed' },
+    ],
+  });
+  const section = item('ZZZZ2223', {
+    itemType: 'bookSection',
+    title: 'Field atlas',
+    citationKey: 'kim_field_1998',
+    DOI: '10.4242/winter.a',
+    creators: [{ creatorType: 'author', firstName: 'Eva', lastName: 'Kim' }],
+  });
+  const bib = '@book{oster_field_nodate,\n  title = {Field atlas},\n  doi = {10.4242/winter.a},\n  author = {Reed, Ann},\n  editor = {Øster, Bo}\n}\n';
+
+  it("won't follow an edited DOI to another item while the entry's own is keyless", async () => {
+    for (const mode of ['add', 'update'] as const) {
+      const r = await pushThroughApi(bib, [book, section], mode);
+      expect(r.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'ZZZZ2223 and ZZZZ2222' });
+      expect(r.posts).toEqual([]);
+    }
+  });
+
+  it('nor an ISBN', () => {
+    const isbnBook = item('ZZZZ2225', { itemType: 'book', title: 'Other atlas', ISBN: '9780262033848', citationKey: 'x' });
+    const byIsbn = '@book{oster_field_nodate,\n  title = {Field atlas},\n  isbn = {9780262033848},\n  author = {Reed, Ann},\n  editor = {Øster, Bo}\n}\n';
+    expect(plan(byIsbn, [book, isbnBook]).actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'ZZZZ2225 and ZZZZ2222' });
+  });
+
+  it('nor a PMID', async () => {
+    const pmidItem = item('ZZZZ2226', { title: 'Other', PMID: '12345678', citationKey: 'y' });
+    const keylessArticle = item('ZZZZ2227', { title: 'Field notes', creators: [{ creatorType: 'author', firstName: 'Ann', lastName: 'Reed' }] });
+    const byPmid = '@article{fieldnotes,\n  title = {Field notes},\n  pmid = {12345678},\n  author = {Reed, Ann}\n}\n';
+    const r = await pushThroughApi(byPmid, [keylessArticle, pmidItem], 'update');
+    expect(r.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'ZZZZ2226 and ZZZZ2227' });
+  });
+
+  it('still updates a keyless item its own DOI matches', () => {
+    const article = item('ZZZZ2228', {
+      title: 'Field notes',
+      DOI: '10.4242/notes',
+      pages: '1–5',
+      creators: [{ creatorType: 'author', firstName: 'Ann', lastName: 'Reed' }],
+    });
+    const edited = '@article{reed_field_nodate,\n  title = {Field notes},\n  doi = {10.4242/notes},\n  author = {Reed, Ann},\n  pages = {1--6}\n}\n';
+    expect(plan(edited, [article]).actions[0]).toMatchObject({ kind: 'update', itemKey: 'ZZZZ2228', changes: [{ field: 'pages' }] });
+  });
+});
