@@ -13,6 +13,7 @@ out/__mocks__/**
 dist/**
 
 # Git and editor metadata
+.git
 .git/**
 .gitignore
 .kiro/**
