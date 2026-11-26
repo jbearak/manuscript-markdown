@@ -1,4 +1,4 @@
-import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText, parseBibtex, splitAuthorString } from './bibtex-parser';
+import { BibtexEntry, bibtexGroupsAsText, bibtexNamesWithTildesAs, bibtexTexAsText, parseBibtex, splitAuthorString, tiesAsSpaces } from './bibtex-parser';
 import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, withEquationEscapes, withWordBackslashes, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
@@ -880,7 +880,7 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   const author = entry.fields.get('author');
   const institution = text('institution');
   if (author) {
-    itemData.author = parseAuthors(author);
+    itemData.author = parseAuthors(nameList(entry, 'author') ?? author);
   } else if (institution) {
     // Fallback for entries (commonly @techreport) that credit an organization
     // via `institution` instead of `author`; map to CSL literal name form.
@@ -914,7 +914,7 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
 
   // Editor (parsed like authors, supports institutional editors)
   const editor = entry.fields.get('editor');
-  if (editor) itemData.editor = parseAuthors(editor);
+  if (editor) itemData.editor = parseAuthors(nameList(entry, 'editor') ?? editor);
 
   const publisher = text('publisher');
   if (publisher) itemData.publisher = publisher;
@@ -1171,8 +1171,21 @@ export function bibtexNameParts(name: string): { first: string; von: string; las
 // Here too, where the push and the tests have always found it
 export { splitAuthorString };
 
+// A tilde written as its command, \textasciitilde{}, in a name list as
+// nameList gives it, which no tie is
+const WRITTEN_TILDE = '\uE000';
+
+/** An entry's name list, with its tildes written as commands as
+ *  WRITTEN_TILDE, which parseAuthors reads */
+const nameList = (entry: BibtexEntry, field: string) => bibtexNamesWithTildesAs(entry, field, WRITTEN_TILDE);
+
+/** A name list's names as citeproc takes them: split where BibTeX splits
+ *  the list, before a tie reads as a space, so Doe~and~Smith is one name,
+ *  and then each name's ties, unescaped `~`, as spaces, as BibTeX splits
+ *  a name's words at them and TeX shows them, in a group too. A tilde
+ *  written as its command, in a list as nameList gives it, stays a tilde. */
 export function parseAuthors(authorString: string): CiteprocName[] {
-  return splitAuthorString(authorString).map(parseAuthorName);
+  return splitAuthorString(authorString).map(name => parseAuthorName(tiesAsSpaces(name, true).split(WRITTEN_TILDE).join('~')));
 }
 
 /** One name of a list, as parseAuthors reads each. */
@@ -1223,7 +1236,7 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
     if (!keySuppressed && author) {
       // The first author's family name, or an institution's whole name, as
       // citeproc's data has it (see parseAuthors)
-      const first = parseAuthors(author)[0];
+      const first = parseAuthors(nameList(entry, 'author') ?? author)[0];
       text = first ? first.literal ?? first.family ?? '' : author.trim();
     } else if (keySuppressed) {
       // suppress-author: year only, no author name

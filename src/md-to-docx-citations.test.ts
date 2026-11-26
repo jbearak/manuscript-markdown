@@ -1079,15 +1079,27 @@ describe('BibTeX text symbols in citeproc\'s data', () => {
 describe('BibTeX ties, empty groups and \\url in names', () => {
   const names = (author: string) => buildItemData(parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b')!).author;
 
-  // Names stay as main reads them: BibTeX splits a name's words at a tie
-  // once it has split the names, and serializeBibtex would have to write
-  // them back as they were read, a later step's
+  // A tie is a space: BibTeX splits a name's words at one once it has
+  // split the names, and TeX shows one as a space, in a group too
   it.each([
-    ['ties between initials', String.raw`D.~E. Knuth`, [{ family: 'Knuth', given: 'D.~E.' }]],
-    ['ties around a von part', String.raw`Jean~de~La~Fontaine`, [{ family: 'Jean~de~La~Fontaine' }]],
-    ['a tie in a group', String.raw`{Jean~Paul} Sartre`, [{ family: 'Sartre', given: 'Jean~Paul' }]],
+    ['ties between initials', String.raw`D.~E. Knuth`, [{ family: 'Knuth', given: 'D. E.' }]],
+    ['ties around a von part', String.raw`Jean~de~La~Fontaine`, [{ family: 'La Fontaine', given: 'Jean', 'dropping-particle': 'de' }]],
+    ['a tie in a group', String.raw`{Jean~Paul} Sartre`, [{ family: 'Sartre', given: 'Jean Paul' }]],
+    ['a tie in a name in one group', String.raw`{Barnes~Noble}`, [{ literal: 'Barnes Noble' }]],
+    ['a tie after a comma', String.raw`Knuth, Donald~E.`, [{ family: 'Knuth', given: 'Donald E.' }]],
+  ])('reads %s in a name as spaces', (_name, author, expected) => {
+    expect(names(author)).toEqual(expected);
+  });
+
+  it.each([
     ['a tilde\'s accent on nothing', String.raw`X \~{}Y`, [{ family: String.raw`\~{}Y`, given: 'X' }]],
     ['a tilde\'s command', String.raw`X \textasciitilde{}Y`, [{ family: '~Y', given: 'X' }]],
+    ['a tilde\'s command by a tie', String.raw`A~B \textasciitilde{}C, D`, [{ family: 'A B ~C', given: 'D' }]],
+    ['a tilde\'s command in a group', String.raw`{Research \textasciitilde{} Development}`, [{ literal: 'Research ~ Development' }]],
+    ['a tilde\'s accent', String.raw`Mu\~{n}oz, Ana`, [{ family: 'Muñoz', given: 'Ana' }]],
+    ['a tilde\'s accent without braces', String.raw`Mu\~noz, Ana`, [{ family: 'Muñoz', given: 'Ana' }]],
+    ['two names without ties', 'Doe, Jane and Smith, John', [{ family: 'Doe', given: 'Jane' }, { family: 'Smith', given: 'John' }]],
+    ['a name with and in one group', '{Barnes and Noble}', [{ literal: 'Barnes and Noble' }]],
     ['an empty group between hyphens', String.raw`Smith-{}-Jones`, [{ family: 'Smith--Jones' }]],
     ['a \\url', String.raw`\url{a_b}, John`, [{ family: String.raw`\url{a_b}`, given: 'John' }]],
   ])('reads %s in a name as before', (_name, author, expected) => {
@@ -1700,7 +1712,6 @@ describe('names parted at an and in any case', () => {
     ['{Barnes AND Noble}', '(Barnes AND Noble, 2020)', 'Barnes AND Noble.'],
     ['Barnes {AND} Noble', '(Noble, 2020)', 'Noble, B. A.'],
     ['Anderson, Sandra', '(Anderson, 2020)', 'Anderson, S.'],
-    ['Doe~and~Smith', '(Doe~and~Smith, 2020)', 'Doe~and~Smith. (2020)'],
     ['Doe, Jane and others', '(Doe & others, 2020)', 'Doe, J., & others.'],
   ])('reads %s as before', async (author, citation, entry) => {
     const text = await exported(author);
@@ -1708,8 +1719,30 @@ describe('names parted at an and in any case', () => {
     expect(text).toContain(entry);
   });
 
+  // Ties are spaces once the names are parted, so this is one name, which
+  // BibTeX reads as First Doe, von and, Last Smith
+  it('reads Doe~and~Smith as one name', async () => {
+    const text = await exported('Doe~and~Smith');
+    expect(text).toContain('(Smith, 2020)');
+    expect(text).toContain('Smith, D. and. (2020)');
+  });
+
+  it.each([
+    ['Knuth, Donald~E.', '(Knuth, 2020)', 'Knuth, D. E. (2020)'],
+    ['Donald~E. Knuth', '(Knuth, 2020)', 'Knuth, D. E. (2020)'],
+    ['J.~K. Rowling and Doe, Jane', '(Rowling & Doe, 2020)', 'Rowling, J. K., & Doe, J. (2020)'],
+    ['{Barnes~Noble}', '(Barnes Noble, 2020)', 'Barnes Noble. (2020)'],
+    ['Mu\\~{n}oz, Ana', '(Muñoz, 2020)', 'Muñoz, A. (2020)'],
+  ])('reads the ties in %s as spaces', async (author, citation, entry) => {
+    const text = await exported(author);
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+    expect(text).not.toContain('~');
+  });
+
   it('parts an editor list the same way', () => {
     const entries = parseBibtex('@book{k,\n  editor = {Doe, Jane AND Smith, John},\n  title = {Study},\n  year = {2020}\n}\n');
     expect(buildItemData(entries.get('k')!).editor).toEqual([{ family: 'Doe', given: 'Jane' }, { family: 'Smith', given: 'John' }]);
   });
 });
+
