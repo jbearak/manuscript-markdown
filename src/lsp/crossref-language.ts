@@ -169,12 +169,15 @@ function documentLines(parse: DocumentParse, map: [number, number]): [number, nu
 function captionLines(text: string): Map<string, Array<[number, number]>> {
 	const parse = parseOf(text);
 	const lines = new Map<string, Array<[number, number]>>();
-	for (const token of parse.tokens) {
+	parse.tokens.forEach((token, at) => {
 		const label = token.type === 'paragraph_open' ? token.attrGet('id') : null;
-		if (!label || !token.map || !/^(?:fig|tbl)-/.test(label)) continue;
+		// Its text's lines, as a table's caption above the table has the
+		// table's first line in its paragraph's (see captionsRule)
+		const map = parse.tokens[at + 1]?.map;
+		if (!label || !map || !/^(?:fig|tbl)-/.test(label)) return;
 		if (!lines.has(label)) lines.set(label, []);
-		lines.get(label)!.push(documentLines(parse, token.map));
-	}
+		lines.get(label)!.push(documentLines(parse, map));
+	});
 	return lines;
 }
 
