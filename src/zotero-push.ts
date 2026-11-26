@@ -688,6 +688,81 @@ function looseText(value: string): string {
     .join('');
 }
 
+/** The Zotero text whose export, as Zotero's BibTeX export writes a text
+ *  field, is `tex`: its escapes (\$, {\textasciitilde} and the like) as the
+ *  characters, its $^{\textrm{…}}$ and $_{\textrm{…}}$ as <sup> and <sub>,
+ *  \textit, \textbf and \textsc as Zotero's markup, and the braces it puts
+ *  around capitals dropped.  Undefined for any other TeX, math included,
+ *  so only an unchanged export reads back as its value; used only to drop
+ *  a notice, never to write. */
+function textOfExport(tex: string): string | undefined {
+  const ESCAPED: Readonly<Record<string, string>> = { $: '$', '&': '&', '%': '%', '#': '#', _: '_', '{': '{', '}': '}' };
+  const COMMANDS: Readonly<Record<string, string>> = {
+    textasciitilde: '~',
+    textasciicircum: '^',
+    textbackslash: '\\',
+    textless: '<',
+    textgreater: '>',
+    textbar: '|',
+  };
+  const MARKUP: Readonly<Record<string, string>> = { textit: 'i', textbf: 'b', textsc: 'sc' };
+  // The group starting at `at`, an opening brace: its content and the
+  // index after it.
+  const group = (at: number): [string, number] | undefined => {
+    let depth = 0;
+    for (let i = at; i < tex.length; i++) {
+      if (tex[i] === '\\') i++;
+      else if (tex[i] === '{') depth++;
+      else if (tex[i] === '}' && --depth === 0) return [tex.slice(at + 1, i), i + 1];
+    }
+    return undefined;
+  };
+  let out = '';
+  for (let i = 0; i < tex.length; ) {
+    const rest = tex.slice(i);
+    const command = /^\{\\([a-z]+)\}/.exec(rest);
+    if (command && command[1] in COMMANDS) {
+      out += COMMANDS[command[1]];
+      i += command[0].length;
+      continue;
+    }
+    const script = /^\$([\^_])\{\\textrm\{/.exec(rest);
+    if (script) {
+      const inner = group(i + 2);
+      if (inner === undefined || tex[inner[1]] !== '$') return undefined;
+      const body = /^\\textrm(\{[^]*\})$/.exec(inner[0]);
+      const read = body ? textOfExport(body[1]) : undefined;
+      if (read === undefined) return undefined;
+      const tag = script[1] === '^' ? 'sup' : 'sub';
+      out += '<' + tag + '>' + read + '</' + tag + '>';
+      i = inner[1] + 1;
+      continue;
+    }
+    const markup = /^\\([a-z]+)\{/.exec(rest);
+    if (markup && markup[1] in MARKUP) {
+      const inner = group(i + markup[0].length - 1);
+      const read = inner === undefined ? undefined : textOfExport(inner[0]);
+      if (inner === undefined || read === undefined) return undefined;
+      const tag = MARKUP[markup[1]];
+      out += '<' + tag + '>' + read + '</' + tag + '>';
+      i = inner[1];
+      continue;
+    }
+    const c = tex[i];
+    if (c === '\\') {
+      if (!(tex[i + 1] in ESCAPED)) return undefined;
+      out += ESCAPED[tex[i + 1]];
+      i += 2;
+    } else if (c === '$' || c === '~' || c === '^') {
+      return undefined;
+    } else {
+      if (c !== '{' && c !== '}') out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 const MATH_OPEN = '';
 const MATH_CLOSE = '';
 
@@ -845,7 +920,7 @@ interface EntryFields {
   /** Zotero field → a value left out for its TeX or math, as looseText
    *  reads it, with its line in `notPushed`, which an update drops where
    *  Zotero's value is the same text. */
-  readonly kept: Map<string, { readonly loose: string; readonly base: string; readonly line: ZoteroFieldNotPushed }>;
+  readonly kept: Map<string, { readonly loose: string; readonly tex: string; readonly base: string; readonly line: ZoteroFieldNotPushed }>;
   readonly date?: readonly number[];
   readonly creators: Map<string, ReadCreators>;
   readonly notPushed: ZoteroFieldNotPushed[];
@@ -892,7 +967,7 @@ function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet
         // As TeX, escapes and all, where a command's group is still around
         // its argument and an escaped dollar sign is text.
         const tex = entry.texFields?.get(name) ?? bibtexFieldAsPlainText(entry, name) ?? '';
-        kept.set(target, { loose: looseText(tex), base, line });
+        kept.set(target, { loose: looseText(tex), tex, base, line });
       }
       continue;
     }
@@ -988,10 +1063,13 @@ function updateChanges(
   // A value left out for its TeX that is Zotero's own text, its markup and
   // math set aside, is no difference to report.
   const same = new Set<ZoteroFieldNotPushed>();
-  for (const [field, { loose, base, line }] of read.kept) {
+  for (const [field, { loose, tex, base, line }] of read.kept) {
     const current = typeof item[field] === 'string' ? (item[field] as string) : '';
     const caseless = CASELESS_BASES.has(baseOf(type, field) || base);
     if (current !== '' && looseFold(looseText(current), caseless) === looseFold(loose, caseless)) same.add(line);
+    // Or the TeX is what Zotero's export writes for its value, as
+    // `Cost \$5 per m$^{\textrm{2}}$` or `x{\textasciitilde}y`.
+    else if (current !== '' && textOfExport(tex) === current) same.add(line);
   }
   const notPushed = read.notPushed.filter(line => !same.has(line));
   const extra = extraFields(item);

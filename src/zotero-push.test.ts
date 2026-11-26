@@ -1850,3 +1850,37 @@ describe('push: a match by identifier while another, keyless item is the plain m
     expect(plan(edited, [article]).actions[0]).toMatchObject({ kind: 'update', itemKey: 'ZZZZ2228', changes: [{ field: 'pages' }] });
   });
 });
+
+describe('push: no notice for a title given as Zotero exports it', () => {
+  const titled = (stored: string, tex: string) =>
+    plan('@article{k,\n  title = {' + tex + '}\n}\n', [item('AAAA2222', { title: stored, citationKey: 'k' })]).actions[0];
+
+  it('is quiet on unchanged exports with escapes beside letters, math signs and scripts', () => {
+    // As Zotero's BibTeX export writes each stored title.
+    for (const [stored, tex] of [
+      ['Cost $5 per m<sup>2</sup>', 'Cost \\$5 per m$^{\\textrm{2}}$'],
+      ['x~y', 'x{\\textasciitilde}y'],
+      ['x^y', 'x{\\textasciicircum}y'],
+      ['Ratio $\\frac{a}{bc}$', 'Ratio \\${\\textbackslash}frac\\{a\\}\\{bc\\}\\$'],
+      ['Model ~ H<sub>2</sub>O', 'Model {\\textasciitilde} {H}$_{\\textrm{2}}${O}'],
+      ['<i>K</i><sub>D</sub>', '\\textit{{K}}$_{\\textrm{{D}}}$'],
+    ]) {
+      expect(titled(stored, tex)).toMatchObject({ kind: 'unchanged', notPushed: [] });
+    }
+  });
+
+  it('still reports an edit of any of them', () => {
+    for (const [stored, tex] of [
+      ['Cost $5 per m<sup>2</sup>', 'Cost \\$6 per m$^{\\textrm{2}}$'],
+      ['Cost $5 per m<sup>2</sup>', 'Cost \\$5 per m$^{\\textrm{3}}$'],
+      ['x~y', 'x{\\textasciitilde}z'],
+      ['x^y', 'x{\\textasciicircum}Y'],
+      ['Ratio $\\frac{a}{bc}$', 'Ratio $\\frac{ab}{c}$'],
+      ['Ratio $\\frac{a}{bc}$', 'Ratio \\${\\textbackslash}frac\\{ab\\}\\{c\\}\\$'],
+      ['Model ~ H<sub>2</sub>O', 'Model {\\textasciitilde} {H}$_{\\textrm{3}}${O}'],
+    ]) {
+      const a = titled(stored, tex);
+      expect(a.kind === 'unchanged' ? a.notPushed.map(n => n.field) : a.kind).toEqual(['title']);
+    }
+  });
+});
