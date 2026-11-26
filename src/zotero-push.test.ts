@@ -882,7 +882,7 @@ describe('push: an entry writes only the item it clearly owns', () => {
     // Zotero exports B as cite-B, but another item may make that key unseen
     // (generatedCitationKey is close, not exact), so push won't take B.
     const { plan: p, posts } = await pushThroughApi('@article{cite-B,\n  title = {Title B}\n}\n', [A, B]);
-    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'citation-key-conflict', detail: 'BBBB2222' });
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'extra-key-only', detail: 'BBBB2222' });
     expect(posts).toEqual([]);
     // Nor when the title, author and year agree with that item too.
     const one = item('AAAA2222', { title: 'Old title', citationKey: 'native', extra: 'Citation Key: manual' });
@@ -1305,7 +1305,7 @@ describe("push: citation keys as Zotero's export gives them", () => {
     const { plan: p, posts } = await pushThroughApi('@article{exported,\n  title = {Strata}\n}\n\n@article{other,\n  title = {Soil}\n}\n', [strata, soil]);
     expect(p.actions).toMatchObject([
       { kind: 'skip', reason: 'citation-key-conflict' },
-      { kind: 'skip', reason: 'citation-key-conflict', detail: 'BBBB2222' },
+      { kind: 'skip', reason: 'extra-key-only', detail: 'BBBB2222' },
     ]);
     expect(posts).toEqual([]);
   });
@@ -1580,6 +1580,42 @@ describe('push: round four, a skip never withdraws a claim', () => {
       const p = plan(bib, [editorial, winter]);
       expect([field, p.actions.map(a => a.kind)]).toEqual([field, ['skip', 'skip']]);
       expect(p.changed).toBe(false);
+    }
+  });
+});
+
+describe('push: round four, fjournal and exact comparison', () => {
+  it('reads journal as the abbreviation beside any non-empty fjournal, even one it can\'t write', () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', publicationTitle: 'Journal of Biology' });
+    for (const fjournal of ['\\textit{Journal of Biology}', 'Journal of $B$iology']) {
+      const p = plan(`@article{k,\n  journal = {J. Biol.},\n  fjournal = {${fjournal}}\n}\n`, [k]);
+      const action = p.actions[0];
+      expect(action.kind === 'update' ? action.patch : {}).not.toHaveProperty('publicationTitle');
+    }
+  });
+
+  it('writes a coauthor whose name changed only in case', () => {
+    const creators = [
+      { creatorType: 'author', firstName: 'Eva', lastName: 'Mcdonald' },
+      { creatorType: 'author', firstName: 'Ann', lastName: 'Reed' },
+    ];
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators });
+    const p = plan('@article{k,\n  author = {McDonald, Eva and Reed, Anne}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({
+      kind: 'update',
+      patch: { creators: [{ lastName: 'McDonald', firstName: 'Eva' }, { lastName: 'Reed', firstName: 'Anne' }] },
+    });
+  });
+
+  it('reports a formula that changed only in its spaces or font', () => {
+    const cases: Array<[string, string]> = [
+      ['Growth $\\text{ab}$', 'Growth $\\text{a b}$'],
+      ['Transform $\\sinx$', 'Transform $\\sin x$'],
+      ['Vector $\\mathit{x}$', 'Vector $\\mathbf{x}$'],
+    ];
+    for (const [entry, zotero] of cases) {
+      const p = plan(`@article{k,\n  title = {${entry}}\n}\n`, [item('AAAA2222', { title: zotero, citationKey: 'k' })]);
+      expect([entry, p.actions[0]]).toMatchObject([entry, { kind: 'unchanged', notPushed: [{ field: 'title', reason: 'math' }] }]);
     }
   });
 });

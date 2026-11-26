@@ -214,6 +214,8 @@ const SKIP_PROSE: Readonly<Record<ZoteroPushSkipReason, string>> = {
   'isbn-owned-elsewhere': "its ISBN is another item's",
   'possible-existing':
     'an item with no citation key stored has its title and names, so it may be that item; if it is, give it the citation key in Zotero',
+  'extra-key-only':
+    "only a \"Citation Key:\" line of this item's Extra gives its citation key, and push can't rule out that Zotero's export gives the key to another item too; check which item it is in Zotero, and link the entry with zotero-key",
   'generated-key':
     "Zotero's BibTeX export makes this citation key for an item with none stored, so it may be that item; if it is, give it the citation key in Zotero",
 

@@ -159,6 +159,9 @@ export type ZoteroPushSkipReason =
    *  it for one that has none (see generatedCitationKey), so it may be in
    *  the library already. */
   | 'generated-key'
+  /** Only one item's Extra line gives the entry's key, which push doesn't
+   *  take as that item's (see `decisions`). */
+  | 'extra-key-only'
   /** An item with no citation key stored has the entry's title and names,
    *  so it may be the entry's (see sameWorkWithoutKey). */
   | 'possible-existing'
@@ -662,7 +665,14 @@ function looseText(value: string): string {
   return parts
     .map((part, i) => {
       if (i % 2 === 0) return unwrap(part).replace(/\\([{}$&%#_])/g, (_m, c: string) => '' + c).replace(/[{}]/g, '').replace(//g, '');
-      let math = unwrap(part).replace(/\s+/g, '');
+      // As written, spaces and font commands too ($\sin x$ is not $\sinx$,
+      // \mathbf{x} not \mathit{x}): only the \textrm Zotero's export puts
+      // around a sub- or superscript is read away.
+      let math = part;
+      for (let before = ''; before !== math; ) {
+        before = math;
+        math = math.replace(/\\textrm\s*\{([^{}]*)\}/g, (_m, x: string) => '{' + x + '}');
+      }
       for (let before = ''; before !== math; ) {
         before = math;
         math = math.replace(/\{\{([^{}]*)\}\}/g, (_m, x: string) => '{' + x + '}');
@@ -731,15 +741,20 @@ function creatorText(c: ZoteroCreator): string {
  *  for the creator, as `Garcia Lopez` for a last name Garcia Lopez and no
  *  first name, which reads back otherwise. */
 function sameAsExported(current: readonly ZoteroCreator[], next: readonly ZoteroCreator[], texts: ReadonlyArray<string | undefined>): boolean {
-  const fold = (s: string) => foldText(s).toLowerCase();
+  // As written, case and all: a stored creator is kept only when the entry
+  // gives it unchanged, so Mcdonald corrected to McDonald is written.
+  const exact = (a: string | undefined, b: string | undefined) => foldText(a ?? '') === foldText(b ?? '');
   return (
     current.length === next.length &&
     current.every((c, i) => {
-      if (sameCreators([c], [next[i]])) return true;
+      const n = next[i];
+      const oneField = (x: ZoteroCreator) => x.name !== undefined && x.name !== '';
+      if (oneField(c) && oneField(n) && exact(c.name, n.name)) return true;
+      if (!oneField(c) && !oneField(n) && exact(c.lastName, n.lastName) && exact(c.firstName, n.firstName)) return true;
       const text = texts[i];
-      if (text === undefined || (c.name !== undefined && c.name !== '')) return false;
+      if (text === undefined || oneField(c)) return false;
       const exported = c.firstName ? (c.lastName ?? '') + ', ' + c.firstName : (c.lastName ?? '');
-      return fold(exported) === fold(text);
+      return exact(exported, text);
     })
   );
 }
@@ -826,12 +841,11 @@ interface EntryFields {
   readonly notPushed: ZoteroFieldNotPushed[];
 }
 
-/** Whether the entry gives a full journal title push reads, beside which
- *  `journal` is the abbreviation: an empty or unreadable fjournal gives
- *  none. */
+/** Whether the entry gives a full journal title, beside which `journal` is
+ *  the abbreviation.  Any fjournal but an empty one says so, even one push
+ *  can't write, as one in TeX: it still says what journal means. */
 function hasFullJournal(entry: BibtexEntry): boolean {
-  const read = readText(entry, 'fjournal');
-  return read !== undefined && 'value' in read;
+  return (entry.fields.get('fjournal') ?? '').trim() !== '';
 }
 
 /** `repeated`: the fields the entry gives more than once, which are never
@@ -1380,6 +1394,7 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         // A key the export makes for an item with none stored only
         // suggests it: Zotero's own reading may differ.
         if (claims.length === 1 && claims[0].source === 'generated') return skip(entryKey, 'generated-key', claims[0].item);
+        if (claims.length === 1 && claims[0].source === 'extra') return skip(entryKey, 'extra-key-only', claims[0].item);
         if (claims.length === 1) return skip(entryKey, 'citation-key-conflict', claims[0].item);
         // Nor does a create depend on that key being Zotero's exactly: an
         // item with no key stored and the entry's title and names, and no
