@@ -876,16 +876,18 @@ describe('push: an entry writes only the item it clearly owns', () => {
     expect(posts).toEqual([]);
   });
 
-  it("reads a key only an item's Extra gives as that item's, as Zotero's export does", async () => {
-    // The matcher reads B by the key in its field, so cite-B finds nothing;
-    // Zotero exports B as cite-B.
+  it("leaves alone an entry whose key only one item's Extra gives", async () => {
+    // The matcher reads B by the key in its field, so cite-B finds nothing.
+    // Zotero exports B as cite-B, but another item may make that key unseen
+    // (generatedCitationKey is close, not exact), so push won't take B.
     const { plan: p, posts } = await pushThroughApi('@article{cite-B,\n  title = {Title B}\n}\n', [A, B]);
-    expect(p.actions[0]).toMatchObject({ kind: 'unchanged', itemKey: 'BBBB2222' });
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'citation-key-conflict', detail: 'BBBB2222' });
     expect(posts).toEqual([]);
-    // One item, its field and Extra different: the export's key is its own.
+    // Nor when the title, author and year agree with that item too.
     const one = item('AAAA2222', { title: 'Old title', citationKey: 'native', extra: 'Citation Key: manual' });
     const edited = await pushThroughApi('@article{manual,\n  title = {New title}\n}\n', [one]);
-    expect(edited.plan.actions[0]).toMatchObject({ kind: 'update', itemKey: 'AAAA2222', changes: [{ field: 'title', to: 'New title' }] });
+    expect(edited.plan.actions[0]).toMatchObject({ kind: 'skip' });
+    expect(edited.posts).toEqual([]);
   });
 
   it("doesn't count an item's key in its field and its Extra as two claims", async () => {
@@ -1302,7 +1304,7 @@ describe("push: citation keys as Zotero's export gives them", () => {
     const { plan: p, posts } = await pushThroughApi('@article{exported,\n  title = {Strata}\n}\n\n@article{other,\n  title = {Soil}\n}\n', [strata, soil]);
     expect(p.actions).toMatchObject([
       { kind: 'skip', reason: 'citation-key-conflict' },
-      { kind: 'unchanged', itemKey: 'BBBB2222' },
+      { kind: 'skip', reason: 'citation-key-conflict', detail: 'BBBB2222' },
     ]);
     expect(posts).toEqual([]);
   });
@@ -1478,7 +1480,7 @@ describe('push: round three of review', () => {
     expect(same.actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
   });
 
-  it("takes a weak match for the item whose Extra alone gives the entry's key", async () => {
+  it("doesn't take a weak match for the item whose Extra alone gives the entry's key", async () => {
     const doe = item('AAAA2222', {
       title: 'Tidal basins',
       citationKey: 'doe2020',
@@ -1489,10 +1491,26 @@ describe('push: round three of review', () => {
       creators: [{ creatorType: 'author', firstName: 'Ann', lastName: 'Doe' }],
     });
     const bib = '@article{manual,\n  title = {Tidal basins},\n  author = {Doe, Ann},\n  year = {2020},\n  pages = {21--30}\n}\n';
-    const unchanged = await pushThroughApi(bib, [doe]);
-    expect(unchanged.plan.actions[0]).toMatchObject({ kind: 'unchanged', itemKey: 'AAAA2222' });
     const edited = await pushThroughApi(bib.replace('21--30', '21--31'), [doe]);
-    expect(edited.plan.actions[0]).toMatchObject({ kind: 'update', changes: [{ field: 'pages', to: '21–31' }] });
+    expect(edited.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'weak-match' });
+    expect(edited.posts).toEqual([]);
+    // Finding 1 of the third review: A's export key, which push can't make
+    // (Ħ), is B's Extra line, and A matches B weakly.
+    const a = item('AAAA2222', { title: 'Winter notes', publicationTitle: 'Journal of Field Studies', pages: '10–20', creators: [{ creatorType: 'author', firstName: '', lastName: 'Ħasan Lopez' }] });
+    const b = item('BBBB2222', {
+      title: 'Winter migrations',
+      citationKey: 'winter-migrations',
+      extra: 'Citation Key: hasan_lopez_winter_nodate',
+      publicationTitle: 'Journal of Field Studies',
+      pages: '1–2',
+      creators: [{ creatorType: 'author', firstName: 'Ada', lastName: 'Lopez' }],
+    });
+    const exported = '@article{hasan_lopez_winter_nodate,\n  title = {Winter notes},\n  journal = {Journal of Field Studies},\n  author = {Ħasan Lopez},\n  pages = {10--20}\n}\n';
+    for (const items of [[a, b], [a, { ...b, title: 'Summer migrations', publicationTitle: 'Other Journal' }]]) {
+      const r = await pushThroughApi(exported, items as ZoteroItemJson[]);
+      expect(r.plan.actions[0].kind).toBe('skip');
+      expect(r.posts).toEqual([]);
+    }
   });
 
   it("reads Zotero's swung dash, tilde and circumflex as its export writes them", () => {

@@ -1343,26 +1343,12 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     return read !== undefined && 'value' in read ? validDoi(read.value) : undefined;
   };
 
-  // The matcher reads an item's Citation Key field over its Extra line, and
-  // Zotero's export the other way: an entry the matcher finds nothing for,
-  // whose key is one item's Extra line and no one else's, is that item.
-  // So is one the matcher found only weakly, by title, author and year or
-  // by URL, when that is the same item.
-  const decisions = input.decisions.map((decision): ZoteroLinkDecision => {
-    const weak = decision.outcome === 'update' && !STRONG_TIERS.has(decision.tier);
-    if (decision.outcome !== 'unmatched' && !weak) return decision;
-    const claims = keyClaims.get(decision.entry.key) ?? [];
-    const owner = claims.length === 1 && claims[0].source === 'extra' ? input.items.get(claims[0].item) : undefined;
-    if (owner === undefined || (weak && decision.target.key !== owner.key)) return decision;
-    return {
-      outcome: 'update',
-      entry: decision.entry,
-      tier: 'citation-key',
-      evidence: ['citation-key'],
-      target: { key: owner.key, uri: owner.uri ?? '' },
-      additions: [],
-    };
-  });
+  // An entry whose key only one item's Extra line gives is never taken for
+  // that item: the key Zotero's export makes for an item with none stored
+  // (generatedCitationKey) is followed closely, not exactly, so another
+  // item may answer to it unseen.  It is reported instead (see the
+  // unmatched case below).
+  const decisions = input.decisions;
 
   // First pass: what each entry is, on its own.
   const candidates: Candidate[] = decisions.map((decision): Candidate => {
