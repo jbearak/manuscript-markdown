@@ -584,7 +584,7 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
   // John\}, is one BibTeX counts as a group's and this list's reader as a
   // character, so where its names part is unclear.
   if (escapedBraceOutsideGroups(raw)) return 'unreadable';
-  const list = splitAuthorString(raw, true);
+  const list = splitAuthorString(raw);
   if (list.length === 0 || !list.every(readableName)) return 'unreadable';
   // Math, as in a title (see readText), loses its groups as a name's part;
   // counted as written, where an escaped dollar sign is text.
