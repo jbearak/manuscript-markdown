@@ -1765,10 +1765,6 @@ describe('a name list ending and others', () => {
     ['ieee', 'Doe, Jane and Smith, John and others', '[1]', 'J. Doe, J. Smith, et al., Study.'],
     ['vancouver', 'Doe, Jane and others', '(1)', 'Doe J et al. Study.'],
     ['vancouver', 'Doe, Jane and Smith, John and others', '(1)', 'Doe J, Smith J, et al. Study.'],
-    // APA's bibliography sets et-al-use-last, so the name is dropped
-    ['apa', 'Doe, Jane and others', '(Doe, 2020)', 'Doe, J. (2020).'],
-    ['apa', 'Doe, Jane and Smith, John and others', '(Doe & Smith, 2020)', 'Doe, J., & Smith, J. (2020).'],
-    ['apa', 'Doe, Jane and Smith, John and Roe, Rick and others', '(Doe et al., 2020)', 'Doe, J., Smith, J., & Roe, R. (2020).'],
   ])('in %s, reads %s with no name others', async (style, author, citation, entry) => {
     const { text } = await exported(style, book(author));
     expect(text).toContain(citation);
@@ -1776,13 +1772,40 @@ describe('a name list ending and others', () => {
     expect(text).not.toContain('others');
   });
 
-  it.each(['apa', 'chicago-author-date', 'ieee'])('in %s, reads others alone as no author', async (style) => {
+  // APA's bibliography sets et-al-use-last, so others is a name, as on main
+  it.each([
+    ['Doe, Jane and others', '(Doe & others, 2020)', 'Doe, J., & others. (2020).'],
+    ['Doe, Jane and Smith, John and others', '(Doe et al., 2020)', 'Doe, J., Smith, J., & others. (2020).'],
+    ['others', '(others, 2020)', 'others. (2020).'],
+  ])('in apa, reads %s as before', async (author, citation, entry) => {
+    const { text } = await exported('apa', book(author));
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+  });
+
+  // Only the name others and nothing else ends a list so, as in BibTeX
+  it.each([
+    ['Doe, Jane and van others', '(Doe and others 2020)', 'Doe, Jane, and van others. 2020.'],
+    ['Doe, Jane and others, Jr., Sam', '(Doe and others 2020)', 'Doe, Jane, and Sam others Jr. 2020.'],
+  ])('in chicago-author-date, reads %s as names', async (author, citation, entry) => {
+    const { text } = await exported('chicago-author-date', book(author));
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+    expect(text).not.toContain('et al.');
+  });
+
+  it('reads others alone as no author without citeproc', () => {
+    const entries = parseBibtex(book('others'));
+    expect(generateFallbackText(['k'], entries)).toBe('(k 2020)');
+    expect(generateFallbackText(['k'], parseBibtex(book('Doe, Jane and others')))).toBe('(Doe 2020)');
+  });
+
+  it.each(['chicago-author-date', 'ieee'])('in %s, reads others alone as no author', async (style) => {
     const { text } = await exported(style, book('others'));
     expect(text).not.toContain('others');
   });
 
   it.each([
-    ['apa', 'In J. Doe (Ed.), Book.'],
     ['chicago-author-date', 'In Book, edited by Jane Doe et al.'],
     ['ieee', 'in Book, J. Doe et al., Eds.'],
   ])('in %s, reads an editor list so', async (style, expected) => {

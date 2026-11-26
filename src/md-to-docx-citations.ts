@@ -411,10 +411,10 @@ function withNamesAsRead(item: CiteprocItemData): CiteprocItemData {
 }
 
 /** Whether `name`, the last of a list, is BibTeX's `others`, which ends a
- *  list whose other names it doesn't give: a family name `others` alone,
- *  not {others}, which is a literal */
-export function isOthersName(name: CiteprocName): boolean {
-  return name.family === 'others' && name.given === undefined && name.literal === undefined;
+ *  list whose other names it doesn't give: the name `others` and nothing
+ *  else, not {others}, which is a literal, nor van others or others, Jr. */
+function isOthersName(name: CiteprocName): boolean {
+  return name.family === 'others' && Object.keys(name).length === 1;
 }
 
 // A name whose dropping particle is this, and no other part, citeproc-js
@@ -427,18 +427,15 @@ const ET_AL_NAME: CiteprocName = { family: '', 'dropping-particle': 'et al.' };
 
 /** `item` with a name list ending `and others` (see isOthersName) as
  *  citeproc-js prints one cut short: with the style's et-al term after the
- *  names before it. A style that sets et-al-use-last, as APA's
- *  bibliography, would join them with its ellipsis, which puts the last
- *  name given where the list's last author goes, so there the `others`
- *  name is dropped, and the list is the names it gives. A list of `others`
- *  alone is no names. Only citeproc's copy reads it so: the copy a Zotero
- *  field holds keeps the name, as BibTeX wrote it. */
-function withOthersAsEtAl(item: CiteprocItemData, useLast: boolean): CiteprocItemData {
+ *  names before it. A list of `others` alone is no names. Only citeproc's
+ *  copy reads it so: the copy a Zotero field holds keeps the name, as
+ *  BibTeX wrote it. Not for a style that sets et-al-use-last, as APA's
+ *  bibliography does (see buildEngine). */
+function withOthersAsEtAl(item: CiteprocItemData): CiteprocItemData {
   const asEtAl = (names: CiteprocName[] | undefined) => {
     if (!names || names.length === 0 || !isOthersName(names[names.length - 1])) return names;
     const given = names.slice(0, -1);
-    if (given.length === 0) return undefined;
-    return useLast ? given : [...given, { ...ET_AL_NAME }];
+    return given.length === 0 ? undefined : [...given, { ...ET_AL_NAME }];
   };
   const read = { ...item };
   for (const role of ['author', 'editor'] as const) {
@@ -457,11 +454,17 @@ function buildEngine(
   const citeproc = CSL;
   if (!citeproc) return undefined;
 
-  const useLast = /\bet-al-use-last\s*=\s*["']true["']/.test(styleXml);
+  // A style that sets et-al-use-last joins a list ending ET_AL_NAME with
+  // its ellipsis before the last name given, which reads as the list's last
+  // author, and dropping `others` would cite fewer authors than the list
+  // has, as APA's (Doe & Smith, 2020) for Doe, Smith and others, where
+  // (Doe et al., 2020) is right. So such a style, as APA, still takes
+  // `others` as a name, as it always has.
+  const etAl = !/\bet-al-use-last\s*=\s*["']true["']/.test(styleXml);
   // Build CSL-JSON item map keyed by citation key
   const items = new Map<string, CiteprocItemData>();
   for (const [key, entry] of entries) {
-    const itemData = withNamesAsRead(withOthersAsEtAl(buildItemData(entry), useLast));
+    const itemData = withNamesAsRead(etAl ? withOthersAsEtAl(buildItemData(entry)) : buildItemData(entry));
     itemData.id = key;
     items.set(key, itemData);
   }
@@ -1282,12 +1285,16 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
     const year = entry.fields.get('year');
     const keySuppressed = suppressAuthorKeys?.has(key);
 
+    const list = author ? nameList(entry, 'author') : undefined;
+    const names = author ? parseAuthors(list?.names ?? author, list?.tilde) : [];
+    // A list of `others` alone gives no names (see withOthersAsEtAl)
+    const named = author && !(names.length === 1 && isOthersName(names[0]));
+
     let text: string;
-    if (!keySuppressed && author) {
+    if (!keySuppressed && named) {
       // The first author's family name, or an institution's whole name, as
       // citeproc's data has it (see parseAuthors)
-      const list = nameList(entry, 'author');
-      const first = parseAuthors(list?.names ?? author, list?.tilde)[0];
+      const first = names[0];
       text = first ? first.literal ?? first.family ?? '' : author.trim();
     } else if (keySuppressed) {
       // suppress-author: year only, no author name
