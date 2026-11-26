@@ -79,6 +79,18 @@ describe('parseDta', () => {
     expect(html).toContain('<tr><td data-mm-kind="label">No</td><td data-mm-kind="missing"><span class="mm-missing-value">Don\'t know</span>');
   });
 
+  it('shows a %w.0g number with the digits its width has room for', () => {
+    const data = writeDta({
+      variables: [
+        { name: 'narrow', type: 'double', format: '%9.0g', values: [1 / 3] },
+        { name: 'wide', type: 'double', format: '%21.0g', values: [1 / 3] },
+      ],
+    });
+    const html = parseDta(data, { path: 'data.dta' });
+    expect(html).toContain('data-mm-format="%9.0g">0.3333333</td>');
+    expect(html).toContain('data-mm-format="%21.0g">0.333333333333333</td>');
+  });
+
   it('shows %tc values by their mask', () => {
     const t = Date.UTC(2010, 0, 20, 15, 15, 30, 987) - Date.UTC(1960, 0, 1);
     const masks = [
