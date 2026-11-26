@@ -26,3 +26,36 @@ export async function fastestRunAsync(work: () => Promise<unknown>, samples = 3)
   }
   return fastest;
 }
+
+/**
+ * How many times as long `time` takes on sixteen times `size` as on `size`,
+ * where `time` gives how long some work takes on an input of a size, as the
+ * fastest of a few runs. Work that takes linear time takes about 16 times as
+ * long, or less where a fixed cost counts at the smaller size, and work that
+ * takes time in the square of the size about 256 times. Tests want under
+ * GROWTH_LIMIT, four times the linear ratio and a fourth of the quadratic
+ * one. That leaves a busy machine's slower larger runs room the earlier
+ * tests didn't, which timed four times the size and wanted under 8, the
+ * geometric middle of 4 and 16, or twice the size and wanted under 3. The
+ * first call warms up
+ */
+export function growthOverSixteenfold(time: (size: number) => number, size: number): number {
+  time(size);
+  const small = time(size);
+  return logGrowth(time(16 * size) / small);
+}
+
+/** As growthOverSixteenfold, for `time` that is async */
+export async function growthOverSixteenfoldAsync(time: (size: number) => Promise<number>, size: number): Promise<number> {
+  await time(size);
+  const small = await time(size);
+  return logGrowth(await time(16 * size) / small);
+}
+
+/** The limit on growthOverSixteenfold of work that takes linear time */
+export const GROWTH_LIMIT = 64;
+
+function logGrowth(growth: number): number {
+  if (process.env.LOG_TIMING_GROWTH) console.error('growth over sixteenfold: ' + growth.toFixed(1));
+  return growth;
+}

@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { wrapBareLatexEnvironments, wrapBareLatexEnvironmentsWithLines, DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
-import { fastestRun } from './test-timing';
+import { fastestRun, growthOverSixteenfold, GROWTH_LIMIT } from './test-timing';
 import JSZip from 'jszip';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
@@ -188,9 +188,7 @@ describe('wrapBareLatexEnvironments in time linear in the text', () => {
 			const text = unit.repeat(n);
 			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text));
 		};
-		time(4000);
-		const small = time(4000);
-		expect(time(16000) / small).toBeLessThan(8);
+		expect(growthOverSixteenfold(time, 1000)).toBeLessThan(GROWTH_LIMIT);
 	}, 60000);
 });
 
@@ -697,9 +695,7 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 			const text = unit.repeat(n);
 			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text + '\n' + env));
 		};
-		time(4000);
-		const small = time(4000);
-		expect(time(16000) / small).toBeLessThan(8);
+		expect(growthOverSixteenfold(time, 1000)).toBeLessThan(GROWTH_LIMIT);
 	}, 60000);
 
 	test('wraps a text of a run of dollar signs after a backslash', () => {
@@ -710,9 +706,7 @@ describe('wrapBareLatexEnvironments with stray fences in time linear in the text
 			return fastestRun(() => wrapBareLatexEnvironmentsWithLines(text));
 		};
 		expect(wrapBareLatexEnvironments('\\' + '$'.repeat(9) + '\n' + env)).toContain(D + '\\begin{equation}');
-		time(32000);
-		const small = time(32000);
-		expect(time(128000) / small).toBeLessThan(8);
+		expect(growthOverSixteenfold(time, 8000)).toBeLessThan(GROWTH_LIMIT);
 	}, 60000);
 });
 
@@ -763,9 +757,7 @@ describe('a paragraph of many openers around a bare environment, which no rule o
 				const input = text(n);
 				return fastestRun(() => work(input));
 			};
-			time(8000);
-			const small = time(8000);
-			expect(time(32000) / small).toBeLessThan(8);
+			expect(growthOverSixteenfold(time, 2000)).toBeLessThan(GROWTH_LIMIT);
 		}
 	}, 60000);
 });
@@ -778,8 +770,8 @@ describe('every shape of the probes, many times in each layout, in time linear i
 	// preview's port, goes many times into one paragraph, with an
 	// environment after each, into one after fences in code spans, whose
 	// environments the paragraph's own read wraps, into a paragraph of each,
-	// and into list items in a quote, 4,000 times and 16,000. Through the
-	// wrapper, each takes less than 8 times as long at four times the size,
+	// and into list items in a quote, 1,000 times and 16,000. Through the
+	// wrapper, each grows as linear work does (see growthOverSixteenfold),
 	// and so do the orientation scan the language server runs after each edit
 	// and the preview's wrapper, which run the wrapper, where the paragraph's
 	// read wraps, which runs every read of the wrapper's and the preview's
@@ -846,9 +838,7 @@ describe('every shape of the probes, many times in each layout, in time linear i
 				}
 				return fastest;
 			};
-			work(make(4000));
-			const small = time(4000);
-			expect(time(16000) / small).toBeLessThan(8);
+			expect(growthOverSixteenfold(time, 1000)).toBeLessThan(GROWTH_LIMIT);
 		}
 	};
 
@@ -873,9 +863,7 @@ describe('every shape of the probes, many times in each layout, in time linear i
 				const text = unit.repeat(n);
 				return fastestRun(() => work(text), 1);
 			};
-			again(4000);
-			const small = Math.min(again(4000), again(4000));
-			expect(Math.min(again(16000), again(16000)) / small).toBeLessThan(8);
+			expect(growthOverSixteenfold(n => Math.min(again(n), again(n)), 1000)).toBeLessThan(GROWTH_LIMIT);
 		}
 	}, 120000);
 
@@ -1346,9 +1334,7 @@ describe('bare environments in quotes, alerts and list items in time linear in t
 				}
 				return fastest;
 			};
-			work(make(4000));
-			const small = time(4000);
-			expect(time(16000) / small).toBeLessThan(8);
+			expect(growthOverSixteenfold(time, 1000)).toBeLessThan(GROWTH_LIMIT);
 		}
 	};
 	const rows = containers.flatMap(([where, contain]) => shapes.map(([what, shape]) => [what, where, contain, shape] as const));
