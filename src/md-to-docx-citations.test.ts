@@ -1674,3 +1674,42 @@ describe('BibTeX names with a von part or a Jr part', () => {
     expect(xml).toContain('{"family":"van Gogh","given":"Vincent"}');
   });
 });
+
+// BibTeX parts a name list at an and in any case, outside every group and
+// between spaces, as `bibtex` itself reads it
+describe('names parted at an and in any case', () => {
+  const exported = async (author: string): Promise<string> => {
+    const bibtex = '@book{k,\n  author = {' + author + '},\n  title = {Study},\n  year = {2020}\n}\n';
+    const { docx } = await convertMdToDocx('---\ncsl: apa\n---\n\nSee [@k].\n', { bibtex });
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('').replace(/&amp;/g, '&');
+  };
+
+  it.each([
+    ['Barnes AND Noble', '(Barnes & Noble, 2020)', 'Barnes, & Noble.'],
+    ['Barnes And Noble', '(Barnes & Noble, 2020)', 'Barnes, & Noble.'],
+    ['Doe, Jane And Smith, John', '(Doe & Smith, 2020)', 'Doe, J., & Smith, J.'],
+    ['Doe, Jane AND Smith, John', '(Doe & Smith, 2020)', 'Doe, J., & Smith, J.'],
+  ])('reads %s as two names in the citation and the bibliography', async (author, citation, entry) => {
+    const text = await exported(author);
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+  });
+
+  it.each([
+    ['{Barnes AND Noble}', '(Barnes AND Noble, 2020)', 'Barnes AND Noble.'],
+    ['Barnes {AND} Noble', '(Noble, 2020)', 'Noble, B. A.'],
+    ['Anderson, Sandra', '(Anderson, 2020)', 'Anderson, S.'],
+    ['Doe~and~Smith', '(Doe~and~Smith, 2020)', 'Doe~and~Smith. (2020)'],
+    ['Doe, Jane and others', '(Doe & others, 2020)', 'Doe, J., & others.'],
+  ])('reads %s as before', async (author, citation, entry) => {
+    const text = await exported(author);
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+  });
+
+  it('parts an editor list the same way', () => {
+    const entries = parseBibtex('@book{k,\n  editor = {Doe, Jane AND Smith, John},\n  title = {Study},\n  year = {2020}\n}\n');
+    expect(buildItemData(entries.get('k')!).editor).toEqual([{ family: 'Doe', given: 'Jane' }, { family: 'Smith', given: 'John' }]);
+  });
+});

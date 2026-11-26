@@ -1,4 +1,4 @@
-import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText, parseBibtex } from './bibtex-parser';
+import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText, parseBibtex, splitAuthorString } from './bibtex-parser';
 import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, withEquationEscapes, withWordBackslashes, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
@@ -990,28 +990,6 @@ function mapBibtexTypeToCSL(bibtexType: string): string {
   }
 }
 
-/** Split an author string on ` and ` while respecting brace depth.
- *  `anyCase`: at AND and And too, as BibTeX does (push reads names so); the
- *  DOCX export splits at a lowercase and only, as it always has. */
-export function splitAuthorString(authorString: string, anyCase = false): string[] {
-  const result: string[] = [];
-  let depth = 0;
-  let start = 0;
-  const sep = ' and ';
-  for (let i = 0; i < authorString.length; i++) {
-    if (authorString[i] === '{') { depth++; continue; }
-    if (authorString[i] === '}') { depth = Math.max(0, depth - 1); continue; }
-    const at = authorString.slice(i, i + sep.length);
-    if (depth === 0 && (anyCase ? at.toLowerCase() : at) === sep) {
-      result.push(authorString.slice(start, i).trim());
-      i += sep.length - 1;
-      start = i + 1;
-    }
-  }
-  result.push(authorString.slice(start).trim());
-  return result.filter(s => s.length > 0);
-}
-
 // Where BibTeX splits a name: at a comma, and into its words at whitespace
 // or a hyphen, one character at a time, but not at a no-break space
 const NAME_COMMA = /,/y;
@@ -1189,6 +1167,9 @@ export function bibtexNameParts(name: string): { first: string; von: string; las
   }
   return { first: runs(0, start), von: runs(start, end), last: runs(end, count), jr: '' };
 }
+
+// Here too, where the push and the tests have always found it
+export { splitAuthorString };
 
 export function parseAuthors(authorString: string): CiteprocName[] {
   return splitAuthorString(authorString).map(parseAuthorName);

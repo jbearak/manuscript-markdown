@@ -252,6 +252,30 @@ export function bibtexFieldAsPlainText(entry: BibtexEntry, fieldName: string): s
   return tex.replace(/\\([{}\\$])|[{}]/g, (_brace, escaped: string | undefined) => escaped ?? '');
 }
 
+/** A name list, as an author or editor field holds one, split into its
+ *  names as BibTeX splits it: at an `and` in any case (and, AND, And)
+ *  between spaces, outside every group. So {Barnes AND Noble} and
+ *  Barnes {AND} Noble are one name each, and so is Doe~and~Smith, whose
+ *  ties aren't spaces. The parsed value has its whitespace run together
+ *  into single spaces already. */
+export function splitAuthorString(authorString: string): string[] {
+  const result: string[] = [];
+  let depth = 0;
+  let start = 0;
+  const sep = ' and ';
+  for (let i = 0; i < authorString.length; i++) {
+    if (authorString[i] === '{') { depth++; continue; }
+    if (authorString[i] === '}') { depth = Math.max(0, depth - 1); continue; }
+    if (depth === 0 && authorString.slice(i, i + sep.length).toLowerCase() === sep) {
+      result.push(authorString.slice(start, i).trim());
+      i += sep.length - 1;
+      start = i + 1;
+    }
+  }
+  result.push(authorString.slice(start).trim());
+  return result.filter(s => s.length > 0);
+}
+
 /** A part of a name as plain text, as Zotero stores it: every command the
  *  parser reads in other fields read too, as \o in Flat{\o}, which it leaves
  *  in names (see decodeBibtexText), and then its groups' braces dropped and
