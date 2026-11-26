@@ -18,6 +18,7 @@ import {
   type ZoteroFetch,
 } from './zotero-local-api';
 import { resolveCollection, runZoteroCli } from './zotero-cli';
+import { parseAuthors } from './md-to-docx-citations';
 
 // A slice of Zotero 10's /api/schema: the types these tests use.
 const field = (name: string, baseField?: string) => (baseField ? { field: name, baseField } : { field: name });
@@ -1351,5 +1352,70 @@ describe('push: ISBNs, as a work and its volumes and chapters share them', () =>
     // 0306406152 is the ISBN-10 of 9780306406157; 0306406153 is no ISBN.
     const p = plan('@book{volume,\n  title = {Volume One revised},\n  isbn = {0306406153}\n}\n', [vol, other]);
     expect(p.actions[0]).toMatchObject({ kind: 'update' });
+  });
+});
+
+describe('push: names and text, as BibTeX and Zotero write them', () => {
+  it('parts names at an and between spaces before a tie reads as a space', () => {
+    const p = plan('@article{k,\n  author = {Doe~and~Smith}\n}\n', []);
+    expect(p.actions[0]).toMatchObject({ kind: 'create', data: { creators: [{ creatorType: 'author', lastName: 'and Smith', firstName: 'Doe' }] } });
+  });
+
+  it("leaves the DOCX export's reading of AND as it was", () => {
+    expect(parseAuthors('Barnes AND Noble')).toEqual([{ family: 'Noble', given: 'Barnes AND' }]);
+  });
+
+  it("keeps a two-field name with no first name, as Zotero's export writes it", () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators: [{ creatorType: 'author', firstName: '', lastName: 'Garcia Lopez' }] });
+    expect(plan('@article{k,\n  author = {Garcia Lopez}\n}\n', [k]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+  });
+
+  it('reports a formula that changed, without writing it', () => {
+    const cases: Array<[string, string]> = [
+      ['E = mc$_{2}$', 'E = mc<sup>2</sup>'],
+      ['Average $x^12$', 'Average $x^{12}$'],
+    ];
+    for (const [entry, zotero] of cases) {
+      const p = plan(`@article{k,\n  title = {${entry}}\n}\n`, [item('AAAA2222', { title: zotero, citationKey: 'k' })]);
+      expect([entry, p.actions[0]]).toMatchObject([entry, { kind: 'unchanged', notPushed: [{ field: 'title', reason: 'math' }] }]);
+    }
+  });
+
+  it('writes a name with escaped dollar signs', () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators: [{ creatorType: 'author', name: 'Rates $3 and $8' }] });
+    expect(plan('@article{k,\n  author = {{Rates \\$5 and \\$10}}\n}\n', [k]).actions[0]).toMatchObject({
+      kind: 'update',
+      patch: { creators: [{ creatorType: 'author', name: 'Rates $5 and $10' }] },
+    });
+  });
+
+  it("reads Zotero's export of its entities and nocase spans as the same text", () => {
+    const amp = item('AAAA2222', { title: 'Cats &amp; dogs', citationKey: 'k' });
+    expect(plan('@article{k,\n  title = {Cats \\&amp; dogs}\n}\n', [amp]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+    const nasa = item('AAAA2222', { title: 'The <span class="nocase">NASA</span> report', citationKey: 'k' });
+    const exported = '@article{k,\n  title = {The {\\textless}span class="nocase"{\\textgreater}{NASA}{\\textless}/span{\\textgreater} report}\n}\n';
+    expect(plan(exported, [nasa]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
+  });
+
+  it('reports an editor list that drops a series editor', () => {
+    const creators = [
+      { creatorType: 'seriesEditor', firstName: 'Sue', lastName: 'Lane' },
+      { creatorType: 'editor', firstName: 'Ed', lastName: 'Doe' },
+    ];
+    const k = item('AAAA2222', { itemType: 'book', title: 'T', citationKey: 'k', creators });
+    expect(plan('@book{k,\n  editor = {Doe, Ed}\n}\n', [k]).actions[0]).toMatchObject({
+      kind: 'unchanged',
+      notPushed: [{ field: 'editor', reason: 'series-editors' }],
+    });
+  });
+
+  it('leaves a lone journal alone that could be either the full title or the abbreviation', () => {
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', publicationTitle: 'Journal of Biology', journalAbbreviation: 'J. Biol.' });
+    expect(plan('@article{k,\n  journal = {J. Biol. Sci.}\n}\n', [k]).actions[0]).toMatchObject({
+      kind: 'unchanged',
+      notPushed: [{ field: 'journal', reason: 'ambiguous-journal' }],
+    });
+    // Zotero's full title, as written, is no change.
+    expect(plan('@article{k,\n  journal = {Journal of Biology}\n}\n', [k]).actions[0]).toMatchObject({ kind: 'unchanged', notPushed: [] });
   });
 });

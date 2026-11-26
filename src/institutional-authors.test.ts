@@ -45,12 +45,14 @@ describe('splitAuthorString', () => {
     expect(splitAuthorString('Smith, John')).toEqual(['Smith, John']);
   });
 
-  it('splits on "and" in any case, as BibTeX does', () => {
-    expect(splitAuthorString('Doe, Jane AND Smith, John And {Johnson AND Johnson}')).toEqual([
+  it('splits on "and" in any case only when asked, as push does', () => {
+    expect(splitAuthorString('Doe, Jane AND Smith, John And {Johnson AND Johnson}', true)).toEqual([
       'Doe, Jane',
       'Smith, John',
       '{Johnson AND Johnson}',
     ]);
+    // The DOCX export reads them as it always has.
+    expect(splitAuthorString('Barnes AND Noble')).toEqual(['Barnes AND Noble']);
   });
 
   it('handles nested braces', () => {

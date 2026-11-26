@@ -990,18 +990,19 @@ function mapBibtexTypeToCSL(bibtexType: string): string {
   }
 }
 
-/** Split an author string on ` and ` while respecting brace depth. */
-export function splitAuthorString(authorString: string): string[] {
+/** Split an author string on ` and ` while respecting brace depth.
+ *  `anyCase`: at AND and And too, as BibTeX does (push reads names so); the
+ *  DOCX export splits at a lowercase and only, as it always has. */
+export function splitAuthorString(authorString: string, anyCase = false): string[] {
   const result: string[] = [];
   let depth = 0;
   let start = 0;
-  // BibTeX reads `and` in any case (bibtex.web, "Name-process ... and"),
-  // so Doe AND Smith is two names. (The parser has run spaces together.)
   const sep = ' and ';
   for (let i = 0; i < authorString.length; i++) {
     if (authorString[i] === '{') { depth++; continue; }
     if (authorString[i] === '}') { depth = Math.max(0, depth - 1); continue; }
-    if (depth === 0 && authorString.slice(i, i + sep.length).toLowerCase() === sep) {
+    const at = authorString.slice(i, i + sep.length);
+    if (depth === 0 && (anyCase ? at.toLowerCase() : at) === sep) {
       result.push(authorString.slice(start, i).trim());
       i += sep.length - 1;
       start = i + 1;
@@ -1190,24 +1191,26 @@ export function bibtexNameParts(name: string): { first: string; von: string; las
 }
 
 export function parseAuthors(authorString: string): CiteprocName[] {
-  const authors = splitAuthorString(authorString);
-  return authors.map(author => {
-    // Institutional/corporate author: one group (after BibTeX parser
-    // stripped the outer field braces, institutional names arrive as {Name})
-    if (isOneGroup(author)) return { literal: author.slice(1, -1) };
-    // A group is one word, so Ludwig {van Beethoven}'s last part is van
-    // Beethoven. The von part is citeproc's dropping particle, as pandoc
-    // reads it, and the Jr part its suffix.
-    const { first, von, last, jr } = bibtexNameParts(author);
-    const name: CiteprocName = { family: namePartAsShown(last) };
-    const given = namePartAsShown(first);
-    const particle = namePartAsShown(von);
-    const suffix = namePartAsShown(jr);
-    if (given) name.given = given;
-    if (particle) name['dropping-particle'] = particle;
-    if (suffix) name.suffix = suffix;
-    return name;
-  });
+  return splitAuthorString(authorString).map(parseAuthorName);
+}
+
+/** One name of a list, as parseAuthors reads each. */
+export function parseAuthorName(author: string): CiteprocName {
+  // Institutional/corporate author: one group (after BibTeX parser
+  // stripped the outer field braces, institutional names arrive as {Name})
+  if (isOneGroup(author)) return { literal: author.slice(1, -1) };
+  // A group is one word, so Ludwig {van Beethoven}'s last part is van
+  // Beethoven. The von part is citeproc's dropping particle, as pandoc
+  // reads it, and the Jr part its suffix.
+  const { first, von, last, jr } = bibtexNameParts(author);
+  const name: CiteprocName = { family: namePartAsShown(last) };
+  const given = namePartAsShown(first);
+  const particle = namePartAsShown(von);
+  const suffix = namePartAsShown(jr);
+  if (given) name.given = given;
+  if (particle) name['dropping-particle'] = particle;
+  if (suffix) name.suffix = suffix;
+  return name;
 }
 
 /** `item` with the locator, its label and the suffix Pandoc reads in

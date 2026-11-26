@@ -40,7 +40,7 @@ import {
 } from './bibtex-parser';
 import { createHash } from 'crypto';
 import { pushAll } from './arrays';
-import { parseAuthors, splitAuthorString } from './md-to-docx-citations';
+import { parseAuthorName, splitAuthorString } from './md-to-docx-citations';
 import { normalizeDoi, normalizeIsbns, normalizePmid, type ZoteroLinkDecision } from './zotero-link';
 
 /** An item as the Local API returns its `data`, with `meta.parsedDate`. */
@@ -105,6 +105,9 @@ export type ZoteroFieldNotPushedReason =
   /** A name in the list is not one BibTeX reads: empty, a stray `and`, or
    *  with more than two commas. */
   | 'unreadable-names'
+  /** A lone `journal`, where Zotero has both a full title and an
+   *  abbreviation and the value is neither, could be either. */
+  | 'ambiguous-journal'
   /** Zotero has series editors, which its export lists in `editor` with
    *  the editors, so the entry's editors can't say which are which. */
   | 'series-editors'
@@ -491,6 +494,10 @@ function zoteroDateParts(item: ZoteroItemJson): number[] | undefined {
 /** The entry's names in one role as Zotero creators, or why they can't be. */
 interface ReadCreators {
   readonly creators: ZoteroCreator[];
+  /** Each name's text, its ties read, for a name not in one group, as
+   *  Zotero's export writes a two-field name with no first name (see
+   *  sameAsExported). */
+  readonly texts: ReadonlyArray<string | undefined>;
   /** The list ended `and others`: these are its first names, not all. */
   readonly incomplete: boolean;
 }
@@ -541,24 +548,31 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
   // parser runs them.  (An accent, as \~n, the parser reads already.)
   const written = entry.writtenFields?.get(field)?.trim();
   const asWritten = written !== undefined && /^\{.*\}$|^".*"$/s.test(written) ? written.slice(1, -1).replace(/\s+/g, ' ').trim() : undefined;
-  const raw = tiesAsSpaces(asWritten !== undefined && /\\(?:[{}]|~\{\}|textasciitilde)/.test(asWritten) ? asWritten : parsed);
-  const list = splitAuthorString(raw);
+  const raw = asWritten !== undefined && /\\(?:[{}]|~\{\}|textasciitilde)/.test(asWritten) ? asWritten : parsed;
+  // Names part at an `and` between spaces, in any case, as BibTeX parts
+  // them, before a tie reads as a space: Doe~and~Smith is one name.
+  const list = splitAuthorString(raw, true);
   if (list.length === 0 || !list.every(readableName)) return 'unreadable';
-  // Math, as in a title (see readText), loses its groups as a name's part.
-  if ((raw.match(/(?<!\\)\$/g) ?? []).length >= 2) return 'tex';
+  // Math, as in a title (see readText), loses its groups as a name's part;
+  // counted as written, where an escaped dollar sign is text.
+  if (((written ?? raw).match(/(?<!\\)\$/g) ?? []).length >= 2) return 'tex';
   const creators: ZoteroCreator[] = [];
-  const names = parseAuthors(raw);
+  const texts: Array<string | undefined> = [];
+  const read = list.map(name => tiesAsSpaces(name));
+  const names = read.map(parseAuthorName);
   const last = names[names.length - 1];
   const incomplete = last !== undefined && last.family === 'others' && last.given === undefined && last.literal === undefined;
   if (incomplete) names.pop();
-  for (const name of names) {
+  for (const [i, name] of names.entries()) {
     if (name.literal !== undefined) {
       const literal = bibtexNamePartAsPlainText(name.literal).trim();
       if (literal === '') return 'unreadable';
       if (TEX_COMMAND.test(literal)) return 'tex';
       creators.push({ creatorType, name: literal });
+      texts.push(undefined);
       continue;
     }
+    texts.push(bibtexNamePartAsPlainText(read[i]).replace(/\s+/g, ' ').trim());
     const part = (s: string | undefined) => (s === undefined ? '' : bibtexNamePartAsPlainText(s).replace(/\s+/g, ' ').trim());
     const lastName = [part(name['dropping-particle']), part(name.family)].filter(Boolean).join(' ');
     const given = part(name.given);
@@ -568,7 +582,7 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
     if (lastName === '') return 'unreadable';
     creators.push(firstName ? { creatorType, lastName, firstName } : { creatorType, lastName, firstName: '' });
   }
-  return { creators, incomplete };
+  return { creators, texts, incomplete };
 }
 
 // ---------------------------------------------------------------------------
@@ -593,9 +607,35 @@ function withoutMarkup(value: string): string {
  *  signs, scripts and groups.  Coarser than the text: it only ever spares a
  *  write. */
 function looseText(value: string): string {
-  return value
-    .replace(/\\(?:textit|textbf|textsc|textrm|textup|textnormal|emph|mathrm|mathit|mathbf|textsuperscript|textsubscript)(?![A-Za-z])\s*/g, '')
-    .replace(/[{}^_]|\$/g, '');
+  const FORMAT = 'textit|textbf|textsc|textrm|textup|textnormal|emph|mathrm|mathit|mathbf';
+  let text = value
+    // Zotero's export spells < and > as commands, as in a nocase span.
+    .replace(/\{\\textless\}|\\textless(?:\{\})?/g, '<')
+    .replace(/\{\\textgreater\}|\\textgreater(?:\{\})?/g, '>')
+    // Zotero's sub- and superscripts, as math writes them.
+    .replace(/<sub>(.*?)<\/sub>/g, (_m, x: string) => '_{' + x + '}')
+    .replace(/<sup>(.*?)<\/sup>/g, (_m, x: string) => '^{' + x + '}')
+    .replace(/\\textsubscript\s*\{/g, '_{')
+    .replace(/\\textsuperscript\s*\{/g, '^{');
+  text = withoutMarkup(text);
+  // A formatting command's argument, without the command.
+  for (let before = ''; before !== text; ) {
+    before = text;
+    text = text.replace(new RegExp('\\\\(?:' + FORMAT + ')\\s*\\{([^{}]*)\\}', 'g'), (_m, x: string) => '{' + x + '}');
+  }
+  text = text.replace(new RegExp('\\\\(?:' + FORMAT + ')(?![A-Za-z])\\s*', 'g'), '');
+  // Groups within groups, as _{{2}}, as one.
+  for (let before = ''; before !== text; ) {
+    before = text;
+    text = text.replace(/\{\{([^{}]*)\}\}/g, (_m, x: string) => '{' + x + '}');
+  }
+  // A script's reach kept, x^{12} not x^12, and every other group and
+  // dollar sign set aside.
+  text = text.replace(/([_^])\s*([^{\s])/g, (_m, s: string, x: string) => s + '{' + x + '}');
+  const scripts: string[] = [];
+  text = text.replace(/([_^])\{([^{}]*)\}/g, (_m, s: string, x: string) => '\u0000' + scripts.push(s + '{' + x.replace(/[{}]|\$/g, '') + '}') + '\u0000');
+  text = text.replace(/[{}]|\$/g, '');
+  return text.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => scripts[Number(i) - 1]);
 }
 
 function foldText(value: string): string {
@@ -627,14 +667,33 @@ function sameValue(base: string, a: string, b: string): boolean {
       return foldText(a).replace(/[‐-―-]+/g, '-') === foldText(b).replace(/[‐-―-]+/g, '-');
     default:
       // Zotero's rich text, as <i>…</i>, is markup on the same text.
+      // (Read on both sides: Zotero's export writes its &amp; as \&amp;.)
       return CASELESS_BASES.has(base)
-        ? foldText(withoutMarkup(a)).toLowerCase() === foldText(b).toLowerCase()
-        : foldText(withoutMarkup(a)) === foldText(b);
+        ? foldText(withoutMarkup(a)).toLowerCase() === foldText(withoutMarkup(b)).toLowerCase()
+        : foldText(withoutMarkup(a)) === foldText(withoutMarkup(b));
   }
 }
 
 function creatorText(c: ZoteroCreator): string {
   return c.name !== undefined && c.name !== '' ? c.name : [c.lastName, c.firstName].filter(Boolean).join(', ');
+}
+
+/** The entry's names, read, are Zotero's creators: the same part by part,
+ *  or, for a name not in one group, its text what Zotero's export writes
+ *  for the creator, as `Garcia Lopez` for a last name Garcia Lopez and no
+ *  first name, which reads back otherwise. */
+function sameAsExported(current: readonly ZoteroCreator[], next: readonly ZoteroCreator[], texts: ReadonlyArray<string | undefined>): boolean {
+  const fold = (s: string) => foldText(s).toLowerCase();
+  return (
+    current.length === next.length &&
+    current.every((c, i) => {
+      if (sameCreators([c], [next[i]])) return true;
+      const text = texts[i];
+      if (text === undefined || (c.name !== undefined && c.name !== '')) return false;
+      const exported = c.firstName ? (c.lastName ?? '') + ', ' + c.firstName : (c.lastName ?? '');
+      return fold(exported) === fold(text);
+    })
+  );
 }
 
 /** Names compared part by part: a one-field name, as an organization's,
@@ -850,7 +909,7 @@ function updateChanges(
   for (const [field, { loose, base, line }] of read.kept) {
     const current = typeof item[field] === 'string' ? (item[field] as string) : '';
     const fold = (v: string) => (CASELESS_BASES.has(baseOf(type, field) || base) ? foldText(v).toLowerCase() : foldText(v));
-    if (current !== '' && fold(looseText(withoutMarkup(current))) === fold(loose)) same.add(line);
+    if (current !== '' && fold(looseText(current)) === fold(loose)) same.add(line);
   }
   const notPushed = read.notPushed.filter(line => !same.has(line));
   const extra = extraFields(item);
@@ -866,6 +925,11 @@ function updateChanges(
     // Zotero's abbreviation says nothing new about the full title.
     const abbreviation = item.journalAbbreviation;
     if (from === 'journal' && typeof abbreviation === 'string' && abbreviation !== '' && sameValue('journalAbbreviation', abbreviation, value)) continue;
+    // …and a different one may be either, where Zotero has both.
+    if (from === 'journal' && !entry.fields.has('fjournal') && typeof abbreviation === 'string' && abbreviation !== '' && current !== '') {
+      notPushed.push({ field: from, reason: 'ambiguous-journal' });
+      continue;
+    }
     changes.push({ field, from: current, to: value });
     patch[field] = value;
   }
@@ -884,7 +948,7 @@ function updateChanges(
   }
   const existing = asCreators(item.creators);
   let creators = existing;
-  for (const [role, { creators: next, incomplete }] of read.creators) {
+  for (const [role, { creators: next, texts, incomplete }] of read.creators) {
     const current = existing.filter(c => c.creatorType === role);
     if (incomplete) {
       // `and others` gives only the start of the list: it agrees when the
@@ -893,14 +957,14 @@ function updateChanges(
       if (!sameCreators(current.slice(0, next.length), next)) notPushed.push({ field: role, reason: 'incomplete-names' });
       continue;
     }
-    if (sameCreators(current, next)) continue;
     // Zotero's export lists series editors in `editor` with the editors, in
     // their order, so an editor list can't say which are which.
     if (role === 'editor' && existing.some(c => c.creatorType === 'seriesEditor')) {
       const exported = existing.filter(c => c.creatorType === 'editor' || c.creatorType === 'seriesEditor');
-      if (!sameCreators(exported, next)) notPushed.push({ field: role, reason: 'series-editors' });
+      if (!sameAsExported(exported, next, texts)) notPushed.push({ field: role, reason: 'series-editors' });
       continue;
     }
+    if (sameAsExported(current, next, texts)) continue;
     changes.push({
       field: 'creators:' + role,
       from: current.map(creatorText).join('; '),
