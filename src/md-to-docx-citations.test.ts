@@ -1079,15 +1079,29 @@ describe('BibTeX text symbols in citeproc\'s data', () => {
 describe('BibTeX ties, empty groups and \\url in names', () => {
   const names = (author: string) => buildItemData(parseBibtex('@book{b,\n  author = {' + author + '}\n}').get('b')!).author;
 
-  // Names stay as main reads them: BibTeX splits a name's words at a tie
-  // once it has split the names, and serializeBibtex would have to write
-  // them back as they were read, a later step's
+  // A tie is a space: BibTeX splits a name's words at one once it has
+  // split the names, and TeX shows one as a space, in a group too
   it.each([
-    ['ties between initials', String.raw`D.~E. Knuth`, [{ family: 'Knuth', given: 'D.~E.' }]],
-    ['ties around a von part', String.raw`Jean~de~La~Fontaine`, [{ family: 'Jean~de~La~Fontaine' }]],
-    ['a tie in a group', String.raw`{Jean~Paul} Sartre`, [{ family: 'Sartre', given: 'Jean~Paul' }]],
+    ['ties between initials', String.raw`D.~E. Knuth`, [{ family: 'Knuth', given: 'D. E.' }]],
+    ['ties around a von part', String.raw`Jean~de~La~Fontaine`, [{ family: 'La Fontaine', given: 'Jean', 'dropping-particle': 'de' }]],
+    ['a tie in a group', String.raw`{Jean~Paul} Sartre`, [{ family: 'Sartre', given: 'Jean Paul' }]],
+    ['a tie in a name in one group', String.raw`{Barnes~Noble}`, [{ literal: 'Barnes Noble' }]],
+    ['a tie after a comma', String.raw`Knuth, Donald~E.`, [{ family: 'Knuth', given: 'Donald E.' }]],
+  ])('reads %s in a name as spaces', (_name, author, expected) => {
+    expect(names(author)).toEqual(expected);
+  });
+
+  it.each([
     ['a tilde\'s accent on nothing', String.raw`X \~{}Y`, [{ family: String.raw`\~{}Y`, given: 'X' }]],
     ['a tilde\'s command', String.raw`X \textasciitilde{}Y`, [{ family: '~Y', given: 'X' }]],
+    ['a tilde\'s command by a tie', String.raw`A~B \textasciitilde{}C, D`, [{ family: 'A B ~C', given: 'D' }]],
+    ['a tilde\'s command in a group', String.raw`{Research \textasciitilde{} Development}`, [{ literal: 'Research ~ Development' }]],
+    ['a private-use character', 'Roe\uE000, Rick', [{ family: 'Roe\uE000', given: 'Rick' }]],
+    ['a private-use character by a tilde\'s command', String.raw`Roe\textasciitilde{}`+'\uE000, Rick', [{ family: 'Roe~\uE000', given: 'Rick' }]],
+    ['a tilde\'s accent', String.raw`Mu\~{n}oz, Ana`, [{ family: 'Muñoz', given: 'Ana' }]],
+    ['a tilde\'s accent without braces', String.raw`Mu\~noz, Ana`, [{ family: 'Muñoz', given: 'Ana' }]],
+    ['two names without ties', 'Doe, Jane and Smith, John', [{ family: 'Doe', given: 'Jane' }, { family: 'Smith', given: 'John' }]],
+    ['a name with and in one group', '{Barnes and Noble}', [{ literal: 'Barnes and Noble' }]],
     ['an empty group between hyphens', String.raw`Smith-{}-Jones`, [{ family: 'Smith--Jones' }]],
     ['a \\url', String.raw`\url{a_b}, John`, [{ family: String.raw`\url{a_b}`, given: 'John' }]],
   ])('reads %s in a name as before', (_name, author, expected) => {
@@ -1700,16 +1714,126 @@ describe('names parted at an and in any case', () => {
     ['{Barnes AND Noble}', '(Barnes AND Noble, 2020)', 'Barnes AND Noble.'],
     ['Barnes {AND} Noble', '(Noble, 2020)', 'Noble, B. A.'],
     ['Anderson, Sandra', '(Anderson, 2020)', 'Anderson, S.'],
-    ['Doe~and~Smith', '(Doe~and~Smith, 2020)', 'Doe~and~Smith. (2020)'],
-    ['Doe, Jane and others', '(Doe & others, 2020)', 'Doe, J., & others.'],
   ])('reads %s as before', async (author, citation, entry) => {
     const text = await exported(author);
     expect(text).toContain(citation);
     expect(text).toContain(entry);
   });
 
+  // Ties are spaces once the names are parted, so this is one name, which
+  // BibTeX reads as First Doe, von and, Last Smith
+  it('reads Doe~and~Smith as one name', async () => {
+    const text = await exported('Doe~and~Smith');
+    expect(text).toContain('(Smith, 2020)');
+    expect(text).toContain('Smith, D. and. (2020)');
+  });
+
+  it.each([
+    ['Knuth, Donald~E.', '(Knuth, 2020)', 'Knuth, D. E. (2020)'],
+    ['Donald~E. Knuth', '(Knuth, 2020)', 'Knuth, D. E. (2020)'],
+    ['J.~K. Rowling and Doe, Jane', '(Rowling & Doe, 2020)', 'Rowling, J. K., & Doe, J. (2020)'],
+    ['{Barnes~Noble}', '(Barnes Noble, 2020)', 'Barnes Noble. (2020)'],
+    ['Mu\\~{n}oz, Ana', '(Muñoz, 2020)', 'Muñoz, A. (2020)'],
+  ])('reads the ties in %s as spaces', async (author, citation, entry) => {
+    const text = await exported(author);
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+    expect(text).not.toContain('~');
+  });
+
   it('parts an editor list the same way', () => {
     const entries = parseBibtex('@book{k,\n  editor = {Doe, Jane AND Smith, John},\n  title = {Study},\n  year = {2020}\n}\n');
     expect(buildItemData(entries.get('k')!).editor).toEqual([{ family: 'Doe', given: 'Jane' }, { family: 'Smith', given: 'John' }]);
+  });
+});
+
+describe('a name list ending and others', () => {
+  const exported = async (style: string, bibtex: string, md = 'See [@k].'): Promise<{ text: string; xml: string }> => {
+    const { docx } = await convertMdToDocx('---\ncsl: ' + style + '\n---\n\n' + md + '\n', { bibtex });
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return { xml, text: [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('').replace(/&amp;/g, '&') };
+  };
+  const book = (author: string) => '@book{k,\n  author = {' + author + '},\n  title = {Study},\n  year = {2020},\n  publisher = {P}\n}\n';
+
+  // The style's et-al term, where citeproc-js joins the names before it so
+  // (see withOthersAsEtAl)
+  it.each([
+    ['chicago-author-date', 'Doe, Jane and others', '(Doe et al. 2020)', 'Doe, Jane et al. 2020.'],
+    ['chicago-author-date', 'Doe, Jane and Smith, John and others', '(Doe et al. 2020)', 'Doe, Jane, John Smith, et al. 2020.'],
+    ['chicago-author-date', '{World Health Organization} and others', '(World Health Organization et al. 2020)', 'World Health Organization et al. 2020.'],
+    ['ieee', 'Doe, Jane and others', '[1]', 'J. Doe et al., Study.'],
+    ['ieee', 'Doe, Jane and Smith, John and others', '[1]', 'J. Doe, J. Smith, et al., Study.'],
+    ['vancouver', 'Doe, Jane and others', '(1)', 'Doe J et al. Study.'],
+    ['vancouver', 'Doe, Jane and Smith, John and others', '(1)', 'Doe J, Smith J, et al. Study.'],
+  ])('in %s, reads %s with no name others', async (style, author, citation, entry) => {
+    const { text } = await exported(style, book(author));
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+    expect(text).not.toContain('others');
+  });
+
+  // APA's bibliography sets et-al-use-last, so others is a name, as on main
+  it.each([
+    ['Doe, Jane and others', '(Doe & others, 2020)', 'Doe, J., & others. (2020).'],
+    ['Doe, Jane and Smith, John and others', '(Doe et al., 2020)', 'Doe, J., Smith, J., & others. (2020).'],
+    ['others', '(others, 2020)', 'others. (2020).'],
+  ])('in apa, reads %s as before', async (author, citation, entry) => {
+    const { text } = await exported('apa', book(author));
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+  });
+
+  // Only the name others and nothing else ends a list so, as in BibTeX
+  it.each([
+    ['Doe, Jane and van others', '(Doe and others 2020)', 'Doe, Jane, and van others. 2020.'],
+    ['Doe, Jane and others, Jr., Sam', '(Doe and others 2020)', 'Doe, Jane, and Sam others Jr. 2020.'],
+  ])('in chicago-author-date, reads %s as names', async (author, citation, entry) => {
+    const { text } = await exported('chicago-author-date', book(author));
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+    expect(text).not.toContain('et al.');
+  });
+
+  it('reads others alone as no author without citeproc', () => {
+    const entries = parseBibtex(book('others'));
+    expect(generateFallbackText(['k'], entries)).toBe('(k 2020)');
+    expect(generateFallbackText(['k'], parseBibtex(book('Doe, Jane and others')))).toBe('(Doe 2020)');
+  });
+
+  it.each(['chicago-author-date', 'ieee'])('in %s, reads others alone as no author', async (style) => {
+    const { text } = await exported(style, book('others'));
+    expect(text).not.toContain('others');
+  });
+
+  it.each([
+    ['chicago-author-date', 'In Book, edited by Jane Doe et al.'],
+    ['ieee', 'in Book, J. Doe et al., Eds.'],
+  ])('in %s, reads an editor list so', async (style, expected) => {
+    const bibtex = '@incollection{k,\n  author = {Roe, Rick},\n  title = {Ch},\n  booktitle = {Book},\n  editor = {Doe, Jane and others},\n  year = {2020},\n  publisher = {P}\n}\n';
+    const { text } = await exported(style, bibtex);
+    expect(text).toContain(expected);
+    expect(text).not.toContain('others');
+  });
+
+  it('sorts and tells apart works with et al. as citeproc does a list cut short', async () => {
+    const bibtex = book('Doe, Jane and others').replace('{k,', '{a,').replace('Study', 'Alpha')
+      + book('Doe, Jane and others').replace('{k,', '{b,').replace('Study', 'Beta')
+      + book('Doe, Jane').replace('{k,', '{c,').replace('Study', 'Gamma');
+    const { text } = await exported('chicago-author-date', bibtex, 'See [@c], [@b], [@a].');
+    expect(text).toContain('See (Doe 2020), (Doe et al. 2020b), (Doe et al. 2020a).');
+    expect(text).toContain('Doe, Jane. 2020. Gamma. P.Doe, Jane et al. 2020a. Alpha. P.Doe, Jane et al. 2020b. Beta. P.');
+  });
+
+  it.each([
+    ['apa', '(Doe & others, 2020)'],
+    ['chicago-author-date', '(Doe and others 2020)'],
+  ])('in %s, reads {others}, in a group, as a name', async (style, citation) => {
+    const { text } = await exported(style, book('Doe, Jane and {others}'));
+    expect(text).toContain(citation);
+  });
+
+  it('keeps the name others in the item a Zotero field holds', async () => {
+    const { xml } = await exported('chicago-author-date', book('Doe, Jane and others'));
+    expect(extractCsl(xml).citationItems[0].itemData.author).toEqual([{ family: 'Doe', given: 'Jane' }, { family: 'others' }]);
   });
 });

@@ -34,7 +34,7 @@ import {
 	WorkspaceSymbolParams,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { BibtexEntry, BibtexSourceRange, bibtexFieldAsPlainText, parseBibtexWithRaw, splitAuthorString } from '../bibtex-parser';
+import { BibtexEntry, BibtexSourceRange, bibtexFieldAsPlainText, parseBibtexWithRaw, splitAuthorString, tiesAsSpaces } from '../bibtex-parser';
 import { isCitableKey, isCrossRefKey } from '../citation-syntax';
 import { crossRefCompletions, findCrossRefDefinition, findCrossRefProblems, getCrossRefCompletionContext } from './crossref-language';
 
@@ -1401,7 +1401,7 @@ function getEntryDocumentation(entry: BibtexEntry): string | undefined {
 /** Split BibTeX author string, as the export splits it, and flip each
  *  "Last, First" to "First Last". */
 function parseBibAuthorNames(raw: string): string[] {
-	return splitAuthorString(raw).map(a => {
+	return splitAuthorString(raw).map(name => tiesAsSpaces(name, true)).map(a => {
 		const parts = a.split(',').map(p => p.trim());
 		return parts.length >= 2 ? `${parts[1]} ${parts[0]}` : a.trim();
 	});

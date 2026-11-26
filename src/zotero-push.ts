@@ -35,6 +35,7 @@ import {
   bibtexFieldAsPlainText,
   bibtexNamePartAsPlainText,
   parseBibtexWithRaw,
+  tiesAsSpaces,
   type BibtexEntry,
 } from './bibtex-parser';
 import { createHash } from 'crypto';
@@ -516,25 +517,6 @@ interface ReadCreators {
   readonly texts: ReadonlyArray<string | undefined>;
   /** The list ended `and others`: these are its first names, not all. */
   readonly incomplete: boolean;
-}
-
-/** `value` with each `~` outside its groups a space, as BibTeX splits a
- *  name's words at a tie (bibtex.web, sep_char), but not an escaped one. */
-function tiesAsSpaces(value: string): string {
-  let depth = 0;
-  let out = '';
-  for (let i = 0; i < value.length; i++) {
-    const c = value[i];
-    if (c === '\\') {
-      out += c + (value[i + 1] ?? '');
-      i++;
-      continue;
-    }
-    if (c === '{') depth++;
-    else if (c === '}') depth = Math.max(0, depth - 1);
-    out += c === '~' && depth === 0 ? ' ' : c;
-  }
-  return out;
 }
 
 /** Whether `value` has an escaped brace, \{ or \}, outside the groups its

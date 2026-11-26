@@ -276,6 +276,44 @@ export function splitAuthorString(authorString: string): string[] {
   return result.filter(s => s.length > 0);
 }
 
+/** `value`, a name of a list (see splitAuthorString), with each `~`
+ *  outside its groups a space, as BibTeX splits a name's words at a tie
+ *  (bibtex.web, sep_char), but not an escaped one, as \~{} or an accent's
+ *  \~n. With `inGroups`, a `~` in a group, as {Barnes~Noble}, is a space
+ *  too, as TeX shows it, which splits no word there. */
+export function tiesAsSpaces(value: string, inGroups = false): string {
+  let depth = 0;
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (c === '\\') {
+      out += c + (value[i + 1] ?? '');
+      i++;
+      continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}') depth = Math.max(0, depth - 1);
+    out += c === '~' && (depth === 0 || inGroups) ? ' ' : c;
+  }
+  return out;
+}
+
+/** A name list's value, as the entry's `fields` holds it, but with each
+ *  tilde written as its command, \textasciitilde{}, which reads as ~ there
+ *  as a tie does, as `tilde`, so the ties can be read apart from it (see
+ *  tiesAsSpaces). Where they can't, as in a value made by concatenation,
+ *  the value as `fields` holds it. */
+export function bibtexNamesWithTildesAs(entry: BibtexEntry, field: string, tilde: string): string | undefined {
+  const parsed = entry.fields.get(field);
+  const written = entry.writtenFields?.get(field);
+  if (parsed === undefined || written === undefined || !AUTHOR_FIELDS.has(field)) return parsed;
+  if (!written.includes('\\textasciitilde{}') || !/^\{[\s\S]*\}$|^"[\s\S]*"$/.test(written)) return parsed;
+  // The command where no backslash escapes its own
+  const marked = written.slice(1, -1).replace(/(?<!\\)((?:\\\\)*)\\textasciitilde\{\}/g, (_command, before: string) => before + tilde);
+  const { text } = decodeBibtexFieldValue(field, marked, written.startsWith('{'));
+  return text.split(tilde).join('~') === parsed ? text : parsed;
+}
+
 /** A part of a name as plain text, as Zotero stores it: every command the
  *  parser reads in other fields read too, as \o in Flat{\o}, which it leaves
  *  in names (see decodeBibtexText), and then its groups' braces dropped and

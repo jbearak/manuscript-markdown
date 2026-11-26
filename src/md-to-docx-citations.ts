@@ -1,4 +1,4 @@
-import { BibtexEntry, bibtexGroupsAsText, bibtexTexAsText, parseBibtex, splitAuthorString } from './bibtex-parser';
+import { BibtexEntry, bibtexGroupsAsText, bibtexNamesWithTildesAs, bibtexTexAsText, parseBibtex, splitAuthorString, tiesAsSpaces } from './bibtex-parser';
 import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_HIGHLIGHT_COMMAND, CRITIC_INSERTION_COMMAND, MATH_HIGHLIGHT_RPR, withEquationEscapes, withWordBackslashes, type TrackChange } from './latex-to-omml';
 import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
@@ -410,6 +410,42 @@ function withNamesAsRead(item: CiteprocItemData): CiteprocItemData {
   return read;
 }
 
+/** Whether `name`, the last of a list, is BibTeX's `others`, which ends a
+ *  list whose other names it doesn't give: the name `others` and nothing
+ *  else, not {others}, which is a literal, nor van others or others, Jr. */
+function isOthersName(name: CiteprocName): boolean {
+  return name.family === 'others' && Object.keys(name).length === 1;
+}
+
+// A name whose dropping particle is this, and no other part, citeproc-js
+// prints nothing of, and joins the names before it with the style's et-al
+// term, as it joins a list it has cut short (CSL.NameOutput.prototype.
+// _droppingParticle, which sets etal_spec, read by joinPersons). The
+// processor's documentation doesn't give it; the tests of `and others`
+// fail if an upgrade drops it.
+const ET_AL_NAME: CiteprocName = { family: '', 'dropping-particle': 'et al.' };
+
+/** `item` with a name list ending `and others` (see isOthersName) as
+ *  citeproc-js prints one cut short: with the style's et-al term after the
+ *  names before it. A list of `others` alone is no names. Only citeproc's
+ *  copy reads it so: the copy a Zotero field holds keeps the name, as
+ *  BibTeX wrote it. Not for a style that sets et-al-use-last, as APA's
+ *  bibliography does (see buildEngine). */
+function withOthersAsEtAl(item: CiteprocItemData): CiteprocItemData {
+  const asEtAl = (names: CiteprocName[] | undefined) => {
+    if (!names || names.length === 0 || !isOthersName(names[names.length - 1])) return names;
+    const given = names.slice(0, -1);
+    return given.length === 0 ? undefined : [...given, { ...ET_AL_NAME }];
+  };
+  const read = { ...item };
+  for (const role of ['author', 'editor'] as const) {
+    const names = asEtAl(item[role]);
+    if (names) read[role] = names;
+    else delete read[role];
+  }
+  return read;
+}
+
 function buildEngine(
   entries: Map<string, BibtexEntry>,
   styleXml: string,
@@ -418,10 +454,17 @@ function buildEngine(
   const citeproc = CSL;
   if (!citeproc) return undefined;
 
+  // A style that sets et-al-use-last joins a list ending ET_AL_NAME with
+  // its ellipsis before the last name given, which reads as the list's last
+  // author, and dropping `others` would cite fewer authors than the list
+  // has, as APA's (Doe & Smith, 2020) for Doe, Smith and others, where
+  // (Doe et al., 2020) is right. So such a style, as APA, still takes
+  // `others` as a name, as it always has.
+  const etAl = !/\bet-al-use-last\s*=\s*["']true["']/.test(styleXml);
   // Build CSL-JSON item map keyed by citation key
   const items = new Map<string, CiteprocItemData>();
   for (const [key, entry] of entries) {
-    const itemData = withNamesAsRead(buildItemData(entry));
+    const itemData = withNamesAsRead(etAl ? withOthersAsEtAl(buildItemData(entry)) : buildItemData(entry));
     itemData.id = key;
     items.set(key, itemData);
   }
@@ -880,7 +923,8 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   const author = entry.fields.get('author');
   const institution = text('institution');
   if (author) {
-    itemData.author = parseAuthors(author);
+    const list = nameList(entry, 'author');
+    itemData.author = parseAuthors(list?.names ?? author, list?.tilde);
   } else if (institution) {
     // Fallback for entries (commonly @techreport) that credit an organization
     // via `institution` instead of `author`; map to CSL literal name form.
@@ -914,7 +958,8 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
 
   // Editor (parsed like authors, supports institutional editors)
   const editor = entry.fields.get('editor');
-  if (editor) itemData.editor = parseAuthors(editor);
+  const editors = nameList(entry, 'editor');
+  if (editor) itemData.editor = parseAuthors(editors?.names ?? editor, editors?.tilde);
 
   const publisher = text('publisher');
   if (publisher) itemData.publisher = publisher;
@@ -1171,8 +1216,29 @@ export function bibtexNameParts(name: string): { first: string; von: string; las
 // Here too, where the push and the tests have always found it
 export { splitAuthorString };
 
-export function parseAuthors(authorString: string): CiteprocName[] {
-  return splitAuthorString(authorString).map(parseAuthorName);
+/** An entry's name list as parseAuthors reads it, with each tilde written
+ *  as its command, \textasciitilde{}, which no tie is, as `tilde`, a
+ *  private-use character the field doesn't hold, where it has one */
+function nameList(entry: BibtexEntry, field: string): { names: string; tilde?: string } | undefined {
+  const held = (entry.writtenFields?.get(field) ?? '') + (entry.fields.get(field) ?? '');
+  let code = 0xe000;
+  while (held.includes(String.fromCharCode(code))) code++;
+  const tilde = String.fromCharCode(code);
+  const names = bibtexNamesWithTildesAs(entry, field, tilde);
+  if (names === undefined) return undefined;
+  return names.includes(tilde) ? { names, tilde } : { names };
+}
+
+/** A name list's names as citeproc takes them: split where BibTeX splits
+ *  the list, before a tie reads as a space, so Doe~and~Smith is one name,
+ *  and then each name's ties, unescaped `~`, as spaces, as BibTeX splits
+ *  a name's words at them and TeX shows them, in a group too. `tilde`, as
+ *  nameList gives it, stands for a tilde, which stays one. */
+export function parseAuthors(authorString: string, tilde?: string): CiteprocName[] {
+  return splitAuthorString(authorString).map(name => {
+    const read = tiesAsSpaces(name, true);
+    return parseAuthorName(tilde === undefined ? read : read.split(tilde).join('~'));
+  });
 }
 
 /** One name of a list, as parseAuthors reads each. */
@@ -1219,11 +1285,16 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
     const year = entry.fields.get('year');
     const keySuppressed = suppressAuthorKeys?.has(key);
 
+    const list = author ? nameList(entry, 'author') : undefined;
+    const names = author ? parseAuthors(list?.names ?? author, list?.tilde) : [];
+    // A list of `others` alone gives no names (see withOthersAsEtAl)
+    const named = author && !(names.length === 1 && isOthersName(names[0]));
+
     let text: string;
-    if (!keySuppressed && author) {
+    if (!keySuppressed && named) {
       // The first author's family name, or an institution's whole name, as
       // citeproc's data has it (see parseAuthors)
-      const first = parseAuthors(author)[0];
+      const first = names[0];
       text = first ? first.literal ?? first.family ?? '' : author.trim();
     } else if (keySuppressed) {
       // suppress-author: year only, no author name
