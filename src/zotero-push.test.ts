@@ -456,10 +456,16 @@ describe('createZoteroPushPlan', () => {
     ]);
   });
 
-  it("doesn't count a DOI that the item type can't hold", () => {
-    // The test schema's book has no DOI field.
+  it('counts a DOI two new entries share though one item type can\'t hold it', () => {
+    // The test schema's book has no DOI field; the two entries still name
+    // one work.
     const bib = '@book{a2000,\n  title = {A},\n  doi = {10.1234/a}\n}\n\n@article{b2000,\n  title = {B},\n  doi = {10.1234/a}\n}\n';
-    expect(plan(bib, []).actions.map(a => a.kind)).toEqual(['create', 'create']);
+    expect(plan(bib, []).actions.map(a => a.kind)).toEqual(['skip', 'skip']);
+    const misc = '@misc{a,\n  title = {A},\n  pmid = {222}\n}\n\n@misc{b,\n  title = {A},\n  pmid = {222}\n}\n';
+    expect(plan(misc, []).actions).toMatchObject([
+      { kind: 'skip', reason: 'duplicate-identifier' },
+      { kind: 'skip', reason: 'duplicate-identifier' },
+    ]);
   });
 
   it("doesn't let an entry it can't create block another's DOI", () => {
@@ -1316,5 +1322,34 @@ describe("push: citation keys as Zotero's export gives them", () => {
     const error = await prepareZoteroPush({ type: 'user' }, '@article{cite-A,\n  title = {A edited}\n}\n', COLLECTION, 'update', api).catch(e => e);
     expect(error).toBeInstanceOf(ZoteroLocalApiError);
     expect(api.posts).toEqual([]);
+  });
+});
+
+describe('push: ISBNs, as a work and its volumes and chapters share them', () => {
+  it("won't give a book another book's ISBN from a chapter's entry", () => {
+    const first = item('AAAA2222', { itemType: 'book', title: 'Original', citationKey: 'k', ISBN: '9780262033848' });
+    const other = item('BBBB2222', { itemType: 'book', title: 'Other', citationKey: 'b', ISBN: '9780306406157' });
+    expect(plan('@incollection{k,\n  title = {First},\n  isbn = {9780306406157}\n}\n', [first, other]).actions[0]).toMatchObject({
+      kind: 'skip',
+      reason: 'isbn-owned-elsewhere',
+      detail: 'BBBB2222',
+    });
+  });
+
+  it("doesn't hold a set's ISBN against a volume that has it", () => {
+    const vol1 = item('AAAA2222', { itemType: 'book', title: 'Volume One', citationKey: 'vol1', ISBN: '9780262033848' });
+    const vol2 = item('BBBB2222', { itemType: 'book', title: 'Volume Two', citationKey: 'vol2', ISBN: '9780262033848' });
+    const bib = '@book{vol1,\n  title = {Volume {One}},\n  isbn = {9780262033848}\n}\n\n@book{vol2,\n  title = {Volume {Two}},\n  isbn = {9780262033848}\n}\n';
+    expect(plan(bib, [vol1, vol2]).actions.map(a => a.kind)).toEqual(['unchanged', 'unchanged']);
+    const edited = plan(bib.replace('Volume {One}', 'Volume One, Revised'), [vol1, vol2]);
+    expect(edited.actions[0]).toMatchObject({ kind: 'update', changes: [{ field: 'title', to: 'Volume One, Revised' }] });
+  });
+
+  it("takes an ISBN-10 for an ISBN-13 only when its check digit is right", () => {
+    const vol = item('AAAA2222', { itemType: 'book', title: 'Volume One', citationKey: 'volume' });
+    const other = item('BBBB2222', { itemType: 'book', title: 'Other', citationKey: 'b', ISBN: '9780306406157' });
+    // 0306406152 is the ISBN-10 of 9780306406157; 0306406153 is no ISBN.
+    const p = plan('@book{volume,\n  title = {Volume One revised},\n  isbn = {0306406153}\n}\n', [vol, other]);
+    expect(p.actions[0]).toMatchObject({ kind: 'update' });
   });
 });

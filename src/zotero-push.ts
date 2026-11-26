@@ -922,11 +922,20 @@ function effectivePmid(item: ZoteroItemJson): string | undefined {
  *  edition compare equal.  (The matcher compares them as written; see
  *  normalizeIsbns.) */
 function isbn13(compact: string): string {
-  if (compact.length !== 10) return compact;
+  // Only a real ISBN-10, its check digit right: one with a wrong digit
+  // names no ISBN-13 for sure.
+  if (compact.length !== 10 || !validIsbn10(compact)) return compact;
   const body = '978' + compact.slice(0, 9);
   let sum = 0;
   for (let i = 0; i < 12; i++) sum += Number(body[i]) * (i % 2 === 0 ? 1 : 3);
   return body + String((10 - (sum % 10)) % 10);
+}
+
+function validIsbn10(compact: string): boolean {
+  if (!/^\d{9}[\dX]$/.test(compact)) return false;
+  let sum = 0;
+  for (let i = 0; i < 10; i++) sum += (compact[i] === 'X' ? 10 : Number(compact[i])) * (10 - i);
+  return sum % 11 === 0;
 }
 
 function isbnsOf(value: unknown): string[] {
@@ -1143,11 +1152,23 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     }
   }
   // The whole-work ISBNs the entry gives, as ISBN-13s.
-  const entryIsbns = (entry: BibtexEntry): string[] =>
-    WHOLE_WORK_TYPES.has(entry.type.toLowerCase()) && readText(entry, 'isbn') !== undefined ? isbnsOf(entry.fields.get('isbn')) : [];
-  const isbnElsewhere = (entry: BibtexEntry, itemKey?: string): string[] => [
-    ...new Set(entryIsbns(entry).flatMap(isbn => (isbnOwners.get(isbn) ?? []).filter(k => k !== itemKey))),
-  ];
+  const entryIsbns = (entry: BibtexEntry, anyType = false): string[] =>
+    (anyType || WHOLE_WORK_TYPES.has(entry.type.toLowerCase())) && readText(entry, 'isbn') !== undefined ? isbnsOf(entry.fields.get('isbn')) : [];
+  // Whose an entry's ISBN is, besides the item it matched.  An ISBN that
+  // item holds too is no evidence against it, as a set's ISBN on each of
+  // its volumes; and a chapter's ISBN counts against a whole work it
+  // matched, since writing it would give that book another's ISBN.
+  const isbnElsewhere = (entry: BibtexEntry, item?: ZoteroItemJson): string[] => {
+    const held = item === undefined ? [] : [item.ISBN, ...extraValues(item, 'isbn')].flatMap(isbnsOf);
+    const anyType = item !== undefined && !COMPONENT_ITEM_TYPES.has(item.itemType);
+    return [
+      ...new Set(
+        entryIsbns(entry, anyType)
+          .filter(isbn => !held.includes(isbn))
+          .flatMap(isbn => (isbnOwners.get(isbn) ?? []).filter(k => k !== item?.key)),
+      ),
+    ];
+  };
   // The DOI the entry would write, read as its field is.
   const entryDoi = (entry: BibtexEntry): string | undefined => {
     const read = readText(entry, 'doi');
@@ -1272,7 +1293,7 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
           return skip(entryKey, 'pmid-disagreement', [item.key, ...pmidElsewhere].join(', '));
         }
         // …and for a whole work's ISBN.
-        const isbnClaims = isbnElsewhere(entry, item.key);
+        const isbnClaims = isbnElsewhere(entry, item);
         if (isbnClaims.length > 0) return skip(entryKey, 'isbn-owned-elsewhere', isbnClaims.join(', '));
         return { kind: 'match', entryKey, entry, item, repeated: repeatedByKey.get(entryKey) ?? new Set() };
       }
@@ -1306,13 +1327,16 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
       return [];
     }
     const ids: string[] = [];
+    // Two new entries with one identifier are one work, whatever the item
+    // type can store; an update gives one only where the type has a field.
+    const gives = (base: string) => c.kind === 'create' || hasField(itemType, base);
     const doi = entryDoi(c.entry);
-    if (doi !== undefined && hasField(itemType, 'DOI') && (c.kind === 'create' || effectiveDoi(c.item) === undefined)) ids.push('DOI ' + doi);
+    if (doi !== undefined && gives('DOI') && (c.kind === 'create' || effectiveDoi(c.item) === undefined)) ids.push('DOI ' + doi);
     const pmid = readText(c.entry, 'pmid');
-    if (pmid !== undefined && 'value' in pmid && hasField(itemType, 'PMID') && (c.kind === 'create' || effectivePmid(c.item) === undefined)) {
+    if (pmid !== undefined && 'value' in pmid && gives('PMID') && (c.kind === 'create' || effectivePmid(c.item) === undefined)) {
       ids.push('PMID ' + pmid.value);
     }
-    if (hasField(itemType, 'ISBN')) {
+    if (gives('ISBN')) {
       // An update gives an ISBN the item doesn't have, adding or replacing.
       const has = c.kind === 'create' ? [] : isbnsOf(c.item.ISBN);
       for (const isbn of entryIsbns(c.entry)) if (!has.includes(isbn)) ids.push('ISBN ' + isbn);
