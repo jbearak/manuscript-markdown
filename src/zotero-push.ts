@@ -1039,7 +1039,15 @@ function updateChanges(
     // Each stored creator whose name the entry gives as Zotero's export
     // writes it stays as stored, so correcting one coauthor rewrites no
     // other.
-    const merged = next.map((n, i) => (i < current.length && sameAsExported([current[i]], [n], [texts[i]]) ? current[i] : n));
+    // Not where two of the role's creators export the same text, as a
+    // surname-only "Reed, Ann" and Ann Reed: which one the entry kept is
+    // then unclear, so it gives its own reading, as before.
+    const exportedText = (c: ZoteroCreator) =>
+      c.name !== undefined && c.name !== '' ? '{' + c.name + '}' : c.firstName ? (c.lastName ?? '') + ', ' + c.firstName : (c.lastName ?? '');
+    const twins = new Set(current.map(exportedText).filter((t, i, all) => all.indexOf(t) !== i));
+    const merged = next.map((n, i) =>
+      i < current.length && !twins.has(exportedText(current[i])) && sameAsExported([current[i]], [n], [texts[i]]) ? current[i] : n,
+    );
     if (sameCreators(current, merged)) continue;
     changes.push({
       field: 'creators:' + role,
@@ -1157,19 +1165,38 @@ type KeyClaim = { readonly item: string; readonly source: 'field' | 'extra' | 'g
  *  and whose year, where both give one, is too. */
 function sameWorkWithoutKey(entry: BibtexEntry, items: Iterable<ZoteroItemJson>): string | undefined {
   const title = readText(entry, 'title');
-  if (title === undefined || !('value' in title)) return undefined;
-  const names = (['author', 'editor'] as const).flatMap(role => {
-    const read = readCreators(entry, role, role);
-    return typeof read === 'object' ? read.creators : [];
-  });
+  if (title === undefined) return undefined;
+  // A title push can't write is compared as its text with formatting set
+  // aside, so it can only hold an entry back.
+  const sameTitle = (stored: string) =>
+    'value' in title
+      ? sameValue('title', stored, title.value)
+      : looseFold(looseText(stored), true) === looseFold(looseText(entry.texFields?.get('title') ?? entry.fields.get('title') ?? ''), true);
+  // Each role's names as the entry writes them, against the creators
+  // Zotero's export writes in that field: its primary creators in author,
+  // its editors and series editors in editor.  A list push can't read
+  // counts as the same, so it holds the entry back rather than let it by.
+  const roles = (['author', 'editor'] as const).map(role => ({ role, read: readCreators(entry, role, role) }));
+  const sameNames = (item: ZoteroItemJson) =>
+    roles.every(({ role, read }) => {
+      const stored = asCreators(item.creators).filter(c =>
+        role === 'author' ? c.creatorType === 'author' : c.creatorType === 'editor' || c.creatorType === 'seriesEditor',
+      );
+      if (read === undefined) return stored.length === 0;
+      if (typeof read !== 'object') return true;
+      const given = read.incomplete ? stored.slice(0, read.creators.length) : stored;
+      return given.length === read.creators.length && given.every((c, i) => sameAsExported([c], [read.creators[i]], [read.texts[i]]) || sameCreators([c], [read.creators[i]]));
+    });
+  const allNames = roles.flatMap(({ read }) => (typeof read === 'object' ? read.creators : []));
   const date = readDate(entry);
   const year = date !== undefined && 'parts' in date ? date.parts[0] : undefined;
   for (const item of items) {
     if ((typeof item.citationKey === 'string' && item.citationKey.trim() !== '') || extraCitationKey(item) !== undefined) continue;
-    if (typeof item.title !== 'string' || !sameValue('title', item.title, title.value)) continue;
-    if (!sameCreators(asCreators(item.creators), names)) continue;
+    if (typeof item.title !== 'string' || !sameTitle(item.title)) continue;
+    // (Or all its names in one list as the entry's, as before.)
+    if (!sameNames(item) && !sameCreators(asCreators(item.creators), allNames)) continue;
     const itemYear = zoteroDateParts(item)?.[0];
-    if (year !== undefined && itemYear !== undefined && year !== itemYear) continue;
+    if (year !== undefined && itemYear !== undefined && itemYear !== 0 && year !== itemYear) continue;
     return item.key;
   }
   return undefined;

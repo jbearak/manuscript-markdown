@@ -1619,3 +1619,48 @@ describe('push: round four, fjournal and exact comparison', () => {
     }
   });
 });
+
+describe('push: round four, the create safety net reads names as exported, role by role', () => {
+  it("holds back an unchanged export push can't make the key for", () => {
+    // Ħ: Zotero's export drops it from the key, push doesn't know how.
+    const hasan = item('AAAA2222', {
+      title: 'Winter notes',
+      publicationTitle: 'Journal of Field Studies',
+      pages: '10–20',
+      creators: [{ creatorType: 'author', firstName: '', lastName: 'Ħasan Lopez' }],
+    });
+    const exported = '@article{hasan_lopez_winter_nodate,\n  title = {Winter notes},\n  journal = {Journal of Field Studies},\n  author = {Ħasan Lopez},\n  pages = {10--20}\n}\n';
+    expect(plan(exported, [hasan], 'add').actions[0]).toMatchObject({ kind: 'skip', reason: 'possible-existing', detail: 'AAAA2222' });
+    // A day alone, which Zotero reads as no year, and a translator the
+    // entry's author list doesn't hold.
+    const lee = item('BBBB2222', {
+      title: 'Winter notes',
+      date: '23',
+      parsedDate: '0000-00-23',
+      creators: [
+        { creatorType: 'author', firstName: 'Ann', lastName: 'Lee' },
+        { creatorType: 'translator', firstName: 'Eva', lastName: 'Reed' },
+      ],
+    });
+    const leeBib = '@article{lee_winter_nodate,\n  title = {Winter notes},\n  author = {Lee, Ann},\n  translator = {Reed, Eva}\n}\n';
+    expect(plan(leeBib, [lee], 'add').actions[0].kind).toBe('skip');
+  });
+
+  it('holds back an entry whose names it can\'t read', () => {
+    // An unreadable list is not an empty one: Jane Doe may be in it.
+    const editorial = item('AAAA2222', { title: 'Editorial', creators: [{ creatorType: 'author', firstName: 'Jane', lastName: 'Doe' }] });
+    const p = plan('@article{x,\n  title = {Editorial},\n  author = {Doe, Jane\\{ AND Smith, John\\}}\n}\n', [editorial], 'add');
+    expect(p.actions[0]).toMatchObject({ kind: 'skip', reason: 'possible-existing' });
+  });
+
+  it('gives its own reading of a name two stored creators export alike', () => {
+    const creators = [
+      { creatorType: 'author', firstName: '', lastName: 'Reed, Ann' },
+      { creatorType: 'author', firstName: 'Ann', lastName: 'Reed' },
+      { creatorType: 'author', firstName: 'Eva', lastName: 'Kim' },
+    ];
+    const k = item('AAAA2222', { title: 'T', citationKey: 'k', creators });
+    const p = plan('@article{k,\n  author = {Reed, Ann and Kim, Eva}\n}\n', [k]);
+    expect(p.actions[0]).toMatchObject({ kind: 'update', patch: { creators: [{ lastName: 'Reed', firstName: 'Ann' }, creators[2]] } });
+  });
+});
