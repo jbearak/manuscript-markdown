@@ -920,7 +920,8 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   const author = entry.fields.get('author');
   const institution = text('institution');
   if (author) {
-    itemData.author = parseAuthors(nameList(entry, 'author') ?? author);
+    const list = nameList(entry, 'author');
+    itemData.author = parseAuthors(list?.names ?? author, list?.tilde);
   } else if (institution) {
     // Fallback for entries (commonly @techreport) that credit an organization
     // via `institution` instead of `author`; map to CSL literal name form.
@@ -954,7 +955,8 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
 
   // Editor (parsed like authors, supports institutional editors)
   const editor = entry.fields.get('editor');
-  if (editor) itemData.editor = parseAuthors(nameList(entry, 'editor') ?? editor);
+  const editors = nameList(entry, 'editor');
+  if (editor) itemData.editor = parseAuthors(editors?.names ?? editor, editors?.tilde);
 
   const publisher = text('publisher');
   if (publisher) itemData.publisher = publisher;
@@ -1211,21 +1213,29 @@ export function bibtexNameParts(name: string): { first: string; von: string; las
 // Here too, where the push and the tests have always found it
 export { splitAuthorString };
 
-// A tilde written as its command, \textasciitilde{}, in a name list as
-// nameList gives it, which no tie is
-const WRITTEN_TILDE = '\uE000';
-
-/** An entry's name list, with its tildes written as commands as
- *  WRITTEN_TILDE, which parseAuthors reads */
-const nameList = (entry: BibtexEntry, field: string) => bibtexNamesWithTildesAs(entry, field, WRITTEN_TILDE);
+/** An entry's name list as parseAuthors reads it, with each tilde written
+ *  as its command, \textasciitilde{}, which no tie is, as `tilde`, a
+ *  private-use character the field doesn't hold, where it has one */
+function nameList(entry: BibtexEntry, field: string): { names: string; tilde?: string } | undefined {
+  const held = (entry.writtenFields?.get(field) ?? '') + (entry.fields.get(field) ?? '');
+  let code = 0xe000;
+  while (held.includes(String.fromCharCode(code))) code++;
+  const tilde = String.fromCharCode(code);
+  const names = bibtexNamesWithTildesAs(entry, field, tilde);
+  if (names === undefined) return undefined;
+  return names.includes(tilde) ? { names, tilde } : { names };
+}
 
 /** A name list's names as citeproc takes them: split where BibTeX splits
  *  the list, before a tie reads as a space, so Doe~and~Smith is one name,
  *  and then each name's ties, unescaped `~`, as spaces, as BibTeX splits
- *  a name's words at them and TeX shows them, in a group too. A tilde
- *  written as its command, in a list as nameList gives it, stays a tilde. */
-export function parseAuthors(authorString: string): CiteprocName[] {
-  return splitAuthorString(authorString).map(name => parseAuthorName(tiesAsSpaces(name, true).split(WRITTEN_TILDE).join('~')));
+ *  a name's words at them and TeX shows them, in a group too. `tilde`, as
+ *  nameList gives it, stands for a tilde, which stays one. */
+export function parseAuthors(authorString: string, tilde?: string): CiteprocName[] {
+  return splitAuthorString(authorString).map(name => {
+    const read = tiesAsSpaces(name, true);
+    return parseAuthorName(tilde === undefined ? read : read.split(tilde).join('~'));
+  });
 }
 
 /** One name of a list, as parseAuthors reads each. */
@@ -1276,7 +1286,8 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
     if (!keySuppressed && author) {
       // The first author's family name, or an institution's whole name, as
       // citeproc's data has it (see parseAuthors)
-      const first = parseAuthors(nameList(entry, 'author') ?? author)[0];
+      const list = nameList(entry, 'author');
+      const first = parseAuthors(list?.names ?? author, list?.tilde)[0];
       text = first ? first.literal ?? first.family ?? '' : author.trim();
     } else if (keySuppressed) {
       // suppress-author: year only, no author name

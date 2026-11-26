@@ -1096,6 +1096,8 @@ describe('BibTeX ties, empty groups and \\url in names', () => {
     ['a tilde\'s command', String.raw`X \textasciitilde{}Y`, [{ family: '~Y', given: 'X' }]],
     ['a tilde\'s command by a tie', String.raw`A~B \textasciitilde{}C, D`, [{ family: 'A B ~C', given: 'D' }]],
     ['a tilde\'s command in a group', String.raw`{Research \textasciitilde{} Development}`, [{ literal: 'Research ~ Development' }]],
+    ['a private-use character', 'Roe\uE000, Rick', [{ family: 'Roe\uE000', given: 'Rick' }]],
+    ['a private-use character by a tilde\'s command', String.raw`Roe\textasciitilde{}`+'\uE000, Rick', [{ family: 'Roe~\uE000', given: 'Rick' }]],
     ['a tilde\'s accent', String.raw`Mu\~{n}oz, Ana`, [{ family: 'Muñoz', given: 'Ana' }]],
     ['a tilde\'s accent without braces', String.raw`Mu\~noz, Ana`, [{ family: 'Muñoz', given: 'Ana' }]],
     ['two names without ties', 'Doe, Jane and Smith, John', [{ family: 'Doe', given: 'Jane' }, { family: 'Smith', given: 'John' }]],
