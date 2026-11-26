@@ -1747,3 +1747,140 @@ describe('push: round six', () => {
     expect(plan(bib, [book, article]).actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'BBBB2222 and AAAA2222' });
   });
 });
+
+describe('push: a stored creator the entry moves', () => {
+  const reed = { creatorType: 'author', firstName: 'Ann', lastName: 'Reed' };
+  const garcia = { creatorType: 'author', firstName: '', lastName: 'Garcia Lopez' };
+  const kim = { creatorType: 'author', firstName: 'Eva', lastName: 'Kim' };
+  const editor = { creatorType: 'editor', firstName: 'Ed', lastName: 'Long' };
+  const translator = { creatorType: 'translator', firstName: 'Fran', lastName: 'Lee' };
+  const update = (creators: object[], author: string) => {
+    const a = plan('@book{k,\n  title = {T},\n  author = {' + author + '}\n}\n', [item('AAAA2222', { itemType: 'book', title: 'T', citationKey: 'k', creators })]).actions[0];
+    if (a.kind !== 'update') throw new Error('expected an update, got ' + a.kind);
+    return a;
+  };
+
+  it('keeps a moved last name with no first name as one last name', () => {
+    const a = update([reed, garcia], 'Garcia Lopez and Reed, Ann');
+    expect(a.patch.creators).toEqual([garcia, reed]);
+    expect(a.changes).toEqual([{ field: 'creators:author', from: 'Reed, Ann; Garcia Lopez', to: 'Garcia Lopez; Reed, Ann' }]);
+  });
+
+  it('keeps it when an author is inserted or deleted before it, and says other roles move', () => {
+    const stored = [reed, editor, garcia, translator, kim];
+    const inserted = update(stored, 'Reed, Ann and Singh, Ira and Garcia Lopez and Kim, Eva');
+    expect(inserted.patch.creators).toEqual([reed, { creatorType: 'author', lastName: 'Singh', firstName: 'Ira' }, garcia, kim, editor, translator]);
+    expect(inserted.changes.map(c => c.field)).toEqual(['creators:author', 'creators']);
+    expect(inserted.changes[1].to).toBe('author Reed, Ann; author Singh, Ira; author Garcia Lopez; author Kim, Eva; editor Long, Ed; translator Lee, Fran');
+    const deleted = update(stored, 'Garcia Lopez and Kim, Eva');
+    expect(deleted.patch.creators).toEqual([garcia, kim, editor, translator]);
+  });
+
+  it('keeps both of two creators that export alike on a reorder, but not on a deletion', () => {
+    const surname = { creatorType: 'author', firstName: '', lastName: 'Reed, Ann' };
+    const swapped = update([surname, editor, reed, translator, kim], 'Kim, Eva and Reed, Ann and Reed, Ann');
+    expect(swapped.patch.creators).toEqual([kim, editor, surname, translator, reed]);
+    // Which of the two was deleted can't be told: the entry's reading.
+    const deleted = update([surname, reed, kim], 'Reed, Ann and Kim, Eva');
+    expect(deleted.patch.creators).toEqual([{ creatorType: 'author', lastName: 'Reed', firstName: 'Ann' }, kim]);
+  });
+
+  it("gives the entry's reading where it repeats a name", () => {
+    const a = update([reed, garcia], 'Garcia Lopez and Garcia Lopez');
+    expect(a.patch.creators).toEqual([
+      { creatorType: 'author', lastName: 'Lopez', firstName: 'Garcia' },
+      garcia,
+    ]);
+  });
+});
+
+describe('push: a match by identifier while another, keyless item is the plain match', () => {
+  // Seed 1897, reduced: the keyless book's entry has the section's DOI.
+  const book = item('ZZZZ2222', {
+    itemType: 'book',
+    title: 'Field atlas',
+    // Zotero reads 23 as a day, so its export's key is oster_field_nodate,
+    // where push's reading makes oster_field_23.
+    date: '23',
+    DOI: '10.4242/winter.b',
+    creators: [
+      { creatorType: 'editor', firstName: 'Bo', lastName: 'Øster' },
+      { creatorType: 'author', firstName: 'Ann', lastName: 'Reed' },
+    ],
+  });
+  const section = item('ZZZZ2223', {
+    itemType: 'bookSection',
+    title: 'Field atlas',
+    citationKey: 'kim_field_1998',
+    DOI: '10.4242/winter.a',
+    creators: [{ creatorType: 'author', firstName: 'Eva', lastName: 'Kim' }],
+  });
+  const bib = '@book{oster_field_nodate,\n  title = {Field atlas},\n  doi = {10.4242/winter.a},\n  author = {Reed, Ann},\n  editor = {Øster, Bo}\n}\n';
+
+  it("won't follow an edited DOI to another item while the entry's own is keyless", async () => {
+    for (const mode of ['add', 'update'] as const) {
+      const r = await pushThroughApi(bib, [book, section], mode);
+      expect(r.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'ZZZZ2223 and ZZZZ2222' });
+      expect(r.posts).toEqual([]);
+    }
+  });
+
+  it('nor an ISBN', () => {
+    const isbnBook = item('ZZZZ2225', { itemType: 'book', title: 'Other atlas', ISBN: '9780262033848', citationKey: 'x' });
+    const byIsbn = '@book{oster_field_nodate,\n  title = {Field atlas},\n  isbn = {9780262033848},\n  author = {Reed, Ann},\n  editor = {Øster, Bo}\n}\n';
+    expect(plan(byIsbn, [book, isbnBook]).actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'ZZZZ2225 and ZZZZ2222' });
+  });
+
+  it('nor a PMID', async () => {
+    const pmidItem = item('ZZZZ2226', { title: 'Other', PMID: '12345678', citationKey: 'y' });
+    const keylessArticle = item('ZZZZ2227', { title: 'Field notes', creators: [{ creatorType: 'author', firstName: 'Ann', lastName: 'Reed' }] });
+    const byPmid = '@article{fieldnotes,\n  title = {Field notes},\n  pmid = {12345678},\n  author = {Reed, Ann}\n}\n';
+    const r = await pushThroughApi(byPmid, [keylessArticle, pmidItem], 'update');
+    expect(r.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'ZZZZ2226 and ZZZZ2227' });
+  });
+
+  it('still updates a keyless item its own DOI matches', () => {
+    const article = item('ZZZZ2228', {
+      title: 'Field notes',
+      DOI: '10.4242/notes',
+      pages: '1–5',
+      creators: [{ creatorType: 'author', firstName: 'Ann', lastName: 'Reed' }],
+    });
+    const edited = '@article{reed_field_nodate,\n  title = {Field notes},\n  doi = {10.4242/notes},\n  author = {Reed, Ann},\n  pages = {1--6}\n}\n';
+    expect(plan(edited, [article]).actions[0]).toMatchObject({ kind: 'update', itemKey: 'ZZZZ2228', changes: [{ field: 'pages' }] });
+  });
+});
+
+describe('push: no notice for a title given as Zotero exports it', () => {
+  const titled = (stored: string, tex: string) =>
+    plan('@article{k,\n  title = {' + tex + '}\n}\n', [item('AAAA2222', { title: stored, citationKey: 'k' })]).actions[0];
+
+  it('is quiet on unchanged exports with escapes beside letters, math signs and scripts', () => {
+    // As Zotero's BibTeX export writes each stored title.
+    for (const [stored, tex] of [
+      ['Cost $5 per m<sup>2</sup>', 'Cost \\$5 per m$^{\\textrm{2}}$'],
+      ['x~y', 'x{\\textasciitilde}y'],
+      ['x^y', 'x{\\textasciicircum}y'],
+      ['Ratio $\\frac{a}{bc}$', 'Ratio \\${\\textbackslash}frac\\{a\\}\\{bc\\}\\$'],
+      ['Model ~ H<sub>2</sub>O', 'Model {\\textasciitilde} {H}$_{\\textrm{2}}${O}'],
+      ['<i>K</i><sub>D</sub>', '\\textit{{K}}$_{\\textrm{{D}}}$'],
+    ]) {
+      expect(titled(stored, tex)).toMatchObject({ kind: 'unchanged', notPushed: [] });
+    }
+  });
+
+  it('still reports an edit of any of them', () => {
+    for (const [stored, tex] of [
+      ['Cost $5 per m<sup>2</sup>', 'Cost \\$6 per m$^{\\textrm{2}}$'],
+      ['Cost $5 per m<sup>2</sup>', 'Cost \\$5 per m$^{\\textrm{3}}$'],
+      ['x~y', 'x{\\textasciitilde}z'],
+      ['x^y', 'x{\\textasciicircum}Y'],
+      ['Ratio $\\frac{a}{bc}$', 'Ratio $\\frac{ab}{c}$'],
+      ['Ratio $\\frac{a}{bc}$', 'Ratio \\${\\textbackslash}frac\\{ab\\}\\{c\\}\\$'],
+      ['Model ~ H<sub>2</sub>O', 'Model {\\textasciitilde} {H}$_{\\textrm{3}}${O}'],
+    ]) {
+      const a = titled(stored, tex);
+      expect(a.kind === 'unchanged' ? a.notPushed.map(n => n.field) : a.kind).toEqual(['title']);
+    }
+  });
+});

@@ -124,7 +124,8 @@ export interface ZoteroFieldNotPushed {
 }
 
 export interface ZoteroFieldChange {
-  /** The Zotero field, or `creators:<role>`. */
+  /** The Zotero field, `creators:<role>`, or `creators` for the whole
+   *  list where creators of other roles move. */
   readonly field: string;
   readonly from: string;
   readonly to: string;
@@ -165,8 +166,9 @@ export type ZoteroPushSkipReason =
   /** An item with no citation key stored has the entry's title and names,
    *  so it may be the entry's (see sameWorkWithoutKey). */
   | 'possible-existing'
-  /** Matched by citation key to one item, while another with no citation
-   *  key stored has the entry's title and names (see sameWorkWithoutKey). */
+  /** Matched by citation key, DOI, PMID or ISBN to one item, while another
+   *  with no citation key stored has the entry's title and names (see
+   *  sameWorkWithoutKey). */
   | 'plain-match-elsewhere'
   /** Another whole work in the library, as a book, has the entry's ISBN. */
   | 'isbn-owned-elsewhere'
@@ -686,6 +688,81 @@ function looseText(value: string): string {
     .join('');
 }
 
+/** The Zotero text whose export, as Zotero's BibTeX export writes a text
+ *  field, is `tex`: its escapes (\$, {\textasciitilde} and the like) as the
+ *  characters, its $^{\textrm{…}}$ and $_{\textrm{…}}$ as <sup> and <sub>,
+ *  \textit, \textbf and \textsc as Zotero's markup, and the braces it puts
+ *  around capitals dropped.  Undefined for any other TeX, math included,
+ *  so only an unchanged export reads back as its value; used only to drop
+ *  a notice, never to write. */
+function textOfExport(tex: string): string | undefined {
+  const ESCAPED: Readonly<Record<string, string>> = { $: '$', '&': '&', '%': '%', '#': '#', _: '_', '{': '{', '}': '}' };
+  const COMMANDS: Readonly<Record<string, string>> = {
+    textasciitilde: '~',
+    textasciicircum: '^',
+    textbackslash: '\\',
+    textless: '<',
+    textgreater: '>',
+    textbar: '|',
+  };
+  const MARKUP: Readonly<Record<string, string>> = { textit: 'i', textbf: 'b', textsc: 'sc' };
+  // The group starting at `at`, an opening brace: its content and the
+  // index after it.
+  const group = (at: number): [string, number] | undefined => {
+    let depth = 0;
+    for (let i = at; i < tex.length; i++) {
+      if (tex[i] === '\\') i++;
+      else if (tex[i] === '{') depth++;
+      else if (tex[i] === '}' && --depth === 0) return [tex.slice(at + 1, i), i + 1];
+    }
+    return undefined;
+  };
+  let out = '';
+  for (let i = 0; i < tex.length; ) {
+    const rest = tex.slice(i);
+    const command = /^\{\\([a-z]+)\}/.exec(rest);
+    if (command && command[1] in COMMANDS) {
+      out += COMMANDS[command[1]];
+      i += command[0].length;
+      continue;
+    }
+    const script = /^\$([\^_])\{\\textrm\{/.exec(rest);
+    if (script) {
+      const inner = group(i + 2);
+      if (inner === undefined || tex[inner[1]] !== '$') return undefined;
+      const body = /^\\textrm(\{[^]*\})$/.exec(inner[0]);
+      const read = body ? textOfExport(body[1]) : undefined;
+      if (read === undefined) return undefined;
+      const tag = script[1] === '^' ? 'sup' : 'sub';
+      out += '<' + tag + '>' + read + '</' + tag + '>';
+      i = inner[1] + 1;
+      continue;
+    }
+    const markup = /^\\([a-z]+)\{/.exec(rest);
+    if (markup && markup[1] in MARKUP) {
+      const inner = group(i + markup[0].length - 1);
+      const read = inner === undefined ? undefined : textOfExport(inner[0]);
+      if (inner === undefined || read === undefined) return undefined;
+      const tag = MARKUP[markup[1]];
+      out += '<' + tag + '>' + read + '</' + tag + '>';
+      i = inner[1];
+      continue;
+    }
+    const c = tex[i];
+    if (c === '\\') {
+      if (!(tex[i + 1] in ESCAPED)) return undefined;
+      out += ESCAPED[tex[i + 1]];
+      i += 2;
+    } else if (c === '$' || c === '~' || c === '^') {
+      return undefined;
+    } else {
+      if (c !== '{' && c !== '}') out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 const MATH_OPEN = '';
 const MATH_CLOSE = '';
 
@@ -843,7 +920,7 @@ interface EntryFields {
   /** Zotero field → a value left out for its TeX or math, as looseText
    *  reads it, with its line in `notPushed`, which an update drops where
    *  Zotero's value is the same text. */
-  readonly kept: Map<string, { readonly loose: string; readonly base: string; readonly line: ZoteroFieldNotPushed }>;
+  readonly kept: Map<string, { readonly loose: string; readonly tex: string; readonly base: string; readonly line: ZoteroFieldNotPushed }>;
   readonly date?: readonly number[];
   readonly creators: Map<string, ReadCreators>;
   readonly notPushed: ZoteroFieldNotPushed[];
@@ -890,7 +967,7 @@ function entryFields(entry: BibtexEntry, type: SchemaType, repeated: ReadonlySet
         // As TeX, escapes and all, where a command's group is still around
         // its argument and an escaped dollar sign is text.
         const tex = entry.texFields?.get(name) ?? bibtexFieldAsPlainText(entry, name) ?? '';
-        kept.set(target, { loose: looseText(tex), base, line });
+        kept.set(target, { loose: looseText(tex), tex, base, line });
       }
       continue;
     }
@@ -986,10 +1063,13 @@ function updateChanges(
   // A value left out for its TeX that is Zotero's own text, its markup and
   // math set aside, is no difference to report.
   const same = new Set<ZoteroFieldNotPushed>();
-  for (const [field, { loose, base, line }] of read.kept) {
+  for (const [field, { loose, tex, base, line }] of read.kept) {
     const current = typeof item[field] === 'string' ? (item[field] as string) : '';
     const caseless = CASELESS_BASES.has(baseOf(type, field) || base);
     if (current !== '' && looseFold(looseText(current), caseless) === looseFold(loose, caseless)) same.add(line);
+    // Or the TeX is what Zotero's export writes for its value, as
+    // `Cost \$5 per m$^{\textrm{2}}$` or `x{\textasciitilde}y`.
+    else if (current !== '' && textOfExport(tex) === current) same.add(line);
   }
   const notPushed = read.notPushed.filter(line => !same.has(line));
   const extra = extraFields(item);
@@ -1028,6 +1108,7 @@ function updateChanges(
   }
   const existing = asCreators(item.creators);
   let creators = existing;
+  let regrouped = false;
   for (const [role, { creators: next, texts, incomplete }] of read.creators) {
     const current = existing.filter(c => c.creatorType === role);
     if (incomplete) {
@@ -1056,19 +1137,84 @@ function updateChanges(
     const exportedText = (c: ZoteroCreator) =>
       c.name !== undefined && c.name !== '' ? '{' + c.name + '}' : c.firstName ? (c.lastName ?? '') + ', ' + c.firstName : (c.lastName ?? '');
     const twins = new Set(current.map(exportedText).filter((t, i, all) => all.indexOf(t) !== i));
-    const merged = next.map((n, i) =>
+    const byIndex = next.map((n, i) =>
       i < current.length && !twins.has(exportedText(current[i])) && sameAsExported([current[i]], [n], [texts[i]]) ? current[i] : n,
     );
-    if (sameCreators(current, merged)) continue;
+    if (sameCreators(current, byIndex)) continue;
+    const merged = keptWhereMoved(current, next, texts, byIndex, exportedText, twins);
     changes.push({
       field: 'creators:' + role,
       from: current.map(creatorText).join('; '),
       to: merged.map(creatorText).join('; '),
     });
+    // A role whose number of names changes is written as one run where it
+    // first appeared (replaceRole), so a creator of another role between
+    // two of its names moves after them.
+    const at = creators.flatMap((c, i) => (c.creatorType === role ? [i] : []));
+    if (at.length !== merged.length && at.length > 0 && at[at.length - 1] - at[0] + 1 !== at.length) regrouped = true;
     creators = replaceRole(creators, role, merged);
   }
   if (creators !== existing) patch.creators = creators;
+  // The role lines don't show that move, so a line for the whole list does.
+  if (regrouped) {
+    const listed = (list: readonly ZoteroCreator[]) => list.map(c => c.creatorType + ' ' + creatorText(c)).join('; ');
+    changes.push({ field: 'creators', from: listed(existing), to: listed(creators) });
+  }
   return { changes, patch, notPushed };
+}
+
+/** The role's names as written: `byIndex`, where a stored creator the entry
+ *  gives at its own place stays as stored, and besides, a stored creator
+ *  the entry moves stays as stored too, so moving `Garcia Lopez` (a last
+ *  name with no first name) keeps it one last name.  A stored creator is
+ *  kept where the entry gives its exported text once and no other creator
+ *  of the role exports that text.  Where two do (twins, as a surname-only
+ *  `Reed, Ann` and Ann Reed), only a list with every stored creator in
+ *  some order keeps them, each twin in its stored order; otherwise, as
+ *  for a deletion among twins, which can't be told apart, the entry's own
+ *  reading is written. */
+function keptWhereMoved(
+  current: readonly ZoteroCreator[],
+  next: readonly ZoteroCreator[],
+  texts: ReadonlyArray<string | undefined>,
+  byIndex: readonly ZoteroCreator[],
+  exportedText: (c: ZoteroCreator) => string,
+  twins: ReadonlySet<string>,
+): ZoteroCreator[] {
+  // Stored creators by exported text, so each name looks only at the
+  // creators it could be (sameAsExported needs the same text, part by
+  // part or as exported).
+  const key = (text: string) => foldText(text);
+  const byText = new Map<string, number[]>();
+  current.forEach((c, j) => {
+    const k = key(exportedText(c));
+    byText.set(k, [...(byText.get(k) ?? []), j]);
+  });
+  const candidates = next.map((n, i) => {
+    const out = new Set<number>([...(byText.get(key(exportedText(n))) ?? []), ...(texts[i] === undefined ? [] : (byText.get(key(texts[i] ?? '')) ?? []))]);
+    return [...out].sort((a, b) => a - b).filter(j => sameAsExported([current[j]], [n], [texts[i]]));
+  });
+  // Every stored creator, in some order: a name kept at its own place
+  // keeps it, and each other name takes the first unused creator it could
+  // be, so twins keep their stored order.
+  if (next.length === current.length) {
+    const used = new Set<number>(byIndex.flatMap((c, i) => (c === next[i] ? [] : [i])));
+    const assigned: ZoteroCreator[] = [];
+    for (let i = 0; i < next.length; i++) {
+      const j = byIndex[i] !== next[i] ? i : candidates[i].find(c => !used.has(c));
+      if (j === undefined) break;
+      used.add(j);
+      assigned.push(current[j]);
+    }
+    if (assigned.length === next.length) return assigned;
+  }
+  const uses = new Map<number, number>();
+  for (const list of candidates) for (const j of list) uses.set(j, (uses.get(j) ?? 0) + 1);
+  return byIndex.map((c, i) => {
+    if (c !== next[i]) return c;
+    const only = candidates[i].filter(j => !twins.has(exportedText(current[j])));
+    return only.length === 1 && candidates[i].length === 1 && uses.get(only[0]) === 1 ? current[only[0]] : c;
+  });
 }
 
 /** The item's PMID, as the matcher reads one: its PMID field, or a `PMID:`
@@ -1339,6 +1485,9 @@ type Candidate =
       readonly entry: BibtexEntry;
       readonly item: ZoteroItemJson;
       readonly repeated: ReadonlySet<string>;
+      /** For a match by DOI, PMID or ISBN: the keyless item that has the
+       *  entry's title and names too, if one does (see plain-match-elsewhere). */
+      readonly plainElsewhere?: string;
     }
   | { readonly kind: 'create'; readonly entryKey: string; readonly entry: BibtexEntry; readonly repeated: ReadonlySet<string> }
   | Extract<ZoteroPushAction, { kind: 'skip' }>;
@@ -1550,7 +1699,15 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         // …and for a whole work's ISBN.
         const isbnClaims = isbnElsewhere(entry, item);
         if (isbnClaims.length > 0) return skip(entryKey, 'isbn-owned-elsewhere', isbnClaims.join(', '));
-        return { kind: 'match', entryKey, entry, item, repeated: repeatedByKey.get(entryKey) ?? new Set() };
+        // The same for a match by DOI, PMID or ISBN: an edited DOI can name
+        // another work with the same title, while the entry's own item has
+        // no key stored.  Skipped last (see below), so the other skips keep
+        // their reasons.
+        const plainElsewhere =
+          decision.outcome === 'update' && (decision.tier === 'doi' || decision.tier === 'isbn-pmid')
+            ? sameWorkWithoutKey(entry, keyless(), item.key)
+            : undefined;
+        return { kind: 'match', entryKey, entry, item, repeated: repeatedByKey.get(entryKey) ?? new Set(), plainElsewhere };
       }
     }
   });
@@ -1657,14 +1814,18 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
     if (input.mode === 'update' && type !== undefined) {
       ({ changes, patch, notPushed } = updateChanges(c.entry, c.item, type, c.repeated));
     }
-    if (!addToCollection && changes.length === 0) {
-      return { kind: 'unchanged', entryKey: c.entryKey, itemKey: c.item.key, notPushed };
-    }
+    const unchanged = !addToCollection && changes.length === 0;
     // Any write to the item would let Zotero rewrite it from its Extra.
-    const migrations = type === undefined ? [] : extraMigrations(c.item, type, input.schema);
+    const migrations = unchanged || type === undefined ? [] : extraMigrations(c.item, type, input.schema);
     if (migrations.length > 0) {
       return { kind: 'skip', entryKey: c.entryKey, reason: 'extra-would-migrate', detail: migrations.join(', ') };
     }
+    // Matched by an identifier while a keyless item is the plain match:
+    // either may be the entry's, so neither is written or reported as it.
+    if (c.plainElsewhere !== undefined) {
+      return { kind: 'skip', entryKey: c.entryKey, reason: 'plain-match-elsewhere', detail: c.item.key + ' and ' + c.plainElsewhere };
+    }
+    if (unchanged) return { kind: 'unchanged', entryKey: c.entryKey, itemKey: c.item.key, notPushed };
     if (addToCollection) patch.collections = [...collections, input.collectionKey];
     return {
       kind: 'update',
