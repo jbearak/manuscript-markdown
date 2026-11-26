@@ -3179,6 +3179,38 @@ describe('frontmatter for VS Code\'s preview table', () => {
     expect(frontmatterYamlForPreview('title: Purpose:\nauthor: Jane Smith')).toBe('title: "Purpose:"\nauthor: Jane Smith');
   });
 
+  it('leaves a title with a colon only in its comment as it is, as YAML reads it', () => {
+    for (const yaml of ['title: Fieldwork # draft: private\nauthor: Jane', 'title: # editor: remember\nauthor: Jane',
+      'title: Fieldwork # draft:\nauthor: Jane', 'title: "Purpose: methods" # c: d\nauthor: Jane']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+  });
+
+  it('quotes a title with a colon in it without the comment after it, which YAML reads without', () => {
+    expect(frontmatterYamlForPreview('title: Example: notes # draft\nauthor: Jane')).toBe('title: "Example: notes"\nauthor: Jane');
+    expect(frontmatterYamlForPreview('title: Example: notes # draft: x\nauthor: Jane')).toBe('title: "Example: notes"\nauthor: Jane');
+    // A # with no space before it is the title's
+    expect(frontmatterYamlForPreview('title: a: b#c\nauthor: Jane')).toBe('title: "a: b#c"\nauthor: Jane');
+  });
+
+  it('reads no brace or bracket in a title\'s comment, which YAML reads none in', () => {
+    expect(frontmatterYamlForPreview('title: Example: notes # draft {private}\nauthor: Jane')).toBe('title: "Example: notes"\nauthor: Jane');
+    expect(frontmatterYamlForPreview('title: Example: notes # draft [x\nauthor: Jane')).toBe('title: "Example: notes"\nauthor: Jane');
+    // Where the colon needs no quoting, a brace in the comment quotes it
+    // with the title, as export writes it, as before the colon was quoted
+    expect(frontmatterYamlForPreview('title: Fieldwork # {x}\nauthor: Jane')).toBe('title: "Fieldwork # {x}"\nauthor: Jane');
+    // A brace in the value quotes it with its comment, as export reads it
+    expect(frontmatterYamlForPreview('title: Plain {--old--} title # c\nfont: X')).toBe('title: "Plain {--old--} title # c"\nfont: X');
+    expect(frontmatterYamlForPreview('title: A {x}: b # c\nfont: X')).toBe('title: "A {x}: b # c"\nfont: X');
+  });
+
+  it('quotes no colon in the value of a key that only starts with title:, which YAML reads as another key', () => {
+    for (const yaml of ['title:chapter: Methods\nauthor: Jane', 'title:A: b\nauthor: Jane']) {
+      expect(frontmatterYamlForPreview(yaml)).toBe(yaml);
+    }
+    expect(frontmatterYamlForPreview('title:\tA: b\nauthor: Jane')).toBe('title: "A: b"\nauthor: Jane');
+  });
+
   it('leaves a title with a colon YAML reads as part of it as it is', () => {
     for (const yaml of ['title: At 07:53\nfont: X', 'title: https://example.org/a\nfont: X', 'title: "A: b"\nfont: X',
       'title: "A: \\"B\\""\nfont: X', 'title: ["A: B", "C"]\nfont: X',
@@ -3602,6 +3634,25 @@ describe('a paragraph mark a change tracks, in the resolved previews', () => {
     expect(render('original', 'x {--a{++\n\n++}b--} y')).toBe('<p>x ab y</p>');
   });
 
+  it('splits and joins at a mark in a substitution as its side tracks it, as export does', () => {
+    // Export tracks a mark in the old text as deleted and one in the new as
+    // inserted
+    const del = '<del class="manuscript-markdown-deletion">';
+    const ins = '<ins class="manuscript-markdown-addition">';
+    const sub = '<span class="manuscript-markdown-substitution">';
+    expect(render('all', 'A {~~x\n\ny~>z~~} B')).toBe('<p>A ' + sub + del + 'x</del></span></p>\n<p>' + sub + del + 'y</del>' + ins + 'z</ins></span> B</p>');
+    expect(render('none', 'A {~~x\n\ny~>z~~} B')).toBe('<p>A z B</p>');
+    expect(render('original', 'A {~~x\n\ny~>z~~} B')).toBe('<p>A x</p>\n<p>y B</p>');
+    expect(render('none', 'A {~~x~>y\n\nz~~} B')).toBe('<p>A y</p>\n<p>z B</p>');
+    expect(render('original', 'A {~~x~>y\n\nz~~} B')).toBe('<p>A x B</p>');
+    expect(render('none', 'A {~~x\n\ny~>z\n\nw~~} B')).toBe('<p>A z</p>\n<p>w B</p>');
+    expect(render('original', 'A {~~x\n\ny~>z\n\nw~~} B')).toBe('<p>A x</p>\n<p>y B</p>');
+    expect(render('simple', 'A {~~x\n\ny~>z~~} B')).toBe('<p class="manuscript-markdown-changed">A z B</p>');
+    // The innermost change's, as for an addition in the old text
+    expect(render('none', 'A {~~x {++p\n\nq++} y~>z~~} B')).toBe('<p>A </p>\n<p>z B</p>');
+    expect(render('original', 'A {~~x {++p\n\nq++} y~>z~~} B')).toBe('<p>A x pq y B</p>');
+  });
+
   it('keeps a figure apart, with its ID, where the mark before it is dropped', () => {
     const figure = '<figure id="fig-map" class="manuscript-markdown-figure"><img src="a.png" alt="map"><figcaption>Figure 1: map</figcaption></figure>';
     const link = '<p>See <a href="#fig-map" class="manuscript-markdown-cross-reference">Figure 1</a>.</p>';
@@ -3679,5 +3730,66 @@ describe('text over a blank line that is no CriticMarkup span', () => {
     const html = renderWithPlugin('{~~a\n\nb~~} tail');
     expect(html).toContain('<p>{~~a</p>');
     expect(html).toContain('tail');
+  });
+});
+
+describe('the source line of a table\'s caption above its table', () => {
+  // Scroll sync reads each block's first line, its data-line, in the order
+  // the preview shows the blocks, as ascending
+  function blockLines(input: string): Array<[string, number]> {
+    return createMarkdownItWithPlugin().parse(input, {})
+      .filter(token => ['paragraph_open', 'table_open', 'html_block'].includes(token.type) && token.level === 0 && token.map)
+      .map(token => [token.type, token.map![0]] as [string, number]);
+  }
+
+  it('is the table\'s first, so the lines the preview shows ascend', () => {
+    expect(blockLines('P\n\n| H |\n|---|\n| b |\n\n: Cap {#tbl-x}\n\nQ'))
+      .toEqual([['paragraph_open', 0], ['paragraph_open', 2], ['table_open', 2], ['paragraph_open', 8]]);
+    // An HTML block's table, which the caption splits from the HTML before it
+    expect(blockLines('<div>\n<table><tr><td>h</td></tr></table>\n\n: Cap {#tbl-x}\n\nQ'))
+      .toEqual([['html_block', 0], ['paragraph_open', 1], ['html_block', 1], ['paragraph_open', 5]]);
+  });
+
+  it('is the table\'s first in the source, where the preview rewrote lines before it', () => {
+    // A grid table, and a blank line more in a deletion, before; and a grid
+    // table's own caption
+    expect(blockLines('+---+\n| g |\n+===+\n| b |\n+---+\n\nP\n\n| H |\n|---|\n| b |\n\n: Cap {#tbl-x}\n\nQ').slice(1))
+      .toEqual([['paragraph_open', 6], ['paragraph_open', 8], ['table_open', 8], ['paragraph_open', 14]]);
+    expect(blockLines('A {--x\n\n\n\ny--} B\n\n| H |\n|---|\n| b |\n\n: Cap {#tbl-x}\n\nQ'))
+      .toEqual([['paragraph_open', 0], ['paragraph_open', 4], ['paragraph_open', 6], ['table_open', 6], ['paragraph_open', 12]]);
+    expect(blockLines('P\n\n+---+\n| g |\n+===+\n| b |\n+---+\n\n: Cap {#tbl-x}\n\nQ'))
+      .toEqual([['paragraph_open', 0], ['paragraph_open', 2], ['table_open', 2], ['paragraph_open', 10]]);
+  });
+
+  it('stays the caption\'s own in its text, which the language server reads', () => {
+    const tokens = createMarkdownItWithPlugin().parse('P\n\n| H |\n|---|\n| b |\n\n: Cap {#tbl-x}', {});
+    const caption = tokens.findIndex(token => token.attrGet?.('id') === 'tbl-x');
+    expect(tokens[caption + 1].map).toEqual([6, 7]);
+  });
+
+  it('is its own below the table', () => {
+    // The frontmatter, which the plugin reads from the source, as no
+    // frontmatter plugin is in this parser
+    expect(blockLines('---\ntbl-cap-location: bottom\n---\n\n| H |\n|---|\n| b |\n\n: Cap {#tbl-x}'))
+      .toEqual([['table_open', 4], ['paragraph_open', 8]]);
+  });
+});
+
+describe('a cross-reference\'s source offset in a paragraph split at a change\'s paragraph break', () => {
+  it('is where its source is in its own paragraph\'s text', () => {
+    for (const text of [
+      'A {~~x\n\n@fig-map~>x @fig-map~~} B',
+      'A {--x\n\n@fig-map--} @fig-map B',
+      '{++# H\n\n@fig-map++} @fig-map',
+      '# H {--x\n\n@fig-map--} @fig-map',
+    ]) {
+      const refs: Array<[string, number]> = [];
+      for (const inline of createMarkdownItWithPlugin().parse(text, {}).filter(token => token.type === 'inline')) {
+        for (const child of inline.children ?? []) {
+          if (child.type === 'manuscript_cross_reference') refs.push([inline.content.slice(child.meta.offset, child.meta.offset + 8), child.meta.offset]);
+        }
+      }
+      expect(refs.map(([source]) => source)).toEqual(['@fig-map', '@fig-map']);
+    }
   });
 });
