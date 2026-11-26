@@ -1364,8 +1364,8 @@ describe('push: names and text, as BibTeX and Zotero write them', () => {
     expect(p.actions[0]).toMatchObject({ kind: 'create', data: { creators: [{ creatorType: 'author', lastName: 'and Smith', firstName: 'Doe' }] } });
   });
 
-  it("leaves the DOCX export's reading of AND as it was", () => {
-    expect(parseAuthors('Barnes AND Noble')).toEqual([{ family: 'Noble', given: 'Barnes AND' }]);
+  it('reads AND as the DOCX export reads it', () => {
+    expect(parseAuthors('Barnes AND Noble')).toEqual([{ family: 'Barnes' }, { family: 'Noble' }]);
   });
 
   it("keeps a two-field name with no first name, as Zotero's export writes it", () => {
