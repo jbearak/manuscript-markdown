@@ -633,9 +633,9 @@ function looseText(value: string): string {
   // dollar sign set aside.
   text = text.replace(/([_^])\s*([^{\s])/g, (_m, s: string, x: string) => s + '{' + x + '}');
   const scripts: string[] = [];
-  text = text.replace(/([_^])\{([^{}]*)\}/g, (_m, s: string, x: string) => '\u0000' + scripts.push(s + '{' + x.replace(/[{}]|\$/g, '') + '}') + '\u0000');
+  text = text.replace(/([_^])\{([^{}]*)\}/g, (_m, s: string, x: string) => '\uE000' + scripts.push(s + '{' + x.replace(/[{}]|\$/g, '') + '}') + '\uE000');
   text = text.replace(/[{}]|\$/g, '');
-  return text.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => scripts[Number(i) - 1]);
+  return text.replace(/\uE000(\d+)\uE000/g, (_m, i: string) => scripts[Number(i) - 1]);
 }
 
 function foldText(value: string): string {
