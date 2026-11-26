@@ -40,7 +40,7 @@ import {
 } from './bibtex-parser';
 import { createHash } from 'crypto';
 import { pushAll } from './arrays';
-import { parseAuthorName, splitAuthorString } from './md-to-docx-citations';
+import { isOthersName, parseAuthorName, splitAuthorString } from './md-to-docx-citations';
 import { normalizeDoi, normalizeIsbns, normalizePmid, type ZoteroLinkDecision } from './zotero-link';
 
 /** An item as the Local API returns its `data`, with `meta.parsedDate`. */
@@ -578,7 +578,7 @@ function readCreators(entry: BibtexEntry, field: string, creatorType: string): R
   const read = list.map(name => tiesAsSpaces(name));
   const names = read.map(parseAuthorName);
   const last = names[names.length - 1];
-  const incomplete = last !== undefined && last.family === 'others' && last.given === undefined && last.literal === undefined;
+  const incomplete = last !== undefined && isOthersName(last);
   if (incomplete) names.pop();
   for (const [i, name] of names.entries()) {
     if (name.literal !== undefined) {

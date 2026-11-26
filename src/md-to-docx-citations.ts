@@ -410,6 +410,45 @@ function withNamesAsRead(item: CiteprocItemData): CiteprocItemData {
   return read;
 }
 
+/** Whether `name`, the last of a list, is BibTeX's `others`, which ends a
+ *  list whose other names it doesn't give: a family name `others` alone,
+ *  not {others}, which is a literal */
+export function isOthersName(name: CiteprocName): boolean {
+  return name.family === 'others' && name.given === undefined && name.literal === undefined;
+}
+
+// A name whose dropping particle is this, and no other part, citeproc-js
+// prints nothing of, and joins the names before it with the style's et-al
+// term, as it joins a list it has cut short (CSL.NameOutput.prototype.
+// _droppingParticle, which sets etal_spec, read by joinPersons). The
+// processor's documentation doesn't give it; the tests of `and others`
+// fail if an upgrade drops it.
+const ET_AL_NAME: CiteprocName = { family: '', 'dropping-particle': 'et al.' };
+
+/** `item` with a name list ending `and others` (see isOthersName) as
+ *  citeproc-js prints one cut short: with the style's et-al term after the
+ *  names before it. A style that sets et-al-use-last, as APA's
+ *  bibliography, would join them with its ellipsis, which puts the last
+ *  name given where the list's last author goes, so there the `others`
+ *  name is dropped, and the list is the names it gives. A list of `others`
+ *  alone is no names. Only citeproc's copy reads it so: the copy a Zotero
+ *  field holds keeps the name, as BibTeX wrote it. */
+function withOthersAsEtAl(item: CiteprocItemData, useLast: boolean): CiteprocItemData {
+  const asEtAl = (names: CiteprocName[] | undefined) => {
+    if (!names || names.length === 0 || !isOthersName(names[names.length - 1])) return names;
+    const given = names.slice(0, -1);
+    if (given.length === 0) return undefined;
+    return useLast ? given : [...given, { ...ET_AL_NAME }];
+  };
+  const read = { ...item };
+  for (const role of ['author', 'editor'] as const) {
+    const names = asEtAl(item[role]);
+    if (names) read[role] = names;
+    else delete read[role];
+  }
+  return read;
+}
+
 function buildEngine(
   entries: Map<string, BibtexEntry>,
   styleXml: string,
@@ -418,10 +457,11 @@ function buildEngine(
   const citeproc = CSL;
   if (!citeproc) return undefined;
 
+  const useLast = /\bet-al-use-last\s*=\s*["']true["']/.test(styleXml);
   // Build CSL-JSON item map keyed by citation key
   const items = new Map<string, CiteprocItemData>();
   for (const [key, entry] of entries) {
-    const itemData = withNamesAsRead(buildItemData(entry));
+    const itemData = withNamesAsRead(withOthersAsEtAl(buildItemData(entry), useLast));
     itemData.id = key;
     items.set(key, itemData);
   }

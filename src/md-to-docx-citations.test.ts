@@ -1712,7 +1712,6 @@ describe('names parted at an and in any case', () => {
     ['{Barnes AND Noble}', '(Barnes AND Noble, 2020)', 'Barnes AND Noble.'],
     ['Barnes {AND} Noble', '(Noble, 2020)', 'Noble, B. A.'],
     ['Anderson, Sandra', '(Anderson, 2020)', 'Anderson, S.'],
-    ['Doe, Jane and others', '(Doe & others, 2020)', 'Doe, J., & others.'],
   ])('reads %s as before', async (author, citation, entry) => {
     const text = await exported(author);
     expect(text).toContain(citation);
@@ -1746,3 +1745,70 @@ describe('names parted at an and in any case', () => {
   });
 });
 
+describe('a name list ending and others', () => {
+  const exported = async (style: string, bibtex: string, md = 'See [@k].'): Promise<{ text: string; xml: string }> => {
+    const { docx } = await convertMdToDocx('---\ncsl: ' + style + '\n---\n\n' + md + '\n', { bibtex });
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return { xml, text: [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('').replace(/&amp;/g, '&') };
+  };
+  const book = (author: string) => '@book{k,\n  author = {' + author + '},\n  title = {Study},\n  year = {2020},\n  publisher = {P}\n}\n';
+
+  // The style's et-al term, where citeproc-js joins the names before it so
+  // (see withOthersAsEtAl)
+  it.each([
+    ['chicago-author-date', 'Doe, Jane and others', '(Doe et al. 2020)', 'Doe, Jane et al. 2020.'],
+    ['chicago-author-date', 'Doe, Jane and Smith, John and others', '(Doe et al. 2020)', 'Doe, Jane, John Smith, et al. 2020.'],
+    ['chicago-author-date', '{World Health Organization} and others', '(World Health Organization et al. 2020)', 'World Health Organization et al. 2020.'],
+    ['ieee', 'Doe, Jane and others', '[1]', 'J. Doe et al., Study.'],
+    ['ieee', 'Doe, Jane and Smith, John and others', '[1]', 'J. Doe, J. Smith, et al., Study.'],
+    ['vancouver', 'Doe, Jane and others', '(1)', 'Doe J et al. Study.'],
+    ['vancouver', 'Doe, Jane and Smith, John and others', '(1)', 'Doe J, Smith J, et al. Study.'],
+    // APA's bibliography sets et-al-use-last, so the name is dropped
+    ['apa', 'Doe, Jane and others', '(Doe, 2020)', 'Doe, J. (2020).'],
+    ['apa', 'Doe, Jane and Smith, John and others', '(Doe & Smith, 2020)', 'Doe, J., & Smith, J. (2020).'],
+    ['apa', 'Doe, Jane and Smith, John and Roe, Rick and others', '(Doe et al., 2020)', 'Doe, J., Smith, J., & Roe, R. (2020).'],
+  ])('in %s, reads %s with no name others', async (style, author, citation, entry) => {
+    const { text } = await exported(style, book(author));
+    expect(text).toContain(citation);
+    expect(text).toContain(entry);
+    expect(text).not.toContain('others');
+  });
+
+  it.each(['apa', 'chicago-author-date', 'ieee'])('in %s, reads others alone as no author', async (style) => {
+    const { text } = await exported(style, book('others'));
+    expect(text).not.toContain('others');
+  });
+
+  it.each([
+    ['apa', 'In J. Doe (Ed.), Book.'],
+    ['chicago-author-date', 'In Book, edited by Jane Doe et al.'],
+    ['ieee', 'in Book, J. Doe et al., Eds.'],
+  ])('in %s, reads an editor list so', async (style, expected) => {
+    const bibtex = '@incollection{k,\n  author = {Roe, Rick},\n  title = {Ch},\n  booktitle = {Book},\n  editor = {Doe, Jane and others},\n  year = {2020},\n  publisher = {P}\n}\n';
+    const { text } = await exported(style, bibtex);
+    expect(text).toContain(expected);
+    expect(text).not.toContain('others');
+  });
+
+  it('sorts and tells apart works with et al. as citeproc does a list cut short', async () => {
+    const bibtex = book('Doe, Jane and others').replace('{k,', '{a,').replace('Study', 'Alpha')
+      + book('Doe, Jane and others').replace('{k,', '{b,').replace('Study', 'Beta')
+      + book('Doe, Jane').replace('{k,', '{c,').replace('Study', 'Gamma');
+    const { text } = await exported('chicago-author-date', bibtex, 'See [@c], [@b], [@a].');
+    expect(text).toContain('See (Doe 2020), (Doe et al. 2020b), (Doe et al. 2020a).');
+    expect(text).toContain('Doe, Jane. 2020. Gamma. P.Doe, Jane et al. 2020a. Alpha. P.Doe, Jane et al. 2020b. Beta. P.');
+  });
+
+  it.each([
+    ['apa', '(Doe & others, 2020)'],
+    ['chicago-author-date', '(Doe and others 2020)'],
+  ])('in %s, reads {others}, in a group, as a name', async (style, citation) => {
+    const { text } = await exported(style, book('Doe, Jane and {others}'));
+    expect(text).toContain(citation);
+  });
+
+  it('keeps the name others in the item a Zotero field holds', async () => {
+    const { xml } = await exported('chicago-author-date', book('Doe, Jane and others'));
+    expect(extractCsl(xml).citationItems[0].itemData.author).toEqual([{ family: 'Doe', given: 'Jane' }, { family: 'others' }]);
+  });
+});
