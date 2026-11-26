@@ -729,10 +729,15 @@ function sameValue(base: string, a: string, b: string): boolean {
     default:
       // Zotero's rich text, as <i>…</i>, is markup on the same text.
       // (Read on both sides: Zotero's export writes its &amp; as \&amp;.)
-      return CASELESS_BASES.has(base)
-        ? foldText(withoutMarkup(a)).toLowerCase() === foldText(withoutMarkup(b)).toLowerCase()
-        : foldText(withoutMarkup(a)) === foldText(withoutMarkup(b));
+      return textForm(base, a) === textForm(base, b);
   }
+}
+
+/** The form sameValue compares a text field in (its default case), so two
+ *  values are the same exactly when their forms are equal. */
+function textForm(base: string, value: string): string {
+  const text = foldText(withoutMarkup(value));
+  return CASELESS_BASES.has(base) ? text.toLowerCase() : text;
 }
 
 function creatorText(c: ZoteroCreator): string {
@@ -1166,18 +1171,46 @@ function generatedCitationKey(item: ZoteroItemJson): string {
 
 type KeyClaim = { readonly item: string; readonly source: 'field' | 'extra' | 'generated' };
 
+/** The library's items with no citation key stored (field or Extra) and a
+ *  title, grouped by each form sameWorkWithoutKey compares a title in, in
+ *  library order.  Built once a plan: a group holds exactly the items whose
+ *  title compares equal in that form, so looking one up finds every item
+ *  the comparison would accept, and the plan stays linear in the library. */
+type KeylessTitles = {
+  readonly byForm: ReadonlyMap<string, readonly ZoteroItemJson[]>;
+  readonly byLoose: ReadonlyMap<string, readonly ZoteroItemJson[]>;
+};
+
+function keylessTitles(items: Iterable<ZoteroItemJson>): KeylessTitles {
+  const byForm = new Map<string, ZoteroItemJson[]>();
+  const byLoose = new Map<string, ZoteroItemJson[]>();
+  const add = (map: Map<string, ZoteroItemJson[]>, key: string, item: ZoteroItemJson) => {
+    const list = map.get(key);
+    if (list === undefined) map.set(key, [item]);
+    else list.push(item);
+  };
+  for (const item of items) {
+    if ((typeof item.citationKey === 'string' && item.citationKey.trim() !== '') || extraCitationKey(item) !== undefined) continue;
+    if (typeof item.title !== 'string') continue;
+    add(byForm, textForm('title', item.title), item);
+    add(byLoose, looseFold(looseText(item.title), true), item);
+  }
+  return { byForm, byLoose };
+}
+
 /** An item with no citation key stored, Zotero's export of which would
  *  make a key from its metadata, whose title and creators are the entry's
- *  and whose year, where both give one, is too. */
-function sameWorkWithoutKey(entry: BibtexEntry, items: Iterable<ZoteroItemJson>): string | undefined {
+ *  and whose year, where both give one, is too.  Never the item `except`. */
+function sameWorkWithoutKey(entry: BibtexEntry, keyless: KeylessTitles, except?: string): string | undefined {
   const title = readText(entry, 'title');
   if (title === undefined) return undefined;
   // A title push can't write is compared as its text with formatting set
-  // aside, so it can only hold an entry back.
-  const sameTitle = (stored: string) =>
-    'value' in title
-      ? sameValue('title', stored, title.value)
-      : looseFold(looseText(stored), true) === looseFold(looseText(entry.texFields?.get('title') ?? entry.fields.get('title') ?? ''), true);
+  // aside, so it can only hold an entry back.  (sameValue('title', …) is
+  // equality of textForm, so the group is the items it would accept.)
+  const items =
+    ('value' in title
+      ? keyless.byForm.get(textForm('title', title.value))
+      : keyless.byLoose.get(looseFold(looseText(entry.texFields?.get('title') ?? entry.fields.get('title') ?? ''), true))) ?? [];
   // Each role's names as the entry writes them, against the creators
   // Zotero's export writes in that field: its primary creators in author,
   // its editors and series editors in editor.  A list push can't read
@@ -1197,8 +1230,7 @@ function sameWorkWithoutKey(entry: BibtexEntry, items: Iterable<ZoteroItemJson>)
   const date = readDate(entry);
   const year = date !== undefined && 'parts' in date ? date.parts[0] : undefined;
   for (const item of items) {
-    if ((typeof item.citationKey === 'string' && item.citationKey.trim() !== '') || extraCitationKey(item) !== undefined) continue;
-    if (typeof item.title !== 'string' || !sameTitle(item.title)) continue;
+    if (item.key === except) continue;
     // (Or all its names in one list as the entry's, as before.)
     if (!sameNames(item) && !sameCreators(asCreators(item.creators), allNames)) continue;
     const itemYear = zoteroDateParts(item)?.[0];
@@ -1346,6 +1378,9 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
   // citation key, from either place an item keeps one.
   const isbnOwners = new Map<string, string[]>();
   const keyClaims = citationKeyClaims(input.items.values());
+  // Built on first use, once a plan (see KeylessTitles).
+  let keylessCache: KeylessTitles | undefined;
+  const keyless = () => (keylessCache ??= keylessTitles(input.items.values()));
 
   const own = (owners: Map<string, string[]>, value: string, key: string) => {
     const list = owners.get(value) ?? [];
@@ -1432,7 +1467,7 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         // Nor does a create depend on that key being Zotero's exactly: an
         // item with no key stored and the entry's title and names, and no
         // year against it, may be this entry's.
-        const lookalike = sameWorkWithoutKey(entry, input.items.values());
+        const lookalike = sameWorkWithoutKey(entry, keyless());
         if (lookalike !== undefined) return skip(entryKey, 'possible-existing', lookalike);
         const isbnClaims = isbnElsewhere(entry);
         if (isbnClaims.length > 0) return skip(entryKey, 'isbn-owned-elsewhere', isbnClaims.join(', '));
@@ -1480,7 +1515,7 @@ export function createZoteroPushPlan(input: ZoteroPushInput): ZoteroPushPlan {
         // entry's, as Zotero's export of it would make this key, which push
         // can't always tell (generatedCitationKey).  Both are named.
         if (decision.outcome === 'update' && decision.tier === 'citation-key') {
-          const plain = sameWorkWithoutKey(entry, [...input.items.values()].filter(i => i.key !== item.key));
+          const plain = sameWorkWithoutKey(entry, keyless(), item.key);
           if (plain !== undefined) return skip(entryKey, 'plain-match-elsewhere', item.key + ' and ' + plain);
         }
         if (decision.outcome === 'update' && decision.tier !== 'existing') {

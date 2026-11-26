@@ -1708,3 +1708,42 @@ describe('push: round five', () => {
     expect(plan(bib, [own]).actions[0]).toMatchObject({ kind: 'unchanged' });
   });
 });
+
+describe('push: round six', () => {
+  it('reads each keyless title a bounded number of times however many entries are matched by key', () => {
+    // A plan that compared every keyless item against every entry read each
+    // one's title once per entry; read once a plan (keylessTitles), a
+    // title's reads don't grow with the bibliography.
+    let reads = 0;
+    const items: ZoteroItemJson[] = [];
+    let bib = '';
+    for (let i = 0; i < 100; i++) {
+      items.push(item('K' + String(i).padStart(7, '0'), { title: 'Keyed ' + i, citationKey: 'key' + i, creators: [{ creatorType: 'author', firstName: 'Ann', lastName: 'Author' + i }] }));
+      const keyless = item('L' + String(i).padStart(7, '0'), { creators: [{ creatorType: 'author', firstName: 'Bo', lastName: 'Other' + i }] });
+      const title = 'Keyless ' + i;
+      Object.defineProperty(keyless, 'title', { enumerable: true, get: () => (reads++, title) });
+      items.push(keyless);
+      bib += '@article{key' + i + ',\n  title = {Keyed ' + i + '},\n  author = {Author' + i + ', Ann}\n}\n\n';
+    }
+    const p = plan(bib, items);
+    expect(p.actions.filter(a => a.kind === 'unchanged')).toHaveLength(100);
+    expect(reads).toBeLessThan(100 * 10);
+  });
+
+  it('still finds a keyless item whose title differs only in markup and case', async () => {
+    const book = item('BBBB2222', { itemType: 'book', title: 'Editorial notes', citationKey: 'hasan_editorial_nodate', creators: [{ creatorType: 'author', firstName: 'Eva', lastName: 'Kim' }] });
+    const article = item('AAAA2222', { title: 'The <i>Editorial</i>', creators: [{ creatorType: 'author', firstName: 'Eva', lastName: 'Kim' }] });
+    const bib = '@article{hasan_editorial_nodate,\n  title = {The \\emph{editorial}},\n  author = {Kim, Eva}\n}\n';
+    for (const mode of ['add', 'update'] as const) {
+      const r = await pushThroughApi(bib, [book, article], mode);
+      expect(r.plan.actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'BBBB2222 and AAAA2222' });
+    }
+  });
+
+  it('still finds a keyless item by a title push compares loosely, as one with math', () => {
+    const book = item('BBBB2222', { itemType: 'book', title: 'Rates notes', citationKey: 'ratesbook', creators: [{ creatorType: 'author', firstName: 'Eva', lastName: 'Kim' }] });
+    const article = item('AAAA2222', { title: 'Rates of $x^2$ growth', creators: [{ creatorType: 'author', firstName: 'Eva', lastName: 'Kim' }] });
+    const bib = '@article{ratesbook,\n  title = {Rates of $x^2$ growth},\n  author = {Kim, Eva}\n}\n';
+    expect(plan(bib, [book, article]).actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'BBBB2222 and AAAA2222' });
+  });
+});
