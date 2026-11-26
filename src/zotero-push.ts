@@ -124,7 +124,8 @@ export interface ZoteroFieldNotPushed {
 }
 
 export interface ZoteroFieldChange {
-  /** The Zotero field, or `creators:<role>`. */
+  /** The Zotero field, `creators:<role>`, or `creators` for the whole
+   *  list where creators of other roles move. */
   readonly field: string;
   readonly from: string;
   readonly to: string;
@@ -1028,6 +1029,7 @@ function updateChanges(
   }
   const existing = asCreators(item.creators);
   let creators = existing;
+  let regrouped = false;
   for (const [role, { creators: next, texts, incomplete }] of read.creators) {
     const current = existing.filter(c => c.creatorType === role);
     if (incomplete) {
@@ -1056,19 +1058,84 @@ function updateChanges(
     const exportedText = (c: ZoteroCreator) =>
       c.name !== undefined && c.name !== '' ? '{' + c.name + '}' : c.firstName ? (c.lastName ?? '') + ', ' + c.firstName : (c.lastName ?? '');
     const twins = new Set(current.map(exportedText).filter((t, i, all) => all.indexOf(t) !== i));
-    const merged = next.map((n, i) =>
+    const byIndex = next.map((n, i) =>
       i < current.length && !twins.has(exportedText(current[i])) && sameAsExported([current[i]], [n], [texts[i]]) ? current[i] : n,
     );
-    if (sameCreators(current, merged)) continue;
+    if (sameCreators(current, byIndex)) continue;
+    const merged = keptWhereMoved(current, next, texts, byIndex, exportedText, twins);
     changes.push({
       field: 'creators:' + role,
       from: current.map(creatorText).join('; '),
       to: merged.map(creatorText).join('; '),
     });
+    // A role whose number of names changes is written as one run where it
+    // first appeared (replaceRole), so a creator of another role between
+    // two of its names moves after them.
+    const at = creators.flatMap((c, i) => (c.creatorType === role ? [i] : []));
+    if (at.length !== merged.length && at.length > 0 && at[at.length - 1] - at[0] + 1 !== at.length) regrouped = true;
     creators = replaceRole(creators, role, merged);
   }
   if (creators !== existing) patch.creators = creators;
+  // The role lines don't show that move, so a line for the whole list does.
+  if (regrouped) {
+    const listed = (list: readonly ZoteroCreator[]) => list.map(c => c.creatorType + ' ' + creatorText(c)).join('; ');
+    changes.push({ field: 'creators', from: listed(existing), to: listed(creators) });
+  }
   return { changes, patch, notPushed };
+}
+
+/** The role's names as written: `byIndex`, where a stored creator the entry
+ *  gives at its own place stays as stored, and besides, a stored creator
+ *  the entry moves stays as stored too, so moving `Garcia Lopez` (a last
+ *  name with no first name) keeps it one last name.  A stored creator is
+ *  kept where the entry gives its exported text once and no other creator
+ *  of the role exports that text.  Where two do (twins, as a surname-only
+ *  `Reed, Ann` and Ann Reed), only a list with every stored creator in
+ *  some order keeps them, each twin in its stored order; otherwise, as
+ *  for a deletion among twins, which can't be told apart, the entry's own
+ *  reading is written. */
+function keptWhereMoved(
+  current: readonly ZoteroCreator[],
+  next: readonly ZoteroCreator[],
+  texts: ReadonlyArray<string | undefined>,
+  byIndex: readonly ZoteroCreator[],
+  exportedText: (c: ZoteroCreator) => string,
+  twins: ReadonlySet<string>,
+): ZoteroCreator[] {
+  // Stored creators by exported text, so each name looks only at the
+  // creators it could be (sameAsExported needs the same text, part by
+  // part or as exported).
+  const key = (text: string) => foldText(text);
+  const byText = new Map<string, number[]>();
+  current.forEach((c, j) => {
+    const k = key(exportedText(c));
+    byText.set(k, [...(byText.get(k) ?? []), j]);
+  });
+  const candidates = next.map((n, i) => {
+    const out = new Set<number>([...(byText.get(key(exportedText(n))) ?? []), ...(texts[i] === undefined ? [] : (byText.get(key(texts[i] ?? '')) ?? []))]);
+    return [...out].sort((a, b) => a - b).filter(j => sameAsExported([current[j]], [n], [texts[i]]));
+  });
+  // Every stored creator, in some order: a name kept at its own place
+  // keeps it, and each other name takes the first unused creator it could
+  // be, so twins keep their stored order.
+  if (next.length === current.length) {
+    const used = new Set<number>(byIndex.flatMap((c, i) => (c === next[i] ? [] : [i])));
+    const assigned: ZoteroCreator[] = [];
+    for (let i = 0; i < next.length; i++) {
+      const j = byIndex[i] !== next[i] ? i : candidates[i].find(c => !used.has(c));
+      if (j === undefined) break;
+      used.add(j);
+      assigned.push(current[j]);
+    }
+    if (assigned.length === next.length) return assigned;
+  }
+  const uses = new Map<number, number>();
+  for (const list of candidates) for (const j of list) uses.set(j, (uses.get(j) ?? 0) + 1);
+  return byIndex.map((c, i) => {
+    if (c !== next[i]) return c;
+    const only = candidates[i].filter(j => !twins.has(exportedText(current[j])));
+    return only.length === 1 && candidates[i].length === 1 && uses.get(only[0]) === 1 ? current[only[0]] : c;
+  });
 }
 
 /** The item's PMID, as the matcher reads one: its PMID field, or a `PMID:`

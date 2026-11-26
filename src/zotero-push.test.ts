@@ -1747,3 +1747,49 @@ describe('push: round six', () => {
     expect(plan(bib, [book, article]).actions[0]).toMatchObject({ kind: 'skip', reason: 'plain-match-elsewhere', detail: 'BBBB2222 and AAAA2222' });
   });
 });
+
+describe('push: a stored creator the entry moves', () => {
+  const reed = { creatorType: 'author', firstName: 'Ann', lastName: 'Reed' };
+  const garcia = { creatorType: 'author', firstName: '', lastName: 'Garcia Lopez' };
+  const kim = { creatorType: 'author', firstName: 'Eva', lastName: 'Kim' };
+  const editor = { creatorType: 'editor', firstName: 'Ed', lastName: 'Long' };
+  const translator = { creatorType: 'translator', firstName: 'Fran', lastName: 'Lee' };
+  const update = (creators: object[], author: string) => {
+    const a = plan('@book{k,\n  title = {T},\n  author = {' + author + '}\n}\n', [item('AAAA2222', { itemType: 'book', title: 'T', citationKey: 'k', creators })]).actions[0];
+    if (a.kind !== 'update') throw new Error('expected an update, got ' + a.kind);
+    return a;
+  };
+
+  it('keeps a moved last name with no first name as one last name', () => {
+    const a = update([reed, garcia], 'Garcia Lopez and Reed, Ann');
+    expect(a.patch.creators).toEqual([garcia, reed]);
+    expect(a.changes).toEqual([{ field: 'creators:author', from: 'Reed, Ann; Garcia Lopez', to: 'Garcia Lopez; Reed, Ann' }]);
+  });
+
+  it('keeps it when an author is inserted or deleted before it, and says other roles move', () => {
+    const stored = [reed, editor, garcia, translator, kim];
+    const inserted = update(stored, 'Reed, Ann and Singh, Ira and Garcia Lopez and Kim, Eva');
+    expect(inserted.patch.creators).toEqual([reed, { creatorType: 'author', lastName: 'Singh', firstName: 'Ira' }, garcia, kim, editor, translator]);
+    expect(inserted.changes.map(c => c.field)).toEqual(['creators:author', 'creators']);
+    expect(inserted.changes[1].to).toBe('author Reed, Ann; author Singh, Ira; author Garcia Lopez; author Kim, Eva; editor Long, Ed; translator Lee, Fran');
+    const deleted = update(stored, 'Garcia Lopez and Kim, Eva');
+    expect(deleted.patch.creators).toEqual([garcia, kim, editor, translator]);
+  });
+
+  it('keeps both of two creators that export alike on a reorder, but not on a deletion', () => {
+    const surname = { creatorType: 'author', firstName: '', lastName: 'Reed, Ann' };
+    const swapped = update([surname, editor, reed, translator, kim], 'Kim, Eva and Reed, Ann and Reed, Ann');
+    expect(swapped.patch.creators).toEqual([kim, editor, surname, translator, reed]);
+    // Which of the two was deleted can't be told: the entry's reading.
+    const deleted = update([surname, reed, kim], 'Reed, Ann and Kim, Eva');
+    expect(deleted.patch.creators).toEqual([{ creatorType: 'author', lastName: 'Reed', firstName: 'Ann' }, kim]);
+  });
+
+  it("gives the entry's reading where it repeats a name", () => {
+    const a = update([reed, garcia], 'Garcia Lopez and Garcia Lopez');
+    expect(a.patch.creators).toEqual([
+      { creatorType: 'author', lastName: 'Lopez', firstName: 'Garcia' },
+      garcia,
+    ]);
+  });
+});
