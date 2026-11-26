@@ -118,4 +118,59 @@ describe('comments marked by their reference alone', () => {
     expect(order.every((at, k) => at >= 0 && (k === 0 || at > order[k - 1]))).toBe(true);
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
+
+  /** The XML with the comment's markers taken out and put back in the last
+   *  cross-reference's result: its reference, or its range's start and end,
+   *  each before the number (`before`) or after it */
+  const inCrossReference = (where: { ref?: 'before' | 'after'; start?: 'before' | 'after'; end?: 'before' | 'after' }) => (xml: string) => {
+    const ref = xml.match(/<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference w:id="\d+"\/><\/w:r>/)![0];
+    const id = ref.match(/w:id="(\d+)"/)![1];
+    const marks = { ref, start: '<w:commentRangeStart w:id="' + id + '"/>', end: '<w:commentRangeEnd w:id="' + id + '"/>' };
+    const stripped = xml.replace(ref, '').replace(marks.start, '').replace(marks.end, '');
+    const results = [...stripped.matchAll(/(<w:fldChar w:fldCharType="separate"\/><\/w:r>)(<w:r>(?:(?!<\/w:r>).)*<w:t>\d<\/w:t><\/w:r>)/g)];
+    expect(results.length).toBeGreaterThan(0);
+    const last = results[results.length - 1];
+    const at = (side: 'before' | 'after') => (['start', 'end', 'ref'] as const).filter(k => where[k] === side).map(k => marks[k]).join('');
+    return stripped.slice(0, last.index) + last[1] + at('before') + last[2] + at('after') + stripped.slice(last.index + last[0].length);
+  };
+
+  describe('in a cross-reference to a note, which Markdown writes whole', () => {
+    const md = 'One[^1] two three[^1]{>>c<<}.\n\n[^1]: Note.\n';
+    for (const side of ['before', 'after'] as const) {
+      test('goes after the cross-reference, from ' + side + ' its number', async () => {
+        const out = await roundTrip(md, inCrossReference({ ref: side }));
+        expect(out).toBe(md);
+        expect(await roundTrip(out, xml => xml)).toBe(out);
+      });
+    }
+
+    test('with an empty range there, as a point', async () => {
+      expect(await roundTrip(md, inCrossReference({ start: 'after', end: 'after', ref: 'after' }))).toBe(md);
+    });
+
+    test('while a range on its number still takes the cross-reference', async () => {
+      expect(await roundTrip(md, inCrossReference({ start: 'before', end: 'after', ref: 'after' })))
+        .toBe('One[^1] two three{==[^1]==}{>>c<<}.\n\n[^1]: Note.\n');
+    });
+
+    test('in a footnote', async () => {
+      const notes = 'One[^1] two[^2].\n\n[^1]: Note.\n\n[^2]: See[^1]{>>c<<} more.\n';
+      const out = await roundTrip(notes, inCrossReference({ ref: 'before' }), 'word/footnotes.xml');
+      expect(out).toBe(notes);
+      expect(await roundTrip(out, xml => xml)).toBe(out);
+    });
+  });
+
+  test('in a citation\'s result, which Markdown writes whole, goes after the citation', async () => {
+    const bibtex = '@article{a2020, author={Alpha, A}, title={A}, journal={J}, year={2020}}';
+    const md = 'Text [@a2020]{>>c<<} more.\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const ref = xml.match(/<w:r><w:rPr><w:rStyle w:val="CommentReference"\/><\/w:rPr><w:commentReference w:id="\d+"\/><\/w:r>/)![0];
+    const separate = '<w:fldChar w:fldCharType="separate"/></w:r>';
+    expect(xml).toContain(separate + '<w:r><w:t>(Alpha, 2020)</w:t>');
+    zip.file('word/document.xml', noRanges(xml).replace(ref, '').replace(separate, separate + ref));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toBe(md);
+  });
 });
